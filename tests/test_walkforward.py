@@ -382,3 +382,57 @@ class TestLeakageAssertion:
                     test=Window("2031-01-01", "2031-01-31", "test"))
         with pytest.raises(WindowError, match="no sessions"):
             assert_no_leakage([bad], _feed())
+
+
+# ---------------------------------------------------------------------------
+# Reproducibility of candidate naming
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCandidateNamesAreReproducible:
+    """A candidate's key must not change between runs.
+
+    Regression test for a real defect: a candidate with no ``name`` was keyed by
+    ``repr()``, which embeds the object's memory address. The same configuration
+    therefore produced a different ``selected`` mapping on every run, so a
+    walk-forward result could not be compared, cached, or asserted on.
+    """
+
+    def _run(self, candidates, evaluate):
+        return run_walk_forward(
+            _feed(), candidates=candidates, evaluate=evaluate,
+            train_sessions=10, validate_sessions=5, test_sessions=5,
+        )
+
+    def test_a_nameless_candidate_is_not_keyed_by_address(self):
+        def evaluate(candidate, feed, window):
+            return 1.0
+
+        first = self._run([object()], evaluate)
+        second = self._run([object()], evaluate)
+        assert set(first.selected.values()) == set(second.selected.values())
+
+    def test_a_nameless_candidate_key_contains_no_hex_address(self):
+        import re
+
+        def evaluate(candidate, feed, window):
+            return 1.0
+
+        result = self._run([object()], evaluate)
+        for name in result.selected.values():
+            assert not re.search(r"0x[0-9a-fA-F]+", name)
+
+    def test_two_candidates_of_the_same_type_keep_separate_scores(self):
+        """A shared key would make one candidate's score overwrite the other's."""
+        class Strategy:
+            def __init__(self, score):
+                self.score = score
+
+        def evaluate(candidate, feed, window):
+            return candidate.score
+
+        result = self._run([Strategy(0.1), Strategy(0.9)], evaluate)
+        # Two distinct keys, so the better one (0.9) is chosen and both scores show.
+        assert len(result.train_scores[result.folds[0].index]) == 2
+        assert len(set(result.selected.values())) == 1

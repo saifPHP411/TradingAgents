@@ -312,22 +312,24 @@ def run_walk_forward(
         end=end,
     )
     result = WalkForwardResult(folds=folds)
+    names = _candidate_names(candidates)
+    named = list(zip(names, candidates, strict=True))
     for fold in folds:
         train_feed = slice_feed(feed, fold.train)
         validate_feed = slice_feed(feed, fold.validate)
         test_feed = slice_feed(feed, fold.test)
 
         train_scores = {
-            _candidate_name(candidate): float(evaluate(candidate, train_feed, fold.train))
-            for candidate in candidates
+            name: float(evaluate(candidate, train_feed, fold.train))
+            for name, candidate in named
         }
         validation_scores = {
-            _candidate_name(candidate): float(evaluate(candidate, validate_feed, fold.validate))
-            for candidate in candidates
+            name: float(evaluate(candidate, validate_feed, fold.validate))
+            for name, candidate in named
         }
         chosen = select_best(validation_scores, maximize=maximize)
         # The chosen candidate is re-evaluated on test, and nothing else is.
-        chosen_candidate = next(c for c in candidates if _candidate_name(c) == chosen)
+        chosen_candidate = next(c for name, c in named if name == chosen)
         test_score = float(evaluate(chosen_candidate, test_feed, fold.test))
 
         result.train_scores[fold.index] = train_scores
@@ -341,13 +343,42 @@ def run_walk_forward(
 
 
 def _candidate_name(candidate: Any) -> str:
-    """A stable name for a candidate, so scores can be keyed by it."""
+    """A stable name for a candidate, so scores can be keyed by it.
+
+    Never ``repr()``: that embeds the object's memory address, so the same
+    candidate would be keyed differently on each run and the fold result would
+    not be reproducible. A candidate with no ``name`` is named by its type,
+    which is stable for the life of the process.
+    """
     if isinstance(candidate, str):
         return candidate
     name = getattr(candidate, "name", None)
     if name:
         return str(name)
-    return repr(candidate)
+    cls = type(candidate)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _candidate_names(candidates: Sequence[Any]) -> list[str]:
+    """Names for a whole candidate sequence, disambiguated by position.
+
+    Two candidates of the same type would otherwise share a key and silently
+    overwrite each other's scores. The sequence order is the only stable
+    tie-break available, so duplicates get a ``#N`` suffix in that order.
+    """
+    names = [_candidate_name(candidate) for candidate in candidates]
+    counts: dict[str, int] = {}
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for name in names:
+        if counts[name] == 1:
+            out.append(name)
+            continue
+        seen[name] = seen.get(name, 0) + 1
+        out.append(f"{name}#{seen[name]}")
+    return out
 
 
 def assert_no_leakage(folds: Iterable[Fold], feed: MarketDataFeed) -> None:
