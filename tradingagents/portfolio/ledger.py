@@ -226,6 +226,7 @@ class Ledger:
         fee: float,
         timestamp: datetime,
         reason: str = "",
+        order_id: str | None = None,
     ) -> Holding:
         """Apply one fill: ``quantity`` > 0 buys, ``quantity`` < 0 sells.
 
@@ -296,17 +297,23 @@ class Ledger:
         if abs(self.cash) < 1e-9:
             self.cash = 0.0
 
+        fill_detail = {
+            "quantity": quantity,
+            "price": price,
+            "fee": fee,
+            "cash_delta": cash_delta,
+            "cash_after": self.cash,
+        }
+        # The order this fill belongs to, so a report can tie a fill back to the
+        # order that produced it. Omitted for a direct ledger fill with no order
+        # behind it, so every value in ``detail`` stays a figure or a flag.
+        if order_id is not None:
+            fill_detail["order_id"] = order_id
         self._record(
             EventType.ORDER_FILLED,
             timestamp=timestamp,
             symbol=symbol,
-            detail={
-                "quantity": quantity,
-                "price": price,
-                "fee": fee,
-                "cash_delta": cash_delta,
-                "cash_after": self.cash,
-            },
+            detail=fill_detail,
             reason=reason,
         )
         self._record_position_event(symbol, holding, was_open, quantity, timestamp)

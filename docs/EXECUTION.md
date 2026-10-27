@@ -52,7 +52,6 @@ refusals are countable rather than prose:
 | `INSUFFICIENT_POSITION` | A sell larger than the holding |
 | `MARKET_CLOSED` | The market context says the session is closed |
 | `NO_PRICE` | No price is available for the symbol |
-| `SYMBOL_NOT_TRADABLE` | The symbol is not in the feed |
 | `RISK_LIMIT` | The risk engine refused it |
 | `BUDGET_EXHAUSTED` | The run's budget ran out |
 

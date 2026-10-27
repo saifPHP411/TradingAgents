@@ -81,7 +81,9 @@ class ExecutionSimulator:
 
     # --- Public API ---------------------------------------------------------
 
-    def submit(self, order: Order, *, market: MarketContext) -> Order:
+    def submit(
+        self, order: Order, *, market: MarketContext, idempotent: bool = False
+    ) -> Order:
         """Attempt to execute ``order``, recording the outcome on the order.
 
         Never raises for a market condition: a rejected or unfilled order is a
@@ -95,6 +97,15 @@ class ExecutionSimulator:
         a double fill is a real position the caller never asked for. The first
         outcome is returned unchanged, so a caller that accidentally loops gets
         the same answer instead of an accumulating position.
+
+        A ``PARTIALLY_FILLED`` order is the exception, because it is not terminal
+        and a second submission would fill its remaining size — a real second
+        fill, not a re-run of the first. A caller that re-drives an order it may
+        already have submitted (a paper loop retrying, say) passes
+        ``idempotent=True`` to get the recorded outcome back instead of filling
+        again. The backtester, which submits each order exactly once, leaves it
+        ``False`` so a genuine re-submission of a partially filled order still
+        works.
         """
         if market.symbol != order.symbol:
             raise ValueError(
@@ -102,21 +113,35 @@ class ExecutionSimulator:
             )
         if order.status.is_terminal:
             return order
+        if idempotent and order.filled_quantity > 0:
+            # This order was already worked. Return it unchanged rather than
+            # filling its remaining size a second time.
+            return order
 
+        if not order.created_recorded:
+            self.ledger.record_event(
+                EventType.ORDER_CREATED, timestamp=order.created_at, symbol=order.symbol,
+                detail={"order_id": order.order_id, "side": order.side.value,
+                        "quantity": order.quantity, "type": order.order_type.value,
+                        "limit_price": order.limit_price},
+            )
+            order.created_recorded = True
+
+        accepted = self._pre_trade_rejection(order, market)
+        if accepted is not None:
+            return self._reject(order, *accepted)
+        # The order passed every pre-trade check: it is accepted and will now be
+        # worked. Recording acceptance here, after the checks and before the
+        # fill, keeps the lifecycle in order (CREATED, then ACCEPTED, then
+        # FILLED/CANCELLED) rather than logging acceptance before creation.
         self.ledger.record_event(
-            EventType.ORDER_CREATED, timestamp=order.created_at, symbol=order.symbol,
-            detail={"order_id": order.order_id, "side": order.side.value,
-                    "quantity": order.quantity, "type": order.order_type.value,
-                    "limit_price": order.limit_price},
+            EventType.ORDER_ACCEPTED, timestamp=order.created_at, symbol=order.symbol,
+            detail={"order_id": order.order_id, "quantity": order.quantity},
         )
-
-        rejection = self._pre_trade_rejection(order, market)
-        if rejection is not None:
-            return self._reject(order, *rejection)
 
         fill_quantity, fill_price = self._resolve_fill(order, market)
         if fill_quantity <= 0:
-            return self._reject(
+            return self._cancel(
                 order, RejectReason.LIMIT_NOT_REACHED,
                 f"the {order.order_type.value.lower()} price {order.limit_price} was not reached "
                 f"at a reference price of {market.price}",
@@ -203,16 +228,17 @@ class ExecutionSimulator:
 
         if order.order_type is OrderType.LIMIT:
             assert order.limit_price is not None
+            remaining = order.remaining_quantity
             if order.side is OrderSide.BUY:
                 # A buy limit fills only if the market came down to it.
                 if reference > order.limit_price:
                     return 0.0, 0.0
                 # Filling at the better of the two: the limit caps the price, it
                 # does not set it.
-                return order.quantity, min(reference, order.limit_price)
+                return remaining, min(reference, order.limit_price)
             if reference < order.limit_price:
                 return 0.0, 0.0
-            return order.quantity, max(reference, order.limit_price)
+            return remaining, max(reference, order.limit_price)
 
         fill_price, _, _ = self.costs.fill_price(
             side=Side.BUY if order.side is OrderSide.BUY else Side.SELL,
@@ -227,13 +253,15 @@ class ExecutionSimulator:
 
         Only market orders are capped: a limit order's fill is already
         conditional on price, and a daily bar cannot say how much volume traded
-        at that price.
+        at that price. The cap is applied to what remains to fill, so a
+        partially filled order that is re-driven only ever fills its remainder.
         """
+        remaining = order.remaining_quantity
         volume = market.average_daily_volume
         if not self.max_volume_participation or not volume or volume <= 0:
-            return order.quantity
+            return remaining
         cap = volume * self.max_volume_participation
-        return min(order.quantity, cap)
+        return min(remaining, cap)
 
     # --- Applying the fill --------------------------------------------------
 
@@ -253,28 +281,65 @@ class ExecutionSimulator:
                 fee=commission,
                 timestamp=_as_utc(market.timestamp),
                 reason=f"order {order.order_id}",
+                order_id=order.order_id,
             )
         except InsufficientFundsError as exc:
             return self._reject(order, RejectReason.INSUFFICIENT_CASH, str(exc))
         except InsufficientPositionError as exc:
             return self._reject(order, RejectReason.INSUFFICIENT_POSITION, str(exc))
 
-        order.filled_quantity = quantity
+        order.filled_quantity = min(order.filled_quantity + quantity, order.quantity)
         order.average_fill_price = price
         # A capped fill is partial only if something is left over; a market order
-        # whose full size fits in the bar is simply filled.
+        # whose full size fits in the bar is simply filled. The status reflects the
+        # total filled, so a partially filled order that is re-driven and fills
+        # more still ends FILLED once its whole size is done.
         order.status = (
-            OrderStatus.FILLED if quantity >= order.quantity - 1e-9 else OrderStatus.PARTIALLY_FILLED
+            OrderStatus.FILLED
+            if order.filled_quantity >= order.quantity - 1e-9
+            else OrderStatus.PARTIALLY_FILLED
         )
         return order
 
     def _reject(self, order: Order, reason: RejectReason, detail: str) -> Order:
-        """Mark the order rejected and record why, without touching the book."""
+        """Mark the order rejected and record why, without touching the book.
+
+        A rejection means the order was never accepted — it was malformed, the
+        market was closed, or the book could not fund it. It is distinct from a
+        cancellation, where a valid order simply did not get its price.
+        """
         order.status = OrderStatus.REJECTED
         order.reject_reason = reason
         order.reject_detail = detail
         self.ledger.record_event(
             EventType.ORDER_REJECTED,
+            timestamp=order.created_at,
+            symbol=order.symbol,
+            detail={"order_id": order.order_id, "reason": reason.value},
+            reason=detail,
+        )
+        return order
+
+    def cancel(self, order: Order, *, reason: RejectReason, detail: str) -> Order:
+        """Cancel a live order that never got its price, recording the outcome.
+
+        The honest terminal state for an order the market did not fill. A
+        cancellation is recorded as ``ORDER_CANCELLED``, not ``ORDER_REJECTED``,
+        so the event log distinguishes "the book refused this" from "the price
+        never came". A caller that has already reached a terminal order gets it
+        back unchanged, so cancelling twice is not a second event.
+        """
+        if order.status.is_terminal:
+            return order
+        return self._cancel(order, reason, detail)
+
+    def _cancel(self, order: Order, reason: RejectReason, detail: str) -> Order:
+        """Mark the order cancelled and record why, without touching the book."""
+        order.status = OrderStatus.CANCELLED
+        order.reject_reason = reason
+        order.reject_detail = detail
+        self.ledger.record_event(
+            EventType.ORDER_CANCELLED,
             timestamp=order.created_at,
             symbol=order.symbol,
             detail={"order_id": order.order_id, "reason": reason.value},

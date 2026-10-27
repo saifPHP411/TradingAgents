@@ -489,3 +489,53 @@ class TestFromBacktestResult:
         first = metrics_from_result(self._result()[0]).to_dict()
         second = metrics_from_result(self._result()[0]).to_dict()
         assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Adversarial: hostile and degenerate curves
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestDegenerateCurvesAreHandled:
+    """A curve an account cannot produce must not produce a nonsense metric.
+
+    These are the shapes a broken feed or a division by zero leaves behind. The
+    requirement is only that the metric is finite and deterministic — never an
+    infinity, never a crash.
+    """
+
+    def test_a_peak_at_zero_does_not_report_an_infinite_drawdown(self):
+        detail = max_drawdown(pd.Series([0.0, -5.0, 3.0], index=["a", "b", "c"]))
+        assert math.isfinite(detail.max_drawdown)
+        assert detail.max_drawdown == 0.0
+
+    def test_a_curve_that_never_has_a_positive_peak_is_finite(self):
+        detail = max_drawdown(pd.Series([0.0, -1.0, -2.0]))
+        assert detail.max_drawdown == 0.0
+
+    def test_an_infinite_equity_point_does_not_poison_the_drawdown(self):
+        detail = max_drawdown(pd.Series([100.0, float("inf"), 90.0]))
+        assert math.isfinite(detail.max_drawdown)
+
+    def test_non_finite_equity_points_are_dropped_from_the_returns(self):
+        returns = period_returns(pd.Series([100.0, float("nan"), 110.0, float("inf"), 120.0]))
+        assert all(math.isfinite(r) for r in returns)
+        assert len(returns) >= 1
+
+    def test_metrics_are_finite_for_a_curve_that_goes_to_zero(self):
+        metrics = compute_metrics(pd.Series([100.0, 50.0, 0.0]), initial_capital=100.0)
+        assert math.isfinite(metrics.max_drawdown)
+        assert math.isfinite(metrics.total_return)
+
+    def test_a_non_date_index_does_not_crash_the_cagr(self):
+        metrics = compute_metrics(
+            pd.Series([100.0, 110.0, 120.0], index=["a", "b", "c"]), initial_capital=100.0
+        )
+        assert metrics.cagr is None
+        assert metrics.total_return == pytest.approx(0.2)
+
+    def test_a_negative_equity_curve_is_finite(self):
+        metrics = compute_metrics(pd.Series([100.0, 50.0, -10.0]), initial_capital=100.0)
+        assert math.isfinite(metrics.max_drawdown)
+        assert math.isfinite(metrics.total_return)

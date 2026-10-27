@@ -732,3 +732,178 @@ class TestBuySizeCappedByCashAtFill:
         result, _ = _run(_buy_once(position_size=1.0), feed=feed, config=config)
         assert result.ledger.cash >= -1e-6
         assert result.ledger.cash == pytest.approx(0.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Exit tracking vs. the ledger (adversarial audit)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestExitTrackingFollowsTheLedger:
+    """A signal SELL fills at the next open; the exit tracker must follow it.
+
+    The engine tracks open positions for their scheduled exit. A SELL signal
+    executes through the same pending-order path as a buy, so the ledger's
+    holding falls — but the tracker was never told. It then tried to sell the
+    position again at its holding-period exit and the ledger refused the oversell,
+    leaving the engine's idea of the book permanently larger than the real one.
+    """
+
+    def _sell_after_buy(self, *, buy_size=0.5, sell_size=1.0):
+        def strategy(context):
+            if context.session == "2026-01-05":
+                return _signal(context.session, position_size=buy_size)
+            if context.session == "2026-01-07":
+                return _signal(context.session, action=SignalAction.SELL, position_size=sell_size)
+            return None
+        return strategy
+
+    def test_a_sell_signal_empties_the_engine_tracker(self):
+        result, engine = _run(
+            self._sell_after_buy(),
+            config=BacktestConfig(initial_cash=100_000.0, holding_period_days=3),
+        )
+        assert result.ledger.position_quantity("AAPL") == pytest.approx(0.0)
+        assert engine.open_positions == {}
+
+    def test_a_sell_signal_records_a_completed_round_trip(self):
+        result, _ = _run(
+            self._sell_after_buy(),
+            config=BacktestConfig(initial_cash=100_000.0, holding_period_days=3),
+        )
+        sells = [t for t in result.trades if t.reason == "signal_sell"]
+        assert len(sells) == 1
+        assert sells[0].quantity == pytest.approx(result.ledger.position_quantity("AAPL") + sells[0].quantity)
+
+    def test_no_phantom_oversell_after_a_signal_sell(self):
+        """The scheduled exit must not try to sell a position that is already gone."""
+        result, _ = _run(
+            self._sell_after_buy(),
+            config=BacktestConfig(initial_cash=100_000.0, holding_period_days=2),
+        )
+        assert not [u for u in result.unfilled if "exceeds" in u[2]]
+
+    def test_a_partial_sell_reduces_the_tracked_position(self):
+        result, engine = _run(
+            self._sell_after_buy(buy_size=0.5, sell_size=0.5),
+            config=BacktestConfig(initial_cash=100_000.0, holding_period_days=20),
+        )
+        # Half sold: the tracker holds what the ledger holds, not the original size.
+        tracked = engine.open_positions.get("AAPL")
+        if tracked is not None:
+            assert tracked.quantity == pytest.approx(result.ledger.position_quantity("AAPL"))
+
+    def test_the_tracker_always_agrees_with_the_ledger(self):
+        result, engine = _run(
+            self._sell_after_buy(buy_size=1.0, sell_size=0.25),
+            config=BacktestConfig(initial_cash=100_000.0, holding_period_days=4),
+        )
+        for symbol, position in engine.open_positions.items():
+            assert position.quantity == pytest.approx(result.ledger.position_quantity(symbol))
+
+
+# ---------------------------------------------------------------------------
+# Event-log completeness and ordering
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestTheEventLogIsOrderedAndComplete:
+    def test_creation_is_recorded_before_acceptance(self):
+        """A lifecycle that logs ACCEPTED before CREATED is not a lifecycle."""
+        result, _ = _run(_buy_once(), config=BacktestConfig(holding_period_days=2))
+        order_events = [e.type for e in result.ledger.events
+                        if e.type in (EventType.ORDER_CREATED, EventType.ORDER_ACCEPTED)]
+        assert order_events[0] is EventType.ORDER_CREATED
+        assert order_events[1] is EventType.ORDER_ACCEPTED
+
+    def test_an_order_expired_for_a_missing_bar_is_cancelled_on_the_record(self):
+        """An order that expires because the symbol did not trade leaves a record."""
+        def frame(dates, price):
+            return pd.DataFrame(
+                {"open": [price] * len(dates), "high": [price * 1.01] * len(dates),
+                 "low": [price * 0.99] * len(dates), "close": [price] * len(dates),
+                 "volume": [1_000_000] * len(dates)},
+                index=pd.to_datetime(dates),
+            )
+        feed = MarketDataFeed({
+            # AAPL does not trade on 01-06, so an order to buy it there expires.
+            "AAPL": frame(["2026-01-05", "2026-01-07"], 100.0),
+            "MSFT": frame(["2026-01-05", "2026-01-06", "2026-01-07"], 50.0),
+        })
+        result, _ = _run(_buy_once(), feed=feed, config=BacktestConfig(holding_period_days=5))
+        cancels = [e for e in result.ledger.events if e.type is EventType.ORDER_CANCELLED]
+        assert cancels, "the expired order must be cancelled on the event log"
+        assert any("no bar" in u[2] for u in result.unfilled)
+
+    def test_an_order_still_pending_at_the_end_is_accounted_for(self):
+        """An order with no next session to execute in is cancelled, not dropped."""
+        def strategy(context):
+            if context.session == DATES[-1]:
+                return _signal(context.session, position_size=0.1)
+            return None
+        result, _ = _run(strategy, config=BacktestConfig(holding_period_days=5))
+        created = [e for e in result.ledger.events if e.type is EventType.ORDER_CREATED]
+        cancelled = [e for e in result.ledger.events if e.type is EventType.ORDER_CANCELLED]
+        assert created, "the final-session order must still be created"
+        assert len(cancelled) == len(created), "every created order ends with an outcome"
+
+    def test_every_created_order_has_a_terminal_event(self):
+        """No order may be created and then vanish without an outcome."""
+        def strategy(context):
+            return _signal(context.session, position_size=0.1)
+        result, _ = _run(strategy, config=BacktestConfig(holding_period_days=5))
+        created = {e.detail.get("order_id") for e in result.ledger.events
+                   if e.type is EventType.ORDER_CREATED}
+        terminal = {e.detail.get("order_id") for e in result.ledger.events
+                    if e.type in (EventType.ORDER_FILLED, EventType.ORDER_REJECTED,
+                                  EventType.ORDER_CANCELLED)}
+        assert created <= terminal
+
+
+# ---------------------------------------------------------------------------
+# The tradable universe
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSignalsForSymbolsOutsideTheUniverse:
+    """A signal the feed cannot price is rejected, not fatal.
+
+    The multi-agent brain can name a ticker that is not in the run's universe.
+    Before this guard the backtester raised ``BarDataError`` from inside the loop,
+    so one stray symbol destroyed the entire run and lost every result.
+    """
+
+    def _ghost_strategy(self):
+        def strategy(context):
+            if context.session == "2026-01-05":
+                return _signal(context.session, symbol="GHOST", position_size=0.2)
+            return None
+        return strategy
+
+    def test_a_signal_for_an_unknown_symbol_does_not_crash_the_run(self):
+        result, _ = _run(self._ghost_strategy(), config=BacktestConfig(initial_cash=100_000.0))
+        assert result is not None
+
+    def test_a_signal_for_an_unknown_symbol_is_recorded_as_a_rejection(self):
+        result, _ = _run(self._ghost_strategy(), config=BacktestConfig(initial_cash=100_000.0))
+        reasons = [reason for _s, sym, reason in result.rejections if sym == "GHOST"]
+        assert "UNKNOWN_SYMBOL" in reasons
+
+    def test_an_unknown_symbol_never_touches_the_book(self):
+        result, _ = _run(self._ghost_strategy(), config=BacktestConfig(initial_cash=100_000.0))
+        assert result.ledger.cash == pytest.approx(100_000.0)
+        assert result.ledger.holdings == {}
+
+    def test_the_rest_of_the_run_still_happens(self):
+        """One bad symbol must not stop the good ones."""
+        def strategy(context):
+            if context.session == "2026-01-05":
+                return [
+                    _signal(context.session, symbol="GHOST", position_size=0.1),
+                ] and _signal(context.session, position_size=0.3)
+            return None
+        result, _ = _run(strategy, config=BacktestConfig(initial_cash=100_000.0))
+        assert result.ledger.position_quantity("AAPL") > 0

@@ -153,20 +153,30 @@ def max_drawdown(equity: pd.Series) -> DrawdownDetail:
 
     The trough is the session of the maximum decline; the peak is the highest
     point at or before it, which is what the account actually fell from.
+
+    Only a strictly positive peak is measured. A peak at or below zero is not a
+    peak an account can fall from — a curve that goes from 0 to -5 has no
+    meaningful percentage decline, and dividing by the zero peak would report an
+    infinite drawdown. Such a decline is reported as 0, matching the guard in
+    :func:`drawdown_series`.
     """
     if equity.empty:
         return DrawdownDetail(0.0, None, None, None, 0)
-    running_peak = equity.cummax()
+    positive = equity.where(equity > 0)
+    running_peak = positive.cummax()
     decline = running_peak - equity
-    if decline.max() <= 0:
+    if decline.max() <= 0 or not math.isfinite(decline.max()):
         return DrawdownDetail(0.0, None, None, None, 0)
     trough_idx = decline.idxmax()
-    peak_idx = equity.loc[:trough_idx].idxmax()
-    depth = float(decline.max() / running_peak.loc[trough_idx])
+    peak_value = positive.loc[:trough_idx].max()
+    if not math.isfinite(peak_value) or peak_value <= 0:
+        return DrawdownDetail(0.0, None, None, None, 0)
+    peak_idx = positive.loc[:trough_idx].idxmax()
+    depth = float(decline.max() / peak_value)
     recovery_idx = None
-    peak_value = equity.loc[peak_idx]
+    peak_equity = equity.loc[peak_idx]
     after = equity.loc[trough_idx:]
-    regained = after[after >= peak_value]
+    regained = after[after >= peak_equity]
     if len(regained) > 1 or (len(regained) == 1 and regained.index[0] != trough_idx):
         recovery_idx = regained.index[0]
     if recovery_idx is not None:
@@ -199,7 +209,14 @@ def period_returns(equity: pd.Series) -> pd.Series:
     """
     if len(equity) < 2:
         return pd.Series(dtype=float)
-    returns = equity.pct_change().iloc[1:]
+    # A non-finite equity point (a NaN a caller let through, an inf from a
+    # division) makes every return after it non-finite, which then makes the
+    # Sharpe, Sortino and volatility silently ``None``. Dropping the point keeps
+    # the finite returns usable rather than losing the whole series.
+    clean = equity[equity.notna() & (equity.abs() != float("inf"))]
+    if len(clean) < 2:
+        return pd.Series(dtype=float)
+    returns = clean.pct_change().iloc[1:]
     return returns.replace([math.inf, -math.inf], math.nan).dropna()
 
 
@@ -273,7 +290,12 @@ def cagr(initial: float, final: float, start: datetime | str | None, end: dateti
     """
     if initial <= 0 or final <= 0 or start is None or end is None:
         return None
-    start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
+    try:
+        start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
+    except (ValueError, TypeError):
+        # A curve indexed by something that is not a date has no elapsed calendar
+        # time to compound over.
+        return None
     years = (end_ts - start_ts).days / 365.25
     if years <= 0:
         return None

@@ -288,7 +288,26 @@ class PortfolioBacktester:
             raise ValueError(f"no sessions between {start} and {end}")
         for session in sessions:
             self._run_session(session)
+        self._expire_pending_at_end(sessions[-1])
         return self.result
+
+    def _expire_pending_at_end(self, last_session: str) -> None:
+        """Expire orders still queued when the data runs out.
+
+        An order scheduled on the final session has no next session to execute
+        in. Leaving it queued would drop it without a record, so it is cancelled
+        explicitly: the event log and the unfilled list then account for every
+        order the run created.
+        """
+        for item in self._pending:
+            self.execution.cancel(
+                item.order, reason=RejectReason.NO_PRICE,
+                detail=f"the run ended on {last_session} before this order could execute",
+            )
+            self.result.unfilled.append(
+                (last_session, item.order.symbol, "run ended before the order executed")
+            )
+        self._pending = []
 
     def _run_session(self, session: str) -> None:
         """One session: fill yesterday's orders, act on exits, decide, then mark."""
@@ -315,18 +334,28 @@ class PortfolioBacktester:
         point where the fill price is known and the ledger has not moved yet. A
         buy that would breach a cap is reduced to the largest size that does not,
         and refused only when no positive size remains. A sell reduces exposure
-        and needs no re-check.
+        and needs no size re-check, but its size is still capped to the holding so
+        it cannot oversell.
+
+        Whatever fills, the engine's exit tracking is then reconciled with the
+        ledger. A SELL that filled here reduced the position, and the exit
+        tracker must follow it or it would later try to sell a position the book
+        no longer holds.
         """
         pending, self._pending = self._pending, []
         for item in pending:
             bar = self.feed.bar(item.order.symbol, session)
             if bar is None:
                 # The market for this symbol did not trade today. The order
-                # expires rather than filling at a price that never existed.
+                # expires rather than filling at a price that never existed, and
+                # the cancellation is recorded so the log is not silent about it.
+                self.execution.cancel(
+                    item.order, reason=RejectReason.NO_PRICE,
+                    detail="no bar on the execution session; the order expired unfilled",
+                )
                 self.result.unfilled.append(
                     (session, item.order.symbol, "no bar on the execution session")
                 )
-                item.order.status = OrderStatus.CANCELLED
                 continue
             market = MarketContext(
                 symbol=item.order.symbol,
@@ -340,11 +369,21 @@ class PortfolioBacktester:
                 order = self._recheck_entry_at_fill(item, market, session)
                 if order is None:
                     continue
+            else:
+                order = self._recheck_exit_at_fill(item, market, session)
+                if order is None:
+                    continue
             filled = self.execution.submit(order, market=market)
             if filled.status is OrderStatus.FILLED:
-                self._register_entry(item, filled, session)
+                if filled.side is OrderSide.BUY:
+                    self._register_entry(item, filled, session)
+                else:
+                    self._register_reduction(filled, session)
             elif filled.status is OrderStatus.PARTIALLY_FILLED:
-                self._register_entry(item, filled, session)
+                if filled.side is OrderSide.BUY:
+                    self._register_entry(item, filled, session)
+                else:
+                    self._register_reduction(filled, session)
                 self.result.unfilled.append(
                     (session, filled.symbol,
                      f"partial fill: {filled.filled_quantity} of {filled.quantity}")
@@ -353,6 +392,85 @@ class PortfolioBacktester:
                 self.result.unfilled.append(
                     (session, filled.symbol, filled.reject_detail or str(filled.reject_reason))
                 )
+        self._reconcile_tracking()
+
+    def _recheck_exit_at_fill(
+        self, item: PendingOrder, market: MarketContext, session: str
+    ) -> Order | None:
+        """Cap a pending SELL to the quantity the book actually holds.
+
+        A SELL order was sized against the holding at the decision session, but
+        the holding can have changed by the fill — a stop, a scheduled exit or an
+        earlier signal may have sold part of it. Selling more than is held would
+        be rejected by the ledger as an oversell; capping to the holding turns
+        that into a smaller fill, and a holding of zero into a refusal that is
+        recorded rather than silently dropped.
+        """
+        order = item.order
+        held = self.ledger.position_quantity(order.symbol)
+        if held <= 0:
+            return self._refuse_at_fill(
+                item, session,
+                f"no {order.symbol} position remains to sell; the holding was closed before the fill",
+            )
+        if order.quantity > held + 1e-9:
+            return order.model_copy(update={"quantity": held})
+        return order
+
+    def _register_reduction(self, order: Order, session: str) -> None:
+        """Apply a filled SELL to the engine's exit tracking.
+
+        The ledger has already moved; this keeps the exit tracker consistent with
+        it. The tracked position's quantity falls by what was sold, and the
+        tracker drops the position when nothing is left. A partial sale also
+        records a completed round trip for the part that was sold, so the trade
+        statistics count it.
+        """
+        position = self._open.get(order.symbol)
+        if position is None:
+            return
+        sold = order.filled_quantity
+        exit_price = order.average_fill_price or 0.0
+        exit_fee = self.config.costs.fee_for_fill(quantity=sold, price=exit_price)
+        entry_fee_share = (
+            position.entry_fees * (sold / position.quantity) if position.quantity else 0.0
+        )
+        self.result.trades.append(
+            Trade(
+                symbol=order.symbol,
+                entry_session=position.entry_session,
+                exit_session=session,
+                quantity=sold,
+                entry_price=position.entry_price,
+                exit_price=exit_price,
+                fees=entry_fee_share + exit_fee,
+                reason="signal_sell",
+            )
+        )
+        position.quantity -= sold
+        position.entry_fees -= entry_fee_share
+        if position.quantity <= 1e-12:
+            del self._open[order.symbol]
+
+    def _reconcile_tracking(self) -> None:
+        """Make the exit tracker agree with the ledger after this session's fills.
+
+        The ledger is the book of record; the exit tracker is a convenience that
+        holds the entry price and the exit schedule. If they ever disagree — a
+        signal sold a position the tracker still counted, a fill rounded a
+        quantity to zero — the tracker is corrected to the ledger rather than the
+        other way round, because forcing the book to match the tracker would mean
+        inventing trades. A tracked position the book no longer holds is dropped
+        with a note, so the discrepancy is visible rather than silent.
+        """
+        for symbol in list(self._open):
+            held = self.ledger.position_quantity(symbol)
+            position = self._open[symbol]
+            if held <= 1e-12:
+                del self._open[symbol]
+                continue
+            if abs(position.quantity - held) > 1e-6:
+                position.quantity = held
 
     def _recheck_entry_at_fill(
         self, item: PendingOrder, market: MarketContext, session: str
@@ -590,6 +708,16 @@ class PortfolioBacktester:
         self.result.decisions += 1
         self.result.signals.append(signal)
 
+        # A symbol the feed does not hold cannot be priced, so it cannot be
+        # sized or executed. The model may name a ticker that is not in this
+        # run's universe; that is a rejected signal, not a crash. The risk engine
+        # is deliberately feed-agnostic and cannot make this check.
+        if signal.symbol not in self.feed.symbols:
+            self.result.rejections.append(
+                (session, signal.symbol, RiskReason.UNKNOWN_SYMBOL.value)
+            )
+            return
+
         price = self.feed.bar(signal.symbol, session)
         reference = price.close if price is not None else None
         decision = self.risk.evaluate(
@@ -614,7 +742,13 @@ class PortfolioBacktester:
         self._schedule_order(signal, decision.quantity, session)
 
     def _schedule_order(self, signal: TradingSignal, quantity: float, session: str) -> None:
-        """Create the order and queue it for the next session's open."""
+        """Create the order and queue it for the next session's open.
+
+        Creation is recorded here, at schedule time, so the event log's lifecycle
+        order is CREATED then ACCEPTED (acceptance is recorded by the simulator
+        when it works the order). The order carries ``created_recorded`` so the
+        simulator does not log a second creation.
+        """
         side = OrderSide.BUY if signal.action is SignalAction.BUY else OrderSide.SELL
         order = Order(
             order_id=f"{signal.signal_id}-{session}",
@@ -627,9 +761,11 @@ class PortfolioBacktester:
             signal_id=signal.signal_id,
         )
         self.ledger.record_event(
-            EventType.ORDER_ACCEPTED, timestamp=signal.timestamp, symbol=signal.symbol,
-            detail={"order_id": order.order_id, "quantity": quantity},
+            EventType.ORDER_CREATED, timestamp=signal.timestamp, symbol=signal.symbol,
+            detail={"order_id": order.order_id, "side": side.value, "quantity": quantity,
+                    "type": order.order_type.value, "limit_price": order.limit_price},
         )
+        order.created_recorded = True
         if not self.config.execute_on_next_open:
             # Documented as unsafe: fills at the price the decision already saw.
             bar = self.feed.bar(signal.symbol, session)
@@ -641,10 +777,14 @@ class PortfolioBacktester:
                                          is_open=True, average_daily_volume=bar.volume),
                 )
                 if filled.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
-                    self._register_entry(
-                        PendingOrder(order=order, signal=signal, created_session=session),
-                        filled, session,
-                    )
+                    if filled.side is OrderSide.BUY:
+                        self._register_entry(
+                            PendingOrder(order=order, signal=signal, created_session=session),
+                            filled, session,
+                        )
+                    else:
+                        self._register_reduction(filled, session)
+                    self._reconcile_tracking()
                 return
         self._pending.append(PendingOrder(order=order, signal=signal, created_session=session))
 

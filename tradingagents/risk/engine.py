@@ -601,6 +601,11 @@ class RiskEngine:
         decision.reference_price = float(fill_price)
 
         if action is SignalAction.SELL:
+            # No cap re-check: a sell reduces the position and the exposure, so a
+            # gap can only make it smaller. Its holding constraint is the
+            # ledger's, enforced where the fill is applied, and the caller caps
+            # the size to the holding before submitting, so a sell cannot oversell
+            # through this path.
             decision.quantity = quantity
             decision.notional = quantity * fill_price
             return decision

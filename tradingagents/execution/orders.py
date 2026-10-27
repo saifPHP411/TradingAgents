@@ -72,7 +72,6 @@ class RejectReason(StrEnum):
     INSUFFICIENT_POSITION = "INSUFFICIENT_POSITION"
     MARKET_CLOSED = "MARKET_CLOSED"
     NO_PRICE = "NO_PRICE"
-    SYMBOL_NOT_TRADABLE = "SYMBOL_NOT_TRADABLE"
     RISK_LIMIT = "RISK_LIMIT"
     LIMIT_NOT_REACHED = "LIMIT_NOT_REACHED"
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
@@ -105,6 +104,15 @@ class Order(BaseModel):
     average_fill_price: float | None = Field(default=None, description="Average price of the filled units")
     reject_reason: RejectReason | None = Field(default=None, description="Set when the order is rejected")
     reject_detail: str = Field(default="", description="Human-readable rejection explanation")
+    created_recorded: bool = Field(
+        default=False,
+        description=(
+            "Internal bookkeeping: whether an ORDER_CREATED event has already been "
+            "recorded for this order. A caller that records creation itself (the "
+            "backtester, which creates an order on the decision session and executes "
+            "it on the next) sets this so the simulator does not record a second one."
+        ),
+    )
 
     @model_validator(mode="after")
     def _limit_price_matches_the_type(self) -> Order:

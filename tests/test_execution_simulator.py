@@ -163,12 +163,18 @@ class TestLimitOrders:
         assert filled.average_fill_price == pytest.approx(100.0)
 
     def test_a_buy_limit_below_the_market_does_not_fill(self):
+        """An unfilled limit is cancelled, not rejected.
+
+        A limit that the market never reached is a valid order that did not get
+        its price, which is a cancellation — the book never refused it. Recording
+        it as REJECTED conflated the two and left ``ORDER_CANCELLED`` unreachable.
+        """
         sim, ledger = _sim()
         filled = sim.submit(
             _order(order_type=OrderType.LIMIT, limit_price=95.0),
             market=_market(100.0),
         )
-        assert filled.status is OrderStatus.REJECTED
+        assert filled.status is OrderStatus.CANCELLED
         assert filled.reject_reason is RejectReason.LIMIT_NOT_REACHED
         assert ledger.position_quantity("AAPL") == 0.0
         assert ledger.cash == 10_000.0
@@ -192,13 +198,14 @@ class TestLimitOrders:
         assert filled.average_fill_price == pytest.approx(110.0)
 
     def test_a_sell_limit_above_the_market_does_not_fill(self):
+        """A sell limit the market never rose to is cancelled, not rejected."""
         sim, ledger = _sim()
         sim.submit(_order(), market=_market(100.0))
         filled = sim.submit(
             _order(side=OrderSide.SELL, order_type=OrderType.LIMIT, limit_price=120.0),
             market=_market(110.0, timestamp=T1),
         )
-        assert filled.status is OrderStatus.REJECTED
+        assert filled.status is OrderStatus.CANCELLED
         assert filled.reject_reason is RejectReason.LIMIT_NOT_REACHED
         assert ledger.position_quantity("AAPL") == 10
 
@@ -453,3 +460,92 @@ class TestAnOrderFillsAtMostOnce:
         sim.submit(order, market=_market(1.0))
         assert ledger.position_quantity("AAPL") == 0.0
         assert ledger.cash == pytest.approx(100.0)
+
+
+@pytest.mark.unit
+class TestIdempotentReSubmission:
+    """A partially filled order can be driven twice without filling twice.
+
+    A partial fill is not terminal, so the terminal-state guard does not cover it:
+    a caller that re-drives the same order (a paper loop retrying, a retry after a
+    timeout) would fill the remaining size a second time — a real position nobody
+    asked for. ``idempotent=True`` asks for the recorded outcome instead. The
+    backtester leaves it False, so a genuine second submission still works.
+    """
+
+    def test_an_idempotent_re_submission_does_not_fill_again(self):
+        sim, ledger = _sim()
+        sim.max_volume_participation = 0.1
+        order = _order(quantity=500)
+        market = _market(100.0, volume=1_000.0)
+        first = sim.submit(order, market=market)
+        assert first.status is OrderStatus.PARTIALLY_FILLED
+        filled_once = ledger.position_quantity("AAPL")
+        second = sim.submit(order, market=market, idempotent=True)
+        assert second is first
+        assert ledger.position_quantity("AAPL") == pytest.approx(filled_once)
+
+    def test_a_non_idempotent_re_submission_still_fills_the_remainder(self):
+        """The default must keep the genuine re-submission path working."""
+        sim, ledger = _sim(cash=100_000.0)
+        sim.max_volume_participation = 0.1
+        # Cash covers the whole order, so the only thing limiting the first fill
+        # is participation; the second submission fills more of the remainder.
+        order = _order(quantity=500)
+        market = _market(100.0, volume=1_000.0)
+        sim.submit(order, market=market)
+        first_fill = ledger.position_quantity("AAPL")
+        assert order.status is OrderStatus.PARTIALLY_FILLED
+        sim.submit(order, market=market)
+        assert ledger.position_quantity("AAPL") > first_fill
+        assert ledger.position_quantity("AAPL") == pytest.approx(order.filled_quantity)
+
+
+@pytest.mark.unit
+class TestCancellationVersusRejection:
+    """An unfilled limit is cancelled; a malformed or unfunded order is rejected."""
+
+    def test_a_limit_the_market_never_reached_is_cancelled(self):
+        sim, ledger = _sim()
+        order = _order(order_type=OrderType.LIMIT, limit_price=95.0)
+        filled = sim.submit(order, market=_market(100.0))
+        assert filled.status is OrderStatus.CANCELLED
+        assert ledger.position_quantity("AAPL") == 0.0
+
+    def test_a_cancellation_is_recorded_as_a_cancellation_event(self):
+        sim, ledger = _sim()
+        order = _order(order_type=OrderType.LIMIT, limit_price=95.0)
+        sim.submit(order, market=_market(100.0))
+        types = [e.type for e in ledger.events]
+        assert EventType.ORDER_CANCELLED in types
+        assert EventType.ORDER_REJECTED not in types
+
+    def test_the_explicit_cancel_records_once(self):
+        sim, ledger = _sim()
+        order = _order()
+        sim.cancel(order, reason=RejectReason.NO_PRICE, detail="manual")
+        sim.cancel(order, reason=RejectReason.NO_PRICE, detail="manual again")
+        cancels = [e for e in ledger.events if e.type is EventType.ORDER_CANCELLED]
+        assert len(cancels) == 1
+
+    def test_a_filled_order_cannot_be_cancelled(self):
+        sim, ledger = _sim()
+        order = _order()
+        sim.submit(order, market=_market(100.0))
+        sim.cancel(order, reason=RejectReason.NO_PRICE, detail="too late")
+        assert order.status is OrderStatus.FILLED
+        assert not [e for e in ledger.events if e.type is EventType.ORDER_CANCELLED]
+
+
+@pytest.mark.unit
+class TestFillsAreTraceableToTheirOrder:
+    """Every ORDER_FILLED event names the order it belongs to."""
+
+    def test_a_fill_event_carries_the_order_id(self):
+        sim, ledger = _sim()
+        order = _order()
+        order.order_id = "ord-123"
+        sim.submit(order, market=_market(100.0))
+        fills = [e for e in ledger.events if e.type is EventType.ORDER_FILLED]
+        assert fills
+        assert fills[0].detail["order_id"] == "ord-123"

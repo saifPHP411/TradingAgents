@@ -473,3 +473,40 @@ class TestPaperBuyCappedByCashAtFill:
         step = session.on_signal(_signal(size=1.0))
         assert session.ledger.cash == pytest.approx(0.0, abs=1e-6)
         assert step.quantity == pytest.approx(session.ledger.position_quantity("AAPL"))
+
+
+@pytest.mark.unit
+class TestPaperOrderLifecycle:
+    """The paper path records the same lifecycle the backtest does.
+
+    An order that never reached the ledger's creation record but did reach its
+    rejection record is an event log a report cannot read in order. The paper
+    path builds its own order, so it must record creation itself before anything
+    can refuse it.
+    """
+
+    def test_a_filled_order_logs_creation_then_acceptance(self):
+        session = _session()
+        session.on_signal(_signal())
+        types = [e.type.value for e in session.ledger.events]
+        assert types[0] == "ORDER_CREATED"
+        assert types.index("ORDER_CREATED") < types.index("ORDER_ACCEPTED")
+        assert types.index("ORDER_ACCEPTED") < types.index("ORDER_FILLED")
+
+    def test_the_steps_reconcile_with_the_ledger(self):
+        """Every unit the steps claim to have filled is a unit the book holds."""
+        session = _session()
+        session.on_signal(_signal(size=0.2))
+        session.on_signal(_signal(size=0.2))
+        filled = sum(s.quantity for s in session.steps if s.order_status == "FILLED")
+        assert filled == pytest.approx(session.ledger.position_quantity("AAPL"))
+
+    def test_every_order_that_is_created_is_resolved(self):
+        """No paper order is created and then left without an outcome."""
+        session = _session()
+        session.on_signal(_signal())
+        created = {e.detail.get("order_id") for e in session.ledger.events
+                   if e.type.value == "ORDER_CREATED"}
+        resolved = {e.detail.get("order_id") for e in session.ledger.events
+                    if e.type.value in ("ORDER_FILLED", "ORDER_REJECTED", "ORDER_CANCELLED")}
+        assert created <= resolved

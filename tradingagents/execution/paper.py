@@ -183,6 +183,17 @@ class PaperSession:
             as_of_date=signal.as_of_date,
             signal_id=signal.signal_id,
         )
+        # Record creation before the fill-time re-check, so an order the re-check
+        # refuses still has a CREATED event ahead of its ORDER_REJECTED. The
+        # simulator skips its own creation record because of the flag.
+        self.ledger.record_event(
+            EventType.ORDER_CREATED,
+            timestamp=now,
+            symbol=order.symbol,
+            detail={"order_id": order.order_id, "side": side.value,
+                    "quantity": order.quantity, "type": order.order_type.value},
+        )
+        order.created_recorded = True
         # The caps were checked at the decision price. The fill gets a different
         # one — the quote has moved, or the costs moved it — so a buy is re-checked
         # at the price it will actually pay, exactly as the backtester does. A
