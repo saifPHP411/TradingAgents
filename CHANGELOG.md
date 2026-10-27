@@ -6,6 +6,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Changes that need action when upgrading are listed under "Upgrading from" in their release.
 
+## [Unreleased] — simulated trading system
+
+Adds a deterministic simulated trading system alongside the existing multi-agent
+analysis, so a decision can become a position with honest books kept about it.
+The agent workflow is unchanged and stays the analytical component; execution,
+sizing, constraints and accounting are separate code. There is no live trading
+path, and no configuration that produces one.
+
+### Added
+
+- A validated signal contract (`signals/`): a decision becomes a `TradingSignal`
+  only if its action is BUY/HOLD/SELL, its confidence is in range, and its size
+  and stop/target are coherent. A HOLD cannot carry a size.
+- A portfolio ledger (`portfolio/`): cash, positions, average entry, market
+  value, equity, realized and unrealized P&L, fees and exposure, with an event
+  log (`ORDER_FILLED`, `POSITION_OPENED`, `FEE_CHARGED`, and the rest). Every
+  cash or position change goes through one method.
+- A deterministic risk engine (`risk/`): configurable limits on position size,
+  portfolio exposure, open positions, daily loss, drawdown and order value.
+  Long-only is enforced in code, not by prompt. A position cap bounds the
+  resulting position, not each order, so repeated buys cannot accumulate past it.
+- A simulated execution engine (`execution/`): MARKET and LIMIT orders with a
+  full lifecycle, named rejection reasons, and configurable costs — commission,
+  half-spread, slippage and volume-scaled impact. Costs land in the ledger.
+- A portfolio, event-loop backtester (`backtesting/`): market event, decision,
+  risk validation, order, fill, portfolio update, P&L. Orders fill at the next
+  session's open, bars are sliced strictly at each session, and stops fill at the
+  open on a gap rather than at the level.
+- Performance analytics (`performance/`): total and annualized return, CAGR,
+  realized and unrealized P&L, fees, trade counts, win rate, profit factor,
+  average win/loss, expectancy, max drawdown, Sharpe, Sortino, Calmar, exposure,
+  turnover, and benchmark comparison. An undefined metric is `None`, never zero.
+- Walk-forward evaluation (`backtesting/walkforward.py`): train, validation and
+  test windows, with fold ordering validated at construction.
+- LLM cost telemetry and budgets (`telemetry/`): per-call tokens, latency, retries
+  and estimated cost, a run cost ceiling, a call ceiling, and run metadata for
+  reproducibility.
+- Paper trading (`execution/paper.py`): the same pipeline driven by live quotes
+  from a caller-supplied source instead of historical bars.
+- Reports (`trading_report/`): one document covering decisions, execution,
+  portfolio and performance, rendered to self-contained HTML and JSON.
+- Point-in-time guarantees per data source (`dataflows/pit.py`): each source is
+  classified `REQUEST_BOUNDED`, `WINDOW_FILTERED` or `NOT_PIT_SAFE`, with the
+  guard that implements it cited and checked by tests.
+- Documentation: `docs/ARCHITECTURE.md`, `docs/BACKTESTING.md`, `docs/RISK.md`,
+  `docs/EXECUTION.md`, `docs/PAPER_TRADING.md`, `docs/TRADING_SYSTEM_AUDIT.md`
+  and `docs/FINAL_DEVELOPMENT_REPORT.md`, plus `examples/simulated_run.py`.
+
+### Notes
+
+- Prices are split-adjusted, so a backtest reflects price return only; dividends
+  are not credited as cash. Documented rather than hidden.
+- LLM calls are not deterministic, so a run's signals carry their own reasoning
+  and a content-derived id; the deterministic layers around them are reproducible
+  from the run configuration.
+
+
 ## [0.7.1] — 2026-10-27
 
 Decisions are scored only on final closes and settle across long market holidays, a model's unpadded date no longer reads filings made after the run date, and fixes to portfolios, prices, SEC statements, reports, Azure and Claude settings.

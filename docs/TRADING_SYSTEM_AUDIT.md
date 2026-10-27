@@ -270,20 +270,37 @@ concentrated in `dataflows/date_window.py`:
 - `withhold_live_profile`, `withhold_undisclosed_trades`,
   `withhold_undated_statements` refuse to serve data with no historical vintage.
 
-| Source | PIT-safe? | Assessment |
-|---|---|---|
-| yfinance OHLCV | PARTIAL | Bars are historical, but adjusted-vs-raw is unasserted. |
-| yfinance fundamentals/profile | NO (by design) | Withheld for historical runs. |
-| SEC EDGAR | PASS | Filings dated by filing date, served as filed (`vendors/sec_edgar.py`); `tests/test_sec_edgar.py`, `tests/test_statement_knowledge_time.py`. |
-| FRED | PARTIAL | Series have observation dates; vintage/ALFRED revisions are not modelled. |
-| yfinance news | PARTIAL | Window-trimmed, but the feed serves "latest" only; `coverage_gap` marks unreachable windows. |
-| Reddit / StockTwits | PARTIAL | Same feed limitation; documented via `coverage_gap`. |
-| Polymarket | PARTIAL | Keyless snapshot; no historical archive. |
+Each source is now classified in `dataflows/pit.py`, at three levels, and the
+tests read the cited guard so a classification cannot go stale:
 
-**Assessment: PASS for the clamping/withholding discipline; PARTIAL overall**
-because some sources cannot be served point-in-time at all. That limitation is
-documented rather than hidden — the correct behaviour — but there is no
-snapshot-capable provider abstraction to swap in.
+| Source | Level | Evidence |
+|---|---|---|
+| yfinance OHLCV | REQUEST_BOUNDED | `agents/tools.py:get_stock_data` clamps the window end via `as_of_window` before the vendor is called. Adjusted prices mean a historical price is the split-adjusted value, not the price on the tape. |
+| yfinance indicators | REQUEST_BOUNDED | Computed from the same clamped window, so no future bar enters. |
+| FRED | REQUEST_BOUNDED | `vendors/fred.py:get_macro_data` bounds `observation_end` and pins the vintage with `realtime_start`/`realtime_end` (`fred.py:204`), so a later revision does not appear in an earlier run. |
+| SEC EDGAR | WINDOW_FILTERED | Served as filed, which is the right shape; a statement with no filing date is withheld (`withhold_undated_statements`) rather than assumed to predate the run. |
+| yfinance news | WINDOW_FILTERED | Dated items filtered to the window; undated items withheld from a historical run; `coverage_gap` reports an unreachable window as unavailable. |
+| Reddit / StockTwits | WINDOW_FILTERED | Same feed limitation; filtered on the item's own timestamp, unreachable windows reported. |
+| company profile | NOT_PIT_SAFE | Present-day snapshot with no historical view; withheld entirely from a historical run. The withholding is the mitigation, not a guarantee. |
+| insider transactions | NOT_PIT_SAFE | Not dated by public disclosure, so withheld from a historical run. |
+| Polymarket | NOT_PIT_SAFE | No date parameter to clamp at all; a backtest must not use it. |
+
+Two caveats are recorded in code rather than smoothed over: the price clamp lives
+in the agent tool layer, so a direct vendor call would bypass it, and no vendor
+has a clamp of its own. That is why the backtester reads bars from
+`MarketDataFeed` rather than calling a vendor.
+
+`dataflows/pit.py` also provides a `SnapshotSource` protocol and
+`register_snapshot_source`, so a source that gains a dated archive is promoted to
+`REQUEST_BOUNDED` in one place without touching its callers. None is registered,
+because none of the current vendors has one, and the tests assert that rather
+than leaving it implied.
+
+**Assessment: PASS for the clamping/withholding discipline and for stating each
+source's limit in code; PARTIAL overall** because news, social and SEC sources
+are filtered rather than served as they stood, and three sources cannot be served
+point-in-time at all. The difference from the baseline audit is that the limit is
+now recorded per source and checkable, instead of being a general caveat.
 
 ---
 
@@ -433,11 +450,17 @@ Design rules for the new layers:
 | 5 | Fees, slippage, spread in the ledger | `execution/costs.py` | implemented |
 | 6 | Portfolio/event-based backtester | `backtesting/` | implemented |
 | 7 | Performance analytics + benchmark | `performance/` | implemented |
-| 8 | Walk-forward / out-of-sample | `backtesting/walk_forward.py` | implemented |
-| 9 | PIT integrity review + provider abstraction | `dataflows/` + docs | documented, abstraction added |
-| 10 | Reproducibility run metadata | `reproducibility.py` | implemented |
+| 8 | Walk-forward / out-of-sample | `backtesting/walkforward.py` | implemented |
+| 9 | PIT integrity review + provider abstraction | `dataflows/pit.py` + docs | implemented, with per-source caveats |
+| 10 | Reproducibility run metadata | `telemetry/run.py` | implemented |
 | 11 | LLM cost telemetry + budgets | `telemetry/` | implemented |
-| 12 | Paper-trading abstraction | `execution/` | implemented |
-| 13 | Reports with decision/execution/portfolio/performance | `reporting.py` | extended |
+| 12 | Paper-trading abstraction | `execution/paper.py` | implemented |
+| 13 | Reports with decision/execution/portfolio/performance | `trading_report/` | implemented |
+
+Two roadmap entries named a module that does not exist in the delivered tree
+(`reproducibility.py`, `walk_forward.py`); the corrected paths are above. The
+reports module is `trading_report/` rather than an extension of `reporting.py`,
+because `reporting.py` is the agent-written report tree and the two answer
+different questions.
 
 See `docs/FINAL_DEVELOPMENT_REPORT.md` for what was actually delivered.

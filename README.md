@@ -362,6 +362,80 @@ ta = TradingAgentsGraph(config=config)
 _, decision = ta.propagate("NVDA", "2026-09-01")
 ```
 
+
+## Simulated trading system
+
+The analysis above produces a view. The simulated trading system turns that view into a position and keeps honest books about it, without ever reaching a broker. It is a separate, deterministic layer that consumes a validated `TradingSignal`:
+
+```
+market data → AI brain → signal → risk engine → order → simulated fill → ledger → performance → report
+```
+
+The AI brain is unchanged and stays the analytical component. Execution, sizing, constraints and accounting are deterministic code, so a bad model response produces a rejected signal rather than a corrupt book.
+
+| Layer | Module | What it does |
+|---|---|---|
+| Signal contract | `signals/` | Validates a decision into a typed `TradingSignal` (BUY/HOLD/SELL, confidence, size, stop, target, reasoning). |
+| Risk engine | `risk/` | Decides whether a trade is allowed and at what size. Long-only is enforced in code, not by prompt. |
+| Execution | `execution/` | Orders, lifecycle, simulated fills, and costs (commission, spread, slippage). |
+| Portfolio ledger | `portfolio/` | Cash, positions, average entry, realized/unrealized P&L, fees, exposure, and an event log. |
+| Backtester | `backtesting/` | A portfolio, event-loop backtest with point-in-time bars and no look-ahead. |
+| Paper trading | `execution/paper.py` | The same pipeline driven by live quotes instead of historical bars. |
+| Performance | `performance/` | Return, CAGR, drawdown, Sharpe, Sortino, Calmar, win rate, profit factor, exposure, turnover, benchmark. |
+| Reports | `trading_report/` | One document, rendered to self-contained HTML and JSON. |
+| Telemetry | `telemetry/` | LLM token/cost accounting, budgets, and run metadata for reproducibility. |
+| PIT integrity | `dataflows/pit.py` | States per data source what point-in-time guarantee it offers, and what it does not. |
+
+There is no live trading path and no configuration that produces one. `ExecutionMode` has only `BACKTEST` and `PAPER`; a request for `live`, `real`, `production`, `broker` or `exchange` raises. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full picture, and the other documents under [`docs/`](docs/) for each layer.
+
+### Running a simulated backtest
+
+Everything is offline and needs no API key. From a Colab cell or an Android shell:
+
+```bash
+python examples/simulated_run.py
+```
+
+That builds a synthetic price series, runs a trivial strategy through the full loop, and writes `reports/example/simulated_run.html` and `.json`.
+
+In your own code:
+
+```python
+from tradingagents.backtesting import BacktestConfig, MarketDataFeed, PortfolioBacktester
+from tradingagents.execution import CostModel
+from tradingagents.risk import RiskLimits
+from tradingagents.trading_report import build_report, write_report
+
+feed = MarketDataFeed({"AAPL": bars})           # a DataFrame of OHLCV, indexed by date
+config = BacktestConfig(
+    initial_cash=100_000.0,
+    holding_period_days=5,
+    costs=CostModel(commission_rate=0.0005, half_spread_bps=1.0, slippage_bps=2.0),
+    risk_limits=RiskLimits(max_position_size=0.25, max_portfolio_exposure=0.9),
+)
+result = PortfolioBacktester(feed, my_strategy, config=config).run()
+paths = write_report(build_report(result), "reports", stem="aapl_run")
+```
+
+### Running a paper simulation
+
+Paper mode uses the same ledger, risk engine and simulator, driven by live quotes you supply. It still cannot reach a venue:
+
+```python
+from datetime import UTC, datetime
+from tradingagents.execution import Quote, dict_quote_source, new_session
+
+session = new_session(
+    initial_cash=100_000.0,
+    quotes=dict_quote_source({"AAPL": 195.40}, timestamp=datetime.now(UTC)),
+)
+step = session.on_signal(my_signal)
+session.write_json("runs/paper.json")
+```
+
+See [`docs/PAPER_TRADING.md`](docs/PAPER_TRADING.md) for details, and [`docs/TRADING_SYSTEM_AUDIT.md`](docs/TRADING_SYSTEM_AUDIT.md) for the audit of what the framework had before this layer was added.
+
+
 ## Evaluating decisions over time
 
 One run gives one decision, which cannot tell you whether the system decides well. `run_backtest` runs the same pipeline over a grid of tickers and dates, writes to a memory log of its own, and scores the decisions whose holding window has since traded.
