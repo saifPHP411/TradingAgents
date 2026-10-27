@@ -147,6 +147,24 @@ class Ledger:
         self.events.append(event)
         return event
 
+    def record_event(
+        self,
+        type_: EventType,
+        *,
+        timestamp: datetime,
+        symbol: str | None = None,
+        detail: dict | None = None,
+        reason: str = "",
+    ) -> LedgerEvent:
+        """Record an event the ledger did not itself cause.
+
+        The execution engine records the order lifecycle here (created, rejected,
+        accepted), so the log is one ordered history of everything that happened
+        to the book rather than two logs that have to be interleaved later. The
+        ledger remains the only writer, so ``seq`` stays dense.
+        """
+        return self._record(type_, timestamp=timestamp, symbol=symbol, detail=detail, reason=reason)
+
     # --- Positions ----------------------------------------------------------
 
     def holding(self, symbol: str) -> Holding:
