@@ -134,6 +134,35 @@ and the obvious path, which is the guarantee the docstring makes.
 Tests: `tests/test_backtest_engine.py::TestTheStrategyCannotMoveTheBook` (five
 tests, four of which fail on the old behaviour).
 
+### 6. A partially filled order reported its last fill price as its average
+
+Severity: high. It understates or overstates what an order actually paid, and it
+is silent — the cash the ledger spent is right, so nothing in the output
+contradicts the wrong figure.
+
+`ExecutionSimulator._apply` set `order.average_fill_price = price` on every fill.
+An order that fills in pieces at different prices — a MARKET order capped by
+`max_volume_participation` over two sessions, or a limit worked over two bars —
+therefore ended with the *last* piece's price in a field named
+`average_fill_price`, and `Order.notional` (defined as `filled_quantity *
+average_fill_price`) disagreed with the cash the ledger actually spent.
+
+Reproduced on the working tree at `e7853e4`: a 1,000-unit order that filled 400
+@ 10 and 600 @ 20 reported `average_fill_price = 20.0` and `notional = 20,000`,
+against a true average of 16.0 and a true notional of 16,000. The ledger's own
+`average_entry_price` was 16.0, so the two records of the same fills disagreed.
+
+Fix: `_apply` accumulates a quantity-weighted average across every piece:
+`average = (prior_notional + applied * price) / filled_quantity`. A single fill
+is unchanged (`applied == quantity`, so the formula reduces to `price`), and the
+order's notional now equals what the ledger spent. The ledger's VWAP was already
+correct and is untouched.
+
+Tests: `tests/test_execution_simulator.py::TestPartialFills` — the average across
+two pieces, the 1000/400/600 example reconciled against the ledger, and fees
+charged per piece. The average test fails on the old behaviour (obtained 20.0,
+expected 16.0).
+
 ## What the audit confirmed holds
 
 Each of these was attacked and did not break:

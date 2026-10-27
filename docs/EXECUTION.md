@@ -87,6 +87,29 @@ defaults to 0, which disables partial fills. When set, an order larger than its
 share fills partially and the remainder is reported, rather than being filled
 whole against a bar that could not have absorbed it.
 
+A partial fill applies only the filled quantity to the book: cash, position, fees
+and turnover all move by the piece that actually filled, never by the requested
+size. `Order.filled_quantity` is the running total and `Order.average_fill_price`
+is the quantity-weighted average of every piece, so the order's record of its own
+fills agrees with the ledger's VWAP for the position.
+
+Three limitations are real and are stated rather than hidden:
+
+- **A partial fill is not re-queued.** A MARKET order that fills part of its size
+  ends `PARTIALLY_FILLED` and the remainder is reported in `BacktestResult.unfilled`
+  — it is not carried to the next session. A caller that wants the rest must
+  re-submit (the simulator will fill the remaining size on a second `submit`).
+- **A LIMIT order is single-shot.** The simulator is given one bar per `submit`;
+  if the limit is not reached on that bar the order is cancelled with
+  `LIMIT_NOT_REACHED` and is terminal, so it cannot fill on a later bar through
+  the same object. There is no good-till-cancelled rest and no expiry date. This
+  is consistent with the simulator's one-bar-per-submit contract, but it means a
+  strategy cannot express "rest this limit for the next five sessions" without
+  re-creating the order each session.
+- **The backtester and the paper session only ever create MARKET orders.** Neither
+  the engine nor the paper session emits a LIMIT order, so `LIMIT` is exercised
+  through the simulator's own API and tests, not through a run.
+
 ## The safety guard
 
 `ExecutionMode` has exactly two members, `BACKTEST` and `PAPER`. There is no

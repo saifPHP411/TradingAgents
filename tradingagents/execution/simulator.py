@@ -288,8 +288,17 @@ class ExecutionSimulator:
         except InsufficientPositionError as exc:
             return self._reject(order, RejectReason.INSUFFICIENT_POSITION, str(exc))
 
-        order.filled_quantity = min(order.filled_quantity + quantity, order.quantity)
-        order.average_fill_price = price
+        # A quantity-weighted average across every fill, not the last fill price.
+        # An order can fill in pieces at different prices (a market order capped
+        # by volume participation on two sessions, a limit worked over two bars),
+        # and the field is named ``average_fill_price``: reporting only the most
+        # recent piece would understate or overstate what the order actually paid.
+        # The ledger keeps its own VWAP for the position; this keeps the order's
+        # record of its own fills consistent with it.
+        applied = min(quantity, order.quantity - order.filled_quantity)
+        prior_notional = (order.average_fill_price or 0.0) * order.filled_quantity
+        order.filled_quantity += applied
+        order.average_fill_price = (prior_notional + applied * price) / order.filled_quantity
         # A capped fill is partial only if something is left over; a market order
         # whose full size fits in the bar is simply filled. The status reflects the
         # total filled, so a partially filled order that is re-driven and fills

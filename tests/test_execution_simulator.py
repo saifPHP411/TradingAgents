@@ -332,6 +332,56 @@ class TestPartialFills:
             with pytest.raises(ValueError):
                 ExecutionSimulator(Ledger(1_000.0), max_volume_participation=bad)
 
+    def test_the_average_fill_price_averages_every_piece(self):
+        """Two partial fills at different prices must average, not report the last.
+
+        The field is named ``average_fill_price``; reporting only the most recent
+        piece made a 1000-unit order that paid 400 @ 10 and 600 @ 20 look like it
+        paid 20 for the whole thing, and made ``Order.notional`` disagree with the
+        cash the ledger actually spent.
+        """
+        sim, ledger = _sim(cash=1_000_000.0, max_volume_participation=0.4)
+        order = _order(quantity=1_000)
+        sim.submit(order, market=_market(10.0, volume=1_000.0))
+        sim.submit(order, market=_market(20.0, volume=1_500.0, timestamp=T1))
+        assert order.filled_quantity == pytest.approx(1_000.0)
+        assert order.status is OrderStatus.FILLED
+        assert order.average_fill_price == pytest.approx(16.0)
+        # The order's notional is what the ledger spent, not quantity times the
+        # last price.
+        assert order.notional == pytest.approx(16_000.0)
+        assert ledger.cash == pytest.approx(1_000_000.0 - 16_000.0)
+
+    def test_the_concrete_partial_fill_example_reconciles(self):
+        """The requested 1000/400/600 example, checked against the ledger."""
+        sim, ledger = _sim(cash=1_000_000.0, max_volume_participation=0.4)
+        order = _order(quantity=1_000)
+        first = sim.submit(order, market=_market(10.0, volume=1_000.0))
+        assert first.status is OrderStatus.PARTIALLY_FILLED
+        assert order.filled_quantity == pytest.approx(400.0)
+        assert order.remaining_quantity == pytest.approx(600.0)
+        assert ledger.position_quantity("AAPL") == pytest.approx(400.0)
+        assert ledger.cash == pytest.approx(1_000_000.0 - 4_000.0)
+        second = sim.submit(order, market=_market(10.0, volume=1_500.0, timestamp=T1))
+        assert second.status is OrderStatus.FILLED
+        assert order.filled_quantity == pytest.approx(1_000.0)
+        assert order.remaining_quantity == pytest.approx(0.0)
+        assert order.filled_quantity <= 1_000.0
+        assert order.remaining_quantity >= 0.0
+        assert ledger.position_quantity("AAPL") == pytest.approx(1_000.0)
+        assert ledger.cash == pytest.approx(1_000_000.0 - 10_000.0)
+
+    def test_fees_are_charged_per_piece_not_once_at_the_end(self):
+        costs = CostModel(commission_per_unit=0.01)
+        sim, ledger = _sim(cash=1_000_000.0, costs=costs, max_volume_participation=0.4)
+        order = _order(quantity=1_000)
+        sim.submit(order, market=_market(10.0, volume=1_000.0))
+        after_first = ledger.total_fees
+        assert after_first == pytest.approx(4.0)  # 400 units * 0.01
+        sim.submit(order, market=_market(10.0, volume=1_500.0, timestamp=T1))
+        assert ledger.total_fees == pytest.approx(10.0)  # (400 + 600) * 0.01
+        assert ledger.total_fees - after_first == pytest.approx(6.0)
+
 
 # ---------------------------------------------------------------------------
 # Contract and accounting
