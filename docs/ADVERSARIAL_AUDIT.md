@@ -163,6 +163,53 @@ two pieces, the 1000/400/600 example reconciled against the ledger, and fees
 charged per piece. The average test fails on the old behaviour (obtained 20.0,
 expected 16.0).
 
+### 7. A LIMIT order was single-shot, and its remainder could not rest
+
+Severity: medium. It made a whole class of strategy inexpressible, and the way it
+was handled hid the fact: an unfilled limit was *cancelled*, so a run reported a
+terminal outcome for an order that a real venue would have left working.
+
+The simulator is given one bar per `submit`. A LIMIT order the bar did not reach
+was cancelled with `LIMIT_NOT_REACHED` and became terminal, so it could never fill
+on a later bar through the same object. There was no good-till-cancelled rest and
+no expiry. Neither the backtester nor the paper session ever created a LIMIT
+order, so the type was exercised only through the simulator's own API.
+
+Two further defects sat behind that one:
+
+- **Acceptance would be re-recorded.** The simulator appended an `ORDER_ACCEPTED`
+  event on every `submit`. Working one order across several bars would have logged
+  one acceptance per bar, so the event log would show an order accepted five times.
+- **A resting remainder would double-count.** `_register_entry` used the order's
+  cumulative `filled_quantity`, so an order that filled 40 then 60 units across
+  two sessions would have registered 40 + 100 = 140 units of exit tracking against
+  a 100-unit position.
+
+Fix: an order can rest. `submit(..., rest_if_unfilled=True)` leaves a GTC LIMIT
+the bar did not reach `ACCEPTED` instead of cancelling it, and records no event
+while it rests. `Order.accepted_recorded` guards the acceptance so it is logged
+once. `BacktestConfig.resting_limit_orders` and `limit_order_ttl_sessions`, plus
+`Order.expires_session`, bound how long an order may rest; an expired order is
+cancelled with the new `EXPIRED` reason and stamped with the expiry session's
+time. LIMIT reachability now uses the bar's low/high when supplied, so a limit the
+session traded down to (but did not close at) fills. The engine registers only the
+*increment* each session via `_apply_fill_to_tracking`, so a multi-session fill is
+one position. The backtester and the paper session now both emit LIMIT orders from
+a signal's `order_intent`, and the paper session holds resting orders in
+`session.resting`, advanced by `work_resting()`. Competing orders for one symbol
+against one session share that symbol's liquidity allowance, consumed in queue
+order.
+
+Reproduced: a GTC buy limit at 95 with a session that opens at 100 and closes at
+100 was cancelled on its first session, and a later session opening at 94 never
+saw the order. A two-session partial fill registered 140 units of exit tracking
+against a 100-unit position.
+
+Tests: `tests/test_persistent_limit_orders.py` (resting, expiry, TTL, partial
+remainder, low/high reachability, the single-acceptance guard, and the
+single-position accounting through the backtester) and
+`tests/test_paper_trading.py::TestPaperRestingLimits`.
+
 ## What the audit confirmed holds
 
 Each of these was attacked and did not break:

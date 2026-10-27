@@ -45,12 +45,18 @@ from tradingagents.execution.orders import (
     OrderStatus,
     OrderType,
     RejectReason,
+    TimeInForce,
 )
 from tradingagents.execution.simulator import ExecutionSimulator
 from tradingagents.portfolio.events import EventType
 from tradingagents.portfolio.ledger import Ledger
 from tradingagents.risk.engine import RiskEngine, RiskVerdict
-from tradingagents.signals.contract import SignalAction, TradingSignal
+from tradingagents.signals.contract import (
+    OrderIntent,
+    SignalAction,
+    SignalTimeInForce,
+    TradingSignal,
+)
 
 
 class PaperSessionError(RuntimeError):
@@ -124,6 +130,10 @@ class PaperSession:
     day_start_equity: float | None = None
     day: str | None = None
     steps: list[SessionStep] = field(default_factory=list)
+    resting: list[Order] = field(default_factory=list)
+    """GTC LIMIT orders still live. Worked by :meth:`work_resting` against fresh
+    quotes; a caller that never calls it leaves them resting, which is honest —
+    an order nobody advanced is an order that did not fill."""
 
     def __post_init__(self) -> None:
         # The mode is resolved through the same guard a backtest uses, so a
@@ -173,12 +183,22 @@ class PaperSession:
         # is built here rather than by the risk engine, so a decision stays a
         # decision and cannot place anything on its own.
         side = OrderSide.BUY if signal.action is SignalAction.BUY else OrderSide.SELL
+        order_type = (
+            OrderType.LIMIT if signal.order_intent is OrderIntent.LIMIT else OrderType.MARKET
+        )
+        time_in_force = (
+            TimeInForce.GTC if signal.time_in_force is SignalTimeInForce.GTC
+            else TimeInForce.DAY
+        )
         order = Order(
             order_id=f"{signal.signal_id}-paper",
             symbol=signal.symbol,
             side=side,
             quantity=decision.quantity,
-            order_type=OrderType.MARKET,
+            order_type=order_type,
+            limit_price=signal.limit_price,
+            time_in_force=time_in_force,
+            expires_session=signal.expires_session,
             created_at=now,
             as_of_date=signal.as_of_date,
             signal_id=signal.signal_id,
@@ -236,13 +256,68 @@ class PaperSession:
                     order = order.model_copy(update={"quantity": review.quantity})
 
         fees_before = self.ledger.total_fees
-        filled = self.simulator.submit(order, market=quote.as_market())
+        rests = (
+            order_type is OrderType.LIMIT and time_in_force is TimeInForce.GTC
+        )
+        filled = self.simulator.submit(order, market=quote.as_market(), rest_if_unfilled=rests)
+        if filled.status is OrderStatus.ACCEPTED and rests:
+            # A persistent limit the quote did not reach: it stays live for a
+            # later :meth:`work_resting`. Nothing is recorded as terminal, because
+            # nothing terminal happened.
+            self.resting.append(filled)
 
         self.equity_peak = max(self.equity_peak, self.ledger.equity)
         reason = "" if filled.status.value == "FILLED" else (
             filled.reject_detail or filled.status.value
         )
         return self._record(signal, decision, filled, reason, fees_before=fees_before)
+
+    def work_resting(self) -> list[SessionStep]:
+        """Try every resting order against the current quotes.
+
+        A caller that has just marked the book to fresh quotes calls this to
+        advance the orders left from earlier signals. Each order is worked once
+        against its symbol's current quote: it fills, partially fills, or stays
+        resting. An order whose quote is missing is left resting rather than
+        cancelled — no quote is not a reason to kill an order. The returned steps
+        describe what happened, in the order the orders were worked, so the
+        outcome is deterministic.
+        """
+        if not self.resting:
+            return []
+        still_resting: list[Order] = []
+        steps: list[SessionStep] = []
+        for order in self.resting:
+            if order.status.is_terminal:
+                continue
+            try:
+                quote = self.quotes(order.symbol)
+            except (KeyError, LookupError):
+                still_resting.append(order)
+                continue
+            filled = self.simulator.submit(
+                order, market=quote.as_market(), rest_if_unfilled=True
+            )
+            if filled.status in (OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED):
+                still_resting.append(filled)
+            steps.append(
+                SessionStep(
+                    timestamp=quote.timestamp,
+                    symbol=filled.symbol,
+                    action="",
+                    approved=True,
+                    quantity=float(filled.filled_quantity),
+                    order_status=filled.status.value,
+                    fill_price=float(filled.average_fill_price)
+                    if filled.average_fill_price else None,
+                    fees=0.0,
+                    reason=filled.reject_detail or "",
+                    equity=self.ledger.equity,
+                )
+            )
+        self.resting = still_resting
+        self.steps.extend(steps)
+        return steps
 
     def _record(self, signal, decision, order, reason: str, *, fees_before: float = 0.0) -> SessionStep:
         # The step reports what was actually filled when there was a fill, so a
@@ -289,6 +364,17 @@ class PaperSession:
             "realized_pnl": self.ledger.realized_pnl,
             "unrealized_pnl": self.ledger.unrealized_pnl,
             "total_fees": self.ledger.total_fees,
+            "resting_orders": [
+                {
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "side": order.side.value,
+                    "quantity": order.quantity,
+                    "filled_quantity": order.filled_quantity,
+                    "limit_price": order.limit_price,
+                }
+                for order in self.resting
+            ],
             "positions": {
                 symbol: {"quantity": holding.quantity,
                          "average_entry_price": holding.average_entry_price,

@@ -23,6 +23,14 @@ share of the bar's volume: only that share fills, the order ends
 ``PARTIALLY_FILLED``, and the caller decides whether to re-submit. A limit order
 does not partially fill, because a daily bar cannot say whether the limit was
 touched before or after the volume was consumed.
+
+An order can also *rest*. With ``TimeInForce.GTC`` a caller that works an order
+across several bars passes ``rest_if_unfilled=True``: a limit the bar did not
+reach is left accepted rather than cancelled, so the same order object can be
+worked again on the next bar. The order is cancelled only when the caller asks,
+when it reaches its ``expires_session``, or when the caller stops working it. A
+resting fill is a modelled fill against a bar whose range covered the limit; it
+is not a claim about queue position, which a daily bar cannot express.
 """
 
 from __future__ import annotations
@@ -42,6 +50,7 @@ from tradingagents.execution.orders import (
     OrderStatus,
     OrderType,
     RejectReason,
+    TimeInForce,
 )
 from tradingagents.portfolio.events import EventType
 from tradingagents.portfolio.ledger import (
@@ -82,7 +91,13 @@ class ExecutionSimulator:
     # --- Public API ---------------------------------------------------------
 
     def submit(
-        self, order: Order, *, market: MarketContext, idempotent: bool = False
+        self,
+        order: Order,
+        *,
+        market: MarketContext,
+        idempotent: bool = False,
+        rest_if_unfilled: bool = False,
+        liquidity_budget: float | None = None,
     ) -> Order:
         """Attempt to execute ``order``, recording the outcome on the order.
 
@@ -106,6 +121,12 @@ class ExecutionSimulator:
         again. The backtester, which submits each order exactly once, leaves it
         ``False`` so a genuine re-submission of a partially filled order still
         works.
+
+        ``rest_if_unfilled=True`` is the persistent-order path. A LIMIT order the
+        bar did not reach is left ``ACCEPTED`` rather than cancelled, so the
+        caller can work the same order on a later bar. It is only meaningful for a
+        GTC limit order; a DAY order is cancelled as before, and a MARKET order
+        ignores it because it always either fills or expires.
         """
         if market.symbol != order.symbol:
             raise ValueError(
@@ -133,14 +154,31 @@ class ExecutionSimulator:
         # The order passed every pre-trade check: it is accepted and will now be
         # worked. Recording acceptance here, after the checks and before the
         # fill, keeps the lifecycle in order (CREATED, then ACCEPTED, then
-        # FILLED/CANCELLED) rather than logging acceptance before creation.
-        self.ledger.record_event(
-            EventType.ORDER_ACCEPTED, timestamp=order.created_at, symbol=order.symbol,
-            detail={"order_id": order.order_id, "quantity": order.quantity},
-        )
+        # FILLED/CANCELLED) rather than logging acceptance before creation. A
+        # resting order is worked on several bars, so acceptance is recorded once
+        # and guarded by a flag: without it, every later attempt would append a
+        # second ORDER_ACCEPTED for the same order.
+        if not order.accepted_recorded:
+            self.ledger.record_event(
+                EventType.ORDER_ACCEPTED, timestamp=order.created_at, symbol=order.symbol,
+                detail={"order_id": order.order_id, "quantity": order.quantity},
+            )
+            order.accepted_recorded = True
+        # The order is live from here. A fill or cancellation overwrites this; an
+        # order that neither fills nor is cancelled (a resting limit) keeps it, so
+        # the status honestly says "accepted, still working".
+        order.status = OrderStatus.ACCEPTED
 
-        fill_quantity, fill_price = self._resolve_fill(order, market)
+        fill_quantity, fill_price = self._resolve_fill(
+            order, market, liquidity_budget=liquidity_budget
+        )
         if fill_quantity <= 0:
+            if rest_if_unfilled and order.time_in_force is TimeInForce.GTC:
+                # A persistent order the bar did not reach stays live. It is not
+                # cancelled and no event is recorded: nothing happened to it, and
+                # a CANCELLED event would say the order is finished when it is
+                # not. The caller works it again on the next eligible bar.
+                return order
             return self._cancel(
                 order, RejectReason.LIMIT_NOT_REACHED,
                 f"the {order.order_type.value.lower()} price {order.limit_price} was not reached "
@@ -186,7 +224,12 @@ class ExecutionSimulator:
     # --- Fill resolution ----------------------------------------------------
 
     def projected_fill_price(
-        self, order: Order, *, market: MarketContext, quantity: float | None = None
+        self,
+        order: Order,
+        *,
+        market: MarketContext,
+        quantity: float | None = None,
+        liquidity_budget: float | None = None,
     ) -> float | None:
         """The price a fill would get at ``quantity``, without moving the ledger.
 
@@ -211,17 +254,30 @@ class ExecutionSimulator:
             return None
         if market.price <= 0:
             return None
-        fill_quantity, fill_price = self._resolve_fill(probe, market)
+        fill_quantity, fill_price = self._resolve_fill(
+            probe, market, liquidity_budget=liquidity_budget
+        )
         if fill_quantity <= 0 or not math.isfinite(fill_price) or fill_price <= 0:
             return None
         return fill_price
 
-    def _resolve_fill(self, order: Order, market: MarketContext) -> tuple[float, float]:
+    def _resolve_fill(
+        self, order: Order, market: MarketContext, *, liquidity_budget: float | None = None
+    ) -> tuple[float, float]:
         """The quantity and price this order fills at, or ``(0, 0)`` if it does not.
 
-        For a LIMIT order the bar's price decides whether the limit is reachable,
-        and the limit (or the bar price, if it is better) is the fill price. For
-        a MARKET order the bar price is the reference and the costs move it.
+        For a LIMIT order the bar decides whether the limit was reachable and the
+        limit (or the bar price, if it is better) is the fill price. Reachability
+        uses the bar's low/high when the caller supplied them: a buy limit is
+        reachable if the session traded down to it, which the low proves and a
+        single reference price cannot. Without a range the reference price alone
+        decides, which is the older and stricter behaviour.
+
+        For a MARKET order the bar price is the reference and the costs move it.
+        ``liquidity_budget`` is the shared units-of-volume allowance for this
+        session, deducted by the caller as orders consume it; when it is supplied
+        it caps the fill for either order type, so competing orders cannot each
+        claim the whole bar.
         """
         assert market.price is not None
         reference = market.price
@@ -230,15 +286,25 @@ class ExecutionSimulator:
             assert order.limit_price is not None
             remaining = order.remaining_quantity
             if order.side is OrderSide.BUY:
-                # A buy limit fills only if the market came down to it.
-                if reference > order.limit_price:
+                # A buy limit fills only if the market came down to it. The bar's
+                # low proves it traded there; the reference price alone only says
+                # where it ended.
+                reached = reference <= order.limit_price or (
+                    market.low is not None and market.low <= order.limit_price
+                )
+                if not reached:
                     return 0.0, 0.0
                 # Filling at the better of the two: the limit caps the price, it
                 # does not set it.
-                return remaining, min(reference, order.limit_price)
-            if reference < order.limit_price:
-                return 0.0, 0.0
-            return remaining, max(reference, order.limit_price)
+                price = min(reference, order.limit_price)
+            else:
+                reached = reference >= order.limit_price or (
+                    market.high is not None and market.high >= order.limit_price
+                )
+                if not reached:
+                    return 0.0, 0.0
+                price = max(reference, order.limit_price)
+            return self._apply_liquidity_budget(order, remaining, liquidity_budget), price
 
         fill_price, _, _ = self.costs.fill_price(
             side=Side.BUY if order.side is OrderSide.BUY else Side.SELL,
@@ -246,22 +312,44 @@ class ExecutionSimulator:
             quantity=order.quantity,
             average_daily_volume=market.average_daily_volume,
         )
-        return self._fillable_quantity(order, market), fill_price
+        quantity = self._fillable_quantity(order, market, liquidity_budget=liquidity_budget)
+        return quantity, fill_price
 
-    def _fillable_quantity(self, order: Order, market: MarketContext) -> float:
+    def _fillable_quantity(
+        self, order: Order, market: MarketContext, *, liquidity_budget: float | None = None
+    ) -> float:
         """Cap the fill at the configured share of the bar's volume, when known.
 
-        Only market orders are capped: a limit order's fill is already
-        conditional on price, and a daily bar cannot say how much volume traded
-        at that price. The cap is applied to what remains to fill, so a
-        partially filled order that is re-driven only ever fills its remainder.
+        A market order's fill is capped by the participation rate: a daily bar
+        cannot absorb an order larger than the volume that traded. The cap is
+        applied to what remains to fill, so a partially filled order that is
+        re-driven only ever fills its remainder. ``liquidity_budget`` is the
+        caller's shared per-session allowance and is applied on top, so several
+        orders worked against one bar share it rather than each taking the whole.
         """
         remaining = order.remaining_quantity
+        cap = remaining
         volume = market.average_daily_volume
-        if not self.max_volume_participation or not volume or volume <= 0:
+        if self.max_volume_participation and volume and volume > 0:
+            cap = min(cap, volume * self.max_volume_participation)
+        if liquidity_budget is not None:
+            cap = min(cap, max(liquidity_budget, 0.0))
+        return cap
+
+    def _apply_liquidity_budget(
+        self, order: Order, remaining: float, liquidity_budget: float | None
+    ) -> float:
+        """Cap a limit fill to the caller's shared session allowance.
+
+        A limit order is not capped by the participation rate on its own — a daily
+        bar cannot say how much volume traded at the limit — but when the caller
+        declares a session budget (competing orders, a liquidity-limited bar) the
+        limit draws from the same pool as everything else, so two limits cannot
+        each fill their full size against a bar that only traded enough for one.
+        """
+        if liquidity_budget is None:
             return remaining
-        cap = volume * self.max_volume_participation
-        return min(remaining, cap)
+        return min(remaining, max(liquidity_budget, 0.0))
 
     # --- Applying the fill --------------------------------------------------
 
@@ -329,7 +417,14 @@ class ExecutionSimulator:
         )
         return order
 
-    def cancel(self, order: Order, *, reason: RejectReason, detail: str) -> Order:
+    def cancel(
+        self,
+        order: Order,
+        *,
+        reason: RejectReason,
+        detail: str,
+        timestamp: datetime | None = None,
+    ) -> Order:
         """Cancel a live order that never got its price, recording the outcome.
 
         The honest terminal state for an order the market did not fill. A
@@ -337,19 +432,31 @@ class ExecutionSimulator:
         so the event log distinguishes "the book refused this" from "the price
         never came". A caller that has already reached a terminal order gets it
         back unchanged, so cancelling twice is not a second event.
+
+        ``timestamp`` defaults to the order's creation time, which is right for a
+        single-bar order. A resting order cancelled or expired on a later session
+        passes that session's time instead, so the cancellation is not stamped
+        before fills that happened while it rested.
         """
         if order.status.is_terminal:
             return order
-        return self._cancel(order, reason, detail)
+        return self._cancel(order, reason, detail, timestamp=timestamp)
 
-    def _cancel(self, order: Order, reason: RejectReason, detail: str) -> Order:
+    def _cancel(
+        self,
+        order: Order,
+        reason: RejectReason,
+        detail: str,
+        *,
+        timestamp: datetime | None = None,
+    ) -> Order:
         """Mark the order cancelled and record why, without touching the book."""
         order.status = OrderStatus.CANCELLED
         order.reject_reason = reason
         order.reject_detail = detail
         self.ledger.record_event(
             EventType.ORDER_CANCELLED,
-            timestamp=order.created_at,
+            timestamp=timestamp or order.created_at,
             symbol=order.symbol,
             detail={"order_id": order.order_id, "reason": reason.value},
             reason=detail,

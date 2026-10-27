@@ -31,8 +31,27 @@ An order is never sent anywhere. The simulator fills it against a
 Two, and only two:
 
 - `MARKET` — fills at the market price plus costs, subject to available cash or
-  position.
-- `LIMIT` — fills only if the market price is at or better than the limit.
+  position. Always `DAY`: it either fills on its bar or expires.
+- `LIMIT` — fills only if the market reached the limit. With `DAY` it is worked
+  once; with `GTC` it rests across sessions until it fills or expires.
+
+A LIMIT order's reachability uses the bar's low/high when the caller supplies
+them: a buy limit fills if the session traded down to it (the low proves it), and
+a sell limit if it traded up to it (the high). Without a range the reference price
+alone decides. The limit caps the price, it does not set it — a bar that traded
+through the limit fills at the better price.
+
+`TimeInForce` has two members:
+
+| Member | Meaning |
+|---|---|
+| `DAY` | Worked once, on the first eligible bar; cancelled if that bar misses it |
+| `GTC` | Rests across eligible bars until it fills or reaches its expiry |
+
+`GTC` here means "rests until filled or expired", not the venue-level guarantee
+of queue priority. A daily OHLC bar cannot prove the order sat at the front of a
+queue, so a fill on a bar whose range covers the limit is a modelled fill, not a
+claim about the real book.
 
 There is no stop, stop-limit or trailing variant. Those need a price feed between
 bars to trigger honestly, which a daily-bar simulation cannot provide. A stop
@@ -53,6 +72,8 @@ refusals are countable rather than prose:
 | `MARKET_CLOSED` | The market context says the session is closed |
 | `NO_PRICE` | No price is available for the symbol |
 | `RISK_LIMIT` | The risk engine refused it |
+| `LIMIT_NOT_REACHED` | A limit order the bar did not reach was cancelled |
+| `EXPIRED` | A resting order reached its expiry unfilled |
 | `BUDGET_EXHAUSTED` | The run's budget ran out |
 
 A rejection never touches the book. Every check happens before any state change.
@@ -93,22 +114,52 @@ size. `Order.filled_quantity` is the running total and `Order.average_fill_price
 is the quantity-weighted average of every piece, so the order's record of its own
 fills agrees with the ledger's VWAP for the position.
 
-Three limitations are real and are stated rather than hidden:
+## Persistent (resting) orders
 
-- **A partial fill is not re-queued.** A MARKET order that fills part of its size
-  ends `PARTIALLY_FILLED` and the remainder is reported in `BacktestResult.unfilled`
-  — it is not carried to the next session. A caller that wants the rest must
-  re-submit (the simulator will fill the remaining size on a second `submit`).
-- **A LIMIT order is single-shot.** The simulator is given one bar per `submit`;
-  if the limit is not reached on that bar the order is cancelled with
-  `LIMIT_NOT_REACHED` and is terminal, so it cannot fill on a later bar through
-  the same object. There is no good-till-cancelled rest and no expiry date. This
-  is consistent with the simulator's one-bar-per-submit contract, but it means a
-  strategy cannot express "rest this limit for the next five sessions" without
-  re-creating the order each session.
-- **The backtester and the paper session only ever create MARKET orders.** Neither
-  the engine nor the paper session emits a LIMIT order, so `LIMIT` is exercised
-  through the simulator's own API and tests, not through a run.
+A caller that works an order across several bars passes `rest_if_unfilled=True`
+to `submit`. A LIMIT order the bar did not reach is then left `ACCEPTED` instead
+of being cancelled, so the same order object can be worked again on a later bar.
+The order is cancelled only when the caller asks, when it reaches its expiry, or
+when the caller stops working it.
+
+- Acceptance is recorded once. `Order.accepted_recorded` guards the
+  `ORDER_ACCEPTED` event, so a resting order worked on ten bars still logs one
+  acceptance.
+- A resting order is never cancelled just because a bar missed it, and no event
+  is recorded while it rests — a `CANCELLED` event would say the order is finished
+  when it is not.
+- Expiry is explicit. `Order.expires_session` is the last session the order may be
+  worked on; `BacktestConfig.limit_order_ttl_sessions` bounds the sessions it may
+  be worked for. Either bound is checked before the order is worked, so an order
+  never fills on the session after it should have expired. An expired order is
+  cancelled with `EXPIRED` and stamped with the expiry session's time.
+- The remainder of a partially filled resting order stays live. Only the
+  increment each session applies is registered with the exit tracker, so a
+  three-session fill is one position, not three.
+
+`BacktestConfig.resting_limit_orders` (default `True`) turns the whole path on or
+off; off, every order is single-shot, exactly as before.
+
+## Session liquidity
+
+When `max_volume_participation` is set, every order worked against one session
+draws from a shared per-symbol allowance: the configured share of that symbol's
+own traded volume. Two orders for the same symbol therefore compete for the same
+liquidity rather than each assuming the whole bar. The allowance is consumed in
+queue order, so the outcome is deterministic. Orders for different symbols have
+independent liquidity.
+
+Two limitations are real and are stated rather than hidden:
+
+- **A partial fill of a MARKET order is not re-queued by the backtester.** A
+  MARKET order that fills part of its size ends `PARTIALLY_FILLED` and the
+  remainder is reported in `BacktestResult.unfilled`; the backtester does not
+  carry it to the next session. A resting LIMIT order's remainder *is* carried
+  forward. A caller that wants a MARKET remainder filled must re-submit it (the
+  simulator will fill the remaining size on a second `submit`).
+- **A resting fill is a modelled fill.** A daily bar can prove the price traded,
+  not that a queue would have filled the order there. `GTC` is therefore
+  documented as "rests until filled or expired", not as a queue guarantee.
 
 ## The safety guard
 

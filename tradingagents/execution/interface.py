@@ -107,9 +107,20 @@ class MarketContext:
     vendor and a test can supply a bar by hand. ``is_open`` is required rather
     than inferred from a missing price, because "the market is closed" and "I
     have no price" are different answers and must be reported differently.
+
+    ``low`` and ``high`` are the bar's intraday range when the caller has it. A
+    LIMIT order needs them to decide whether the market traded to its limit: a
+    single reference price can only say "the market is at X", not "the market
+    passed through X". They are optional, and a context without them falls back
+    to the reference price, so a caller that has only one price is not forced to
+    invent a range. A range does not prove the order would have been filled in
+    the real queue; it says the price traded, which is the most a daily bar can
+    honestly say.
     """
 
-    __slots__ = ("symbol", "price", "timestamp", "is_open", "average_daily_volume")
+    __slots__ = (
+        "symbol", "price", "timestamp", "is_open", "average_daily_volume", "low", "high",
+    )
 
     def __init__(
         self,
@@ -119,9 +130,13 @@ class MarketContext:
         timestamp,
         is_open: bool = True,
         average_daily_volume: float | None = None,
+        low: float | None = None,
+        high: float | None = None,
     ) -> None:
         self.symbol = symbol
         self.price = price
         self.timestamp = timestamp
         self.is_open = is_open
         self.average_daily_volume = average_daily_volume
+        self.low = low
+        self.high = high

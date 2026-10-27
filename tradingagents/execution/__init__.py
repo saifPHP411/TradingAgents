@@ -24,6 +24,7 @@ from tradingagents.execution.orders import (
     OrderStatus,
     OrderType,
     RejectReason,
+    TimeInForce,
 )
 from tradingagents.execution.paper import (
     PaperSession,
@@ -54,6 +55,7 @@ __all__ = [
     "Quote",
     "QuoteSource",
     "RejectReason",
+    "TimeInForce",
     "SessionStep",
     "Side",
     "assert_simulation_only",

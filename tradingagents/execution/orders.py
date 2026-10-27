@@ -41,6 +41,24 @@ class OrderType(StrEnum):
     LIMIT = "LIMIT"
 
 
+class TimeInForce(StrEnum):
+    """How long an order may rest before it is cancelled.
+
+    ``DAY`` is the original behaviour: the order is worked once, on the first
+    eligible bar, and cancelled if that bar does not fill it. ``GTC`` (good-till-
+    cancelled) lets a resting order remain active across eligible bars until it
+    fills or reaches an explicit expiration session.
+
+    ``GTC`` here means "rests until filled or expired", not the venue-level
+    guarantee of queue priority. A daily OHLC bar cannot prove the order sat at
+    the front of a queue, so a fill on a bar whose range covers the limit is a
+    modelled fill, not a claim about the real book.
+    """
+
+    DAY = "DAY"
+    GTC = "GTC"
+
+
 class OrderSide(StrEnum):
     """Which way the order moves the book. Long-only, so no short variants."""
 
@@ -74,6 +92,7 @@ class RejectReason(StrEnum):
     NO_PRICE = "NO_PRICE"
     RISK_LIMIT = "RISK_LIMIT"
     LIMIT_NOT_REACHED = "LIMIT_NOT_REACHED"
+    EXPIRED = "EXPIRED"
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
 
 
@@ -98,6 +117,21 @@ class Order(BaseModel):
     created_at: datetime = Field(description="When the order was created (UTC-aware)")
     as_of_date: str = Field(description="The analysis date this order came from, YYYY-MM-DD")
     signal_id: str = Field(default="", description="The signal that produced it, for the audit trail")
+    time_in_force: TimeInForce = Field(
+        default=TimeInForce.DAY,
+        description=(
+            "How long the order may rest. DAY is worked once and cancelled if "
+            "unfilled; GTC rests across eligible bars until filled or expired."
+        ),
+    )
+    expires_session: str | None = Field(
+        default=None,
+        description=(
+            "The last session (YYYY-MM-DD) the order may be worked on. None means "
+            "no explicit expiry. Only meaningful for a GTC order; a DAY order is "
+            "worked once regardless."
+        ),
+    )
 
     status: OrderStatus = Field(default=OrderStatus.CREATED, description="Current lifecycle state")
     filled_quantity: float = Field(default=0.0, ge=0.0, description="Units filled so far")
@@ -113,6 +147,14 @@ class Order(BaseModel):
             "it on the next) sets this so the simulator does not record a second one."
         ),
     )
+    accepted_recorded: bool = Field(
+        default=False,
+        description=(
+            "Internal bookkeeping: whether an ORDER_ACCEPTED event has already been "
+            "recorded. A resting order is worked on several bars, so this keeps the "
+            "acceptance a once-only event instead of one per attempt."
+        ),
+    )
 
     @model_validator(mode="after")
     def _limit_price_matches_the_type(self) -> Order:
@@ -120,6 +162,10 @@ class Order(BaseModel):
             raise ValueError("a LIMIT order needs a limit_price")
         if self.order_type is OrderType.MARKET and self.limit_price is not None:
             raise ValueError("a MARKET order must not carry a limit_price")
+        if self.order_type is OrderType.MARKET and self.time_in_force is not TimeInForce.DAY:
+            raise ValueError("a MARKET order must be DAY; it either fills on its bar or expires")
+        if self.expires_session is not None and self.expires_session < self.as_of_date:
+            raise ValueError("expires_session cannot be before as_of_date")
         if self.filled_quantity > self.quantity + 1e-9:
             raise ValueError("filled_quantity cannot exceed quantity")
         return self

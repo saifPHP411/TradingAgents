@@ -6,8 +6,10 @@ signals, never agent prose.
 """
 
 from tradingagents.signals.contract import (
+    OrderIntent,
     SignalAction,
     SignalError,
+    SignalTimeInForce,
     TradingSignal,
     action_for_rating,
     confidence_for_rating,
@@ -15,8 +17,10 @@ from tradingagents.signals.contract import (
 )
 
 __all__ = [
+    "OrderIntent",
     "SignalAction",
     "SignalError",
+    "SignalTimeInForce",
     "TradingSignal",
     "action_for_rating",
     "confidence_for_rating",

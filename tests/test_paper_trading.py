@@ -32,7 +32,12 @@ from tradingagents.execution.costs import CostModel
 from tradingagents.portfolio.events import EventType
 from tradingagents.portfolio.ledger import Ledger
 from tradingagents.risk import RiskEngine, RiskLimits
-from tradingagents.signals import SignalAction, TradingSignal
+from tradingagents.signals import (
+    OrderIntent,
+    SignalAction,
+    SignalTimeInForce,
+    TradingSignal,
+)
 
 NOW = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
 
@@ -510,3 +515,78 @@ class TestPaperOrderLifecycle:
         resolved = {e.detail.get("order_id") for e in session.ledger.events
                     if e.type.value in ("ORDER_FILLED", "ORDER_REJECTED", "ORDER_CANCELLED")}
         assert created <= resolved
+
+
+# ---------------------------------------------------------------------------
+# Resting LIMIT orders in a paper session
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestPaperRestingLimits:
+    """A GTC limit rests across quotes, exactly as it rests across bars.
+
+    The paper session runs the same simulator as the backtest, so a limit that
+    the quote did not reach must stay live rather than being cancelled — and it
+    must be advanced by a later quote when one reaches it.
+    """
+
+    def _limit_signal(self, *, limit_price, size=0.1, at=NOW):
+        return TradingSignal(
+            symbol="AAPL", action=SignalAction.BUY, confidence=0.8, timestamp=at,
+            as_of_date=at.date().isoformat(), position_size=size,
+            order_intent=OrderIntent.LIMIT, limit_price=limit_price,
+            entry_price=100.0, time_in_force=SignalTimeInForce.GTC,
+        )
+
+    def test_an_unreached_limit_rests_and_is_not_cancelled(self):
+        session = _session(quotes={"AAPL": 100.0})
+        session.on_signal(self._limit_signal(limit_price=95.0))
+        assert len(session.resting) == 1
+        assert session.resting[0].status.value == "ACCEPTED"
+        assert session.ledger.position_quantity("AAPL") == 0.0
+        assert not [e for e in session.ledger.events if e.type.value == "ORDER_CANCELLED"]
+
+    def test_a_resting_limit_fills_when_a_later_quote_reaches_it(self):
+        session = _session(quotes={"AAPL": 100.0})
+        session.on_signal(self._limit_signal(limit_price=95.0))
+        assert session.resting
+        # A fresh, lower quote: the resting order must fill against it.
+        session.quotes = dict_quote_source({"AAPL": 94.0}, timestamp=NOW + timedelta(hours=1))
+        steps = session.work_resting()
+        assert steps and steps[0].order_status == "FILLED"
+        assert session.ledger.position_quantity("AAPL") > 0
+        assert session.resting == []
+
+    def test_a_resting_limit_stays_live_when_the_quote_still_misses(self):
+        session = _session(quotes={"AAPL": 100.0})
+        session.on_signal(self._limit_signal(limit_price=95.0))
+        session.quotes = dict_quote_source({"AAPL": 99.0}, timestamp=NOW + timedelta(hours=1))
+        session.work_resting()
+        assert len(session.resting) == 1
+
+    def test_working_resting_with_nothing_resting_is_a_no_op(self):
+        session = _session()
+        assert session.work_resting() == []
+
+    def test_the_snapshot_reports_resting_orders(self):
+        session = _session(quotes={"AAPL": 100.0})
+        session.on_signal(self._limit_signal(limit_price=95.0))
+        snap = session.snapshot()
+        assert len(snap["resting_orders"]) == 1
+        assert snap["resting_orders"][0]["limit_price"] == 95.0
+        # JSON-safe, like the rest of the snapshot.
+        json.dumps(snap)
+
+    def test_a_resting_fill_does_not_double_count_across_works(self):
+        """Working the same resting order twice must not add the position twice."""
+        session = _session(quotes={"AAPL": 100.0})
+        session.on_signal(self._limit_signal(limit_price=95.0))
+        session.quotes = dict_quote_source({"AAPL": 94.0}, timestamp=NOW + timedelta(hours=1))
+        session.work_resting()
+        held = session.ledger.position_quantity("AAPL")
+        assert held > 0
+        # A second work with nothing resting changes nothing.
+        session.work_resting()
+        assert session.ledger.position_quantity("AAPL") == pytest.approx(held)
+

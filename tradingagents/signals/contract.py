@@ -49,6 +49,34 @@ class SignalAction(StrEnum):
     SELL = "SELL"
 
 
+class OrderIntent(StrEnum):
+    """How the signal wants its order priced.
+
+    A closed set, and it lives here rather than in the execution package so the
+    signal layer does not import the engine it feeds. ``MARKET`` is the default
+    and the original behaviour; ``LIMIT`` asks for a resting order at an explicit
+    price. An unknown value is a validation failure, not a string the engine has
+    to interpret.
+    """
+
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+
+
+class SignalTimeInForce(StrEnum):
+    """How long a LIMIT signal's order may stay live.
+
+    ``DAY`` is worked once and cancelled if unfilled; ``GTC`` rests across
+    eligible bars until it fills or reaches its expiration. The engine maps these
+    onto the execution layer's own vocabulary; keeping a separate enum here means
+    the contract can be validated without importing the execution package, which
+    would be a cycle (the paper session imports this module).
+    """
+
+    DAY = "DAY"
+    GTC = "GTC"
+
+
 class SignalError(ValueError):
     """A signal could not be built from the decision it was derived from."""
 
@@ -144,6 +172,32 @@ class TradingSignal(BaseModel):
         default=None, ge=1, description="Intended holding period in trading days, or None"
     )
 
+    order_intent: OrderIntent = Field(
+        default=OrderIntent.MARKET,
+        description=(
+            "How to price the order: MARKET fills at the bar price; LIMIT rests at "
+            "``limit_price`` until it fills or expires. The risk engine rules on "
+            "the trade either way; this only changes the price the order asks for."
+        ),
+    )
+    limit_price: float | None = Field(
+        default=None,
+        gt=0.0,
+        description=(
+            "Absolute limit price for a LIMIT intent. Required for LIMIT, refused "
+            "for MARKET, and must sit on the correct side of the entry for the "
+            "action, so a limit that could never fill is a construction error."
+        ),
+    )
+    time_in_force: SignalTimeInForce = Field(
+        default=SignalTimeInForce.DAY,
+        description="DAY works the limit once; GTC lets it rest until filled or expired.",
+    )
+    expires_session: str | None = Field(
+        default=None,
+        description="The last session (YYYY-MM-DD) a GTC limit may be worked on, or None.",
+    )
+
     rating: str | None = Field(
         default=None, description="The originating five-tier rating, kept for traceability"
     )
@@ -179,6 +233,19 @@ class TradingSignal(BaseModel):
             raise ValueError(f"as_of_date must be YYYY-MM-DD, got {value!r}")
         return str(value)
 
+    @field_validator("expires_session")
+    @classmethod
+    def _expires_session_is_canonical(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parsed = datetime.strptime(str(value), "%Y-%m-%d")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"expires_session must be YYYY-MM-DD, got {value!r}") from exc
+        if parsed.strftime("%Y-%m-%d") != str(value):
+            raise ValueError(f"expires_session must be YYYY-MM-DD, got {value!r}")
+        return str(value)
+
     @field_validator("timestamp")
     @classmethod
     def _timestamp_is_utc_aware(cls, value: datetime) -> datetime:
@@ -203,6 +270,8 @@ class TradingSignal(BaseModel):
                 raise ValueError("a HOLD must not carry stop_loss or take_profit levels")
             if self.position_size is not None:
                 raise ValueError("a HOLD must not request a position_size")
+            if self.order_intent is OrderIntent.LIMIT:
+                raise ValueError("a HOLD must not request a LIMIT order")
             return self
 
         if self.action is SignalAction.BUY:
@@ -215,6 +284,30 @@ class TradingSignal(BaseModel):
                 raise ValueError(f"a SELL stop_loss ({stop}) must be above its entry_price ({entry})")
             if entry is not None and target is not None and target >= entry:
                 raise ValueError(f"a SELL take_profit ({target}) must be below its entry_price ({entry})")
+
+        if self.order_intent is OrderIntent.LIMIT:
+            if self.limit_price is None:
+                raise ValueError("a LIMIT intent needs a limit_price")
+            # A limit on the wrong side of the market can never fill, so it is a
+            # construction error rather than a trade that silently never happens.
+            # A BUY limit must be at or below the entry it is willing to pay; a
+            # SELL limit at or above the price it will accept.
+            if entry is not None:
+                if self.action is SignalAction.BUY and self.limit_price > entry:
+                    raise ValueError(
+                        f"a BUY limit_price ({self.limit_price}) above the entry_price "
+                        f"({entry}) can never fill"
+                    )
+                if self.action is SignalAction.SELL and self.limit_price < entry:
+                    raise ValueError(
+                        f"a SELL limit_price ({self.limit_price}) below the entry_price "
+                        f"({entry}) can never fill"
+                    )
+        elif self.limit_price is not None:
+            raise ValueError("a MARKET intent must not carry a limit_price")
+
+        if self.time_in_force is SignalTimeInForce.GTC and self.order_intent is not OrderIntent.LIMIT:
+            raise ValueError("only a LIMIT order can be GTC; a MARKET order is always DAY")
         return self
 
     # --- Derived ------------------------------------------------------------
@@ -244,6 +337,10 @@ class TradingSignal(BaseModel):
             "take_profit": self.take_profit,
             "position_size": self.position_size,
             "holding_period_days": self.holding_period_days,
+            "order_intent": self.order_intent.value,
+            "limit_price": self.limit_price,
+            "time_in_force": self.time_in_force.value,
+            "expires_session": self.expires_session,
             "rating": self.rating,
         }
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -267,6 +364,10 @@ def signal_from_decision(
     position_size: float | None = None,
     holding_period_days: int | None = None,
     confidence: float | None = None,
+    order_intent: OrderIntent = OrderIntent.MARKET,
+    limit_price: float | None = None,
+    time_in_force: SignalTimeInForce = SignalTimeInForce.DAY,
+    expires_session: str | None = None,
     source: str = "portfolio_manager",
     reasoning: str = "",
 ) -> TradingSignal | None:
@@ -294,6 +395,10 @@ def signal_from_decision(
         take_profit=take_profit,
         position_size=position_size,
         holding_period_days=holding_period_days,
+        order_intent=order_intent,
+        limit_price=limit_price,
+        time_in_force=time_in_force,
+        expires_session=expires_session,
         rating=rating,
         source=source,
         reasoning=reasoning,

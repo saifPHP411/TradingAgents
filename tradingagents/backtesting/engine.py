@@ -55,11 +55,17 @@ from tradingagents.execution import (
     OrderStatus,
     OrderType,
     RejectReason,
+    TimeInForce,
 )
 from tradingagents.portfolio import Ledger, LedgerView
 from tradingagents.portfolio.events import EventType
 from tradingagents.risk import RiskEngine, RiskLimits, RiskReason, RiskVerdict
-from tradingagents.signals.contract import SignalAction, TradingSignal
+from tradingagents.signals.contract import (
+    OrderIntent,
+    SignalAction,
+    SignalTimeInForce,
+    TradingSignal,
+)
 
 
 @dataclass
@@ -74,6 +80,17 @@ class BacktestConfig:
     costs: CostModel = field(default_factory=CostModel)
     max_volume_participation: float = 0.0
     """Share of a bar's volume a market order may take; 0 disables partial fills."""
+    resting_limit_orders: bool = True
+    """Whether a GTC LIMIT signal is worked across sessions until it fills or expires.
+
+    A MARKET signal is unaffected: it is worked on its first eligible session as
+    before. A GTC LIMIT signal is carried forward, so the order stays live while
+    the price has not reached its limit. Off, every order is single-shot.
+    """
+    limit_time_in_force: str = "GTC"
+    """The time in force given to a signal's LIMIT order: ``GTC`` or ``DAY``."""
+    limit_order_ttl_sessions: int | None = None
+    """Sessions a resting LIMIT order may be worked before it expires; None is no expiry."""
     use_stops: bool = True
     """Whether a signal's stop_loss and take_profit are enforced against each session."""
     execute_on_next_open: bool = True
@@ -90,11 +107,17 @@ class BacktestConfig:
 
 @dataclass
 class PendingOrder:
-    """An order waiting for the next session's open."""
+    """An order waiting for the next session's open, or resting across sessions."""
 
     order: Order
     signal: TradingSignal
     created_session: str
+    sessions_worked: int = 0
+    """How many sessions this order has been presented for. Bounds a resting TTL."""
+    applied_quantity: float = 0.0
+    """Units already applied to the ledger's exit tracking, so a resting order
+    that fills across sessions registers only the increment each time rather than
+    the cumulative total."""
 
 
 @dataclass
@@ -320,6 +343,8 @@ class PortfolioBacktester:
         self._session_start_equity = self.ledger.equity
 
         # 1. Orders created on the previous session execute at this session's open.
+        #    A persistent LIMIT order that does not fill stays queued for the
+        #    next session instead of being cancelled.
         self._execute_pending(session)
         # 2. Positions whose holding period elapsed, or whose stop/target was
         #    touched, exit at this session's open.
@@ -332,7 +357,7 @@ class PortfolioBacktester:
     # --- Execution ----------------------------------------------------------
 
     def _execute_pending(self, session: str) -> None:
-        """Fill orders scheduled for this session, then drop them.
+        """Work every order due on this session, resting a persistent LIMIT if unfilled.
 
         Before an entry fills, its size is re-checked against the risk caps at the
         price the fill will actually get. A cap satisfied at the decision price
@@ -343,34 +368,68 @@ class PortfolioBacktester:
         and needs no size re-check, but its size is still capped to the holding so
         it cannot oversell.
 
+        A GTC LIMIT order that the bar did not reach is not cancelled: it goes
+        back on the queue for the next session, so the same order stays live until
+        it fills or expires. Every other order is single-shot, exactly as before.
+        Competing orders worked against one session share that session's liquidity
+        allowance, so two orders cannot each fill their whole size against a bar
+        that only traded enough for one; the budget is consumed in queue order, so
+        the outcome is deterministic.
+
         Whatever fills, the engine's exit tracking is then reconciled with the
         ledger. A SELL that filled here reduced the position, and the exit
         tracker must follow it or it would later try to sell a position the book
         no longer holds.
         """
         pending, self._pending = self._pending, []
+        # The session's shared units-of-volume allowance, per symbol. None means
+        # "no liquidity limit", which is the default.
+        budget = self._session_liquidity_budget(session)
+
         for item in pending:
-            bar = self.feed.bar(item.order.symbol, session)
-            if bar is None:
-                # The market for this symbol did not trade today. The order
-                # expires rather than filling at a price that never existed, and
-                # the cancellation is recorded so the log is not silent about it.
+            order = item.order
+            if order.status.is_terminal:
+                continue
+            item.sessions_worked += 1
+
+            if self._has_expired(item, session):
                 self.execution.cancel(
-                    item.order, reason=RejectReason.NO_PRICE,
-                    detail="no bar on the execution session; the order expired unfilled",
+                    order, reason=RejectReason.EXPIRED,
+                    detail=f"the resting order reached its expiry on {session} unfilled",
+                    timestamp=_session_open_time(session),
                 )
                 self.result.unfilled.append(
-                    (session, item.order.symbol, "no bar on the execution session")
+                    (session, order.symbol, "the resting order expired unfilled")
                 )
                 continue
+
+            bar = self.feed.bar(order.symbol, session)
+            if bar is None:
+                # The market for this symbol did not trade today. A persistent
+                # order keeps resting — the price may come tomorrow — while a
+                # single-shot order expires, since it had one session to fill.
+                if self._rests_across_sessions(item):
+                    self._pending.append(item)
+                    continue
+                self.execution.cancel(
+                    order, reason=RejectReason.NO_PRICE,
+                    detail="no bar on the execution session; the order expired unfilled",
+                    timestamp=_session_open_time(session),
+                )
+                self.result.unfilled.append(
+                    (session, order.symbol, "no bar on the execution session")
+                )
+                continue
+
             market = MarketContext(
-                symbol=item.order.symbol,
+                symbol=order.symbol,
                 price=bar.open,
                 timestamp=_session_open_time(session),
                 is_open=True,
                 average_daily_volume=bar.volume,
+                low=bar.low,
+                high=bar.high,
             )
-            order = item.order
             if order.side is OrderSide.BUY:
                 order = self._recheck_entry_at_fill(item, market, session)
                 if order is None:
@@ -379,26 +438,113 @@ class PortfolioBacktester:
                 order = self._recheck_exit_at_fill(item, market, session)
                 if order is None:
                     continue
-            filled = self.execution.submit(order, market=market)
+            # The re-check may have rebuilt the order at a smaller size; the
+            # resting queue must hold that object, or the remainder would be
+            # worked against the stale size.
+            item.order = order
+
+            symbol_budget = None if budget is None else budget.get(order.symbol)
+            filled = self.execution.submit(
+                order,
+                market=market,
+                rest_if_unfilled=self._rests_across_sessions(item),
+                liquidity_budget=symbol_budget,
+            )
+            if budget is not None and order.symbol in budget and filled.filled_quantity > 0:
+                budget[order.symbol] = max(
+                    budget[order.symbol] - filled.filled_quantity, 0.0
+                )
+
             if filled.status is OrderStatus.FILLED:
-                if filled.side is OrderSide.BUY:
-                    self._register_entry(item, filled, session)
-                else:
-                    self._register_reduction(filled, session)
+                self._apply_fill_to_tracking(item, filled, session)
             elif filled.status is OrderStatus.PARTIALLY_FILLED:
-                if filled.side is OrderSide.BUY:
-                    self._register_entry(item, filled, session)
-                else:
-                    self._register_reduction(filled, session)
+                self._apply_fill_to_tracking(item, filled, session)
                 self.result.unfilled.append(
                     (session, filled.symbol,
                      f"partial fill: {filled.filled_quantity} of {filled.quantity}")
                 )
+                # A persistent order keeps its remainder live; a single-shot one
+                # is done, exactly as before.
+                if self._rests_across_sessions(item):
+                    self._pending.append(item)
+            elif filled.status is OrderStatus.ACCEPTED:
+                # A persistent limit the bar did not reach: still live, no event.
+                self._pending.append(item)
             else:
                 self.result.unfilled.append(
                     (session, filled.symbol, filled.reject_detail or str(filled.reject_reason))
                 )
         self._reconcile_tracking()
+
+    def _apply_fill_to_tracking(self, item: PendingOrder, order: Order, session: str) -> None:
+        """Move the engine's exit tracking by the units this fill just added.
+
+        An order that fills in one go reports its whole size here. A resting order
+        that fills a piece per session reports its cumulative ``filled_quantity``,
+        so the increment — what this session's fill actually added — is what the
+        tracker must move by. The increment's own average price is derived from
+        the order's running VWAP, so a piece filled at a different price is
+        blended into the entry exactly as the ledger blends it.
+        """
+        applied_before = item.applied_quantity
+        applied_now = order.filled_quantity - applied_before
+        if applied_now <= 0:
+            return
+        order_vwap = order.average_fill_price or 0.0
+        prior_notional = order_vwap * applied_before
+        increment_price = (order_vwap * order.filled_quantity - prior_notional) / applied_now
+        item.applied_quantity = order.filled_quantity
+        if order.side is OrderSide.BUY:
+            self._register_entry(item, applied_now, increment_price, session)
+        else:
+            self._register_reduction(order, applied_now, increment_price, session)
+
+    def _rests_across_sessions(self, item: PendingOrder) -> bool:
+        """Whether an order should be worked again on a later session if unfilled.
+
+        Only a GTC LIMIT order rests, and only when the run enables it. A MARKET
+        order is single-shot by construction, and a DAY limit is worked once.
+        """
+        order = item.order
+        return (
+            self.config.resting_limit_orders
+            and order.order_type is OrderType.LIMIT
+            and order.time_in_force is TimeInForce.GTC
+        )
+
+    def _has_expired(self, item: PendingOrder, session: str) -> bool:
+        """Whether a resting order has reached its expiry and must be cancelled.
+
+        An explicit ``expires_session`` is the last session the order may be
+        worked on; a ``limit_order_ttl_sessions`` counts the sessions it may be
+        worked for. Either bound, checked before the order is worked, so an order
+        is never filled on the session after it should have expired.
+        """
+        order = item.order
+        if order.expires_session is not None and session > order.expires_session:
+            return True
+        ttl = self.config.limit_order_ttl_sessions
+        return ttl is not None and item.sessions_worked > ttl
+
+    def _session_liquidity_budget(self, session: str) -> dict[str, float] | None:
+        """The units of volume each symbol's orders may share this session.
+
+        ``None`` when participation is not configured, which is the default and
+        means no liquidity limit. Otherwise it is a per-symbol allowance: the
+        configured share of that symbol's own traded volume. Two orders for the
+        same symbol against one session draw from one pool rather than each
+        assuming the whole bar, so competing orders cannot both fill their full
+        size against a bar that only traded enough for one. Orders for different
+        symbols have independent liquidity, so they do not compete.
+        """
+        if not self.config.max_volume_participation:
+            return None
+        budget: dict[str, float] = {}
+        for symbol in self.feed.symbols:
+            bar = self.feed.bar(symbol, session)
+            if bar is not None and bar.volume:
+                budget[symbol] = bar.volume * self.config.max_volume_participation
+        return budget or None
 
     def _recheck_exit_at_fill(
         self, item: PendingOrder, market: MarketContext, session: str
@@ -423,20 +569,24 @@ class PortfolioBacktester:
             return order.model_copy(update={"quantity": held})
         return order
 
-    def _register_reduction(self, order: Order, session: str) -> None:
+    def _register_reduction(
+        self, order: Order, quantity: float, price: float, session: str
+    ) -> None:
         """Apply a filled SELL to the engine's exit tracking.
 
         The ledger has already moved; this keeps the exit tracker consistent with
         it. The tracked position's quantity falls by what was sold, and the
         tracker drops the position when nothing is left. A partial sale also
         records a completed round trip for the part that was sold, so the trade
-        statistics count it.
+        statistics count it. ``quantity`` and ``price`` are this fill's own
+        increment, not the order's cumulative totals, so a SELL that fills across
+        sessions records one trade per piece at that piece's price.
         """
         position = self._open.get(order.symbol)
         if position is None:
             return
-        sold = order.filled_quantity
-        exit_price = order.average_fill_price or 0.0
+        sold = quantity
+        exit_price = price
         exit_fee = self.config.costs.fee_for_fill(quantity=sold, price=exit_price)
         entry_fee_share = (
             position.entry_fees * (sold / position.quantity) if position.quantity else 0.0
@@ -569,15 +719,21 @@ class PortfolioBacktester:
         self.result.unfilled.append((session, order.symbol, order.reject_detail))
         return None
 
-    def _register_entry(self, item: PendingOrder, order: Order, session: str) -> None:
-        """Record a filled entry so the position can be exited later."""
-        existing = self._open.get(order.symbol)
-        quantity = order.filled_quantity
-        price = order.average_fill_price or 0.0
+    def _register_entry(
+        self, item: PendingOrder, quantity: float, price: float, session: str
+    ) -> None:
+        """Record a filled entry so the position can be exited later.
+
+        ``quantity`` and ``price`` are this fill's own increment. A resting order
+        that fills a piece per session calls this once per piece, so each piece's
+        fees are charged on that piece and the entry blends exactly as the ledger
+        blends it, rather than a single cumulative charge.
+        """
+        existing = self._open.get(order_symbol := item.order.symbol)
         fees = self.config.costs.fee_for_fill(quantity=quantity, price=price)
         if existing is None:
-            self._open[order.symbol] = OpenPosition(
-                symbol=order.symbol,
+            self._open[order_symbol] = OpenPosition(
+                symbol=order_symbol,
                 quantity=quantity,
                 entry_price=price,
                 entry_session=session,
@@ -754,14 +910,32 @@ class PortfolioBacktester:
         order is CREATED then ACCEPTED (acceptance is recorded by the simulator
         when it works the order). The order carries ``created_recorded`` so the
         simulator does not log a second creation.
+
+        The order's type, limit price and time in force come from the signal's
+        own intent, validated by the contract. A LIMIT intent becomes a LIMIT
+        order at the signal's limit; a MARKET intent (the default) is unchanged.
+        The signal cannot name a limit for a MARKET order or omit one for a LIMIT
+        order — the contract already refused that — so this translation has no
+        default to fall back on and cannot silently downgrade a limit to a market
+        order.
         """
         side = OrderSide.BUY if signal.action is SignalAction.BUY else OrderSide.SELL
+        order_type = (
+            OrderType.LIMIT if signal.order_intent is OrderIntent.LIMIT else OrderType.MARKET
+        )
+        time_in_force = (
+            TimeInForce.GTC if signal.time_in_force is SignalTimeInForce.GTC
+            else TimeInForce.DAY
+        )
         order = Order(
             order_id=f"{signal.signal_id}-{session}",
             symbol=signal.symbol,
             side=side,
             quantity=quantity,
-            order_type=OrderType.MARKET,
+            order_type=order_type,
+            limit_price=signal.limit_price,
+            time_in_force=time_in_force,
+            expires_session=signal.expires_session,
             created_at=signal.timestamp,
             as_of_date=signal.as_of_date,
             signal_id=signal.signal_id,
@@ -780,16 +954,19 @@ class PortfolioBacktester:
                     order,
                     market=MarketContext(symbol=signal.symbol, price=bar.close,
                                          timestamp=_session_close_time(session),
-                                         is_open=True, average_daily_volume=bar.volume),
+                                         is_open=True, average_daily_volume=bar.volume,
+                                         low=bar.low, high=bar.high),
                 )
                 if filled.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                    item = PendingOrder(order=order, signal=signal, created_session=session)
                     if filled.side is OrderSide.BUY:
                         self._register_entry(
-                            PendingOrder(order=order, signal=signal, created_session=session),
-                            filled, session,
+                            item, filled.filled_quantity, filled.average_fill_price or 0.0, session
                         )
                     else:
-                        self._register_reduction(filled, session)
+                        self._register_reduction(
+                            filled, filled.filled_quantity, filled.average_fill_price or 0.0, session
+                        )
                     self._reconcile_tracking()
                 return
         self._pending.append(PendingOrder(order=order, signal=signal, created_session=session))

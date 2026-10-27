@@ -16,6 +16,20 @@ path, and no configuration that produces one.
 
 ### Added
 
+- Persistent LIMIT orders (`execution/`, `backtesting/`): an order can rest
+  across sessions instead of being single-shot. `TimeInForce.DAY`/`GTC`, an
+  `expires_session` and a `limit_order_ttl_sessions` bound how long it may rest;
+  an expired order is cancelled with the new `EXPIRED` reason. A GTC limit the
+  bar did not reach stays `ACCEPTED` and is worked again, recording its
+  acceptance once (`Order.accepted_recorded`). Reachability uses the bar's
+  low/high when supplied, so a limit the session traded to (but did not close at)
+  fills. The backtester and the paper session both emit LIMIT orders from a
+  signal's `order_intent`, and the paper session advances resting orders with
+  `PaperSession.work_resting()`.
+- Signal order intent (`signals/`): `OrderIntent` (`MARKET`/`LIMIT`) and
+  `SignalTimeInForce` (`DAY`/`GTC`) on `TradingSignal`, with `limit_price` and
+  `expires_session`. A LIMIT intent needs a limit on the correct side of the
+  entry; a MARKET intent refuses one; only a LIMIT order may be GTC.
 - A validated signal contract (`signals/`): a decision becomes a `TradingSignal`
   only if its action is BUY/HOLD/SELL, its confidence is in range, and its size
   and stop/target are coherent. A HOLD cannot carry a size.
