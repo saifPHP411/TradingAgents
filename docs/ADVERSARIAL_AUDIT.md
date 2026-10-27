@@ -102,6 +102,38 @@ schedule is unchanged.
 
 Tests: `tests/test_execution_costs.py::TestMakerTakerFees`.
 
+### 5. The strategy could move the book it was given to read
+
+Severity: high. It lets a run report a result no order produced.
+
+`StrategyContext`'s docstring promised the ledger was "read-only for context ...
+but no way to move it", and the field held the live `Ledger`. A strategy could
+therefore write `context.ledger.cash = 10_000_000`, or call
+`context.ledger.apply_fill(...)` and conjure a position at a price of its
+choosing. Any such strategy invalidated the backtest it was supposedly testing,
+and the corruption is invisible in the output: the numbers still add up.
+
+Reproduced: a strategy that sets `cash` and calls `apply_fill` on the first
+session ends the run with 10,000,001 in cash and 4,995 units of `X` at an entry
+of 1.0 — a book no order could have produced. The probe ran on the working tree
+at `dee70f1~1`.
+
+Fix: `StrategyContext.ledger` is a `LedgerView`, a read-only window. Assignment
+and deletion raise `AttributeError`, the mutating methods (`apply_fill`, `mark`,
+`charge_fee`, `record_event`) are simply not on the view, and `holding`,
+`open_positions` and `holdings` return copies, so mutating what the strategy
+receives cannot reach the book. Reads — `cash`, `equity`, `position_quantity`,
+`total_exposure`, `snapshot` — are unchanged, so a strategy that only inspects
+the book behaves exactly as before. The view wraps the live ledger rather than
+snapshotting it, so the figures stay current within a session.
+
+It is not a security boundary: Python has no private attributes, and a caller
+that goes looking for the wrapped object can find it. It closes the accidental
+and the obvious path, which is the guarantee the docstring makes.
+
+Tests: `tests/test_backtest_engine.py::TestTheStrategyCannotMoveTheBook` (five
+tests, four of which fail on the old behaviour).
+
 ## What the audit confirmed holds
 
 Each of these was attacked and did not break:
