@@ -65,9 +65,13 @@ module of the same name has already broken an import once here.
 
 ## Known limitation
 
-An equity-relative position or exposure cap can be exceeded when the fill gaps up
-from the decision price: the risk engine sizes at the decision session's price and
-the fill happens at the next session's open. This is deliberate and pinned by
-`tests/test_backtest_engine.py::TestPositionCapThroughAGap`. Fixing it means a
-fill-time re-check against the actual fill price, which is a design change, not a
-patch. Cash and long-only constraints still hold through such a gap.
+An equity-relative position or exposure cap is re-checked at the fill price
+(`RiskEngine.review_fill`), so an up-gap cannot leave a position past its cap: the
+fill is reduced to the largest size that holds, and refused only when no positive
+size remains. Cash and long-only constraints hold through a gap, and a buy whose
+all-in cost (notional plus fee) exceeds the cash is reduced to the affordable
+notional rather than refused. The residual limitation is narrower: the re-check
+uses the *projected* fill price, which for a MARKET order is the price the
+simulator will use, so the two agree; an order type that filled at a price not
+derivable from the bar would need the re-check to reconcile after the fill. See
+`docs/PR1_INDEPENDENT_REVIEW.md`.

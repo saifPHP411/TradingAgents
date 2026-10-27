@@ -266,3 +266,30 @@ class TestDeterminism:
         first.pop("generated_at")
         second.pop("generated_at")
         assert first == second
+
+
+@pytest.mark.unit
+class TestExposureAndTurnoverAreMeasured:
+    """The report's exposure and turnover must reflect the run, not read zero.
+
+    Regression test for a real defect: ``build_report`` computed metrics with a
+    direct ``compute_metrics`` call that passed no ``exposure`` series and no
+    ``traded_notional``, so the report always showed a mean exposure of 0 and a
+    turnover of 0 even for a fully invested run. It now uses
+    ``metrics_from_result``, which supplies both from the equity curve and the
+    fill events.
+    """
+
+    def test_a_fully_invested_run_reports_nonzero_exposure(self):
+        report = build_report(_result())
+        assert report["metrics"]["exposure"] > 0.0
+
+    def test_the_report_exposure_matches_the_equity_curve(self):
+        result = _result()
+        report = build_report(result)
+        mean_exposure = sum(p.exposure for p in result.equity_curve) / len(result.equity_curve)
+        assert report["metrics"]["exposure"] == pytest.approx(mean_exposure)
+
+    def test_a_run_that_traded_reports_nonzero_turnover(self):
+        report = build_report(_result())
+        assert report["metrics"]["turnover"] > 0.0

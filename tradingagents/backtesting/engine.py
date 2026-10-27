@@ -374,12 +374,21 @@ class PortfolioBacktester:
             # leave it to submit() to record the correct outcome.
             return order
 
+        # What the cash still covers at the projected price, fees included. The
+        # order was sized against cash at the decision price; a gap or the fill
+        # fee can push the all-in cost past the cash, so the size is capped to the
+        # affordable notional here rather than being refused by the simulator.
+        max_notional = self.config.costs.affordable_notional(
+            cash=self.ledger.cash, price=fill_price
+        )
+
         review = self.risk.review_fill(
             symbol=order.symbol,
             action=SignalAction.BUY,
             quantity=order.quantity,
             ledger=self.ledger,
             fill_price=fill_price,
+            max_notional=max_notional,
         )
         if review.verdict is RiskVerdict.REJECTED:
             return self._refuse_at_fill(
@@ -404,6 +413,9 @@ class PortfolioBacktester:
             quantity=reduced.quantity,
             ledger=self.ledger,
             fill_price=reduced_price,
+            max_notional=self.config.costs.affordable_notional(
+                cash=self.ledger.cash, price=reduced_price
+            ),
         )
         if final.verdict is RiskVerdict.REJECTED:
             return self._refuse_at_fill(
@@ -438,7 +450,7 @@ class PortfolioBacktester:
         existing = self._open.get(order.symbol)
         quantity = order.filled_quantity
         price = order.average_fill_price or 0.0
-        fees = self.config.costs.commission(quantity=quantity, price=price)
+        fees = self.config.costs.fee_for_fill(quantity=quantity, price=price)
         if existing is None:
             self._open[order.symbol] = OpenPosition(
                 symbol=order.symbol,
@@ -546,7 +558,7 @@ class PortfolioBacktester:
             )
             return
         exit_price = filled.average_fill_price or price
-        exit_fee = self.config.costs.commission(quantity=position.quantity, price=exit_price)
+        exit_fee = self.config.costs.fee_for_fill(quantity=position.quantity, price=exit_price)
         self.result.trades.append(
             Trade(
                 symbol=position.symbol,

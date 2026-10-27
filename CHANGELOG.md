@@ -85,6 +85,27 @@ path, and no configuration that produces one.
 - A paper session's `SessionStep` reports the quantity that was filled, not the
   quantity that was requested, so a reduced fill is not reported as a larger
   position than the ledger holds.
+- An order sized to the available cash is reduced, not refused, when the fill
+  price or the fill fee pushes its all-in cost past the cash. The simulator
+  rejected the whole order with `INSUFFICIENT_CASH`, so a buy sized to the book
+  was lost entirely once a commission or an up-gap applied; the fill-time
+  re-check now caps the size to the fee-inclusive affordable notional
+  (`CostModel.affordable_notional`), and both the backtester and the paper
+  session pass it. A size that affords nothing is still refused.
+- A bar whose OHLC values are internally inconsistent (`high < low`, or an
+  open/close outside the range) is dropped when the feed is built rather than
+  raising mid-backtest. `Bar` validated the row, but `_normalize` did not, so a
+  vendor row with `high < low` survived construction and aborted a run on an
+  arbitrary later session while it held a position. The construction filter now
+  mirrors `Bar`'s own validator.
+- The report's mean exposure and turnover are measured rather than always zero.
+  `build_report` computed metrics with a direct `compute_metrics` call that
+  passed no exposure series and no traded notional, so a fully invested run
+  reported `exposure = 0` and `turnover = 0`; it now uses `metrics_from_result`.
+- The `maker_fee_bps` and `taker_fee_bps` cost fields are charged. They were
+  declared and documented but never read, so a schedule that set them collected
+  nothing; the execution path now charges `CostModel.fee_for_fill`, which adds
+  the maker rate for a resting LIMIT fill and the taker rate for a MARKET fill.
 
 ### Notes
 

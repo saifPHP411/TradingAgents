@@ -677,3 +677,58 @@ class TestPositionCapEnforcedAtFill:
             symbol == "AAPL" and "refused at execution" in detail
             for _, symbol, detail in result.unfilled
         )
+
+
+@pytest.mark.unit
+class TestBuySizeCappedByCashAtFill:
+    """A buy that no longer fits the cash at fill time is reduced, not dropped.
+
+    Regression test for a real defect: the order was sized to the available cash
+    at the decision price, but the fill happens at the next session's open and
+    carries a fee, so the all-in cost could exceed the cash. The simulator then
+    rejected the whole order (``INSUFFICIENT_CASH``), losing a fill the cash could
+    still have paid for. The fill-time re-check now caps the size to the
+    fee-inclusive affordable notional, exactly as it caps the risk limits.
+    """
+
+    def test_a_commission_does_not_turn_a_full_cash_buy_into_a_rejection(self):
+        feed = _feed(opens=[100.0] * 6, closes=[100.0] * 6)
+        config = BacktestConfig(
+            initial_cash=100_000.0,
+            holding_period_days=20,
+            costs=CostModel(commission_rate=0.001),
+            risk_limits=RiskLimits(max_position_size=1.0, max_portfolio_exposure=None),
+        )
+        result, _ = _run(_buy_once(position_size=1.0), feed=feed, config=config)
+        assert result.ledger.position_quantity("AAPL") > 0
+        # The whole cash is spent, and the all-in cost (notional + fees) fits it.
+        spent = result.ledger.position_quantity("AAPL") * 100.0 + result.ledger.total_fees
+        assert spent <= 100_000.0 + 1e-6
+        assert not [u for u in result.unfilled if "INSUFFICIENT_CASH" in u[2]]
+
+    def test_an_up_gap_reduces_the_size_rather_than_refusing(self):
+        # Decision close 100, fill open 150: the cash buys 2/3 as many units.
+        feed = _feed(opens=[100.0, 150.0, 150.0, 150.0, 150.0, 150.0],
+                     closes=[100.0, 150.0, 150.0, 150.0, 150.0, 150.0])
+        config = BacktestConfig(
+            initial_cash=100_000.0,
+            holding_period_days=20,
+            risk_limits=RiskLimits(max_position_size=1.0, max_portfolio_exposure=None),
+        )
+        result, _ = _run(_buy_once(position_size=1.0), feed=feed, config=config)
+        quantity = result.ledger.position_quantity("AAPL")
+        assert quantity == pytest.approx(100_000.0 / 150.0)
+        assert result.ledger.cash == pytest.approx(0.0, abs=1e-6)
+
+    def test_the_cap_never_leaves_cash_negative(self):
+        feed = _feed(opens=[100.0, 200.0, 200.0, 200.0, 200.0, 200.0],
+                     closes=[100.0, 200.0, 200.0, 200.0, 200.0, 200.0])
+        config = BacktestConfig(
+            initial_cash=100_000.0,
+            holding_period_days=20,
+            costs=CostModel(commission_rate=0.001),
+            risk_limits=RiskLimits(max_position_size=1.0, max_portfolio_exposure=None),
+        )
+        result, _ = _run(_buy_once(position_size=1.0), feed=feed, config=config)
+        assert result.ledger.cash >= -1e-6
+        assert result.ledger.cash == pytest.approx(0.0, abs=1e-6)

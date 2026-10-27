@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from tradingagents.performance.metrics import PerformanceMetrics, compute_metrics
+from tradingagents.performance.metrics import PerformanceMetrics
+from tradingagents.performance.report import metrics_from_result
 
 
 @dataclass
@@ -190,14 +191,7 @@ def build_report(
     Building the structure once and rendering from it means the HTML and the JSON
     cannot drift: they are two views of one document.
     """
-    metrics = metrics or compute_metrics(
-        result.equity_series(),
-        initial_capital=result.initial_cash,
-        trades=result.trades,
-        realized_pnl=result.ledger.realized_pnl if result.ledger else 0.0,
-        unrealized_pnl=result.ledger.unrealized_pnl if result.ledger else 0.0,
-        total_fees=result.ledger.total_fees if result.ledger else 0.0,
-    )
+    metrics = metrics or metrics_from_result(result)
     sections = [
         decision_section(result),
         execution_section(result),

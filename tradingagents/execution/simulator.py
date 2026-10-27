@@ -240,7 +240,10 @@ class ExecutionSimulator:
     def _apply(self, order: Order, market: MarketContext, quantity: float, price: float) -> Order:
         """Move the ledger, then record the outcome on the order."""
         signed = quantity if order.side is OrderSide.BUY else -quantity
-        commission = self.costs.commission(quantity=quantity, price=price)
+        # A limit order rests in the book (maker); a market order takes (taker).
+        commission = self.costs.fee_for_fill(
+            quantity=quantity, price=price, is_maker=order.order_type is OrderType.LIMIT
+        )
 
         try:
             self.ledger.apply_fill(

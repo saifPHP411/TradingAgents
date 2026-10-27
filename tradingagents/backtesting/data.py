@@ -115,13 +115,25 @@ class MarketDataFeed:
         data = data[~data.index.duplicated(keep="last")].sort_index()
         keep = ["open", "high", "low", "close", "volume"]
         data = data[keep].astype({"open": float, "high": float, "low": float, "close": float})
-        # Drop non-finite rows *here*, at construction, rather than letting an inf
+        # Drop unusable rows *here*, at construction, rather than letting one
         # through and having ``Bar`` raise it mid-run: a backtest that dies on the
-        # fortieth session because the vendor emitted an inf has hidden the bad
-        # row instead of reporting it. Dropping it keeps the run alive and the
-        # date simply has no bar, which every caller already handles.
+        # fortieth session because the vendor emitted an inf — or a bar whose high
+        # sits below its low — has hidden the bad row instead of reporting it.
+        # Dropping it keeps the run alive and the date simply has no bar, which
+        # every caller already handles. The consistency check mirrors ``Bar``'s own
+        # validator (same 1e-9 tolerance) so a row that survives construction can
+        # never raise when it is served.
         data = data.replace([float("inf"), float("-inf")], float("nan"))
-        data = data[(data[["open", "high", "low", "close"]] > 0).all(axis=1)]
+        prices = data[["open", "high", "low", "close"]]
+        tol = 1e-9
+        consistent = (
+            prices.notna().all(axis=1)
+            & (prices > 0).all(axis=1)
+            & (data["high"] >= data["low"])
+            & (data["open"] >= data["low"] - tol) & (data["open"] <= data["high"] + tol)
+            & (data["close"] >= data["low"] - tol) & (data["close"] <= data["high"] + tol)
+        )
+        data = data[consistent]
         if data.empty:
             raise BarDataError(f"bars for {symbol} have no usable rows")
         return data

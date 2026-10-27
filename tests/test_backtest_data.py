@@ -264,6 +264,52 @@ class TestNonFiniteBarsAreDroppedAtConstruction:
 
 
 @pytest.mark.unit
+class TestInconsistentOhlcBarsAreDroppedAtConstruction:
+    """A bar whose high is below its low must be dropped when the feed is built.
+
+    Regression test for a real defect: ``_normalize`` dropped non-finite and
+    non-positive rows but not OHLC-inconsistent ones, so a row with ``high < low``
+    (or an open/close outside the range) survived construction and then made
+    ``Bar`` raise when ``bar()`` was called — mid-backtest, on an arbitrary later
+    session, aborting a run that was holding a position. A vendor emitting one bad
+    row must cost the run that one date, not the whole run.
+    """
+
+    def test_a_high_below_low_row_is_dropped(self):
+        frame = _frame(DATES[:2], [100.0, 101.0])
+        frame.loc[pd.Timestamp("2026-01-06"), "high"] = 99.0
+        frame.loc[pd.Timestamp("2026-01-06"), "low"] = 100.0
+        feed = MarketDataFeed({"AAPL": frame})
+        assert feed.calendar() == ["2026-01-05"]
+        assert feed.bar("AAPL", "2026-01-06") is None
+
+    def test_an_open_above_the_high_is_dropped(self):
+        frame = _frame(DATES[:2], [100.0, 101.0])
+        frame.loc[pd.Timestamp("2026-01-06"), "open"] = 200.0
+        feed = MarketDataFeed({"AAPL": frame})
+        assert feed.calendar() == ["2026-01-05"]
+
+    def test_a_close_below_the_low_is_dropped(self):
+        frame = _frame(DATES[:2], [100.0, 101.0])
+        frame.loc[pd.Timestamp("2026-01-06"), "close"] = 1.0
+        feed = MarketDataFeed({"AAPL": frame})
+        assert feed.calendar() == ["2026-01-05"]
+
+    def test_a_served_bar_never_raises_for_a_consistent_frame(self):
+        """Every date the calendar reports must serve a valid ``Bar``."""
+        feed = MarketDataFeed({"AAPL": _frame(DATES, CLOSES)})
+        for session in feed.calendar():
+            assert feed.bar("AAPL", session) is not None
+
+    def test_a_frame_of_only_bad_rows_is_refused(self):
+        frame = _frame(DATES[:2], [100.0, 101.0])
+        frame["high"] = [1.0, 1.0]
+        frame["low"] = [2.0, 2.0]
+        with pytest.raises(BarDataError):
+            MarketDataFeed({"AAPL": frame})
+
+
+@pytest.mark.unit
 class TestSessionBoundedView:
     """``as_of`` must hide every later bar, on every accessor.
 

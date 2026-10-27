@@ -169,3 +169,71 @@ class TestCostModelValidation:
 
         breakdown = CostBreakdown(commission=1.0, spread=2.0, slippage=3.0)
         assert breakdown.total == pytest.approx(6.0)
+
+
+@pytest.mark.unit
+class TestMakerTakerFees:
+    """A configured maker/taker rate must actually be charged.
+
+    Regression test for a real defect: ``maker_fee_bps`` and ``taker_fee_bps``
+    existed as fields and were documented, but no code path ever read them, so a
+    schedule that set them collected nothing. The execution path now charges
+    ``fee_for_fill``, which adds the rate on top of the commission.
+    """
+
+    def test_a_market_fill_pays_the_taker_rate(self):
+        model = CostModel(taker_fee_bps=10.0, maker_fee_bps=2.0)
+        assert model.fee_for_fill(quantity=100, price=100.0, is_maker=False) == pytest.approx(10.0)
+
+    def test_a_limit_fill_pays_the_maker_rate(self):
+        model = CostModel(taker_fee_bps=10.0, maker_fee_bps=2.0)
+        assert model.fee_for_fill(quantity=100, price=100.0, is_maker=True) == pytest.approx(2.0)
+
+    def test_the_rate_is_added_to_the_commission(self):
+        model = CostModel(commission_flat=1.0, taker_fee_bps=10.0)
+        assert model.fee_for_fill(quantity=100, price=100.0) == pytest.approx(11.0)
+
+    def test_the_default_schedule_charges_nothing_extra(self):
+        assert NO_COSTS.fee_for_fill(quantity=100, price=100.0) == 0.0
+
+
+@pytest.mark.unit
+class TestAffordableNotional:
+    """``affordable_notional`` is the fee-inclusive cash a buy can spend.
+
+    Regression test for a real defect: an order sized to exactly the available
+    cash was rejected at the fill once the commission (or a gap) pushed the
+    all-in cost past the cash, instead of being reduced to what the cash covered.
+    """
+
+    def test_no_fee_makes_the_whole_cash_affordable(self):
+        assert NO_COSTS.affordable_notional(cash=1000.0, price=100.0) == pytest.approx(1000.0)
+
+    def test_a_commission_rate_leaves_headroom_for_the_fee(self):
+        model = CostModel(commission_rate=0.001)
+        notional = model.affordable_notional(cash=100_000.0, price=100.0)
+        assert notional + model.fee_for_fill(quantity=notional / 100.0, price=100.0) <= 100_000.0 + 1e-6
+
+    def test_a_flat_fee_is_covered(self):
+        model = CostModel(commission_flat=5.0)
+        notional = model.affordable_notional(cash=1000.0, price=100.0)
+        assert notional == pytest.approx(995.0)
+
+    def test_a_commission_minimum_is_respected(self):
+        model = CostModel(commission_per_unit=0.001, commission_min=50.0)
+        notional = model.affordable_notional(cash=1000.0, price=100.0)
+        # The minimum binds: only 1000 - 50 is spendable on notional.
+        assert notional == pytest.approx(950.0)
+
+    def test_a_taker_rate_is_covered(self):
+        model = CostModel(taker_fee_bps=10.0)
+        notional = model.affordable_notional(cash=1000.0, price=100.0)
+        units = notional / 100.0
+        assert notional + model.fee_for_fill(quantity=units, price=100.0) <= 1000.0 + 1e-6
+
+    def test_zero_cash_affords_nothing(self):
+        assert NO_COSTS.affordable_notional(cash=0.0, price=100.0) == 0.0
+
+    def test_the_result_is_never_negative(self):
+        model = CostModel(commission_flat=10.0)
+        assert model.affordable_notional(cash=5.0, price=100.0) == 0.0

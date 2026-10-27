@@ -439,3 +439,37 @@ class TestPaperCapEnforcedAtFill:
         rejected = [e for e in session.ledger.events if e.type is EventType.ORDER_REJECTED]
         assert rejected, "a fill-time refusal must record an ORDER_REJECTED event"
         assert all(e.detail.get("reason") == "RISK_LIMIT" for e in rejected)
+
+
+@pytest.mark.unit
+class TestPaperBuyCappedByCashAtFill:
+    """The paper path caps a buy to affordable cash at fill, as the backtest does.
+
+    Regression test for a real defect: a buy sized to the whole book was refused
+    by the simulator once the commission pushed the all-in cost past the cash,
+    because the paper path did not pass the fee-inclusive affordable notional to
+    the fill-time re-check. It now does, so the same order is reduced instead.
+    """
+
+    def test_a_commission_does_not_reject_a_full_cash_buy(self):
+        session = _session(
+            quotes={"AAPL": 100.0},
+            limits=RiskLimits(max_position_size=1.0, max_portfolio_exposure=None),
+            costs=CostModel(commission_rate=0.001),
+        )
+        step = session.on_signal(_signal(size=1.0))
+        assert step.order_status == "FILLED"
+        assert session.ledger.position_quantity("AAPL") > 0
+        spent = session.ledger.position_quantity("AAPL") * 100.0 + session.ledger.total_fees
+        assert spent <= 100_000.0 + 1e-6
+
+    def test_the_paper_and_backtest_caps_agree_on_the_quantity(self):
+        """Both paths must cap to the same affordable size for the same inputs."""
+        session = _session(
+            quotes={"AAPL": 100.0},
+            limits=RiskLimits(max_position_size=1.0, max_portfolio_exposure=None),
+            costs=CostModel(commission_rate=0.001),
+        )
+        step = session.on_signal(_signal(size=1.0))
+        assert session.ledger.cash == pytest.approx(0.0, abs=1e-6)
+        assert step.quantity == pytest.approx(session.ledger.position_quantity("AAPL"))

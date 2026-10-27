@@ -123,6 +123,50 @@ class CostModel(BaseModel):
         total = self.commission_flat + self.commission_per_unit * units + self.commission_rate * notional
         return max(total, self.commission_min) if units else 0.0
 
+    def execution_fee_bps(self, *, is_maker: bool) -> float:
+        """The maker or taker rate in basis points, for a limit or a market fill.
+
+        A limit order that rests in the book *makes* liquidity and pays the maker
+        rate; a market order *takes* it and pays the taker rate. Both default to
+        zero, so a schedule that sets neither is unchanged by this distinction.
+        """
+        return self.maker_fee_bps if is_maker else self.taker_fee_bps
+
+    def fee_for_fill(self, *, quantity: float, price: float, is_maker: bool = False) -> float:
+        """The total fee for a fill: commission plus the maker/taker component.
+
+        This is the one function the execution path should charge, so a schedule
+        that configures maker/taker fees actually collects them rather than merely
+        accepting the settings.
+        """
+        total = self.commission(quantity=quantity, price=price)
+        bps = self.execution_fee_bps(is_maker=is_maker)
+        if bps:
+            total += abs(quantity) * price * (bps / 10_000.0)
+        return total
+
+    def affordable_notional(self, *, cash: float, price: float, is_maker: bool = False) -> float:
+        """Largest notional a buy can pay for out of ``cash``, fees included.
+
+        The all-in cost of buying ``q`` units at ``price`` is
+        ``q*price + commission(q) + exec_fee(q)``, which is the maximum of two
+        increasing linear functions of ``q`` (the commission minimum either binds
+        or it does not). Both must fit the cash, so the answer is the smaller of
+        the two break-even quantities. Used at fill time so an order sized to
+        available cash is reduced to what the cash still covers, rather than
+        refused outright, when a fee or a gap pushes it over.
+        """
+        if cash <= 0 or price <= 0:
+            return 0.0
+        exec_rate = self.execution_fee_bps(is_maker=is_maker) / 10_000.0
+        # Commission above its minimum: flat + per_unit*q + rate*q*price.
+        slope_a = price + self.commission_per_unit + self.commission_rate * price + exec_rate * price
+        q_a = (cash - self.commission_flat) / slope_a if slope_a > 0 else 0.0
+        # Commission at its minimum: min + the exec fee, on top of the notional.
+        slope_b = price + exec_rate * price
+        q_b = (cash - self.commission_min) / slope_b if slope_b > 0 else 0.0
+        return max(min(q_a, q_b), 0.0) * price
+
     def spread_cost(self, *, quantity: float, price: float) -> float:
         """The half-spread paid on a fill, in the account currency.
 

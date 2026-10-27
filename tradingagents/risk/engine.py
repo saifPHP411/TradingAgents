@@ -548,6 +548,7 @@ class RiskEngine:
         quantity: float,
         ledger: Ledger,
         fill_price: float,
+        max_notional: float | None = None,
     ) -> RiskDecision:
         """Re-check the position and exposure caps at the price a fill will get.
 
@@ -588,6 +589,12 @@ class RiskEngine:
             decision.reasons.append(RiskReason.INVALID_PRICE)
             decision.notes.append(
                 f"fill price {fill_price!r} is not a positive finite number"
+            )
+            return self._reject(decision)
+        if max_notional is not None and (not math.isfinite(max_notional) or max_notional < 0):
+            decision.reasons.append(RiskReason.INVALID_PRICE)
+            decision.notes.append(
+                f"max_notional {max_notional!r} is not a finite, non-negative number"
             )
             return self._reject(decision)
 
@@ -645,6 +652,15 @@ class RiskEngine:
 
         if limits.max_order_value is not None:
             cap_quantity(limits.max_order_value, RiskReason.MAX_ORDER_VALUE)
+
+        # The cash still available at fill time, as a notional the caller has
+        # already made fee-aware. A size was checked against cash when the order
+        # was created, but the fill price can gap and the fee is added at the
+        # fill, so the request can exceed what the cash covers. Reducing to the
+        # affordable notional is the honest outcome; refusing would lose a fill
+        # the cash could still pay for.
+        if max_notional is not None:
+            cap_quantity(max_notional, RiskReason.INSUFFICIENT_CASH)
 
         if limits.max_open_positions is not None and held <= 0:
             open_positions = ledger.open_positions()
