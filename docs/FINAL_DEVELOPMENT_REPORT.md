@@ -390,32 +390,36 @@ fix: enforce the position cap at the fill price, not only at the decision
 
 **FINAL STATUS: PASS WITH FINDINGS**
 
-Every phase in the task is implemented and tested, and the one defect the
-adversarial review left open — an equity-relative position cap that a price gap
-could breach between the decision and the fill — is now fixed, in both the backtest
-and the paper path, with regression tests that assert the value of the position the
-fill creates.
+Every phase in the task is implemented and tested, and the defects the
+adversarial reviews left open are now fixed: an equity-relative position cap that
+a price gap could breach between the decision and the fill (in both the backtest
+and the paper path); an order lifecycle whose events were emitted in the wrong
+order; exit tracking that could drop a position; a walk-forward whose candidate
+names embedded a memory address and so were not reproducible; and a strategy
+context that handed the live ledger to the strategy, letting it write the book by
+hand and fabricate a result. Each fix carries a regression test that fails on the
+old behaviour.
 
 What is done: the multi-agent architecture is preserved and remains the analytical
 component; there is no live trading path and no secret committed; the accounting,
 execution, risk, cost, walk-forward and performance layers are tested; the
 accounting conservation identity holds to floating-point zero; the performance
-formulas match hand-computed values; and the risk caps hold at the fill price, so a
-gap cannot produce a position larger than the limits allow. The suite is 1,966
-tests, all offline and hermetic, and `ruff check .` is clean.
+formulas match hand-computed values; the risk caps hold at the fill price, so a
+gap cannot produce a position larger than the limits allow; the strategy cannot see
+a future bar or move the book; and the walk-forward selection is reproducible. The
+suite is 2,028 tests, all offline and hermetic, and `ruff check .` is clean.
 
 The "with findings" is deliberate. A clean pass would claim the system has no
-boundaries left, and it does: the re-check uses the projected fill price rather than
-the settled one (equal today, but a constraint on any future order type); the
+boundaries left, and it does: the re-check uses the projected fill price rather
+than the settled one (equal today, but a constraint on any future order type); the
 exposure cap is enforced against the last mark rather than the fill-instant value;
-and there is still no snapshot-capable provider for news and social data. None of
-these is a cap that can be breached today. They are recorded in
-`docs/PR1_INDEPENDENT_REVIEW.md` and in the code, so a later change meets them
-deliberately instead of by accident.
+`LedgerView` is a guard against accident, not a security boundary, since Python
+has no private attributes; and there is still no snapshot-capable provider for news
+and social data. None of these is a cap that can be breached today. They are
+recorded in `docs/PR1_INDEPENDENT_REVIEW.md` and in the code, so a later change
+meets them deliberately instead of by accident.
 
-Why not a bare PASS: the honest reading of a review that found seven defects the
-original 1,899-test suite had missed is that the suite proved the code did what its
-author expected, not what the code actually does. Six were fixed in the first round
-and the seventh in the second, each with a test that reproduces the defect first.
-The status reflects a system whose known limitations are written down, not one
-without any.
+Why not a bare PASS: the honest reading of reviews that found defects the original
+1,899-test suite had missed is that the suite proved the code did what its author
+expected, not what the code actually does. The status reflects a system whose known
+limitations are written down, not one without any.
