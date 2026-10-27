@@ -51,6 +51,13 @@ A strategy cannot see the future even if it tries. `StrategyContext.history()`
 returns frames sliced at `S`, and the feed's `history()` refuses to return a bar
 after the requested date. There is no accessor that returns the full frame.
 
+A strategy also cannot move the book. `StrategyContext.ledger` is a
+`LedgerView`, a read-only window: assigning to it raises, `apply_fill` is not
+reachable through it, and the holdings it returns are copies. Only orders, which
+the engine applies, change the book. The view is not a security boundary —
+Python has no private attributes — but it removes the accidental path that let a
+strategy write `context.ledger.cash` and fabricate a result.
+
 ## Missing and partial data
 
 - A symbol with no bar on session `S` keeps its last known close when marked.

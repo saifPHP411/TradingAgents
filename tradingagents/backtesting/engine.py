@@ -56,7 +56,7 @@ from tradingagents.execution import (
     OrderType,
     RejectReason,
 )
-from tradingagents.portfolio import Ledger
+from tradingagents.portfolio import Ledger, LedgerView
 from tradingagents.portfolio.events import EventType
 from tradingagents.risk import RiskEngine, RiskLimits, RiskReason, RiskVerdict
 from tradingagents.signals.contract import SignalAction, TradingSignal
@@ -221,7 +221,7 @@ class StrategyContext:
 
     session: str
     feed: MarketDataFeed
-    ledger: Ledger
+    ledger: LedgerView
     clock: SessionClock
     symbols: tuple[str, ...]
 
@@ -229,6 +229,12 @@ class StrategyContext:
         # Replace the raw feed with a session-bounded view. Done here rather than
         # at construction sites so every path that builds a context gets it.
         self.feed = self.feed.as_of(self.session)
+        # The strategy gets a read-only window on the book. Handing over the
+        # live ledger let a strategy write `context.ledger.cash = ...` or call
+        # apply_fill and fabricate a result, which the class docstring promised
+        # could not happen.
+        if not isinstance(self.ledger, LedgerView):
+            self.ledger = LedgerView(self.ledger)
 
     def history(self, symbol: str) -> pd.DataFrame:
         """Bars for ``symbol`` through this session inclusive. Never a later bar."""

@@ -907,3 +907,82 @@ class TestSignalsForSymbolsOutsideTheUniverse:
             return None
         result, _ = _run(strategy, config=BacktestConfig(initial_cash=100_000.0))
         assert result.ledger.position_quantity("AAPL") > 0
+
+
+# ---------------------------------------------------------------------------
+# The strategy's view of the book
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestTheStrategyCannotMoveTheBook:
+    """The strategy reads the book; only orders move it.
+
+    Regression test for a real defect: ``context.ledger`` was the live
+    :class:`Ledger`, so a strategy could write ``context.ledger.cash = ...`` or
+    call ``apply_fill`` and fabricate a result that no order produced. The class
+    docstring promised the ledger was read-only; it was not.
+    """
+
+    def _tampering_strategy(self, attempts):
+        def strategy(context):
+            try:
+                context.ledger.cash = 10_000_000.0
+                attempts.append("cash written")
+            except AttributeError:
+                attempts.append("cash write refused")
+            try:
+                context.ledger.apply_fill(
+                    symbol="AAPL", quantity=999.0, price=1.0, fee=0.0,
+                    timestamp=datetime(2026, 1, 5, 21, tzinfo=UTC),
+                )
+                attempts.append("fill applied")
+            except AttributeError:
+                attempts.append("fill refused")
+            return None
+        return strategy
+
+    def test_cash_cannot_be_written(self):
+        attempts = []
+        _run(self._tampering_strategy(attempts), config=BacktestConfig(initial_cash=100_000.0))
+        assert "cash written" not in attempts
+        assert "cash write refused" in attempts
+
+    def test_apply_fill_cannot_be_called(self):
+        attempts = []
+        _run(self._tampering_strategy(attempts), config=BacktestConfig(initial_cash=100_000.0))
+        assert "fill applied" not in attempts
+
+    def test_the_book_is_untouched_by_a_tampering_strategy(self):
+        attempts = []
+        result, _ = _run(self._tampering_strategy(attempts),
+                         config=BacktestConfig(initial_cash=100_000.0))
+        assert result.ledger.cash == pytest.approx(100_000.0)
+        assert result.ledger.position_quantity("AAPL") == 0.0
+
+    def test_reading_the_book_still_works(self):
+        seen = {}
+
+        def strategy(context):
+            seen["cash"] = context.ledger.cash
+            seen["equity"] = context.ledger.equity
+            seen["position"] = context.position("AAPL")
+            return None
+
+        _run(strategy, config=BacktestConfig(initial_cash=100_000.0))
+        assert seen["cash"] == pytest.approx(100_000.0)
+        assert seen["equity"] == pytest.approx(100_000.0)
+        assert seen["position"] == 0.0
+
+    def test_a_holding_returned_to_the_strategy_is_a_copy(self):
+        """Mutating the object the strategy receives must not reach the book."""
+        observed = {}
+
+        def strategy(context):
+            holding = context.ledger.holding("AAPL")
+            holding.quantity = 12_345.0
+            observed["after_mutation"] = context.ledger.position_quantity("AAPL")
+            return None
+
+        _run(strategy, config=BacktestConfig(initial_cash=100_000.0))
+        assert observed["after_mutation"] == 0.0

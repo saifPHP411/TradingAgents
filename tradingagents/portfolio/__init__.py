@@ -13,11 +13,13 @@ from tradingagents.portfolio.context import (
 )
 from tradingagents.portfolio.events import EventType, LedgerEvent
 from tradingagents.portfolio.ledger import InsufficientFundsError, Ledger
+from tradingagents.portfolio.view import LedgerView
 
 __all__ = [
     "EventType",
     "InsufficientFundsError",
     "Ledger",
+    "LedgerView",
     "LedgerEvent",
     "PortfolioContext",
     "Position",
