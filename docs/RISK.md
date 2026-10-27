@@ -58,6 +58,41 @@ the cap, because two orders of half the cap summed to the whole cap and the chec
 passed both times. The regression test is
 `tests/test_risk_engine.py::TestPositionCap::test_repeated_buys_cannot_exceed_the_cap`.
 
+## The cap is re-checked at the fill price
+
+Sizing happens when the decision is taken, against the price the decision saw. The
+fill happens later, at a price that can have moved: in a backtest it is the next
+session's open, which can gap, and in paper mode the spread and slippage move the
+fill off the quote. A cap satisfied at the decision price can therefore be breached
+by the fill. A position sized at 20% of equity on a 100 close is worth 40% when the
+fill opens at 200.
+
+The engine is event-driven, so the check and the fill are necessarily one session
+apart. `RiskEngine.review_fill` closes the gap: it re-runs the same cap arithmetic
+against the price the fill will actually get, and both the backtester and the paper
+session call it immediately before submitting a buy, when the fill price is known
+and the ledger has not yet moved. A SELL is not re-checked: it reduces the position
+and the exposure, so a gap can only make it smaller.
+
+When a cap is exceeded the fill is *reduced* to the largest size that keeps every
+cap, rather than refused. A smaller fill is still a fill, and reducing is what the
+sizing path already does when a request is too large. The reduction is recorded as
+a `RiskReason` and a note, so a run is auditable after the fact, and only a fill
+that leaves no positive size is refused outright.
+
+Two properties make the reduction safe to apply:
+
+- `review_fill` never touches the ledger. It computes and returns a decision, so a
+  size that is not executed is charged nothing, and no event is created for it.
+- The size is projected twice. Slippage depends on size, so after a reduction the
+  fill price is re-projected at the smaller quantity — which is the conservative
+  one — and the caps are confirmed against that. The order that is finally
+  submitted is the one whose value was checked.
+
+The ledger's own constraints still hold through a gap: cash cannot go negative and
+a sell cannot take a position short. It is only the equity-relative sizing caps
+that a gap could breach, and this is the check that stops them.
+
 ## Book-level checks come first
 
 A book that is already over a limit must not accept a new position, whatever the

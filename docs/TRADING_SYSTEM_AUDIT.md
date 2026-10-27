@@ -483,19 +483,25 @@ test. These are the defects the suite did not catch.
 | 4 | `StrategyContext.feed` exposed future bars (`ctx.feed.bar(sym, tomorrow)` returned tomorrow) | High | Fixed |
 | 5 | A non-finite bar was accepted at feed construction and raised mid-backtest | Medium | Fixed |
 | 6 | `Quote` accepted NaN/inf prices in paper mode | Medium | Fixed |
-| 7 | Position/exposure cap can be exceeded when the fill gaps up from the decision price | Medium | Documented, pinned by test |
+| 7 | Position/exposure cap can be exceeded when the fill gaps up from the decision price | Medium | Fixed (round 2) |
 
-Defect 7 is the one that is *not* fixed, and it is worth stating why. The risk
-engine sizes an order against the decision price; the fill happens at the next
-session's open. When the open gaps up, the position actually bought is worth more
-than the limit allowed — sizing at 20% of equity on a 100 close and filling at a
-200 open yields a position worth 40% of equity. The engine is event-driven, so
-the check and the fill are necessarily one session apart. The honest fix is a
-re-check at fill time against the actual fill price, which is a deliberate design
-change rather than a patch, so the current behaviour is pinned by
-`tests/test_backtest_engine.py::TestPositionCapThroughAGap` and recorded as a
-known limitation. The ledger's own long-only and cash constraints still hold; it
-is only the equity-relative sizing cap that the gap can breach.
+Defect 7 was left open in the first review round, on the reasoning that the honest
+fix is a fill-time re-check against the actual fill price — a deliberate design
+change rather than a patch — so the behaviour was pinned by a test and recorded as
+a known limitation. That change was then made. `RiskEngine.review_fill` re-runs the
+cap arithmetic at the projected fill price, and both the backtester and the paper
+session call it immediately before submitting a buy. A fill that would breach a cap
+is reduced to the largest size that holds, and refused only when no positive size
+remains. The ledger is never touched by the re-check, so no fee is charged on an
+unfilled quantity and no event is created for it.
+
+Before the fix, a 20% cap on a 100,000 book sized 200 units on a 100 close and
+filled them at a 200 open: a position worth 40% of equity. After the fix the same
+case fills 100 units, worth 20%. The same defect existed in paper mode, where
+spread and slippage move the fill off the quote, and is fixed there too. The
+full account is in `docs/PR1_INDEPENDENT_REVIEW.md`; the tests are
+`TestFillTimeRecheck`, `TestPositionCapEnforcedAtFill` and
+`TestPaperCapEnforcedAtFill`.
 
 Two things were checked and found sound, and are worth recording because they are
 easy to get wrong:

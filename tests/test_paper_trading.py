@@ -29,6 +29,7 @@ from tradingagents.execution import (
     new_session,
 )
 from tradingagents.execution.costs import CostModel
+from tradingagents.portfolio.events import EventType
 from tradingagents.portfolio.ledger import Ledger
 from tradingagents.risk import RiskEngine, RiskLimits
 from tradingagents.signals import SignalAction, TradingSignal
@@ -303,3 +304,138 @@ class TestDeterminism:
                 step.pop("timestamp")
             snapshot["ledger"].pop("timestamp")
         assert first == second
+
+
+# ---------------------------------------------------------------------------
+# The position cap is enforced at the fill in paper mode too
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestPaperCapEnforcedAtFill:
+    """Paper mode shares the pipeline, so it must share the cap guarantee.
+
+    The decision is sized against the quote, but the fill pays a different price
+    once the spread and slippage are applied. A cap satisfied at the quote can be
+    breached by the fill, exactly as a gap breaches it in a backtest. The session
+    re-checks a buy at the projected fill price, so the position that results
+    respects the cap. A sell reduces exposure and is not re-checked.
+    """
+
+    def test_adverse_costs_do_not_breach_the_position_cap(self):
+        # 100 bps of half-spread plus 100 bps of slippage moves a 100 quote to a
+        # 102 fill. Sizing 20% at the quote would be 20.4% at the fill.
+        costs = CostModel(half_spread_bps=100.0, slippage_bps=100.0)
+        session = _session(
+            quotes={"AAPL": 100.0},
+            limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=None),
+            costs=costs,
+        )
+        step = session.on_signal(_signal(size=0.20))
+        quantity = session.ledger.position_quantity("AAPL")
+        assert quantity > 0
+        assert step.fill_price == pytest.approx(102.0)
+        assert quantity * step.fill_price / session.ledger.equity <= 0.20 + 1e-6
+
+    def test_a_fill_inside_the_cap_is_not_reduced(self):
+        costs = CostModel(half_spread_bps=1.0)
+        session = _session(
+            quotes={"AAPL": 100.0},
+            limits=RiskLimits(max_position_size=0.50, max_portfolio_exposure=None),
+            costs=costs,
+        )
+        session.on_signal(_signal(size=0.10))
+        # 10% of 100,000 = 10,000; at ~100.01 that is ~99.99 units, not reduced.
+        assert session.ledger.position_quantity("AAPL") == pytest.approx(99.99, rel=1e-3)
+
+    def test_the_paper_reduction_is_recorded_on_the_step(self):
+        costs = CostModel(half_spread_bps=100.0, slippage_bps=100.0)
+        session = _session(
+            quotes={"AAPL": 100.0},
+            limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=None),
+            costs=costs,
+        )
+        step = session.on_signal(_signal(size=0.20))
+        # The step's quantity is what was actually filled, so a report cannot
+        # claim a larger position than the ledger holds.
+        assert step.quantity == pytest.approx(session.ledger.position_quantity("AAPL"))
+
+    def test_a_sell_is_not_reduced_by_the_cap(self):
+        """A sell is not subject to the buy-side cap, and it is not reduced.
+
+        ``position_size`` on a SELL is a fraction of the *holding* to sell, not a
+        fraction of equity, so a sell of 1.0 closes the position. The cap that
+        reduces a buy must not touch it: a sell lowers exposure, so a cap on
+        exposure cannot be breached by one.
+        """
+        costs = CostModel(half_spread_bps=100.0, slippage_bps=100.0)
+        session = _session(
+            quotes={"AAPL": 100.0},
+            limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=None),
+            costs=costs,
+        )
+        session.on_signal(_signal(size=0.20))
+        held = session.ledger.position_quantity("AAPL")
+        assert held > 0
+        step = session.on_signal(_signal(SignalAction.SELL, size=1.0))
+        assert step.order_status == "FILLED"
+        assert session.ledger.position_quantity("AAPL") == pytest.approx(0.0)
+
+    def test_a_partial_sell_sells_the_requested_fraction_of_the_holding(self):
+        costs = CostModel(half_spread_bps=100.0, slippage_bps=100.0)
+        session = _session(
+            quotes={"AAPL": 100.0},
+            limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=None),
+            costs=costs,
+        )
+        session.on_signal(_signal(size=0.20))
+        held = session.ledger.position_quantity("AAPL")
+        session.on_signal(_signal(SignalAction.SELL, size=0.50))
+        assert session.ledger.position_quantity("AAPL") == pytest.approx(held * 0.50)
+
+    def test_paper_accounting_identity_holds_after_a_capped_fill(self):
+        costs = CostModel(commission_flat=1.0, commission_per_unit=0.01,
+                          half_spread_bps=100.0, slippage_bps=100.0)
+        session = _session(
+            quotes={"AAPL": 100.0},
+            limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=None),
+            costs=costs,
+        )
+        session.on_signal(_signal(size=0.20))
+        ledger = session.ledger
+        basis = sum(h.cost_basis for h in ledger.open_positions().values())
+        assert ledger.cash + basis + ledger.total_fees - ledger.realized_pnl == pytest.approx(
+            100_000.0
+        )
+
+    def test_repeated_paper_entries_cannot_accumulate_past_the_cap(self):
+        session = _session(
+            quotes={"AAPL": 100.0},
+            limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=None),
+        )
+        session.on_signal(_signal(size=0.20))
+        session.on_signal(_signal(size=0.20, at=NOW + timedelta(minutes=1)))
+        q = session.ledger.position_quantity("AAPL")
+        assert q * 100.0 / session.ledger.equity <= 0.20 + 1e-6
+
+    def test_a_refusal_at_the_fill_is_recorded_not_silent(self):
+        """A refusal after the order was created must leave a trace.
+
+        The order exists by then, so the refusal is recorded the same way the
+        simulator records one: the step names the reason and an ``ORDER_REJECTED``
+        event is written. The position is taken to the cap by the first signal, so
+        the second has no headroom once the costs move the fill off the quote.
+        """
+        costs = CostModel(half_spread_bps=100.0, slippage_bps=100.0)
+        session = _session(
+            quotes={"AAPL": 100.0},
+            limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=None),
+            costs=costs,
+        )
+        session.on_signal(_signal(size=0.20))
+        second = session.on_signal(_signal(size=0.20, at=NOW + timedelta(minutes=1)))
+        assert second.order_status == "NONE"
+        assert "refused at execution" in second.reason
+        rejected = [e for e in session.ledger.events if e.type is EventType.ORDER_REJECTED]
+        assert rejected, "a fill-time refusal must record an ORDER_REJECTED event"
+        assert all(e.detail.get("reason") == "RISK_LIMIT" for e in rejected)

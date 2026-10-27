@@ -82,18 +82,19 @@ level rather than at the gap open, and a disabled-stops case.
 | `docs/EXECUTION.md` | Orders, fills, costs, rejections |
 | `docs/PAPER_TRADING.md` | Running against live quotes |
 | `docs/TRADING_SYSTEM_AUDIT.md` | The audit (written at phase 0, updated) |
+| `docs/PR1_INDEPENDENT_REVIEW.md` | The second-pass review: defects found, fixes, remaining limitations |
 | `tests/test_signal_contract.py` | 48 tests |
 | `tests/test_ledger.py` | 38 tests |
 | `tests/test_execution_costs.py` | 28 tests |
 | `tests/test_execution_simulator.py` | 50 tests |
-| `tests/test_risk_engine.py` | 47 tests |
-| `tests/test_backtest_engine.py` | 30 tests |
+| `tests/test_risk_engine.py` | 66 tests |
+| `tests/test_backtest_engine.py` | 41 tests |
 | `tests/test_backtest_data.py` | 29 tests |
 | `tests/test_performance.py` | 62 tests |
 | `tests/test_walkforward.py` | 34 tests |
 | `tests/test_telemetry.py` | 44 tests |
 | `tests/test_pit_integrity.py` | 21 tests |
-| `tests/test_paper_trading.py` | 28 tests |
+| `tests/test_paper_trading.py` | 35 tests |
 | `tests/test_backtest_report.py` | 28 tests |
 
 ## Files modified
@@ -102,7 +103,12 @@ level rather than at the gap open, and a disabled-stops case.
 |---|---|
 | `README.md` | A "Simulated trading system" section: the layer map, a backtest example, a paper example |
 | `CHANGELOG.md` | An `[Unreleased]` section describing the whole addition |
-| `docs/TRADING_SYSTEM_AUDIT.md` | PIT section rewritten to the per-source classification; roadmap module paths corrected |
+| `docs/TRADING_SYSTEM_AUDIT.md` | PIT section rewritten to the per-source classification; roadmap module paths corrected; defect 7 marked fixed |
+| `docs/RISK.md` | A section on the fill-time cap re-check |
+| `tradingagents/risk/engine.py` | `review_fill`: the caps re-checked at the projected fill price |
+| `tradingagents/execution/simulator.py` | `projected_fill_price`: resolve a fill's price without applying it |
+| `tradingagents/execution/paper.py` | The fill-time re-check, and a `SessionStep` that reports the filled quantity |
+| `tradingagents/backtesting/engine.py` | The fill-time re-check before an entry is submitted |
 
 ## Tests before and after
 
@@ -111,7 +117,8 @@ level rather than at the gap open, and a disabled-stops case.
 | Before this work | 1412 passed, 1 skipped, 1 deselected |
 | After the initial implementation | 1899 passed, 1 skipped, 1 deselected, 100 subtests passed |
 | After the adversarial review | 1931 passed, 1 skipped, 1 deselected, 100 subtests passed |
-| Added | 519 tests across 13 files |
+| After the fill-time cap re-check | 1966 passed, 1 skipped, 1 deselected, 100 subtests passed |
+| Added | 554 tests across 14 files |
 
 The suite refuses network access by default (an autouse fixture in
 `tests/conftest.py`), so every test is hermetic and runs offline. `ruff check .`
@@ -271,26 +278,38 @@ These are real, and are stated rather than hidden:
 7. **LLM calls are not deterministic.** The deterministic layers are reproducible
    from configuration; the signals feeding them are not, which is why each carries
    its reasoning and a content-derived id.
-8. **An equity-relative position cap can be breached by a gap.** The risk engine
-   sizes against the decision price and the fill happens at the next open, so a
-   large up-gap leaves a position worth more than the cap allowed. Found in the
-   adversarial review; not fixed, because the honest fix is a fill-time re-check
-   against the actual fill price, which is a design change. Pinned by
-   `tests/test_backtest_engine.py::TestPositionCapThroughAGap`. Cash and long-only
-   constraints still hold through such a gap; only the sizing cap can be exceeded.
+8. **An equity-relative position cap could be breached by a gap — now fixed.**
+   The risk engine sizes against the decision price and the fill happens at the
+   next open, so a large up-gap left a position worth more than the cap allowed.
+   Found in the adversarial review and originally left open, because the honest fix
+   is a fill-time re-check against the actual fill price. That fix was then made:
+   `RiskEngine.review_fill` re-runs the cap arithmetic at the projected fill price,
+   and both the backtester and the paper session call it immediately before
+   submitting a buy. A fill that would breach a cap is reduced to the largest size
+   that holds, and refused only when no positive size remains. A 20% cap on a
+   100,000 book that sized 200 units on a 100 close now fills 100 units at a 200
+   open — 20% of equity, not 40%. The same defect existed in paper mode and is fixed
+   there too. See `docs/PR1_INDEPENDENT_REVIEW.md`.
 
 ## Adversarial review
 
 After the implementation was complete it was re-reviewed against the code rather
 than against its own test count. Seven defects were found that the 1,899-test
-suite had not caught; six were fixed with regression tests and the seventh is
-documented above. The fixed ones were: non-finite prices, quantities and fees
-silently poisoning the ledger; a non-finite market price producing an order marked
-`FILLED`; a re-submitted order filling twice; the strategy context exposing future
-bars through `ctx.feed`; a non-finite bar raising mid-backtest instead of being
-dropped at construction; and `Quote` accepting a non-finite price in paper mode.
-The full list, with reproductions and the reasoning for the one that was not
-fixed, is section 15 of `docs/TRADING_SYSTEM_AUDIT.md`.
+suite had not caught. Six were fixed in the first round with regression tests:
+non-finite prices, quantities and fees silently poisoning the ledger; a non-finite
+market price producing an order marked `FILLED`; a re-submitted order filling
+twice; the strategy context exposing future bars through `ctx.feed`; a non-finite
+bar raising mid-backtest instead of being dropped at construction; and `Quote`
+accepting a non-finite price in paper mode.
+
+The seventh — an equity-relative position cap exceeded when the fill gaps up from
+the decision price — was left open in that round, because the honest fix is a
+fill-time re-check against the actual fill price rather than a patch. It was then
+fixed in a second round, in both the backtest and paper paths, and carries 36
+regression tests that assert the value of the position the fill creates rather than
+the size of the order that was requested. The full account, with reproductions and
+the remaining limitations, is `docs/PR1_INDEPENDENT_REVIEW.md`; the first-round list
+is section 15 of `docs/TRADING_SYSTEM_AUDIT.md`.
 
 Two things were verified as correct rather than assumed: the accounting
 conservation identity holds to floating-point zero, and the performance formulas
@@ -305,8 +324,10 @@ hand-computed values to machine precision.
 - A per-series FRED release calendar.
 - Wiring the telemetry budget into the graph loop as a hard stop.
 - A CLI subcommand for a simulated run, once the shape of the run is settled.
-- A fill-time risk re-check, so an equity-relative position cap cannot be
-  exceeded by a gap between the decision price and the fill price (limitation 8).
+- A fill-time re-check that reconciles against the *settled* price, should an order
+  type ever fill at a price not derivable from the bar. The current re-check uses
+  the projected fill price, which for a MARKET order is the price `submit` uses, so
+  the two agree today.
 
 ## How to run
 
@@ -361,28 +382,40 @@ feat: add LLM cost telemetry, budgets, and run metadata
 feat: record point-in-time guarantees per data source
 feat: add paper trading sessions over the same pipeline as a backtest
 feat: add run reports in HTML and JSON, built from one document
+fix: harden simulation against non-finite inputs and double fills
+fix: enforce the position cap at the fill price, not only at the decision
 ```
 
 ## Final status
 
-**FINAL STATUS: PARTIAL**
+**FINAL STATUS: PASS WITH FINDINGS**
 
-The task is implemented and tested, but "PASS" would be too strong a word for it
-after an adversarial review, so the status is stated honestly rather than
-generously.
+Every phase in the task is implemented and tested, and the one defect the
+adversarial review left open — an equity-relative position cap that a price gap
+could breach between the decision and the fill — is now fixed, in both the backtest
+and the paper path, with regression tests that assert the value of the position the
+fill creates.
 
-What is done: every phase in the task is implemented; the multi-agent
-architecture is preserved and remains the analytical component; there is no live
-trading path and no secret committed; the accounting, execution, risk, cost,
-walk-forward and performance layers are tested; the accounting conservation
-identity holds to floating-point zero and the performance formulas match
-hand-computed values.
+What is done: the multi-agent architecture is preserved and remains the analytical
+component; there is no live trading path and no secret committed; the accounting,
+execution, risk, cost, walk-forward and performance layers are tested; the
+accounting conservation identity holds to floating-point zero; the performance
+formulas match hand-computed values; and the risk caps hold at the fill price, so a
+gap cannot produce a position larger than the limits allow. The suite is 1,966
+tests, all offline and hermetic, and `ruff check .` is clean.
 
-Why not PASS: the review found seven defects in the delivered code that the
-1,899-test suite had not caught. Six are fixed with regression tests. The seventh
-— an equity-relative position cap can be exceeded when the fill gaps up from the
-decision price — is a real, unfixed limitation, documented and pinned by a test
-rather than hidden. A system with a known, unaddressed risk-limit gap is not a
-clean pass, and the honest status reflects that. The gap is bounded: cash and
-long-only constraints still hold through it, and it requires a large up-gap
-between the decision session and the fill session to occur.
+The "with findings" is deliberate. A clean pass would claim the system has no
+boundaries left, and it does: the re-check uses the projected fill price rather than
+the settled one (equal today, but a constraint on any future order type); the
+exposure cap is enforced against the last mark rather than the fill-instant value;
+and there is still no snapshot-capable provider for news and social data. None of
+these is a cap that can be breached today. They are recorded in
+`docs/PR1_INDEPENDENT_REVIEW.md` and in the code, so a later change meets them
+deliberately instead of by accident.
+
+Why not a bare PASS: the honest reading of a review that found seven defects the
+original 1,899-test suite had missed is that the suite proved the code did what its
+author expected, not what the code actually does. Six were fixed in the first round
+and the seventh in the second, each with a test that reproduces the defect first.
+The status reflects a system whose known limitations are written down, not one
+without any.

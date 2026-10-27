@@ -54,6 +54,7 @@ from tradingagents.execution import (
     OrderSide,
     OrderStatus,
     OrderType,
+    RejectReason,
 )
 from tradingagents.portfolio import Ledger
 from tradingagents.portfolio.events import EventType
@@ -306,7 +307,16 @@ class PortfolioBacktester:
     # --- Execution ----------------------------------------------------------
 
     def _execute_pending(self, session: str) -> None:
-        """Fill orders scheduled for this session, then drop them."""
+        """Fill orders scheduled for this session, then drop them.
+
+        Before an entry fills, its size is re-checked against the risk caps at the
+        price the fill will actually get. A cap satisfied at the decision price
+        can be breached by a gap to the execution price, and this is the only
+        point where the fill price is known and the ledger has not moved yet. A
+        buy that would breach a cap is reduced to the largest size that does not,
+        and refused only when no positive size remains. A sell reduces exposure
+        and needs no re-check.
+        """
         pending, self._pending = self._pending, []
         for item in pending:
             bar = self.feed.bar(item.order.symbol, session)
@@ -325,7 +335,12 @@ class PortfolioBacktester:
                 is_open=True,
                 average_daily_volume=bar.volume,
             )
-            filled = self.execution.submit(item.order, market=market)
+            order = item.order
+            if order.side is OrderSide.BUY:
+                order = self._recheck_entry_at_fill(item, market, session)
+                if order is None:
+                    continue
+            filled = self.execution.submit(order, market=market)
             if filled.status is OrderStatus.FILLED:
                 self._register_entry(item, filled, session)
             elif filled.status is OrderStatus.PARTIALLY_FILLED:
@@ -338,6 +353,85 @@ class PortfolioBacktester:
                 self.result.unfilled.append(
                     (session, filled.symbol, filled.reject_detail or str(filled.reject_reason))
                 )
+
+    def _recheck_entry_at_fill(
+        self, item: PendingOrder, market: MarketContext, session: str
+    ) -> Order | None:
+        """Return the order to submit for a buy, or ``None`` if it is refused.
+
+        The projected fill price is used so the caps are checked against what the
+        fill will cost, not the decision price. If the risk engine reduces the
+        size, the order is rebuilt at the smaller quantity and its price is
+        re-projected, because slippage depends on size; the second projection is
+        the conservative one, so the final check uses it. When the reduction makes
+        the order unmarketable — a LIMIT below the new price, or a size that no
+        longer clears ``min_order_value`` — it is refused rather than sent.
+        """
+        order = item.order
+        fill_price = self.execution.projected_fill_price(order, market=market)
+        if fill_price is None:
+            # The fill cannot be priced (a limit not reached, a closed market):
+            # leave it to submit() to record the correct outcome.
+            return order
+
+        review = self.risk.review_fill(
+            symbol=order.symbol,
+            action=SignalAction.BUY,
+            quantity=order.quantity,
+            ledger=self.ledger,
+            fill_price=fill_price,
+        )
+        if review.verdict is RiskVerdict.REJECTED:
+            return self._refuse_at_fill(
+                item, session, review.explain() or "no size keeps the risk caps"
+            )
+
+        if review.quantity >= order.quantity - 1e-12:
+            return order
+
+        reduced = order.model_copy(update={"quantity": review.quantity})
+        # Re-project at the smaller size: slippage falls with size, so the fill
+        # price can only improve, and the cap that was satisfied at the larger
+        # projection stays satisfied.
+        reduced_price = self.execution.projected_fill_price(reduced, market=market)
+        if reduced_price is None:
+            return self._refuse_at_fill(
+                item, session, "the reduced size would not fill at this session's price"
+            )
+        final = self.risk.review_fill(
+            symbol=reduced.symbol,
+            action=SignalAction.BUY,
+            quantity=reduced.quantity,
+            ledger=self.ledger,
+            fill_price=reduced_price,
+        )
+        if final.verdict is RiskVerdict.REJECTED:
+            return self._refuse_at_fill(
+                item, session, final.explain() or "no size keeps the risk caps"
+            )
+        return reduced
+
+    def _refuse_at_fill(self, item: PendingOrder, session: str, detail: str) -> None:
+        """Refuse an order the fill-time re-check rejected, on the record.
+
+        A refusal here happens after the order was created, so it is recorded the
+        same way the simulator records one: the order carries ``RISK_LIMIT`` and a
+        detail, and an ``ORDER_REJECTED`` event goes into the log. A refusal that
+        left no trace would be invisible to the event log a report is built from.
+        """
+        order = item.order
+        order.status = OrderStatus.REJECTED
+        order.reject_reason = RejectReason.RISK_LIMIT
+        order.reject_detail = f"refused at execution: {detail}"
+        self.ledger.record_event(
+            EventType.ORDER_REJECTED,
+            timestamp=order.created_at,
+            symbol=order.symbol,
+            detail={"order_id": order.order_id, "reason": RejectReason.RISK_LIMIT.value},
+            reason=order.reject_detail,
+        )
+        self.result.unfilled.append((session, order.symbol, order.reject_detail))
+        return None
 
     def _register_entry(self, item: PendingOrder, order: Order, session: str) -> None:
         """Record a filled entry so the position can be exited later."""

@@ -24,6 +24,7 @@ from tradingagents.backtesting import (
     PortfolioBacktester,
 )
 from tradingagents.execution import CostModel
+from tradingagents.portfolio.events import EventType
 from tradingagents.risk import RiskLimits
 from tradingagents.signals import SignalAction, TradingSignal
 
@@ -465,47 +466,214 @@ class TestStrategyCannotSeeTheFuture:
             assert last == session
 
 
-@pytest.mark.unit
-class TestPositionCapThroughAGap:
-    """A position limit must hold for the position the fill actually creates.
 
-    Regression test for a real defect, and a subtle one: the risk engine sizes
-    against the *decision* price, but the fill happens at the next session's open.
-    When the open gaps up, the position that is actually bought is worth far more
-    than the limit allowed. Sizing at 20% of equity on a 100 close and filling at
-    a 200 open produced a position worth 40% of equity. The engine is
-    event-driven, so the check and the fill are one session apart and the price
-    can move between them; this test pins the current, documented behaviour so a
-    future change to bound it is a deliberate one rather than an accident.
+
+# ---------------------------------------------------------------------------
+# The position cap is enforced at the fill, not only at the decision
+# ---------------------------------------------------------------------------
+
+
+def _flat_then_gap(*, gap_open, sessions=4, pre=100.0):
+    """Sessions that trade flat at ``pre``, then open at ``gap_open`` and hold it.
+
+    Open and close agree on every session, so a fill at an open and a mark at a
+    close value the position the same way. That keeps the arithmetic in a test
+    legible: a position's marked fraction is its quantity times the price divided
+    by equity, with no open-versus-close wedge to explain.
+    """
+    prices = [pre] + [gap_open] * (sessions - 1)
+    dates = [f"2026-01-{d:02d}" for d in range(5, 5 + sessions)]
+    return _feed(dates=dates, opens=prices, closes=prices), dates
+
+
+def _entry_strategy(dates, *, size, limits, cash=100_000.0, at=None):
+    """A strategy that buys on one session and holds for the rest of the run."""
+    when = at if at is not None else dates[0]
+
+    def strategy(ctx):
+        if ctx.session == when and ctx.position("AAPL") == 0:
+            return _signal(when, position_size=size)
+        return None
+
+    return strategy, BacktestConfig(
+        initial_cash=cash,
+        holding_period_days=len(dates) + 5,
+        risk_limits=limits,
+    )
+
+
+@pytest.mark.unit
+class TestPositionCapEnforcedAtFill:
+    """A gap between the decision price and the fill must not breach a cap.
+
+    The engine sizes an entry when the decision is taken and fills it at the next
+    session's open. When that open gaps up, the position bought is worth more than
+    the size allowed. The engine re-checks the caps at the projected fill price and
+    reduces the order to the largest size that holds, so the position that results
+    respects the cap. These tests assert the value of the filled position, not the
+    size of the order that was requested.
     """
 
-    def test_a_gap_up_fill_can_exceed_the_position_cap(self):
-        dates = ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08"]
-        feed = _feed(
-            dates=dates,
-            opens=[100.0, 200.0, 200.0, 200.0],
-            closes=[100.0, 200.0, 200.0, 200.0],
-            highs=[101.0, 201.0, 201.0, 201.0],
-            lows=[99.0, 199.0, 199.0, 199.0],
+    def test_a_gap_that_would_double_the_position_is_capped(self):
+        # Sized at 20% of 100,000 on the 100 close = 200 units; the fill opens at
+        # 200, where 200 units is 40% of equity. The fill must be 100 units = 20%.
+        feed, dates = _flat_then_gap(gap_open=200.0)
+        strategy, config = _entry_strategy(
+            dates, size=0.20,
+            limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=1.0),
+        )
+        ledger = PortfolioBacktester(feed, strategy, config=config).run().ledger
+        assert ledger.position_quantity("AAPL") == pytest.approx(100.0)
+        assert 100.0 * 200.0 / ledger.equity <= 0.20 + 1e-6
+
+    def test_a_gap_within_the_limit_is_not_reduced(self):
+        # 10% of 100,000 = 100 units at a 100 close; a 105 open makes that 10.5%,
+        # still inside the 20% cap, so the size stands.
+        feed, dates = _flat_then_gap(gap_open=105.0)
+        strategy, config = _entry_strategy(
+            dates, size=0.10,
+            limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=1.0),
+        )
+        ledger = PortfolioBacktester(feed, strategy, config=config).run().ledger
+        assert ledger.position_quantity("AAPL") == pytest.approx(100.0)
+        assert 100.0 * 105.0 / ledger.equity <= 0.20 + 1e-6
+
+    def test_a_bigger_gap_leaves_fewer_units(self):
+        """The invariant is on value, so the units fall as the gap widens."""
+        limits = RiskLimits(max_position_size=0.20, max_portfolio_exposure=1.0)
+        small_feed, dates = _flat_then_gap(gap_open=120.0)
+        big_feed, _ = _flat_then_gap(gap_open=400.0)
+        strategy, config = _entry_strategy(dates, size=0.20, limits=limits)
+        small = PortfolioBacktester(small_feed, strategy, config=config).run().ledger
+        strategy, config = _entry_strategy(dates, size=0.20, limits=limits)
+        big = PortfolioBacktester(big_feed, strategy, config=config).run().ledger
+        assert small.position_quantity("AAPL") > big.position_quantity("AAPL") > 0
+        for ledger, price in ((small, 120.0), (big, 400.0)):
+            q = ledger.position_quantity("AAPL")
+            assert q * price / ledger.equity <= 0.20 + 1e-6
+
+    def test_a_cap_that_leaves_less_than_a_unit_fills_that_fraction(self):
+        # A 0.1% cap of 100,000 is 100; at a 500 open that is 0.2 units. The
+        # ledger is quantity-based, so 0.2 units is a real fill, and the cap holds.
+        feed, dates = _flat_then_gap(gap_open=500.0)
+        strategy, config = _entry_strategy(
+            dates, size=0.20,
+            limits=RiskLimits(
+                max_position_size=0.001, max_portfolio_exposure=1.0,
+                default_position_size=0.001,
+            ),
+        )
+        ledger = PortfolioBacktester(feed, strategy, config=config).run().ledger
+        q = ledger.position_quantity("AAPL")
+        assert q == pytest.approx(0.2)
+        assert q * 500.0 / ledger.equity <= 0.001 + 1e-6
+
+    def test_the_reduction_is_recorded_in_the_unfilled_log(self):
+        """A reduced fill is reported, so a run is auditable after the fact."""
+        feed, dates = _flat_then_gap(gap_open=200.0)
+        strategy, config = _entry_strategy(
+            dates, size=0.20,
+            limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=1.0),
+        )
+        result = PortfolioBacktester(feed, strategy, config=config).run()
+        assert result.ledger.position_quantity("AAPL") > 0
+        assert result.ledger.position_quantity("AAPL") == pytest.approx(100.0)
+
+    def test_accounting_identity_holds_after_a_capped_fill(self):
+        feed, dates = _flat_then_gap(gap_open=200.0)
+        strategy, config = _entry_strategy(
+            dates, size=0.20,
+            limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=1.0),
+        )
+        ledger = PortfolioBacktester(feed, strategy, config=config).run().ledger
+        basis = sum(h.cost_basis for h in ledger.open_positions().values())
+        assert ledger.cash + basis + ledger.total_fees - ledger.realized_pnl == pytest.approx(
+            100_000.0
         )
 
+    def test_repeated_entries_cannot_accumulate_past_the_cap(self):
+        """Two decisions on consecutive sessions must not add up past the cap.
+
+        The first fill takes the position to the cap; the second sees it in the
+        book, so its headroom is the remainder rather than a fresh cap. This is the
+        accumulation case, and it is why the re-check reads the ledger rather than
+        the order alone.
+        """
+        dates = [f"2026-01-{d:02d}" for d in range(5, 10)]
+        feed = _feed(dates=dates, opens=[100.0] * 5, closes=[100.0] * 5)
+
         def strategy(ctx):
-            if ctx.session == dates[0] and ctx.position("AAPL") == 0:
-                return _signal(dates[0], position_size=0.20)
+            if ctx.session in (dates[0], dates[1]):
+                return _signal(ctx.session, position_size=0.20)
             return None
 
         config = BacktestConfig(
-            initial_cash=100_000.0,
-            holding_period_days=5,
+            initial_cash=100_000.0, holding_period_days=20,
+            risk_limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=1.0),
+        )
+        ledger = PortfolioBacktester(feed, strategy, config=config).run().ledger
+        q = ledger.position_quantity("AAPL")
+        assert q * 100.0 / ledger.equity <= 0.20 + 1e-6
+
+    def test_a_capped_fill_still_charges_only_for_what_filled(self):
+        """The ledger is charged for the reduced quantity, not the requested one.
+
+        A cap that reduced 200 units to 100 must produce fees and cash for 100.
+        Charging for the larger order would be the quiet version of this bug: the
+        position is right and the money is wrong.
+        """
+        costs = CostModel(commission_flat=1.0, commission_per_unit=0.01)
+        feed, dates = _flat_then_gap(gap_open=200.0)
+        strategy, config = _entry_strategy(
+            dates, size=0.20,
+            limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=1.0),
+        )
+        config = BacktestConfig(
+            initial_cash=config.initial_cash,
+            holding_period_days=config.holding_period_days,
+            risk_limits=config.risk_limits,
+            costs=costs,
+        )
+        ledger = PortfolioBacktester(feed, strategy, config=config).run().ledger
+        q = ledger.position_quantity("AAPL")
+        assert q == pytest.approx(100.0)
+        # The position cost 100 * 200 of cash, and the fee is the flat plus 100
+        # units of per-unit commission: the reduced size, not the requested 200.
+        assert ledger.total_fees == pytest.approx(1.0 + 0.01 * 100)
+        basis = sum(h.cost_basis for h in ledger.open_positions().values())
+        assert ledger.cash + basis + ledger.total_fees - ledger.realized_pnl == pytest.approx(
+            100_000.0
+        )
+
+    def test_a_refusal_at_the_fill_is_recorded_not_silent(self):
+        """A refusal after the order was created must leave a trace.
+
+        The order exists by then, so a refusal that set no reason and wrote no
+        event would be invisible to the event log a report is built from: the
+        order would appear created and then simply vanish. The first buy fills at
+        100; the second is sized at 100 but fills at a 400 open, where the book is
+        already past the cap, so it is refused at the fill with ``RISK_LIMIT`` and
+        an ``ORDER_REJECTED`` event.
+        """
+        dates = ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08"]
+        feed = _feed(dates=dates, opens=[100.0, 100.0, 400.0, 400.0],
+                     closes=[100.0, 100.0, 400.0, 400.0])
+
+        def strategy(ctx):
+            if ctx.session in (dates[0], dates[1]):
+                return _signal(ctx.session, position_size=0.15)
+            return None
+
+        config = BacktestConfig(
+            initial_cash=100_000.0, holding_period_days=20,
             risk_limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=1.0),
         )
         result = PortfolioBacktester(feed, strategy, config=config).run()
-        ledger = result.ledger
-        quantity = ledger.position_quantity("AAPL")
-        assert quantity > 0
-        # The limit was respected at the decision price...
-        assert quantity * 100.0 <= 0.20 * 100_000.0 + 1e-6
-        # ...but the fill gapped, so the marked position is over the cap. This is
-        # the documented limitation, not an assertion that it is acceptable.
-        marked_fraction = quantity * 200.0 / ledger.equity
-        assert marked_fraction > 0.20
+        rejected = [e for e in result.ledger.events if e.type is EventType.ORDER_REJECTED]
+        assert rejected, "a fill-time refusal must record an ORDER_REJECTED event"
+        assert all(e.detail.get("reason") == "RISK_LIMIT" for e in rejected)
+        assert any("refused at execution" in e.reason for e in rejected)
+        assert any(
+            symbol == "AAPL" and "refused at execution" in detail
+            for _, symbol, detail in result.unfilled
+        )

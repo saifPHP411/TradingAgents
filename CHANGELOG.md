@@ -72,6 +72,19 @@ path, and no configuration that produces one.
 - A bar with a non-finite price is dropped when the feed is built rather than
   raising mid-backtest on an arbitrary later session.
 - A paper-mode `Quote` refuses a non-finite price.
+- An equity-relative position cap is re-checked at the fill price. The engine
+  sized an order against the price the decision saw and filled it at the next
+  session's open, so an up-gap left a position worth more than the cap allowed: a
+  20% cap on a 100,000 book sized 200 units on a 100 close and filled them at a
+  200 open, a position worth 40% of equity. `RiskEngine.review_fill` now re-runs
+  the caps against the price the fill will actually get, and both the backtester
+  and the paper session call it immediately before submitting a buy. A fill that
+  would breach a cap is reduced to the largest size that holds, and refused only
+  when no positive size remains. The same defect existed in paper mode, where
+  spread and slippage move the fill off the quote, and is fixed there too.
+- A paper session's `SessionStep` reports the quantity that was filled, not the
+  quantity that was requested, so a reduced fill is not reported as a larger
+  position than the ledger holds.
 
 ### Notes
 
@@ -80,10 +93,10 @@ path, and no configuration that produces one.
 - LLM calls are not deterministic, so a run's signals carry their own reasoning
   and a content-derived id; the deterministic layers around them are reproducible
   from the run configuration.
-- A known limitation: an equity-relative position cap can be exceeded when the
-  fill gaps up from the decision price, because the engine sizes at the decision
-  and fills at the next open. Pinned by a test and recorded in
-  `docs/FINAL_DEVELOPMENT_REPORT.md` rather than hidden.
+- The fill-time cap re-check uses the *projected* fill price, which for a MARKET
+  order is the price the simulator will use, so the two agree. An order type that
+  filled at a price not derivable from the bar would need the re-check to reconcile
+  after the fill. Recorded in `docs/PR1_INDEPENDENT_REVIEW.md`.
 
 
 ## [0.7.1] — 2026-10-27

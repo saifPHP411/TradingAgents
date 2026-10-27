@@ -39,8 +39,15 @@ from tradingagents.execution.interface import (
     MarketContext,
     resolve_mode,
 )
-from tradingagents.execution.orders import Order, OrderSide, OrderType
+from tradingagents.execution.orders import (
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    RejectReason,
+)
 from tradingagents.execution.simulator import ExecutionSimulator
+from tradingagents.portfolio.events import EventType
 from tradingagents.portfolio.ledger import Ledger
 from tradingagents.risk.engine import RiskEngine, RiskVerdict
 from tradingagents.signals.contract import SignalAction, TradingSignal
@@ -176,6 +183,44 @@ class PaperSession:
             as_of_date=signal.as_of_date,
             signal_id=signal.signal_id,
         )
+        # The caps were checked at the decision price. The fill gets a different
+        # one — the quote has moved, or the costs moved it — so a buy is re-checked
+        # at the price it will actually pay, exactly as the backtester does. A
+        # sell reduces exposure and needs no re-check.
+        if side is OrderSide.BUY:
+            projected = self.simulator.projected_fill_price(order, market=quote.as_market())
+            if projected is not None:
+                review = self.risk.review_fill(
+                    symbol=order.symbol,
+                    action=SignalAction.BUY,
+                    quantity=order.quantity,
+                    ledger=self.ledger,
+                    fill_price=projected,
+                )
+                if review.verdict is not RiskVerdict.APPROVED:
+                    # The order was created before the re-check ran, so the refusal
+                    # is recorded the same way the simulator records one: the order
+                    # carries RISK_LIMIT and an ORDER_REJECTED event goes into the
+                    # log. A refusal that left no trace would be invisible to the
+                    # event log a report is built from.
+                    detail = "refused at execution: " + (
+                        review.explain() or "no size keeps the risk caps"
+                    )
+                    order.status = OrderStatus.REJECTED
+                    order.reject_reason = RejectReason.RISK_LIMIT
+                    order.reject_detail = detail
+                    self.ledger.record_event(
+                        EventType.ORDER_REJECTED,
+                        timestamp=order.created_at,
+                        symbol=order.symbol,
+                        detail={"order_id": order.order_id,
+                                "reason": RejectReason.RISK_LIMIT.value},
+                        reason=detail,
+                    )
+                    return self._record(signal, decision, None, detail)
+                if review.quantity < order.quantity - 1e-12:
+                    order = order.model_copy(update={"quantity": review.quantity})
+
         fees_before = self.ledger.total_fees
         filled = self.simulator.submit(order, market=quote.as_market())
 
@@ -186,12 +231,20 @@ class PaperSession:
         return self._record(signal, decision, filled, reason, fees_before=fees_before)
 
     def _record(self, signal, decision, order, reason: str, *, fees_before: float = 0.0) -> SessionStep:
+        # The step reports what was actually filled when there was a fill, so a
+        # report or a downstream reader cannot claim a larger position than the
+        # ledger holds — which is exactly what a risk cap reduced at the fill
+        # would otherwise cause. With no order, it reports the decision's size.
+        if order is not None and order.filled_quantity > 0:
+            quantity = float(order.filled_quantity)
+        else:
+            quantity = float(decision.quantity or 0.0)
         step = SessionStep(
             timestamp=signal.timestamp,
             symbol=signal.symbol,
             action=str(signal.action),
             approved=decision.verdict is RiskVerdict.APPROVED,
-            quantity=float(decision.quantity or 0.0),
+            quantity=quantity,
             order_status=order.status.value if order is not None else "NONE",
             fill_price=float(order.average_fill_price) if order is not None
             and order.average_fill_price else None,

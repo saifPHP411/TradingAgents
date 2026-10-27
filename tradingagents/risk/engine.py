@@ -31,6 +31,7 @@ running counter, so they cannot drift out of sync with the ledger.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
@@ -535,6 +536,153 @@ class RiskEngine:
         decision.quantity = quantity
         decision.reference_price = float(price)
         decision.notional = quantity * price
+        return decision
+
+    # --- Fill-time re-check ------------------------------------------------
+
+    def review_fill(
+        self,
+        *,
+        symbol: str,
+        action: SignalAction,
+        quantity: float,
+        ledger: Ledger,
+        fill_price: float,
+    ) -> RiskDecision:
+        """Re-check the position and exposure caps at the price a fill will get.
+
+        Sizing happens when the decision is taken, against the price the decision
+        saw. The fill happens later, at a price that can have moved — in a
+        backtest it is the next session's open, which can gap. A cap satisfied at
+        the decision price can therefore be breached by the fill: a position sized
+        at 20% of equity on a 100 close is worth 40% when the fill opens at 200.
+        The engine is event-driven, so the check and the fill are necessarily one
+        session apart, and re-checking here is the only place that closes the gap.
+
+        The re-check is the same arithmetic as :meth:`evaluate`, applied to
+        ``fill_price`` instead of the decision price, so it enforces the caps on
+        the position the fill actually creates rather than the one the decision
+        intended. When a cap is exceeded it returns the *largest* quantity that
+        keeps every cap, approved and noted, rather than refusing outright: a
+        smaller fill is still a fill, and reducing is what the sizing path already
+        does when a request is too large. Only when no positive quantity remains
+        does it reject.
+
+        It never touches the ledger. It computes and returns, so the caller
+        applies the result or refuses it, and nothing is deducted for a quantity
+        that is not executed.
+
+        A SELL needs no cap re-check: it reduces the position and the exposure, so
+        a gap can only make it smaller. Its holding constraint is the ledger's,
+        and is enforced where the fill is applied.
+        """
+        decision = RiskDecision(verdict=RiskVerdict.APPROVED, symbol=symbol, action=action)
+
+        if quantity is None or not math.isfinite(quantity) or quantity <= 0:
+            decision.reasons.append(RiskReason.NON_POSITIVE_QUANTITY)
+            decision.notes.append(
+                f"fill quantity {quantity!r} is not a positive finite number"
+            )
+            return self._reject(decision)
+        if fill_price is None or not math.isfinite(fill_price) or fill_price <= 0:
+            decision.reasons.append(RiskReason.INVALID_PRICE)
+            decision.notes.append(
+                f"fill price {fill_price!r} is not a positive finite number"
+            )
+            return self._reject(decision)
+
+        decision.reference_price = float(fill_price)
+
+        if action is SignalAction.SELL:
+            decision.quantity = quantity
+            decision.notional = quantity * fill_price
+            return decision
+
+        equity = ledger.equity
+        if equity <= 0:
+            decision.reasons.append(RiskReason.NO_EQUITY)
+            decision.notes.append(
+                f"equity is {equity:,.2f} at fill time; there is nothing to size against"
+            )
+            return self._reject(decision)
+
+        limits = self.limits
+        held = ledger.position_quantity(symbol)
+        holding = ledger.holdings.get(symbol)
+        # The symbol's own mark, so the rest of the book is valued without it and
+        # its value can be recomputed at the fill price.
+        mark = (
+            holding.last_price
+            if holding is not None and holding.last_price is not None
+            else fill_price
+        )
+        other_positions_value = ledger.market_value - held * mark
+
+        allowed = quantity
+        binding: list[RiskReason] = []
+
+        def cap_quantity(headroom_value: float, reason: RiskReason) -> None:
+            """Tighten ``allowed`` to fit ``headroom_value`` of additional value."""
+            nonlocal allowed
+            max_quantity = headroom_value / fill_price
+            if max_quantity < allowed - 1e-12:
+                if reason not in binding:
+                    binding.append(reason)
+                allowed = max(max_quantity, 0.0)
+
+        if limits.max_position_size is not None:
+            # The value the position would hold *after* the fill.
+            headroom = limits.max_position_size * equity - held * fill_price
+            cap_quantity(headroom, RiskReason.MAX_POSITION_SIZE)
+
+        if limits.max_portfolio_exposure is not None:
+            headroom = (
+                limits.max_portfolio_exposure * equity
+                - other_positions_value
+                - held * fill_price
+            )
+            cap_quantity(headroom, RiskReason.MAX_PORTFOLIO_EXPOSURE)
+
+        if limits.max_order_value is not None:
+            cap_quantity(limits.max_order_value, RiskReason.MAX_ORDER_VALUE)
+
+        if limits.max_open_positions is not None and held <= 0:
+            open_positions = ledger.open_positions()
+            if len(open_positions) >= limits.max_open_positions:
+                decision.reasons.append(RiskReason.MAX_OPEN_POSITIONS)
+                decision.notes.append(
+                    f"the book already holds {len(open_positions)} positions at fill time, "
+                    f"at the {limits.max_open_positions} limit"
+                )
+                return self._reject(decision)
+
+        if allowed <= 0:
+            decision.reasons.extend(binding or [RiskReason.MAX_POSITION_SIZE])
+            decision.notes.append(
+                "no positive quantity keeps the fill within the limits at the fill price "
+                f"{fill_price:g}; the position is already at or above a cap"
+            )
+            return self._reject(decision)
+
+        notional = allowed * fill_price
+        if limits.min_order_value is not None and notional < limits.min_order_value:
+            decision.reasons.append(RiskReason.MIN_ORDER_VALUE)
+            decision.notes.append(
+                f"the reduced fill value {notional:,.2f} is below min_order_value "
+                f"{limits.min_order_value:,.2f}"
+            )
+            return self._reject(decision)
+
+        if allowed < quantity - 1e-12:
+            # Record which cap bound, so the reduction is auditable and a report
+            # can say why the filled size differs from the requested one.
+            decision.reasons.extend(binding)
+            decision.notes.append(
+                f"fill size reduced from {quantity:.6g} to {allowed:.6g} to keep the position "
+                f"within the limits at the fill price {fill_price:g}"
+            )
+        decision.quantity = allowed
+        decision.notional = notional
         return decision
 
 

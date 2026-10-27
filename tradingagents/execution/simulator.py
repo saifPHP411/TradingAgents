@@ -160,6 +160,37 @@ class ExecutionSimulator:
 
     # --- Fill resolution ----------------------------------------------------
 
+    def projected_fill_price(
+        self, order: Order, *, market: MarketContext, quantity: float | None = None
+    ) -> float | None:
+        """The price a fill would get at ``quantity``, without moving the ledger.
+
+        A caller that has to re-check a limit against the price the fill will
+        actually get — a risk cap enforced at execution rather than at the
+        decision — needs that price before committing. This resolves the fill the
+        same way :meth:`submit` will, but applies nothing, so asking costs nothing
+        and leaves no event behind.
+
+        Returns ``None`` when the order would not fill at all: a limit the market
+        has not reached, or a market that is closed or has no usable price. The
+        caller then leaves the outcome to :meth:`submit` rather than guessing.
+        """
+        if market.symbol != order.symbol:
+            raise ValueError(
+                f"order is for {order.symbol} but the market context is {market.symbol}"
+            )
+        probe = order if quantity is None else order.model_copy(update={"quantity": quantity})
+        if probe.quantity <= 0 or not math.isfinite(probe.quantity):
+            return None
+        if not market.is_open or market.price is None or not math.isfinite(market.price):
+            return None
+        if market.price <= 0:
+            return None
+        fill_quantity, fill_price = self._resolve_fill(probe, market)
+        if fill_quantity <= 0 or not math.isfinite(fill_price) or fill_price <= 0:
+            return None
+        return fill_price
+
     def _resolve_fill(self, order: Order, market: MarketContext) -> tuple[float, float]:
         """The quantity and price this order fills at, or ``(0, 0)`` if it does not.
 
