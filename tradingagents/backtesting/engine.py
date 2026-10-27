@@ -208,6 +208,14 @@ class StrategyContext:
     strategy that reads ``context.history(symbol)`` receives only past bars. It is
     given the ledger read-only for context (how much is held, how much cash is
     free) but no way to move it: orders are the engine's business.
+
+    ``feed`` is a view bounded at ``session``, not the whole feed. Handing over
+    the raw feed made the look-ahead guarantee a property of the helper methods
+    rather than of the object: ``context.history`` was safe, but
+    ``context.feed.bar(symbol, tomorrow)`` returned tomorrow's bar. A strategy
+    could read the future by reaching one attribute deeper, which is exactly the
+    mistake the guarantee is supposed to make impossible. The view closes that,
+    so there is no accessor left that answers for a later date.
     """
 
     session: str
@@ -215,6 +223,11 @@ class StrategyContext:
     ledger: Ledger
     clock: SessionClock
     symbols: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        # Replace the raw feed with a session-bounded view. Done here rather than
+        # at construction sites so every path that builds a context gets it.
+        self.feed = self.feed.as_of(self.session)
 
     def history(self, symbol: str) -> pd.DataFrame:
         """Bars for ``symbol`` through this session inclusive. Never a later bar."""

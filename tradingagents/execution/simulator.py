@@ -27,6 +27,7 @@ touched before or after the volume was consumed.
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 
 from tradingagents.execution.costs import CostModel, Side
@@ -87,11 +88,20 @@ class ExecutionSimulator:
         normal result that the caller must be able to record, not an exception
         that aborts a sweep. It raises only for a programming error — an order
         whose symbol disagrees with the market context it was given.
+
+        Submitting an order that has already reached a terminal state is such a
+        programming error. It is refused rather than filled again, because the
+        ledger has no way to tell a re-submission from a second genuine order, and
+        a double fill is a real position the caller never asked for. The first
+        outcome is returned unchanged, so a caller that accidentally loops gets
+        the same answer instead of an accumulating position.
         """
         if market.symbol != order.symbol:
             raise ValueError(
                 f"order is for {order.symbol} but the market context is {market.symbol}"
             )
+        if order.status.is_terminal:
+            return order
 
         self.ledger.record_event(
             EventType.ORDER_CREATED, timestamp=order.created_at, symbol=order.symbol,
@@ -111,6 +121,19 @@ class ExecutionSimulator:
                 f"the {order.order_type.value.lower()} price {order.limit_price} was not reached "
                 f"at a reference price of {market.price}",
             )
+        # The fill's own arithmetic is the last place a bad number can enter the
+        # book: a non-finite price or size here would be applied by the ledger and
+        # poison cash and equity. Reject rather than attempt the fill.
+        if not math.isfinite(fill_price) or fill_price <= 0:
+            return self._reject(
+                order, RejectReason.INVALID_PRICE,
+                f"costs priced the fill at {fill_price!r}, which is not a usable price",
+            )
+        if not math.isfinite(fill_quantity) or fill_quantity <= 0:
+            return self._reject(
+                order, RejectReason.INVALID_QUANTITY,
+                f"the fill size resolved to {fill_quantity!r}, which is not usable",
+            )
 
         return self._apply(order, market, fill_quantity, fill_price)
 
@@ -124,6 +147,11 @@ class ExecutionSimulator:
             return RejectReason.MARKET_CLOSED, f"the market for {order.symbol} is closed at {market.timestamp}"
         if market.price is None:
             return RejectReason.NO_PRICE, f"no price for {order.symbol} at {market.timestamp}"
+        if not math.isfinite(market.price):
+            # Checked before the cost model sees it: a NaN or inf price is false
+            # against ``<= 0``, so it would otherwise reach the costs and come
+            # back as a non-finite fill price that the ledger would apply.
+            return RejectReason.INVALID_PRICE, f"price {market.price!r} is not a finite number"
         if market.price <= 0:
             return RejectReason.INVALID_PRICE, f"price {market.price} is not positive"
         if order.order_type is OrderType.LIMIT and order.limit_price is None:

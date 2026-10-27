@@ -389,3 +389,67 @@ class TestAccountingThroughExecution:
             ledger.cash + basis + ledger.total_fees - ledger.realized_pnl
             == pytest.approx(10_000.0)
         )
+
+
+# ---------------------------------------------------------------------------
+# Non-finite reference prices and re-submission
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNonFiniteReferencePrice:
+    """A non-finite bar price must be rejected, not filled.
+
+    Regression test for a real defect. ``_pre_trade_rejection`` guarded with
+    ``market.price <= 0``, which is false for a NaN, so a NaN bar price reached
+    the cost model, came back as a NaN fill price, and the ledger applied it —
+    the order reported ``FILLED`` and cash and equity became NaN. Infinity took
+    the same path and produced an infinite fill. Both must be a rejection.
+    """
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_market_price_is_rejected(self, bad):
+        sim, ledger = _sim()
+        order = sim.submit(_order(quantity=10), market=_market(bad))
+        assert order.status is OrderStatus.REJECTED
+        assert order.reject_reason is RejectReason.INVALID_PRICE
+
+    def test_a_non_finite_price_leaves_the_book_finite_and_untouched(self):
+        sim, ledger = _sim()
+        sim.submit(_order(quantity=10), market=_market(float("nan")))
+        assert ledger.cash == pytest.approx(10_000.0)
+        assert ledger.position_quantity("AAPL") == 0.0
+        assert ledger.equity == pytest.approx(10_000.0)
+
+
+@pytest.mark.unit
+class TestAnOrderFillsAtMostOnce:
+    """Re-submitting a terminal order must not fill it again.
+
+    Regression test for a real defect: ``submit`` re-ran the whole lifecycle on
+    an order that had already filled, so the same order object moved the ledger
+    twice. Nothing in the ledger can tell a re-submission from a second genuine
+    order, so the guard has to live here. The second call returns the first
+    outcome unchanged.
+    """
+
+    def test_a_filled_order_is_not_filled_again(self):
+        sim, ledger = _sim()
+        order = _order(quantity=10)
+        first = sim.submit(order, market=_market(100.0))
+        assert first.status is OrderStatus.FILLED
+        second = sim.submit(order, market=_market(100.0))
+        assert second.status is OrderStatus.FILLED
+        assert ledger.position_quantity("AAPL") == pytest.approx(10.0)
+        assert ledger.cash == pytest.approx(9_000.0)
+
+    def test_a_rejected_order_is_not_re_evaluated(self):
+        sim, ledger = _sim(cash=100.0)
+        order = _order(quantity=10)
+        first = sim.submit(order, market=_market(100.0))
+        assert first.status is OrderStatus.REJECTED
+        # A later, more favourable attempt must still be refused: the order is
+        # already terminal, and the ledger must not move.
+        sim.submit(order, market=_market(1.0))
+        assert ledger.position_quantity("AAPL") == 0.0
+        assert ledger.cash == pytest.approx(100.0)

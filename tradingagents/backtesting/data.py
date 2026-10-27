@@ -115,6 +115,12 @@ class MarketDataFeed:
         data = data[~data.index.duplicated(keep="last")].sort_index()
         keep = ["open", "high", "low", "close", "volume"]
         data = data[keep].astype({"open": float, "high": float, "low": float, "close": float})
+        # Drop non-finite rows *here*, at construction, rather than letting an inf
+        # through and having ``Bar`` raise it mid-run: a backtest that dies on the
+        # fortieth session because the vendor emitted an inf has hidden the bad
+        # row instead of reporting it. Dropping it keeps the run alive and the
+        # date simply has no bar, which every caller already handles.
+        data = data.replace([float("inf"), float("-inf")], float("nan"))
         data = data[(data[["open", "high", "low", "close"]] > 0).all(axis=1)]
         if data.empty:
             raise BarDataError(f"bars for {symbol} have no usable rows")
@@ -212,6 +218,31 @@ class MarketDataFeed:
                 f"no bars for {symbol}; the feed holds {list(self._frames)}"
             )
         return self._frames[symbol]
+
+    def as_of(self, session: str) -> MarketDataFeed:
+        """A feed containing only bars dated ``session`` or earlier.
+
+        Used to hand a strategy a view it cannot look past. Every frame is
+        re-cut, so ``bar``, ``history``, ``latest_bar_at_or_before`` and the
+        calendar all answer from the same bounded data and none of them can
+        return a later date. Returns ``self`` when nothing is cut, so a caller
+        that asks for the last session pays nothing for the call.
+
+        The result is a distinct feed, not a proxy: a caller that tried to reach
+        the future would have to hold the original object, which the strategy is
+        not given.
+        """
+        bounded: dict[str, pd.DataFrame] = {}
+        for symbol in self._symbols:
+            frame = self._frames[symbol]
+            cut = frame[frame.index <= pd.Timestamp(session).normalize()]
+            if not cut.empty:
+                bounded[symbol] = cut
+        if not bounded:
+            raise BarDataError(f"no bars at or before {session}")
+        if all(len(bounded[s]) == len(self._frames[s]) for s in bounded):
+            return self
+        return MarketDataFeed(bounded)
 
 
 @dataclass(frozen=True)

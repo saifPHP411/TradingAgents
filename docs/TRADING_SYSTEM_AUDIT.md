@@ -464,3 +464,51 @@ because `reporting.py` is the agent-written report tree and the two answer
 different questions.
 
 See `docs/FINAL_DEVELOPMENT_REPORT.md` for what was actually delivered.
+
+---
+
+## 15. Adversarial review of the delivered system
+
+The implementation above was re-reviewed adversarially against the actual code
+rather than against its own passing suite. The suite passing 1,899 tests was
+treated as a claim to check, not as evidence of correctness. Each item below was
+reproduced with a script before it was fixed, and each fix carries a regression
+test. These are the defects the suite did not catch.
+
+| # | Defect | Severity | Status |
+|---|---|---|---|
+| 1 | NaN/inf price, quantity or fee silently corrupted the ledger (`cash`, `equity` became NaN; `<= 0` guards are false for NaN) | High | Fixed |
+| 2 | NaN/inf market price produced an order marked `FILLED` with a NaN fill | High | Fixed |
+| 3 | Re-submitting an already-filled order filled it a second time | High | Fixed |
+| 4 | `StrategyContext.feed` exposed future bars (`ctx.feed.bar(sym, tomorrow)` returned tomorrow) | High | Fixed |
+| 5 | A non-finite bar was accepted at feed construction and raised mid-backtest | Medium | Fixed |
+| 6 | `Quote` accepted NaN/inf prices in paper mode | Medium | Fixed |
+| 7 | Position/exposure cap can be exceeded when the fill gaps up from the decision price | Medium | Documented, pinned by test |
+
+Defect 7 is the one that is *not* fixed, and it is worth stating why. The risk
+engine sizes an order against the decision price; the fill happens at the next
+session's open. When the open gaps up, the position actually bought is worth more
+than the limit allowed — sizing at 20% of equity on a 100 close and filling at a
+200 open yields a position worth 40% of equity. The engine is event-driven, so
+the check and the fill are necessarily one session apart. The honest fix is a
+re-check at fill time against the actual fill price, which is a deliberate design
+change rather than a patch, so the current behaviour is pinned by
+`tests/test_backtest_engine.py::TestPositionCapThroughAGap` and recorded as a
+known limitation. The ledger's own long-only and cash constraints still hold; it
+is only the equity-relative sizing cap that the gap can breach.
+
+Two things were checked and found sound, and are worth recording because they are
+easy to get wrong:
+
+- **Accounting conservation holds exactly.** `cash + cost_basis + total_fees -
+  realized_pnl == initial_cash` was verified to floating-point zero across mixed
+  buys, a partial exit, and a full round trip, and fees are counted once
+  (`total_fees` = 20 for a two-leg trade), not double counted.
+- **The performance formulas are correct.** Sharpe, Sortino, max drawdown, CAGR,
+  annualised return, win rate, profit factor, average win/loss and expectancy were
+  each recomputed by hand and matched to machine precision.
+
+One earlier concern was withdrawn. The branch is *graph-wise* behind `main` by one
+commit, but `git diff main HEAD` on the shared paths is empty: the PR's tree is a
+strict superset of `main`'s, so merging it cannot revert anything. A content diff,
+not the commit graph, is what decides that, and the content diff is clean.

@@ -109,13 +109,22 @@ level rather than at the gap open, and a disabled-stops case.
 | | Count |
 |---|---|
 | Before this work | 1412 passed, 1 skipped, 1 deselected |
-| After | 1899 passed, 1 skipped, 1 deselected, 100 subtests passed |
-| Added | 487 tests across 13 files |
+| After the initial implementation | 1899 passed, 1 skipped, 1 deselected, 100 subtests passed |
+| After the adversarial review | 1931 passed, 1 skipped, 1 deselected, 100 subtests passed |
+| Added | 519 tests across 13 files |
 
 The suite refuses network access by default (an autouse fixture in
 `tests/conftest.py`), so every test is hermetic and runs offline. `ruff check .`
 passes. The one skip is `langchain_aws` not being installed in this environment;
 its provider support is untouched.
+
+The 1,899 figure was the count *before* the adversarial review. That review found
+seven defects the suite had not caught, of which six were fixed and one
+documented; the 32 tests added between 1,899 and 1,931 are the regression tests
+for those defects, one group per defect. The fact that the suite was green while
+those defects were live is the point of the review, and it is why "all tests pass"
+was not treated as evidence of correctness. See section 15 of
+`docs/TRADING_SYSTEM_AUDIT.md` for the defect list and the reproductions.
 
 ## Backtesting improvements
 
@@ -262,6 +271,31 @@ These are real, and are stated rather than hidden:
 7. **LLM calls are not deterministic.** The deterministic layers are reproducible
    from configuration; the signals feeding them are not, which is why each carries
    its reasoning and a content-derived id.
+8. **An equity-relative position cap can be breached by a gap.** The risk engine
+   sizes against the decision price and the fill happens at the next open, so a
+   large up-gap leaves a position worth more than the cap allowed. Found in the
+   adversarial review; not fixed, because the honest fix is a fill-time re-check
+   against the actual fill price, which is a design change. Pinned by
+   `tests/test_backtest_engine.py::TestPositionCapThroughAGap`. Cash and long-only
+   constraints still hold through such a gap; only the sizing cap can be exceeded.
+
+## Adversarial review
+
+After the implementation was complete it was re-reviewed against the code rather
+than against its own test count. Seven defects were found that the 1,899-test
+suite had not caught; six were fixed with regression tests and the seventh is
+documented above. The fixed ones were: non-finite prices, quantities and fees
+silently poisoning the ledger; a non-finite market price producing an order marked
+`FILLED`; a re-submitted order filling twice; the strategy context exposing future
+bars through `ctx.feed`; a non-finite bar raising mid-backtest instead of being
+dropped at construction; and `Quote` accepting a non-finite price in paper mode.
+The full list, with reproductions and the reasoning for the one that was not
+fixed, is section 15 of `docs/TRADING_SYSTEM_AUDIT.md`.
+
+Two things were verified as correct rather than assumed: the accounting
+conservation identity holds to floating-point zero, and the performance formulas
+(Sharpe, Sortino, drawdown, CAGR, win rate, profit factor, expectancy) match
+hand-computed values to machine precision.
 
 ## Remaining work
 
@@ -271,6 +305,8 @@ These are real, and are stated rather than hidden:
 - A per-series FRED release calendar.
 - Wiring the telemetry budget into the graph loop as a hard stop.
 - A CLI subcommand for a simulated run, once the shape of the run is settled.
+- A fill-time risk re-check, so an equity-relative position cap cannot be
+  exceeded by a gap between the decision price and the fill price (limitation 8).
 
 ## How to run
 
@@ -329,9 +365,24 @@ feat: add run reports in HTML and JSON, built from one document
 
 ## Final status
 
-**FINAL STATUS: PASS**
+**FINAL STATUS: PARTIAL**
 
-Every phase in the task is implemented and tested. The multi-agent architecture is
-preserved and remains the analytical component. There is no live trading path and
-no secret committed. The limitations above are real but are stated, tested where
-testable, and recorded in code rather than left for a reader to discover.
+The task is implemented and tested, but "PASS" would be too strong a word for it
+after an adversarial review, so the status is stated honestly rather than
+generously.
+
+What is done: every phase in the task is implemented; the multi-agent
+architecture is preserved and remains the analytical component; there is no live
+trading path and no secret committed; the accounting, execution, risk, cost,
+walk-forward and performance layers are tested; the accounting conservation
+identity holds to floating-point zero and the performance formulas match
+hand-computed values.
+
+Why not PASS: the review found seven defects in the delivered code that the
+1,899-test suite had not caught. Six are fixed with regression tests. The seventh
+— an equity-relative position cap can be exceeded when the fill gaps up from the
+decision price — is a real, unfixed limitation, documented and pinned by a test
+rather than hidden. A system with a known, unaddressed risk-limit gap is not a
+clean pass, and the honest status reflects that. The gap is bounded: cash and
+long-only constraints still hold through it, and it requires a large up-gap
+between the decision session and the fill session to occur.

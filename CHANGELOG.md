@@ -54,6 +54,25 @@ path, and no configuration that produces one.
   `docs/EXECUTION.md`, `docs/PAPER_TRADING.md`, `docs/TRADING_SYSTEM_AUDIT.md`
   and `docs/FINAL_DEVELOPMENT_REPORT.md`, plus `examples/simulated_run.py`.
 
+### Fixed
+
+- A non-finite price, quantity or fee is refused by the ledger. A NaN passed the
+  `price <= 0` and `fee < 0` guards (both are false for NaN) and was applied,
+  turning cash, equity and the exposure check into NaN for the rest of the run;
+  infinity passed the same guards. Both are now rejected before any state change.
+- A non-finite market price is rejected by the execution engine instead of
+  producing an order marked `FILLED` with a NaN fill price.
+- An order that has already reached a terminal state is not re-evaluated.
+  Submitting a filled order a second time filled it twice, because the ledger
+  cannot distinguish a re-submission from a second genuine order.
+- A strategy's context is bounded at its session, so `context.feed.bar(symbol,
+  tomorrow)` no longer returns tomorrow's bar. The look-ahead guarantee was a
+  property of `context.history` only, and one attribute deeper the feed answered
+  for any date.
+- A bar with a non-finite price is dropped when the feed is built rather than
+  raising mid-backtest on an arbitrary later session.
+- A paper-mode `Quote` refuses a non-finite price.
+
 ### Notes
 
 - Prices are split-adjusted, so a backtest reflects price return only; dividends
@@ -61,6 +80,10 @@ path, and no configuration that produces one.
 - LLM calls are not deterministic, so a run's signals carry their own reasoning
   and a content-derived id; the deterministic layers around them are reproducible
   from the run configuration.
+- A known limitation: an equity-relative position cap can be exceeded when the
+  fill gaps up from the decision price, because the engine sizes at the decision
+  and fills at the next open. Pinned by a test and recorded in
+  `docs/FINAL_DEVELOPMENT_REPORT.md` rather than hidden.
 
 
 ## [0.7.1] — 2026-10-27

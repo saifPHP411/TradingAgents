@@ -52,3 +52,22 @@ module of the same name has already broken an import once here.
   `dataflows/pit.py`. Do not call a source PIT-safe without one.
 - Tests are written to catch a premise error, not to confirm the code. When a
   test fails, first check whether the test's premise is right.
+- Every number that enters the ledger must be finite. NaN is the dangerous case,
+  because `x <= 0` and `x < 0` are both false for it, so a NaN passes the usual
+  positivity guards and then poisons cash and equity. Check `math.isfinite`
+  explicitly, never rely on a comparison.
+- An order may fill at most once. `ExecutionSimulator.submit` refuses an order
+  that is already terminal, because the ledger cannot tell a re-submission from a
+  second genuine order.
+- A strategy's `context.feed` is a view bounded at the session, not the whole
+  feed. Do not hand a strategy the raw feed; that re-opens look-ahead through
+  `feed.bar(symbol, future_date)`.
+
+## Known limitation
+
+An equity-relative position or exposure cap can be exceeded when the fill gaps up
+from the decision price: the risk engine sizes at the decision session's price and
+the fill happens at the next session's open. This is deliberate and pinned by
+`tests/test_backtest_engine.py::TestPositionCapThroughAGap`. Fixing it means a
+fill-time re-check against the actual fill price, which is a design change, not a
+patch. Cash and long-only constraints still hold through such a gap.

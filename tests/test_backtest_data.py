@@ -230,3 +230,68 @@ class TestHelpers:
     def test_as_date_rejects_nonsense(self):
         with pytest.raises(BarDataError):
             as_date("banana")
+
+
+# ---------------------------------------------------------------------------
+# Non-finite bars and the session-bounded view
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNonFiniteBarsAreDroppedAtConstruction:
+    """A non-finite price must be dropped when the feed is built, not raise later.
+
+    Regression test for a real defect: ``_normalize`` kept a row whose price was
+    ``inf`` because ``inf > 0`` is true, and ``Bar`` only rejected it when
+    ``bar()`` was called — mid-backtest. A vendor that emits one inf would abort
+    a run on an arbitrary later session rather than simply leaving that date with
+    no bar. Dropping it at construction keeps the failure at the boundary and the
+    run alive.
+    """
+
+    def test_an_infinite_price_row_is_dropped(self):
+        frame = _frame(DATES[:2], [100.0, 101.0])
+        frame.loc[pd.Timestamp("2026-01-06"), "close"] = float("inf")
+        feed = MarketDataFeed({"AAPL": frame})
+        assert feed.calendar() == ["2026-01-05"]
+        assert feed.bar("AAPL", "2026-01-06") is None
+
+    def test_a_nan_price_row_is_dropped(self):
+        frame = _frame(DATES[:2], [100.0, 101.0])
+        frame.loc[pd.Timestamp("2026-01-06"), "open"] = float("nan")
+        feed = MarketDataFeed({"AAPL": frame})
+        assert feed.calendar() == ["2026-01-05"]
+
+
+@pytest.mark.unit
+class TestSessionBoundedView:
+    """``as_of`` must hide every later bar, on every accessor.
+
+    Regression test for a real defect: the strategy context handed over the raw
+    feed, so ``context.feed.bar(symbol, tomorrow)`` returned tomorrow's bar even
+    though ``context.history`` was safe. The guarantee has to hold for the object
+    the strategy holds, not only for the helper methods it is expected to use.
+    """
+
+    def test_as_of_hides_later_bars(self, feed):
+        view = feed.as_of("2026-01-07")
+        assert view.calendar() == ["2026-01-05", "2026-01-06", "2026-01-07"]
+        assert view.bar("AAPL", "2026-01-08") is None
+        assert view.bar("AAPL", "2026-01-07") is not None
+
+    def test_as_of_history_cannot_reach_past_the_boundary(self, feed):
+        view = feed.as_of("2026-01-06")
+        history = view.history("AAPL", "2026-01-09")
+        assert [str(d.date()) for d in history.index] == ["2026-01-05", "2026-01-06"]
+
+    def test_as_of_latest_bar_at_or_before_is_bounded(self, feed):
+        view = feed.as_of("2026-01-06")
+        bar = view.latest_bar_at_or_before("AAPL", "2026-01-09")
+        assert bar.date == "2026-01-06"
+
+    def test_as_of_the_last_session_returns_the_same_feed(self, feed):
+        assert feed.as_of("2026-01-09") is feed
+
+    def test_as_of_before_any_bar_is_an_error(self, feed):
+        with pytest.raises(BarDataError):
+            feed.as_of("2026-01-01")

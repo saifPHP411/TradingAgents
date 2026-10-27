@@ -28,6 +28,7 @@ from a dict of prices and the same code path is exercised as in production.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -64,8 +65,8 @@ class Quote:
     average_daily_volume: float | None = None
 
     def __post_init__(self) -> None:
-        if self.price <= 0:
-            raise PaperSessionError(f"quote price must be positive, got {self.price}")
+        if not math.isfinite(self.price) or self.price <= 0:
+            raise PaperSessionError(f"quote price must be finite and positive, got {self.price}")
 
     def as_market(self) -> MarketContext:
         return MarketContext(

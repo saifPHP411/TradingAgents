@@ -30,10 +30,26 @@ unrealised P&L of zero rather than a guess.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from tradingagents.portfolio.events import EventType, LedgerEvent
+
+
+def _require_finite(value: float, what: str) -> float:
+    """Reject NaN and infinity before they reach the book.
+
+    A NaN is the worst input this ledger can be handed, because it is not a
+    *wrong* number so much as a *contagious* one: ``cash + nan`` is NaN, and NaN
+    compares false against every bound, so a single NaN price slips past the
+    ``<= 0`` guards and poisons cash, equity and every later comparison at once.
+    Infinity is quieter but no better: it passes the same guards and produces an
+    infinite cash balance. Neither is a market outcome, so neither is accepted.
+    """
+    if not math.isfinite(value):
+        raise LedgerError(f"{what} must be a finite number, got {value!r}")
+    return float(value)
 
 
 class LedgerError(Exception):
@@ -116,9 +132,9 @@ class Ledger:
     def __init__(self, initial_cash: float, currency: str = "USD") -> None:
         if initial_cash <= 0:
             raise LedgerError(f"initial_cash must be positive, got {initial_cash}")
-        self.initial_cash = float(initial_cash)
+        self.initial_cash = _require_finite(initial_cash, "initial_cash")
         self.currency = currency
-        self.cash = float(initial_cash)
+        self.cash = self.initial_cash
         self.holdings: dict[str, Holding] = {}
         self.events: list[LedgerEvent] = []
         self._seq = 0
@@ -189,6 +205,7 @@ class Ledger:
 
     def mark(self, symbol: str, price: float) -> None:
         """Record the latest price for ``symbol``, so unrealised P&L is meaningful."""
+        _require_finite(price, "mark price")
         if price <= 0:
             raise LedgerError(f"mark price must be positive, got {price}")
         self.holding(symbol).last_price = float(price)
@@ -223,6 +240,9 @@ class Ledger:
         """
         if quantity == 0:
             raise LedgerError("a fill of zero units is not a fill")
+        _require_finite(quantity, "fill quantity")
+        _require_finite(price, "fill price")
+        _require_finite(fee, "fill fee")
         if price <= 0:
             raise LedgerError(f"fill price must be positive, got {price}")
         if fee < 0:
@@ -323,6 +343,7 @@ class Ledger:
     def charge_fee(self, *, amount: float, timestamp: datetime, symbol: str | None = None,
                    reason: str = "") -> None:
         """Charge a cost with no market side (a custody or data fee)."""
+        _require_finite(amount, "fee amount")
         if amount < 0:
             raise LedgerError(f"fee must not be negative, got {amount}")
         if amount > self.cash + 1e-9:

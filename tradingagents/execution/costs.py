@@ -21,6 +21,7 @@ the ledger unreproducible, which defeats the point of testing it.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -160,12 +161,16 @@ class CostModel(BaseModel):
         """
         if reference_price <= 0:
             raise ValueError(f"reference_price must be positive, got {reference_price}")
+        if not math.isfinite(reference_price) or not math.isfinite(quantity):
+            raise ValueError(
+                f"reference_price and quantity must be finite, got {reference_price!r} and {quantity!r}"
+            )
         adverse_bps = self.half_spread_bps + self.slippage_bps_for(
             quantity=quantity, price=reference_price, average_daily_volume=average_daily_volume
         )
         direction = 1.0 if side is Side.BUY else -1.0
         fill = reference_price * (1.0 + direction * adverse_bps / 10_000.0)
-        if fill <= 0:
+        if not math.isfinite(fill) or fill <= 0:
             raise ValueError(
                 f"costs priced {side.value} fill at {fill}; reduce the configured spread/slippage"
             )

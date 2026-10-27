@@ -387,3 +387,67 @@ class TestSnapshot:
 @pytest.mark.unit
 def test_ledger_event_is_exported_from_the_package():
     assert LedgerEvent is not None
+
+
+# ---------------------------------------------------------------------------
+# Non-finite inputs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNonFiniteInputsAreRefused:
+    """A NaN or an infinity must be refused, not absorbed.
+
+    These are regression tests for a real defect: ``price <= 0`` and ``fee < 0``
+    are both *false* for a NaN, so a NaN price slipped past every guard and was
+    applied. ``cash + nan`` is NaN, and NaN compares false against every later
+    bound, so one NaN fill turned cash, equity and the exposure check into NaN
+    for the rest of the run. Infinity passed the same guards and produced an
+    infinite cash balance. Neither is a market outcome, so neither is accepted.
+    """
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_fill_price_is_refused(self, bad):
+        ledger = _ledger()
+        with pytest.raises(LedgerError):
+            ledger.apply_fill(symbol="AAPL", quantity=10, price=bad, fee=0.0, timestamp=T0)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_fill_quantity_is_refused(self, bad):
+        ledger = _ledger()
+        with pytest.raises(LedgerError):
+            ledger.apply_fill(symbol="AAPL", quantity=bad, price=100.0, fee=0.0, timestamp=T0)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_non_finite_fee_is_refused(self, bad):
+        ledger = _ledger()
+        with pytest.raises(LedgerError):
+            ledger.apply_fill(symbol="AAPL", quantity=10, price=100.0, fee=bad, timestamp=T0)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_non_finite_mark_is_refused(self, bad):
+        ledger = _ledger()
+        ledger.apply_fill(symbol="AAPL", quantity=10, price=100.0, fee=0.0, timestamp=T0)
+        with pytest.raises(LedgerError):
+            ledger.mark("AAPL", bad)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_non_finite_initial_cash_is_refused(self, bad):
+        with pytest.raises(LedgerError):
+            Ledger(initial_cash=bad)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_non_finite_charged_fee_is_refused(self, bad):
+        ledger = _ledger()
+        with pytest.raises(LedgerError):
+            ledger.charge_fee(amount=bad, timestamp=T0)
+
+    def test_a_refused_non_finite_fill_leaves_the_book_untouched(self):
+        ledger = _ledger(10_000.0)
+        with pytest.raises(LedgerError):
+            ledger.apply_fill(symbol="AAPL", quantity=10, price=float("nan"), fee=0.0, timestamp=T0)
+        assert ledger.cash == pytest.approx(10_000.0)
+        assert ledger.position_quantity("AAPL") == 0.0
+        assert ledger.events == []
+        # The whole point: the book is still finite and still equals its start.
+        assert ledger.equity == pytest.approx(10_000.0)

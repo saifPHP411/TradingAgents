@@ -408,3 +408,104 @@ class TestConfigValidation:
     def test_a_non_positive_holding_period_is_refused(self):
         with pytest.raises(ValueError, match="holding_period_days"):
             BacktestConfig(holding_period_days=0)
+
+
+# ---------------------------------------------------------------------------
+# The strategy cannot see the future, and a cap holds through a gap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestStrategyCannotSeeTheFuture:
+    """The context a strategy is handed must not expose a later bar.
+
+    Regression test for a real defect: the engine passed the raw feed to the
+    strategy context, so ``ctx.feed.bar(symbol, tomorrow)`` returned tomorrow's
+    bar. The safe ``ctx.history`` helper was not the only way in. A strategy that
+    read the future would have produced optimistic results that no other test
+    would flag, which is the worst kind of backtest bug.
+    """
+
+    def test_the_context_feed_is_bounded_at_the_session(self):
+        feed = _feed()
+        seen = {}
+
+        def strategy(ctx):
+            seen[ctx.session] = ctx.feed.bar("AAPL", "2026-01-12")
+            return None
+
+        PortfolioBacktester(feed, strategy, config=BacktestConfig()).run()
+        for session, bar in seen.items():
+            if bar is not None:
+                assert bar.date <= session, f"{session} could see {bar.date}"
+
+    def test_the_context_feed_calendar_ends_at_the_session(self):
+        feed = _feed()
+        lengths = {}
+
+        def strategy(ctx):
+            lengths[ctx.session] = ctx.feed.calendar()[-1]
+            return None
+
+        PortfolioBacktester(feed, strategy, config=BacktestConfig()).run()
+        for session, last in lengths.items():
+            assert last == session
+
+    def test_the_context_history_is_still_bounded(self):
+        feed = _feed()
+        seen = {}
+
+        def strategy(ctx):
+            history = ctx.history("AAPL")
+            seen[ctx.session] = str(history.index[-1].date())
+            return None
+
+        PortfolioBacktester(feed, strategy, config=BacktestConfig()).run()
+        for session, last in seen.items():
+            assert last == session
+
+
+@pytest.mark.unit
+class TestPositionCapThroughAGap:
+    """A position limit must hold for the position the fill actually creates.
+
+    Regression test for a real defect, and a subtle one: the risk engine sizes
+    against the *decision* price, but the fill happens at the next session's open.
+    When the open gaps up, the position that is actually bought is worth far more
+    than the limit allowed. Sizing at 20% of equity on a 100 close and filling at
+    a 200 open produced a position worth 40% of equity. The engine is
+    event-driven, so the check and the fill are one session apart and the price
+    can move between them; this test pins the current, documented behaviour so a
+    future change to bound it is a deliberate one rather than an accident.
+    """
+
+    def test_a_gap_up_fill_can_exceed_the_position_cap(self):
+        dates = ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08"]
+        feed = _feed(
+            dates=dates,
+            opens=[100.0, 200.0, 200.0, 200.0],
+            closes=[100.0, 200.0, 200.0, 200.0],
+            highs=[101.0, 201.0, 201.0, 201.0],
+            lows=[99.0, 199.0, 199.0, 199.0],
+        )
+
+        def strategy(ctx):
+            if ctx.session == dates[0] and ctx.position("AAPL") == 0:
+                return _signal(dates[0], position_size=0.20)
+            return None
+
+        config = BacktestConfig(
+            initial_cash=100_000.0,
+            holding_period_days=5,
+            risk_limits=RiskLimits(max_position_size=0.20, max_portfolio_exposure=1.0),
+        )
+        result = PortfolioBacktester(feed, strategy, config=config).run()
+        ledger = result.ledger
+        quantity = ledger.position_quantity("AAPL")
+        assert quantity > 0
+        # The limit was respected at the decision price...
+        assert quantity * 100.0 <= 0.20 * 100_000.0 + 1e-6
+        # ...but the fill gapped, so the marked position is over the cap. This is
+        # the documented limitation, not an assertion that it is acceptable.
+        marked_fraction = quantity * 200.0 / ledger.equity
+        assert marked_fraction > 0.20
