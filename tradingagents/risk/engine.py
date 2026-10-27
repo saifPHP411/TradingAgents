@@ -329,39 +329,67 @@ class RiskEngine:
                 f"requested size {signal.position_size:.2%} clamped to the "
                 f"{limits.max_position_size:.2%} position limit"
             )
-        fraction = min(
+        requested_value = min(
             requested,
             limits.max_position_size if limits.max_position_size is not None else requested,
-        )
+        ) * equity
 
-        # A new position must fit inside both the per-position cap and whatever
-        # exposure headroom is left; an existing position only needs the
-        # per-position cap, because adding to it does not add a new name.
+        # Every cap bounds the position the order would *leave behind*, not the
+        # order itself. Capping the order alone would let a strategy that buys
+        # 10% five times hold 50% of a name, which is the opposite of a position
+        # limit. So each cap is converted into headroom above the holding.
         held = ledger.position_quantity(signal.symbol)
         held_value = held * price
-        exposure_cap_value = self._exposure_headroom_value(ledger, equity, held_value)
-        if exposure_cap_value is not None:
-            if exposure_cap_value <= 0:
-                decision.reasons.append(RiskReason.MAX_PORTFOLIO_EXPOSURE)
-                decision.notes.append(
-                    f"the book is at the {self.limits.max_portfolio_exposure:.2%} exposure "
-                    "limit; there is no room for a new position"
-                )
-                return 0.0
-            fraction = min(fraction, exposure_cap_value / equity) if equity else 0.0
+        value = requested_value
 
-        target_value = fraction * equity
+        position_headroom = self._position_headroom_value(ledger, equity, held_value, decision)
+        if decision.reasons:
+            return 0.0
+        if position_headroom is not None:
+            if requested_value > position_headroom:
+                decision.notes.append(
+                    f"size reduced to keep {signal.symbol} within the "
+                    f"{limits.max_position_size:.2%} position limit"
+                )
+            value = min(value, position_headroom)
+
+        exposure_headroom = self._exposure_headroom_value(ledger, equity, held_value, decision)
+        if decision.reasons:
+            return 0.0
+        if exposure_headroom is not None:
+            value = min(value, exposure_headroom)
+
         cash = ledger.cash
-        if target_value > cash:
+        if value > cash:
             decision.notes.append(
-                f"size capped by available cash: {target_value:,.2f} requested, {cash:,.2f} free"
+                f"size capped by available cash: {value:,.2f} requested, {cash:,.2f} free"
             )
-            target_value = cash
+            value = cash
 
         self._check_new_position_count(decision, ledger, signal.symbol)
 
-        quantity = self._apply_value_limits(target_value, price, decision)
-        return quantity
+        return self._apply_value_limits(value, price, decision)
+
+    def _position_headroom_value(
+        self, ledger: Ledger, equity: float, held_value: float, decision: RiskDecision
+    ) -> float | None:
+        """Value that may be added without taking this symbol past its position cap.
+
+        ``None`` when no cap is configured. Zero (recorded as a rejection) when
+        the holding is already at or above the cap, which happens when a position
+        appreciates into its limit or when a cap is tightened mid-run.
+        """
+        cap = self.limits.max_position_size
+        if cap is None:
+            return None
+        headroom = cap * equity - held_value
+        if headroom <= 0:
+            decision.reasons.append(RiskReason.MAX_POSITION_SIZE)
+            decision.notes.append(
+                f"the {self.limits.max_position_size:.2%} position limit leaves no room to add"
+            )
+            return 0.0
+        return headroom
 
     def _size_sell(
         self, signal: TradingSignal, ledger: Ledger, price: float, decision: RiskDecision
@@ -381,20 +409,29 @@ class RiskEngine:
         return min(held, held * requested) if requested < 1.0 else held
 
     def _exposure_headroom_value(
-        self, ledger: Ledger, equity: float, held_value: float
+        self, ledger: Ledger, equity: float, held_value: float, decision: RiskDecision
     ) -> float | None:
         """Value that may still be added without breaching the exposure cap.
 
         ``None`` when no cap is configured. The current market value of this
         symbol is excluded from the base, because the cap applies to the book
         *after* the order and the order replaces part of that value rather than
-        adding to it.
+        adding to it. Zero, recorded as a rejection, when the book is already at
+        the cap.
         """
         if self.limits.max_portfolio_exposure is None:
             return None
         cap_value = self.limits.max_portfolio_exposure * equity
         current = ledger.market_value - held_value
-        return max(cap_value - current, 0.0)
+        headroom = cap_value - current
+        if headroom <= 0:
+            decision.reasons.append(RiskReason.MAX_PORTFOLIO_EXPOSURE)
+            decision.notes.append(
+                f"the book is at the {self.limits.max_portfolio_exposure:.2%} exposure "
+                "limit; there is no room for another position"
+            )
+            return 0.0
+        return headroom
 
     def _check_new_position_count(self, decision: RiskDecision, ledger: Ledger, symbol: str) -> None:
         """A new name must not take the book past its position count."""
