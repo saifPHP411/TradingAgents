@@ -23,6 +23,17 @@ from tradingagents.backtesting.engine import (
     StrategyContext,
     Trade,
 )
+from tradingagents.backtesting.walkforward import (
+    Fold,
+    WalkForwardResult,
+    Window,
+    WindowError,
+    assert_no_leakage,
+    build_folds,
+    run_walk_forward,
+    select_best,
+    slice_feed,
+)
 
 __all__ = [
     "BacktestConfig",
@@ -30,6 +41,7 @@ __all__ = [
     "Bar",
     "BarDataError",
     "EquityPoint",
+    "Fold",
     "MarketDataFeed",
     "OpenPosition",
     "PortfolioBacktester",
@@ -37,6 +49,14 @@ __all__ = [
     "Strategy",
     "StrategyContext",
     "Trade",
+    "WalkForwardResult",
+    "Window",
+    "WindowError",
     "as_date",
+    "assert_no_leakage",
+    "build_folds",
+    "run_walk_forward",
+    "select_best",
+    "slice_feed",
     "trading_days_between",
 ]
