@@ -10,7 +10,14 @@ pytest -q                 # full suite; offline, no API key needed
 python -m ruff check .    # lint
 python -m pytest tests/test_backtest_engine.py -q   # one module
 python examples/simulated_run.py                    # end-to-end simulated run
+python -m tradingagents.baseline.run --out docs/baseline/official_baseline.json  # official baseline
 ```
+
+`python -m tradingagents.baseline.fetch_data` is the only network entry point in
+the baseline package, and it is run once by a human to freeze
+`tradingagents/baseline/data/`. Never call it from a test or from a run. The
+download goes through `dataflows/vendors/yahoo/ohlcv.load_ohlcv_range`, because
+`tests/test_layering.py` allows only the data layer to import `yfinance`.
 
 `pytest` refuses network access via an autouse fixture in `tests/conftest.py`, so
 tests are hermetic. Do not add a test that needs a live vendor or an API key
@@ -39,6 +46,13 @@ Two similar-sounding modules are deliberately distinct:
 
 Do not merge either pair; they answer different questions. A package shadowing a
 module of the same name has already broken an import once here.
+
+`tradingagents/baseline/` is the reproducible *reference* baseline: one
+deterministic strategy, a frozen committed dataset, a versioned protocol, and an
+independent cross-check. It is not a baseline of the LLM strategy, which is
+non-deterministic and needs credentials; do not describe it as one. The frozen
+data under `tradingagents/baseline/data/` is the source of truth — a re-fetch is
+a new baseline version, not an update.
 
 ## Conventions
 
