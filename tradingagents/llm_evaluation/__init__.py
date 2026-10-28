@@ -41,6 +41,12 @@ from .point_in_time import (
     source_facts,
 )
 from .protocol import DEFAULT_PROTOCOL, LLMEvaluationProtocol
+from .provider_audit import (
+    ProviderReadiness,
+    looks_like_a_real_credential,
+    provider_readiness,
+    provider_report,
+)
 from .records import (
     SOURCE_LLM_INFERENCE,
     SOURCE_OPERATOR_SUPPLIED,
@@ -70,6 +76,7 @@ __all__ = [
     "DecisionRecordSet",
     "EvaluationOutcome",
     "LLMEvaluationProtocol",
+    "ProviderReadiness",
     "ReadinessVerdict",
     "ReplayError",
     "ReplayStrategy",
@@ -77,8 +84,11 @@ __all__ = [
     "build_evaluation",
     "credential_status",
     "graph_readiness",
+    "looks_like_a_real_credential",
     "no_llm_calls",
     "point_in_time_report",
+    "provider_readiness",
+    "provider_report",
     "redact_reasoning",
     "sha256_text",
     "signal_from_record",

@@ -61,6 +61,12 @@ do not hand-edit the matrix — change `dataflows/pit.py` and the tests will fol
 A source's classification is one-way from its registry level; do not claim a
 `WINDOW_FILTERED` source is `PIT_VERIFIED` because it returned a historical date.
 
+`tradingagents/llm_evaluation/provider_audit.py` reports which LLM providers this
+environment can reach. It reads env-var *names* only and contacts nothing; do not
+make it read a key value or probe a provider. A free-tier claim in it must carry
+the official URL it was checked against — no URL, no claim. Readiness and
+point-in-time data are separate blockers; neither implies the other.
+
 ## Conventions
 
 - Never add a live trading path. `ExecutionMode` has only `BACKTEST` and `PAPER`,

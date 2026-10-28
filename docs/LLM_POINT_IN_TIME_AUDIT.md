@@ -149,15 +149,28 @@ data.**
 |---|---|---|---|---|
 | Frozen dataset (in repo) | Daily OHLCV for the baseline universe, 2022–2024 | Committed bytes; byte-identical each run | None | Yes — the only source the `price_only` scope uses |
 | Yahoo (prices/indicators/news) | Broad | prices request-bounded; news window-filtered | None | Network reachable, but live-only for news and rate-limited (HTTP 429 observed) |
-| SEC EDGAR | US filings as filed | window-filtered (needs filing dates) | `SEC_EDGAR_USER_AGENT` contact string, no key | Not exercised; no frozen capture in repo |
+| SEC EDGAR | US filings as filed | window-filtered (needs filing dates) | `SEC_EDGAR_USER_AGENT` contact string, no key | Reachable (verified 2026-10-28); `filed`-date filtering is in `vendors/sec_edgar.py`, but no frozen capture in repo |
 | FRED | US + mirrored euro macro | request-bounded with vintage pin | `FRED_API_KEY` (free) | Reachable; key not present here |
 | StockTwits / Reddit | Recent social posts | window-filtered, recent-only | None / OAuth | Not usable for a historical window — feeds are recent-only |
 | Polymarket | Live prediction markets | none | None | Not usable in a backtest |
 
 Network is reachable from this environment (verified: `api.openai.com` returned
 HTTP 401, i.e. reachable but unauthenticated; `fred.stlouisfed.org` returned HTTP
-200; Yahoo returned HTTP 429). Reachability is not authorization and not a
-point-in-time guarantee.
+200; `data.sec.gov` returned HTTP 200 with a contact User-Agent; Yahoo returned
+HTTP 429). Reachability is not authorization and not a point-in-time guarantee.
+
+### SEC EDGAR is the strongest PIT fundamentals path already in the repo
+
+`vendors/sec_edgar.py` serves US filings as they were filed: it reads the
+`filed` date on every XBRL fact and serves only facts filed on or before
+`as_of_date`, taking a restated period at its latest filing *before* that date
+(verified 2026-10-28 against `data.sec.gov`, which exposes `filed`, `form`,
+`start`, `end`, `val`, `accn` per fact). The registry still classifies it
+`WINDOW_FILTERED` / `PIT_PARTIALLY_VERIFIED` because a statement with no exposed
+filing date is *withheld* rather than assumed old, and a filing dated by
+acceptance time can be a day late. It is the closest existing source to a
+point-in-time fundamentals feed and needs no credential — only a contact
+User-Agent.
 
 **A snapshot seam exists but is unused.** `dataflows/pit.py` defines a
 `SnapshotSource` protocol and a `SNAPSHOT_SOURCES` registry (currently empty).
@@ -174,14 +187,22 @@ A **full-graph historical LLM pilot** is blocked by:
 1. **No point-in-time news/sentiment/fundamentals.** The three sources the
    non-market analysts depend on are window-filtered or current-only. There is no
    frozen historical capture in the repository and no snapshot source registered.
-2. **No model credential.** No provider key is present in this environment (see
-   `docs/LLM_EVALUATION.md`). Confirmed by inspecting environment variable names
-   only; no value was read or printed.
+   (SEC EDGAR is the strongest existing PIT path for fundamentals; see above.)
+2. **No model credential.** No provider key is present in this environment.
+   Confirmed by inspecting environment variable names only; no value was read or
+   printed. Documented free-tier options and the exact env var to set are in
+   [`LLM_PROVIDER_AUDIT.md`](LLM_PROVIDER_AUDIT.md).
+3. **No capture path.** Nothing constructs a `DecisionRecord` from a real graph
+   run; records are built only in tests. So even with a credential, there is
+   nothing for `build_evaluation` to evaluate. This is a code gap, not a data gap,
+   and it is deliberately left unfilled until (1) is resolved — a capture over
+   inputs the graph cannot honestly obtain for a historical date would record
+   decisions made from non-point-in-time data.
 
 A **price-only restricted pilot** is not blocked by data — it reads only
 `PIT_VERIFIED` sources — but it does not measure the news, sentiment or
 fundamentals agents, so it is not a full-graph evaluation. It remains blocked by
-the missing credential for genuine inference.
+the missing credential (2) and the missing capture path (3).
 
 ## What would unblock a full-graph historical pilot
 
@@ -189,9 +210,12 @@ the missing credential for genuine inference.
    once per session into a dated local store, implement `SnapshotSource` over it,
    and `register_snapshot_source(...)`. The classification rises to
    `PIT_VERIFIED` for that source automatically.
-2. **Provide a credential** for one supported provider and a request budget.
-3. **Re-run** `graph_readiness("full")` — it should report ready once every source
+2. **Provide a credential** for one supported provider (a documented free tier or
+   a local endpoint is enough) and a request budget.
+3. **Add a capture path** that runs the graph over the frozen dataset and writes
+   its decisions to a `DecisionRecordSet` with the window hash and config hash.
+4. **Re-run** `graph_readiness("full")` — it should report ready once every source
    in the matrix is `PIT_VERIFIED` — then run the bounded pilot declared in
    `docs/LLM_EVALUATION.md`.
 
-Until (1) and (2) hold, the honest status is `LLM BASELINE BLOCKED`.
+Until (1), (2) and (3) hold, the honest status is `LLM BASELINE BLOCKED`.

@@ -95,10 +95,15 @@ machine-readable form is the `point_in_time` block of the evaluation artifact.
 The scaffold is built so that a genuine pilot is a data-and-credential step, not a
 code change. It is currently blocked on both.
 
-**Step 1 — credentials.** Set one provider key. The recognised variables are listed
-by `credential_status()` (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-`GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`, …) or point a local OpenAI-compatible
-endpoint at the graph. No key is present in this environment.
+**Step 1 — credentials.** Set one provider key, or point a local
+OpenAI-compatible endpoint at the graph. No key is present in this environment.
+For a documented free tier (Groq, Google Gemini, OpenRouter) or a local endpoint,
+see [`LLM_PROVIDER_AUDIT.md`](LLM_PROVIDER_AUDIT.md), which records each claim
+with its official source. The recognised variables are listed by
+`credential_status()` (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`GROQ_API_KEY`, `GOOGLE_API_KEY`, …). The provider audit's
+`provider_readiness` block reports which providers are usable *now*, by env-var
+name and boolean only — never a value — and contacts nothing.
 
 **Step 2 — data.** For a `price_only` pilot, the frozen dataset already suffices
 and no network call is needed. For a `full` pilot, first register a snapshot source
@@ -108,7 +113,9 @@ before the pilot runs.
 
 **Step 3 — capture decisions, then replay.** Run the graph on the protocol's
 cadence, record each decision as a `DecisionRecord` (the record carries the window
-hash, the config hash and the source), then evaluate it offline:
+hash, the config hash and the source), then evaluate it offline. Note that **no
+capture path exists in this release**: `DecisionRecord` is built only in tests, so
+a capture step must be added before a genuine pilot can produce a record set.
 
 ```bash
 python -m tradingagents.llm_evaluation.run --records records.json --out eval.json
@@ -213,6 +220,10 @@ JSON-serialisable and versioned (`artifact_schema_version`). It contains:
   whether the run is a restricted (price-only) one.
 - `credentials` — which providers have a credential, **by variable name and
   boolean only, never a value**.
+- `provider_readiness` — per-provider transport, credential requirement, env-var
+  name, whether a usable key is present, whether structured output is needed, and
+  any documented free tier with its official source. Derived from the client
+  registries; contacts nothing.
 - `reference_context` — the SMA reference and buy-and-hold SPY over the same
   windows, labelled as context, **not** LLM results.
 - `llm_results` — the per-window replay result, or `null` when no record set was
@@ -295,7 +306,11 @@ May **not** be used for:
 - **Genuine inference is blocked.** No credential in this environment, and the
   full pipeline needs inputs the frozen dataset does not carry. See
   [`docs/LLM_POINT_IN_TIME_AUDIT.md`](LLM_POINT_IN_TIME_AUDIT.md) for the
-  source-by-source audit and the two named blockers.
+  source-by-source audit and the named blockers, and
+  [`docs/LLM_PROVIDER_AUDIT.md`](LLM_PROVIDER_AUDIT.md) for the provider side
+  (documented free tiers, exact env vars, and the missing capture path).
+- **No capture path.** Nothing constructs a `DecisionRecord` from a real graph
+  run, so a credential alone cannot produce a record set to evaluate.
 - **Price-only by construction.** The restricted evaluation measures one input.
   `graph_readiness("full")` reports the graph not ready for a historical run, with
   named blockers, until a snapshot source is registered.

@@ -34,6 +34,7 @@ from tradingagents.llm_clients.api_key_env import get_api_key_env
 
 from .point_in_time import point_in_time_report
 from .protocol import DEFAULT_PROTOCOL, LLMEvaluationProtocol
+from .provider_audit import provider_report
 from .records import (
     SOURCE_LLM_INFERENCE,
     SOURCE_OPERATOR_SUPPLIED,
@@ -261,6 +262,7 @@ def build_evaluation(
     feed = feed if feed is not None else load_feed(protocol)
 
     pit = point_in_time_report(protocol.input_scope)
+    providers = provider_report()
     evaluated = _scope_agents(protocol.input_scope)
     omitted = tuple(a for a in _scope_agents("full") if a not in evaluated)
     restricted = protocol.input_scope != "full"
@@ -321,6 +323,12 @@ def build_evaluation(
                 + ", ".join(creds["env_var_by_provider"][p] for p in creds["providers_without_credentials"])
                 + " (or configure a local OpenAI-compatible endpoint) to run genuine inference"
             )
+            if providers["free_tier_options"]:
+                blockers.append(
+                    "documented free-tier options to obtain a key: "
+                    + ", ".join(providers["free_tier_options"])
+                    + "; see docs/LLM_PROVIDER_AUDIT.md for the official source of each claim"
+                )
         blockers.append(
             "no captured decision record set was supplied; pass one to build_evaluation() "
             "to evaluate real model output via replay"
@@ -347,6 +355,7 @@ def build_evaluation(
         },
         "protocol": protocol.to_dict(),
         "credentials": creds,
+        "provider_readiness": providers,
         "dataset_checksums": protocol.to_dict()["dataset_checksums"],
         "point_in_time": pit,
         "evaluation_scope": {

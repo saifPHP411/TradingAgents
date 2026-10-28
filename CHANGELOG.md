@@ -136,6 +136,15 @@ path, and no configuration that produces one.
   artifact's new `point_in_time`, `evaluation_scope` and `limitations` blocks, so
   a restricted result cannot be read as a full-graph one. Documented in
   `docs/LLM_POINT_IN_TIME_AUDIT.md`. No live trading path is added.
+- A provider-readiness audit (`llm_evaluation/provider_audit.py`): readiness is
+  derived from the client registries and the *names* of the env vars they declare,
+  so it reports which providers this environment can reach without reading a
+  credential value or contacting a provider. Each provider carries its transport,
+  credential requirement, env var, whether structured output is needed, and any
+  documented free API tier with the official URL it was checked against. The
+  report is embedded in the evaluation artifact as `provider_readiness`, and a
+  blocked evaluation now names the documented free-tier options. Documented in
+  `docs/LLM_PROVIDER_AUDIT.md`. No live trading path is added.
 
 ### Fixed
 
