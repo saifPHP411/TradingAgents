@@ -54,6 +54,13 @@ non-deterministic and needs credentials; do not describe it as one. The frozen
 data under `tradingagents/baseline/data/` is the source of truth — a re-fetch is
 a new baseline version, not an update.
 
+`tradingagents/llm_evaluation/` records and replays LLM decisions offline.
+`point_in_time.py` in that package is the readiness audit: its dependency matrix
+is derived from the graph spec, the router's vendor map and the PIT registry, so
+do not hand-edit the matrix — change `dataflows/pit.py` and the tests will follow.
+A source's classification is one-way from its registry level; do not claim a
+`WINDOW_FILTERED` source is `PIT_VERIFIED` because it returned a historical date.
+
 ## Conventions
 
 - Never add a live trading path. `ExecutionMode` has only `BACKTEST` and `PAPER`,

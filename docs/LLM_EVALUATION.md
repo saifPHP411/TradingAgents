@@ -65,6 +65,64 @@ LLM BASELINE BLOCKED (mode: blocked)
 
 It never invents a number to fill the gap.
 
+## Point-in-time readiness, and why a full-graph historical run is refused
+
+`input_scope="full"` is refused because the news, sentiment and fundamentals
+analysts read sources that are not point-in-time safe for a historical run. That
+is not an assumption; it is derived from the code and reported by
+`graph_readiness(scope)` in `tradingagents/llm_evaluation/point_in_time.py`, which
+builds the agent-by-agent dependency matrix from the graph spec, the router's
+vendor map and the PIT registry in `dataflows/pit.py`.
+
+| Scope | Ready for a historical run? | Why |
+|---|---|---|
+| `price_only` (market analyst) | **Yes** | Reads only `yahoo_prices` and `yahoo_indicators`, both `PIT_VERIFIED` — served as they stood at the run's date. |
+| `full` (all analysts) | **No** | News/sentiment sources are window-filtered (dating is the vendor's word) and fundamentals/social sources are current-only (must be withheld). |
+
+A `price_only` run is a **restricted** evaluation: it measures the market analyst
+and the decision-to-execution pipeline on the one input the frozen dataset carries.
+It does **not** measure the news, sentiment or fundamentals pipeline. The artifact
+records this in `evaluation_scope` and `limitations` so a restricted result cannot
+be read as a full-graph one.
+
+The full audit — every source, its classification, the guard that implements it,
+the residual leak channels, and what would unblock a full-graph pilot — is in
+[`docs/LLM_POINT_IN_TIME_AUDIT.md`](LLM_POINT_IN_TIME_AUDIT.md). The
+machine-readable form is the `point_in_time` block of the evaluation artifact.
+
+## How to run a genuine pilot (when unblocked)
+
+The scaffold is built so that a genuine pilot is a data-and-credential step, not a
+code change. It is currently blocked on both.
+
+**Step 1 — credentials.** Set one provider key. The recognised variables are listed
+by `credential_status()` (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`, …) or point a local OpenAI-compatible
+endpoint at the graph. No key is present in this environment.
+
+**Step 2 — data.** For a `price_only` pilot, the frozen dataset already suffices
+and no network call is needed. For a `full` pilot, first register a snapshot source
+(see the audit's "What would unblock a full-graph historical pilot"), so every
+source in the matrix is `PIT_VERIFIED`. `graph_readiness("full")` must report ready
+before the pilot runs.
+
+**Step 3 — capture decisions, then replay.** Run the graph on the protocol's
+cadence, record each decision as a `DecisionRecord` (the record carries the window
+hash, the config hash and the source), then evaluate it offline:
+
+```bash
+python -m tradingagents.llm_evaluation.run --records records.json --out eval.json
+```
+
+The replay runs the recorded decisions through the frozen engine with no model
+call (enforced by `no_llm_calls`), so the evaluation is reproducible and free. A
+result is marked `genuine_inference: true` only when the record set's source is
+`llm_inference`; a fixture is never presented as genuine model output.
+
+**Step 4 — report honestly.** Compare against the frozen reference baseline
+(`docs/STRATEGY_BASELINE.md`) over the same window, costs and timing. Report the
+scope: a `price_only` result is a lower bound, not the full pipeline's result.
+
 ## The protocol
 
 `tradingagents/llm_evaluation/protocol.py` fixes the evaluation *before* any result
@@ -149,6 +207,10 @@ live one is.
 JSON-serialisable and versioned (`artifact_schema_version`). It contains:
 
 - `protocol` — every value that shapes the run, plus the dataset checksums.
+- `point_in_time` — the agent dependency matrix, each source's classification and
+  guard, and the readiness verdict for the run's scope.
+- `evaluation_scope` — which analysts were evaluated and which were omitted, and
+  whether the run is a restricted (price-only) one.
 - `credentials` — which providers have a credential, **by variable name and
   boolean only, never a value**.
 - `reference_context` — the SMA reference and buy-and-hold SPY over the same
@@ -161,6 +223,7 @@ JSON-serialisable and versioned (`artifact_schema_version`). It contains:
   `llm_inference`.
 - `reproducibility` — which determinism claims are verified by tests and which
   require a working credential.
+- `limitations` — the scope the run actually covered and what it did not measure.
 
 Two builds of the same records are byte-identical except for `generated_at`.
 
@@ -230,8 +293,12 @@ May **not** be used for:
 ## Known limitations
 
 - **Genuine inference is blocked.** No credential in this environment, and the
-  full pipeline needs inputs the frozen dataset does not carry.
+  full pipeline needs inputs the frozen dataset does not carry. See
+  [`docs/LLM_POINT_IN_TIME_AUDIT.md`](LLM_POINT_IN_TIME_AUDIT.md) for the
+  source-by-source audit and the two named blockers.
 - **Price-only by construction.** The restricted evaluation measures one input.
+  `graph_readiness("full")` reports the graph not ready for a historical run, with
+  named blockers, until a snapshot source is registered.
 - **One decision per session.** The production graph makes one decision per ticker
   per date, so the honest mapping is one decision per session; more than one in a
   session raises rather than inventing a priority.

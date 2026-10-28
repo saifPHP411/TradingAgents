@@ -32,6 +32,7 @@ from tradingagents.baseline.data import load_feed
 from tradingagents.baseline.reference import SmaCrossover
 from tradingagents.llm_clients.api_key_env import get_api_key_env
 
+from .point_in_time import point_in_time_report
 from .protocol import DEFAULT_PROTOCOL, LLMEvaluationProtocol
 from .records import (
     SOURCE_LLM_INFERENCE,
@@ -133,6 +134,23 @@ def credential_status() -> dict:
         "any_credential_available": bool(available) or bool(local_endpoint),
         "local_endpoint_configured": bool(local_endpoint),
     }
+
+
+_AGENTS_BY_INPUT_SCOPE = {
+    # What each declared scope can actually evaluate, by analyst key. The frozen
+    # dataset carries prices only, so a price_only run measures the market
+    # analyst alone: news, sentiment and fundamentals need sources the dataset
+    # does not carry and which are not point-in-time safe for a historical run.
+    "price_only": ("market",),
+}
+
+
+def _scope_agents(scope: str) -> tuple[str, ...]:
+    from tradingagents.graph.analyst_execution import ANALYST_NODE_SPECS
+
+    if scope in _AGENTS_BY_INPUT_SCOPE:
+        return _AGENTS_BY_INPUT_SCOPE[scope]
+    return tuple(ANALYST_NODE_SPECS)
 
 
 @dataclass
@@ -242,6 +260,11 @@ def build_evaluation(
     creds = credential_status()
     feed = feed if feed is not None else load_feed(protocol)
 
+    pit = point_in_time_report(protocol.input_scope)
+    evaluated = _scope_agents(protocol.input_scope)
+    omitted = tuple(a for a in _scope_agents("full") if a not in evaluated)
+    restricted = protocol.input_scope != "full"
+
     if include_reference_context:
         reference = _reference_context(feed, protocol)
         spy = _spy_context(feed, protocol)
@@ -303,6 +326,15 @@ def build_evaluation(
             "to evaluate real model output via replay"
         )
 
+    # A restricted scope omits agents; the artifact must say so rather than let a
+    # price-only replay be read as a full-graph evaluation.
+    if restricted:
+        blockers.append(
+            "input_scope='price_only' is a RESTRICTED evaluation: only the market "
+            f"analyst runs. Omitted agents: {', '.join(omitted)}. It does not measure "
+            "the news/sentiment/fundamentals pipeline."
+        )
+
     artifact = {
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).isoformat(),
@@ -316,6 +348,14 @@ def build_evaluation(
         "protocol": protocol.to_dict(),
         "credentials": creds,
         "dataset_checksums": protocol.to_dict()["dataset_checksums"],
+        "point_in_time": pit,
+        "evaluation_scope": {
+            "input_scope": protocol.input_scope,
+            "restricted": restricted,
+            "agents_evaluated": list(evaluated),
+            "agents_omitted": list(omitted),
+            "is_full_graph": not restricted,
+        },
         "reference_context": reference_block,
         "llm_results": llm_results,
         "provenance": provenance,
@@ -326,6 +366,16 @@ def build_evaluation(
             "execution_determinism": "verified by tests (same records -> identical fills/ledger)",
             "replay_determinism": "verified by tests (two replays -> identical artifact)",
             "inference_repeatability": "not tested: requires a working credential",
+        },
+        "limitations": {
+            "point_in_time_scope": pit["readiness"]["scope"],
+            "point_in_time_ready": pit["readiness"]["ready"],
+            "news_sentiment_fundamentals_evaluated": False,
+            "note": (
+                "The frozen dataset is price-only and the news/sentiment/fundamentals "
+                "sources are not point-in-time safe for a historical run; see "
+                "docs/LLM_POINT_IN_TIME_AUDIT.md."
+            ),
         },
     }
     # The artifact is scanned for credentials before it can leave this function.

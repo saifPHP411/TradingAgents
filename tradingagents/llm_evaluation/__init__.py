@@ -32,6 +32,14 @@ from .evaluate import (
     credential_status,
     write_evaluation,
 )
+from .point_in_time import (
+    Classification,
+    ReadinessVerdict,
+    agent_dependency_matrix,
+    graph_readiness,
+    point_in_time_report,
+    source_facts,
+)
 from .protocol import DEFAULT_PROTOCOL, LLMEvaluationProtocol
 from .records import (
     SOURCE_LLM_INFERENCE,
@@ -55,20 +63,26 @@ __all__ = [
     "STATUS_BLOCKED",
     "STATUS_ESTABLISHED",
     "STATUS_ESTABLISHED_WITH_FINDINGS",
+    "Classification",
     "CredentialLeakError",
     "DecisionRecord",
     "DecisionRecordError",
     "DecisionRecordSet",
     "EvaluationOutcome",
     "LLMEvaluationProtocol",
+    "ReadinessVerdict",
     "ReplayError",
     "ReplayStrategy",
+    "agent_dependency_matrix",
     "build_evaluation",
     "credential_status",
+    "graph_readiness",
     "no_llm_calls",
+    "point_in_time_report",
     "redact_reasoning",
     "sha256_text",
     "signal_from_record",
+    "source_facts",
     "window_hash",
     "write_evaluation",
 ]

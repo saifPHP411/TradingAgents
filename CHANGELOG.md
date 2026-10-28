@@ -121,6 +121,21 @@ path, and no configuration that produces one.
   versioned (`artifact_schema_version`) and two builds of the same records are
   byte-identical except for the timestamp. Documented in
   `docs/LLM_EVALUATION.md`. No live trading path is added.
+- A point-in-time readiness audit of the agent graph
+  (`llm_evaluation/point_in_time.py`): the agent-by-agent dependency matrix is
+  derived from the code — the graph spec (`graph/analyst_execution.py`), the
+  router's tool→vendor map (`dataflows/router.py`) and the PIT registry
+  (`dataflows/pit.py`) — so it cannot go stale without a test failing. Each source
+  gets a classification (`PIT_VERIFIED`, `PIT_PARTIALLY_VERIFIED`,
+  `PIT_UNVERIFIED`, `CURRENT_ONLY`, `UNAVAILABLE`) and the guard that implements
+  it, and `graph_readiness(scope)` returns a readiness verdict with named
+  blockers. `price_only` (the market analyst) is ready for a historical run — it
+  reads only request-bounded sources; `full` is not, because the news/sentiment
+  sources are window-filtered and the fundamentals/social sources are current-only.
+  The verdict, matrix and classifications are embedded in the evaluation
+  artifact's new `point_in_time`, `evaluation_scope` and `limitations` blocks, so
+  a restricted result cannot be read as a full-graph one. Documented in
+  `docs/LLM_POINT_IN_TIME_AUDIT.md`. No live trading path is added.
 
 ### Fixed
 

@@ -490,6 +490,11 @@ Phase 4 added these to the "confirmed holds" list after attacking them directly:
   are not credited as cash.
 - LLM calls are not deterministic. The deterministic layers around them are
   reproducible from the run configuration; the calls are not.
+- Point-in-time safety is per-source, not global. The market analyst's inputs are
+  request-bounded and safe for a historical run; the news, sentiment and
+  fundamentals sources are window-filtered or current-only and are withheld from
+  one. A full-graph historical run is therefore refused, not faked; see
+  `docs/LLM_POINT_IN_TIME_AUDIT.md`.
 
 ## Recovery: what may and may not be claimed
 
