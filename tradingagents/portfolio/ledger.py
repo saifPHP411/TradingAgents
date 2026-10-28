@@ -484,37 +484,100 @@ class Ledger:
         P&L, fees, marks and the event log all come back, and ``_seq`` is restored
         to the saved value so a resumed run's event numbers continue rather than
         restart and collide with the ones already written.
+
+        The state is *validated* rather than trusted. A hand-edited or corrupted
+        file that carries a negative cash balance, a negative holding, a
+        non-finite figure or a rolled-back sequence counter would resume with a
+        book the session could never have produced — silently wrong, which is the
+        one outcome a recovery must never have. Every invariant the live ledger
+        maintains is re-checked here, and a violation raises
+        :class:`LedgerError` so the caller refuses the file instead of resuming
+        from it.
         """
-        ledger = cls(
-            initial_cash=float(state["initial_cash"]),
-            currency=state.get("currency", "USD"),
-        )
-        ledger.cash = float(state["cash"])
-        ledger._unattributed_fees = float(state.get("unattributed_fees", 0.0))
+        def finite(value: object, what: str) -> float:
+            try:
+                number = float(value)  # type: ignore[arg-type]
+            except (TypeError, ValueError) as exc:
+                raise LedgerError(f"{what} is not a number: {value!r}") from exc
+            if not math.isfinite(number):
+                raise LedgerError(f"{what} must be finite, got {number!r}")
+            return number
+
+        initial_cash = finite(state.get("initial_cash"), "initial_cash")
+        if initial_cash <= 0:
+            raise LedgerError(f"initial_cash must be positive, got {initial_cash}")
+        cash = finite(state.get("cash"), "cash")
+        if cash < -1e-9:
+            raise LedgerError(f"cash must not be negative, got {cash}")
+        unattributed = finite(state.get("unattributed_fees", 0.0), "unattributed_fees")
+        if unattributed < 0:
+            raise LedgerError(f"unattributed_fees must not be negative, got {unattributed}")
+
+        ledger = cls(initial_cash=initial_cash, currency=state.get("currency", "USD"))
+        ledger.cash = cash
+        ledger._unattributed_fees = unattributed
         for symbol, holding_state in state.get("holdings", {}).items():
+            quantity = finite(holding_state.get("quantity", 0.0), f"{symbol} quantity")
+            if quantity < 0:
+                raise LedgerError(f"{symbol} quantity must not be negative, got {quantity}")
+            average = finite(
+                holding_state.get("average_entry_price", 0.0), f"{symbol} average_entry_price"
+            )
+            if average < 0:
+                raise LedgerError(f"{symbol} average_entry_price must not be negative")
+            if quantity > 1e-12 and average <= 0:
+                raise LedgerError(
+                    f"{symbol} holds {quantity} units but has no positive average entry price"
+                )
+            fees = finite(holding_state.get("fees_paid", 0.0), f"{symbol} fees_paid")
+            if fees < 0:
+                raise LedgerError(f"{symbol} fees_paid must not be negative, got {fees}")
+            realized = finite(holding_state.get("realized_pnl", 0.0), f"{symbol} realized_pnl")
+            last = holding_state.get("last_price")
+            if last is not None:
+                last = finite(last, f"{symbol} last_price")
+                if last <= 0:
+                    raise LedgerError(f"{symbol} last_price must be positive, got {last}")
             opened_at = holding_state.get("opened_at")
             ledger.holdings[symbol] = Holding(
                 symbol=holding_state.get("symbol", symbol),
-                quantity=float(holding_state.get("quantity", 0.0)),
-                average_entry_price=float(holding_state.get("average_entry_price", 0.0)),
-                last_price=None if holding_state.get("last_price") is None
-                else float(holding_state["last_price"]),
-                realized_pnl=float(holding_state.get("realized_pnl", 0.0)),
-                fees_paid=float(holding_state.get("fees_paid", 0.0)),
+                quantity=quantity,
+                average_entry_price=average,
+                last_price=last,
+                realized_pnl=realized,
+                fees_paid=fees,
                 opened_at=datetime.fromisoformat(opened_at) if opened_at else None,
             )
-        ledger.events = [
-            LedgerEvent(
-                seq=int(event["seq"]),
-                timestamp=datetime.fromisoformat(event["timestamp"]),
-                type=EventType(event["type"]),
-                symbol=event.get("symbol"),
-                detail=event.get("detail", {}),
-                reason=event.get("reason", ""),
+
+        events = state.get("events", [])
+        restored_events: list[LedgerEvent] = []
+        for index, event in enumerate(events, start=1):
+            seq = event.get("seq")
+            if seq != index:
+                # ``seq`` is dense and 1-based. Anything else — a duplicate, a
+                # gap, a roll-back — would let the next append mint a number that
+                # already exists, so the log would stop being a proof.
+                raise LedgerError(
+                    f"event {index} has seq {seq!r}; the log must be dense and 1-based"
+                )
+            restored_events.append(
+                LedgerEvent(
+                    seq=int(seq),
+                    timestamp=datetime.fromisoformat(event["timestamp"]),
+                    type=EventType(event["type"]),
+                    symbol=event.get("symbol"),
+                    detail=event.get("detail", {}),
+                    reason=event.get("reason", ""),
+                )
             )
-            for event in state.get("events", [])
-        ]
-        ledger._seq = int(state.get("seq", len(ledger.events)))
+        ledger.events = restored_events
+        seq_counter = state.get("seq", len(restored_events))
+        if seq_counter != len(restored_events):
+            raise LedgerError(
+                f"seq counter {seq_counter!r} disagrees with the {len(restored_events)} "
+                "logged events; a resumed run would reuse or skip sequence numbers"
+            )
+        ledger._seq = int(seq_counter)
         return ledger
 
 

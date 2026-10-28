@@ -178,6 +178,24 @@ path, and no configuration that produces one.
   `signal_id` is recorded as processed only once the quote is in hand, so a data
   outage does not mark a decision that was never acted on, and the caller can
   retry it.
+- `Ledger.from_state` validates the persisted book rather than trusting it, and
+  `Order` refuses an impossible lifecycle at construction. A hand-edited or
+  corrupted state file carrying a negative cash balance or holding, a non-finite
+  figure, a `seq` counter rolled back below the event log (which minted duplicate
+  sequence numbers on the resumed run), or a resting order marked `FILLED` with a
+  remainder — or `ACCEPTED` with a fill — used to resume with silently wrong
+  accounting. Every invariant the live ledger maintains is now re-checked, and
+  `PaperSession.restore` raises `PaperStateError` on a violation instead of
+  resuming from it.
+- A paper session shares one per-session liquidity budget across the orders it
+  works against a symbol. `work_resting` computed the volume allowance per order,
+  so two resting orders for one symbol each filled the whole bar — 800 units where
+  the backtester fills 400. The allowance is now computed once per symbol per
+  session and drawn down in queue order, so paper and backtest agree.
+- The paper session's clock only moves forward. `_roll_day` set the day from any
+  quote it was handed, so an out-of-order (earlier-dated) quote moved the day and
+  the daily-loss baseline backwards; a quote on a date earlier than the session
+  has already seen is now ignored for the day roll.
 
 ### Notes
 
@@ -196,6 +214,9 @@ path, and no configuration that produces one.
   proves a restored session continues with identical accounting and no duplicated
   fills; it does not provide the durability policy. Documented in
   `docs/PAPER_TRADING.md`.
+- The claim recovery supports is "deterministically recovers from a valid saved
+  state", not "crash-safe". A crash-safe claim would need a durable checkpoint,
+  which this release does not have. Recorded in `docs/ADVERSARIAL_AUDIT.md`.
 
 
 ## [0.7.1] — 2026-10-27

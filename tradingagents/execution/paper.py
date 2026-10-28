@@ -353,7 +353,7 @@ class PaperSession:
             order,
             market=quote.as_market(),
             rest_if_unfilled=rests,
-            liquidity_budget=self._liquidity_budget(quote),
+            liquidity_budget=self._session_budget(quote, {}),
         )
         if filled.status in (OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED) and rests:
             if self._has_expired(filled, now):
@@ -413,6 +413,12 @@ class PaperSession:
         still_resting: list[Order] = []
         steps: list[SessionStep] = []
         failure: Exception | None = None
+        # The session's shared units-of-volume allowance, per symbol, exactly as
+        # the backtester computes it. It is consumed in queue order, so two orders
+        # for one symbol cannot each fill the whole bar's worth: the first takes
+        # what it needs and the second draws from what is left. Without this the
+        # paper session would fill more than the backtest on the same data.
+        budget: dict[str, float] = {}
         for order in self.resting:
             if order.status.is_terminal:
                 continue
@@ -479,12 +485,16 @@ class PaperSession:
                     order,
                     market=quote.as_market(),
                     rest_if_unfilled=True,
-                    liquidity_budget=self._liquidity_budget(quote),
+                    liquidity_budget=self._session_budget(quote, budget),
                 )
             except Exception as exc:  # noqa: BLE001 - re-raised below, never swallowed
                 still_resting.append(order)
                 failure = failure or exc
                 continue
+            if filled.filled_quantity > 0:
+                budget[order.symbol] = max(
+                    budget.get(order.symbol, 0.0) - filled.filled_quantity, 0.0
+                )
             if filled.status in (OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED):
                 still_resting.append(filled)
             steps.append(
@@ -569,20 +579,24 @@ class PaperSession:
             return order.model_copy(update={"quantity": order.filled_quantity + review.quantity})
         return order
 
-    def _liquidity_budget(self, quote: Quote) -> float | None:
-        """The units this quote's volume allows one order to fill.
+    def _session_budget(self, quote: Quote, budget: dict[str, float]) -> float | None:
+        """The units this symbol may still fill this session, shared across orders.
 
         Mirrors the backtester's per-session allowance: when participation is
-        configured and the quote carries a volume, a LIMIT order that the market
-        reached can still fill only part of its size, exactly as it would against a
-        bar. ``None`` when participation is off or the volume is unknown, which is
-        the default and means no liquidity limit.
+        configured and the quote carries a volume, the symbol's allowance is its
+        volume times the participation rate, computed once and drawn down as
+        orders fill. ``None`` when participation is off or the volume is unknown,
+        which is the default and means no liquidity limit. The running total in
+        ``budget`` is what makes two orders for one symbol compete for one
+        session's worth of volume rather than each claiming the whole bar.
         """
         participation = self.simulator.max_volume_participation
         volume = quote.average_daily_volume
         if not participation or not volume or volume <= 0:
             return None
-        return volume * participation
+        if quote.symbol not in budget:
+            budget[quote.symbol] = volume * participation
+        return budget[quote.symbol]
 
     def _has_expired(self, order: Order, moment: datetime) -> bool:
         """Whether a resting order has reached its expiry and must be cancelled.
@@ -621,8 +635,17 @@ class PaperSession:
         return step
 
     def _roll_day(self, now: datetime) -> None:
-        """Reset the day's opening equity when the date advances."""
+        """Reset the day's opening equity when the date advances.
+
+        The clock only moves forward. A quote stamped before the current session
+        is stale data, not a new day: rolling to it would move the daily-loss
+        baseline backwards and let a late-arriving old quote reset the risk
+        history. A quote on an earlier date than the session has seen is ignored
+        for the clock, so the day and the baseline never go backwards.
+        """
         today = now.astimezone(UTC).date().isoformat()
+        if self.day is not None and today < self.day:
+            return
         if self.day != today:
             self.day = today
             self.day_start_equity = self.ledger.equity

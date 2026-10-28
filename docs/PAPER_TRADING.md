@@ -117,12 +117,19 @@ which is honest: an order nobody advanced is an order that did not fill.
 
 A GTC limit can also fill only *part* of its size when participation is
 configured and the quote carries a volume; its remainder stays in
-`session.resting` so the next `work_resting` continues it. A resting buy is
-re-checked against the risk caps at the price it will fill at, exactly as a fresh
-entry is, so a gap to the limit cannot leave a position past its cap. An order
-that reaches its `expires_session` is cancelled with `EXPIRED` by `work_resting`,
-and a caller can cancel a live order explicitly with
-`session.cancel_resting(order)`.
+`session.resting` so the next `work_resting` continues it. When participation is
+configured, the session's volume allowance for a symbol is **shared** by every
+order worked against that symbol in one `work_resting` call and drawn down in
+queue order, exactly as the backtester shares one session's liquidity — so two
+orders cannot each fill the whole bar. A resting buy is re-checked against the
+risk caps at the price it will fill at, exactly as a fresh entry is, so a gap to
+the limit cannot leave a position past its cap. An order that reaches its
+`expires_session` is cancelled with `EXPIRED` by `work_resting`, and a caller can
+cancel a live order explicitly with `session.cancel_resting(order)`.
+
+The session clock only moves forward: a quote stamped on a date earlier than the
+session has already seen is treated as stale for the day roll, so it cannot move
+the daily-loss baseline backwards.
 
 ## Persistence, restart and recovery
 
@@ -166,9 +173,23 @@ and weighted average fill price, the risk limits, the cost schedule, the
 simulator's participation setting, and the processed-signal set.
 
 `PaperSession.restore` raises `PaperStateError` for a malformed file, an unknown
-`schema_version`, or a state claiming a live mode — it never restores a book that
-would be silently wrong. A restored session is still `PAPER` and still cannot
-reach a venue.
+`schema_version`, a state claiming a live mode, **or a state that is internally
+inconsistent** — a negative cash balance or holding, a non-finite figure, an
+event log that is not dense and 1-based, a `seq` counter that disagrees with it,
+or a resting order in a lifecycle state it could not have reached (a `FILLED`
+order with a remainder, an `ACCEPTED` order with a fill). It never restores a
+book that would be silently wrong. A restored session is still `PAPER` and still
+cannot reach a venue.
+
+### What recovery does and does not guarantee
+
+The design is explicit save, restore from the last saved state — no write-ahead
+log, no automatic checkpoint, no supervisor. That supports one claim:
+
+- **Safe:** the system deterministically recovers from a *valid saved state*.
+- **Not claimed:** the system is *crash-safe*. State written after the last
+  `save_state` is lost on a hard crash. The caller owns the checkpoint cadence; a
+  lost tail is lost data, not a corrupted book.
 
 ## Duplicate processing
 

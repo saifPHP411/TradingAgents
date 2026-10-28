@@ -147,7 +147,10 @@ draws from a shared per-symbol allowance: the configured share of that symbol's
 own traded volume. Two orders for the same symbol therefore compete for the same
 liquidity rather than each assuming the whole bar. The allowance is consumed in
 queue order, so the outcome is deterministic. Orders for different symbols have
-independent liquidity.
+independent liquidity. Both engines share this rule: the backtester computes the
+allowance in `_session_liquidity_budget` and the paper session in
+`PaperSession._session_budget`, so a backtest and a paper run over the same thin
+session fill the same size.
 
 Two limitations are real and are stated rather than hidden:
 

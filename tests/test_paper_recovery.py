@@ -937,3 +937,302 @@ class TestFilePersistence:
         payload = json.loads(path.read_text())
         assert payload["schema_version"] == PAPER_STATE_SCHEMA_VERSION
         assert payload["ledger"]["events"]
+
+
+# ---------------------------------------------------------------------------
+# Corrupt / inconsistent state must be refused, not silently restored
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestInconsistentStateIsRefused:
+    """A state a session could not have reached must fail, not resume.
+
+    The recovery format's whole promise is that a corrupt file is rejected rather
+    than turned into a different portfolio. These are the ways a state can be
+    internally impossible while still being well-formed JSON, and each must raise
+    ``PaperStateError``.
+    """
+
+    def _state(self):
+        session = _session(costs=CostModel(commission_rate=0.001))
+        session.on_signal(_signal(size=0.2))
+        return session.state()
+
+    def _restore(self, state):
+        return PaperSession.restore(
+            state, quotes=dict_quote_source({"AAPL": 100.0}, timestamp=NOW)
+        )
+
+    def test_negative_cash_is_refused(self):
+        state = self._state()
+        state["ledger"]["cash"] = -5000.0
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_non_finite_cash_is_refused(self):
+        state = self._state()
+        state["ledger"]["cash"] = float("nan")
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_negative_holding_is_refused(self):
+        state = self._state()
+        for holding in state["ledger"]["holdings"].values():
+            holding["quantity"] = -42.0
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_non_finite_holding_quantity_is_refused(self):
+        state = self._state()
+        for holding in state["ledger"]["holdings"].values():
+            holding["quantity"] = float("inf")
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_negative_fees_are_refused(self):
+        state = self._state()
+        for holding in state["ledger"]["holdings"].values():
+            holding["fees_paid"] = -10.0
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_a_rolled_back_sequence_counter_is_refused(self):
+        """A seq below the log length would mint duplicate sequence numbers."""
+        state = self._state()
+        state["ledger"]["seq"] = 1
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_duplicate_event_sequence_numbers_are_refused(self):
+        state = self._state()
+        events = state["ledger"]["events"]
+        assert len(events) >= 2
+        events[1]["seq"] = events[0]["seq"]
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_non_dense_event_sequence_is_refused(self):
+        state = self._state()
+        for offset, event in enumerate(state["ledger"]["events"]):
+            event["seq"] = (offset + 1) * 2  # 2, 4, 6 ... not dense
+        state["ledger"]["seq"] = 2 * len(state["ledger"]["events"])
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_a_filled_order_with_remaining_quantity_is_refused(self):
+        state = self._state()
+        state["resting"] = [{
+            "order_id": "x-paper", "symbol": "AAPL", "side": "BUY", "quantity": 100.0,
+            "order_type": "LIMIT", "limit_price": 95.0, "created_at": NOW.isoformat(),
+            "as_of_date": "2026-01-05", "time_in_force": "GTC", "status": "FILLED",
+            "filled_quantity": 40.0, "average_fill_price": 95.0,
+        }]
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_an_accepted_order_with_fill_data_is_refused(self):
+        state = self._state()
+        state["resting"] = [{
+            "order_id": "y-paper", "symbol": "AAPL", "side": "BUY", "quantity": 100.0,
+            "order_type": "LIMIT", "limit_price": 95.0, "created_at": NOW.isoformat(),
+            "as_of_date": "2026-01-05", "time_in_force": "GTC", "status": "ACCEPTED",
+            "filled_quantity": 40.0, "average_fill_price": 95.0,
+        }]
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_a_partially_filled_order_with_zero_filled_is_refused(self):
+        state = self._state()
+        state["resting"] = [{
+            "order_id": "z-paper", "symbol": "AAPL", "side": "BUY", "quantity": 100.0,
+            "order_type": "LIMIT", "limit_price": 95.0, "created_at": NOW.isoformat(),
+            "as_of_date": "2026-01-05", "time_in_force": "GTC",
+            "status": "PARTIALLY_FILLED", "filled_quantity": 0.0,
+        }]
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_a_negative_resting_quantity_is_refused(self):
+        state = self._state()
+        state["resting"] = [{
+            "order_id": "n-paper", "symbol": "AAPL", "side": "BUY", "quantity": -5.0,
+            "order_type": "LIMIT", "limit_price": 95.0, "created_at": NOW.isoformat(),
+            "as_of_date": "2026-01-05", "time_in_force": "GTC", "status": "ACCEPTED",
+        }]
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_a_valid_state_still_restores(self):
+        """The validation must not reject a state the session actually produced."""
+        restored = self._restore(self._state())
+        assert restored.ledger.cash > 0
+        assert restored.ledger.position_quantity("AAPL") > 0
+
+
+# ---------------------------------------------------------------------------
+# The per-session liquidity budget is shared, exactly as in a backtest
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSessionLiquidityBudgetIsShared:
+    """Two orders for one symbol share one session's volume, as in a backtest."""
+
+    def _two_resting(self, *, participation=0.1, volume=4000.0):
+        # A price above the limit so neither order fills when it is created; both
+        # rest, and are worked together on the next session.
+        session = _session(
+            cash=10_000_000.0, quotes={"AAPL": 99.0},
+            limits=RiskLimits(max_position_size=1.0, max_portfolio_exposure=None),
+            participation=participation,
+        )
+        session.on_signal(_limit(size=0.30, limit_price=95.0))
+        session.on_signal(_limit(size=0.31, limit_price=95.0))
+        assert len(session.resting) == 2
+        # Now the market trades through the limit, with a thin session volume.
+        session.quotes = lambda symbol: Quote(
+            symbol="AAPL", price=94.0, timestamp=NOW + timedelta(days=1),
+            average_daily_volume=volume,
+        )
+        return session
+
+    def test_two_resting_orders_share_one_session_budget(self):
+        session = self._two_resting()
+        before = session.ledger.position_quantity("AAPL")
+        session.work_resting()
+        filled = session.ledger.position_quantity("AAPL") - before
+        # 10% of a 4,000-volume session is 400 units for the symbol, shared by
+        # both orders, so the session fills 400 in total, not 800.
+        assert filled == pytest.approx(400.0)
+
+    def test_a_shared_budget_is_consumed_in_queue_order(self):
+        session = self._two_resting()
+        steps = session.work_resting()
+        # The first order takes the whole budget; the second gets nothing this
+        # session, so the allocation is deterministic. Both remain live: the first
+        # as a partial fill, the second still accepted with its whole size left.
+        assert steps[0].quantity == pytest.approx(400.0)
+        assert steps[1].quantity == pytest.approx(0.0)
+        assert [o.symbol for o in session.resting] == ["AAPL", "AAPL"]
+        assert session.resting[1].filled_quantity == pytest.approx(0.0)
+
+    def test_participation_off_means_no_liquidity_limit(self):
+        session = self._two_resting(participation=0.0)
+        before = session.ledger.position_quantity("AAPL")
+        session.work_resting()
+        # Both orders fill their whole size, because no budget was configured.
+        assert session.ledger.position_quantity("AAPL") - before > 400.0
+
+
+# ---------------------------------------------------------------------------
+# The session clock never runs backwards
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSessionClockMonotonicity:
+    def test_an_earlier_quote_does_not_move_the_day_backwards(self):
+        session = _session()
+        session.on_signal(_limit(limit_price=95.0, at=NOW))
+        day = session.day
+        # A quote stamped in the past is stale, not a new session.
+        session.quotes = dict_quote_source(
+            {"AAPL": 94.0}, timestamp=NOW - timedelta(days=5)
+        )
+        session.work_resting()
+        assert session.day == day
+
+    def test_the_daily_loss_baseline_is_not_reset_by_a_stale_quote(self):
+        session = _session()
+        session.on_signal(_limit(limit_price=95.0, at=NOW))
+        baseline = session.day_start_equity
+        session.quotes = dict_quote_source(
+            {"AAPL": 94.0}, timestamp=NOW - timedelta(days=5)
+        )
+        session.work_resting()
+        assert session.day_start_equity == baseline
+
+
+# ---------------------------------------------------------------------------
+# Backtest and Paper agree on a shared, liquidity-limited session
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestBacktestPaperParity:
+    """The same orders against the same thin session must fill the same size.
+
+    The two engines share the simulator and the ledger, so they agree by
+    construction *except* where the caller's per-session liquidity accounting
+    differs. This pins the one place that could diverge: two orders competing for
+    one symbol's volume on one session.
+    """
+
+    def test_competing_limits_fill_the_same_size_in_both_engines(self):
+        import pandas as pd
+
+        from tradingagents.backtesting import (
+            BacktestConfig,
+            MarketDataFeed,
+            PortfolioBacktester,
+        )
+
+        dates = ["2026-01-05", "2026-01-06", "2026-01-07"]
+
+        def feed():
+            frame = pd.DataFrame(
+                {
+                    "open": [100.0, 100.0, 94.0],
+                    "high": [100.0, 100.0, 94.0],
+                    "low": [100.0, 100.0, 94.0],
+                    "close": [100.0, 100.0, 94.0],
+                    "volume": [1_000_000, 1_000_000, 4000],
+                },
+                index=pd.to_datetime(dates),
+            )
+            return MarketDataFeed({"AAPL": frame})
+
+        def signal(session, size):
+            return TradingSignal(
+                symbol="AAPL", action=SignalAction.BUY, confidence=0.8,
+                timestamp=datetime.strptime(session, "%Y-%m-%d").replace(hour=21, tzinfo=UTC),
+                as_of_date=session, position_size=size, order_intent=OrderIntent.LIMIT,
+                limit_price=95.0, entry_price=100.0, time_in_force=SignalTimeInForce.GTC,
+            )
+
+        def strategy(context):
+            if context.session == dates[0]:
+                return signal(context.session, 0.30)
+            if context.session == dates[1]:
+                return signal(context.session, 0.31)
+            return None
+
+        config = BacktestConfig(
+            max_volume_participation=0.1, resting_limit_orders=True,
+            initial_cash=10_000_000.0,
+            risk_limits=RiskLimits(max_position_size=1.0, max_portfolio_exposure=None),
+        )
+        backtester = PortfolioBacktester(feed(), strategy, config=config)
+        backtester.run()
+
+        # The equivalent paper run: two resting limits, worked together on the
+        # thin session that reaches the limit.
+        session = _session(
+            cash=10_000_000.0, quotes={"AAPL": 99.0},
+            limits=RiskLimits(max_position_size=1.0, max_portfolio_exposure=None),
+            participation=0.1,
+        )
+        session.on_signal(_limit(size=0.30, limit_price=95.0))
+        session.on_signal(_limit(size=0.31, limit_price=95.0))
+        session.quotes = lambda symbol: Quote(
+            symbol="AAPL", price=94.0, timestamp=NOW + timedelta(days=1),
+            average_daily_volume=4000.0,
+        )
+        session.work_resting()
+
+        assert backtester.ledger.position_quantity("AAPL") == pytest.approx(
+            session.ledger.position_quantity("AAPL")
+        )
+        # 10% of 4,000 units is 400 for the symbol, shared by both orders.
+        assert session.ledger.position_quantity("AAPL") == pytest.approx(400.0)

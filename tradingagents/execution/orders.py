@@ -168,7 +168,43 @@ class Order(BaseModel):
             raise ValueError("expires_session cannot be before as_of_date")
         if self.filled_quantity > self.quantity + 1e-9:
             raise ValueError("filled_quantity cannot exceed quantity")
+        self._lifecycle_is_possible()
         return self
+
+    def _lifecycle_is_possible(self) -> None:
+        """Reject a status/fill combination no real order could reach.
+
+        This is what makes ``Order.model_validate`` a safe door for a restored
+        order: a persisted order whose status and fill data disagree — ``FILLED``
+        with a remainder, ``ACCEPTED`` with a fill, ``PARTIALLY_FILLED`` with
+        nothing filled — is refused at construction rather than restored as a
+        live-looking order that then mis-fills. The simulator and backtester set
+        these fields by assignment after building the order, so this validator
+        gates construction and deserialisation without constraining the live
+        lifecycle transitions.
+        """
+        filled = self.filled_quantity
+        if filled > 0:
+            if self.average_fill_price is None or self.average_fill_price <= 0:
+                raise ValueError("an order with a fill needs a positive average_fill_price")
+        elif self.average_fill_price is not None:
+            raise ValueError("an order with no fill must not carry an average_fill_price")
+
+        status = self.status
+        if status is OrderStatus.FILLED and filled < self.quantity - 1e-9:
+            raise ValueError(
+                f"a FILLED order cannot have {self.quantity - filled} units remaining"
+            )
+        if status is OrderStatus.PARTIALLY_FILLED and not (0.0 < filled < self.quantity - 1e-9):
+            raise ValueError(
+                "a PARTIALLY_FILLED order must have a positive filled quantity below its size"
+            )
+        if status in (OrderStatus.CREATED, OrderStatus.ACCEPTED, OrderStatus.REJECTED) and filled != 0.0:
+            raise ValueError(
+                f"a {status.value} order cannot have filled quantity {filled}"
+            )
+        if status is OrderStatus.CANCELLED and filled > self.quantity + 1e-9:
+            raise ValueError("a CANCELLED order cannot have filled more than its size")
 
     @property
     def remaining_quantity(self) -> float:

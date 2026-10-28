@@ -354,6 +354,68 @@ queue.
 Tests: `tests/test_paper_recovery.py::TestRestartEqualsNoRestart` (day baseline
 survives the restart) and the day-roll assertions in `tests/test_paper_trading.py`.
 
+## Phase 4 — final release-candidate adversarial audit
+
+An independent pass over the whole simulated system, attacking accounting,
+execution, order lifecycle, partial fills, persistent LIMIT orders, risk
+controls, portfolio state, recovery, determinism, backtest/paper consistency,
+data handling, reporting, walk-forward evaluation, event integrity and the
+simulation boundary. It found three further defects, all fixed with a regression
+test each.
+
+### 16. `restore` accepted state a session could never have produced
+
+Severity: high (for recovery). The recovery format's stated promise is that a
+corrupt file is refused rather than turned into a different portfolio. It was
+not: `Ledger.from_state` trusted the file, and `PaperSession.restore` accepted a
+state with a **negative cash balance**, a **negative holding**, **negative
+fees**, a **NaN cash figure**, a **rolled-back `seq` counter** (which then minted
+**duplicate event sequence numbers** on the resumed run), and an **impossible
+order lifecycle** — a `FILLED` order with a remaining quantity, or an `ACCEPTED`
+order carrying fill data. Each of those resumed with silently wrong accounting,
+which is the one outcome recovery must never have.
+
+Fix: `Ledger.from_state` now re-checks every invariant the live ledger maintains
+— cash and holdings non-negative, all figures finite, a held quantity has a
+positive average entry, and the event log is dense and 1-based with a `seq`
+counter that agrees with it — and raises `LedgerError` on a violation.
+`Order.model_validate` gained a lifecycle validator that refuses a status/fill
+combination no order could reach, so a restored resting order cannot be
+`FILLED` with a remainder or `PARTIALLY_FILLED` with nothing filled.
+`PaperSession.restore` wraps both, so a bad file raises `PaperStateError`.
+
+Tests: `tests/test_paper_recovery.py::TestInconsistentStateIsRefused`.
+
+### 17. Paper did not share a per-session liquidity budget across orders
+
+Severity: medium (backtest/paper divergence). The backtester computes one
+units-of-volume allowance per symbol per session and draws it down in queue
+order, so two orders cannot each fill the whole bar. The paper session computed
+the allowance *per order*, so two resting orders for one symbol filled twice the
+session's volume — 800 units where a backtest fills 400. The two engines are
+supposed to agree by construction; this was the one caller-side place they did
+not.
+
+Fix: `work_resting` now builds one per-symbol budget for the session and passes
+the running remainder to each order, mirroring `_session_liquidity_budget` in the
+backtester. The allocation is consumed in queue order, so it is deterministic.
+
+Tests: `tests/test_paper_recovery.py::TestSessionLiquidityBudgetIsShared` and
+`::TestBacktestPaperParity`.
+
+### 18. The session clock could run backwards on a stale quote
+
+Severity: low. `_roll_day` set the day from whatever quote it was handed, so an
+out-of-order (earlier-dated) quote moved the day and the daily-loss baseline
+*backwards* — resetting the risk history a late-arriving old quote should not be
+able to touch, and stamping a fill in the past.
+
+Fix: `_roll_day` only moves forward. A quote on an earlier date than the session
+has already seen is ignored for the clock, so `day` and `day_start_equity` never
+go backwards.
+
+Tests: `tests/test_paper_recovery.py::TestSessionClockMonotonicity`.
+
 ## What the audit confirmed holds
 
 Each of these was attacked and did not break:
@@ -390,12 +452,60 @@ Each of these was attacked and did not break:
 - **Telemetry.** The cost ceiling and the call ceiling both raise before the call;
   an unpriced model records `None` rather than a fabricated cost.
 
+Phase 4 added these to the "confirmed holds" list after attacking them directly:
+
+- **Event integrity.** No path produced a duplicate lifecycle event, a `FILLED`
+  after a `CANCELLED` or `EXPIRED`, or a non-monotonic / non-dense `seq`; a
+  terminal order is never filled again, and acceptance is recorded once per order
+  however many bars it rests on.
+- **LIMIT boundaries.** A BUY limit fills at the exact boundary and not a tick
+  above; a SELL limit fills at the exact boundary and not a tick below; a
+  gap-through fills at the limit or better; a no-touch cancels.
+- **Reporting.** `total_return`, `max_drawdown`, `win_rate` and the P&L figures
+  recomputed by hand from the equity curve and trade list matched the
+  implementation; an unfilled or rejected order contributes no trade, no notional
+  and no fee.
+- **Walk-forward.** A fold whose validation window reaches into its training
+  window, or whose test window overlaps its validation window, is refused at
+  construction; selection reads validation scores only, never test.
+- **Safety boundary.** `ExecutionMode` has no `LIVE`; `resolve_mode` refuses every
+  live-sounding string (`live`, `real`, `production`, `broker`, `exchange`,
+  `mainnet`); no network, broker or credential import exists anywhere in
+  `execution/`, `portfolio/`, `risk/` or `backtesting/`.
+- **Recovery validation.** A state file is refused, not resumed, when it is
+  malformed, carries an unknown `schema_version`, claims a live mode, or is
+  internally inconsistent (see finding 16).
+
 ## Residual limitations (unchanged)
 
 - The fill-time re-check uses the *projected* fill price. For a MARKET order that
   is the price the simulator uses, so the two agree; an order type that filled at
-  a price not derivable from the bar would need a post-fill reconciliation.
+  a price not derivable from the bar would need a post-fill reconciliation. This
+  is *not* an accounting or risk hole under the current architecture: the
+  simulator fills a MARKET order at exactly the price `projected_fill_price`
+  returns, and a LIMIT order fills at its limit or better, which the re-check also
+  uses. The projection and the fill cannot disagree for either supported order
+  type, so no cap can be breached through this path.
 - Prices are split-adjusted, so a backtest reflects price return only; dividends
   are not credited as cash.
 - LLM calls are not deterministic. The deterministic layers around them are
   reproducible from the run configuration; the calls are not.
+
+## Recovery: what may and may not be claimed
+
+The persistence design is explicit save, restore from the last saved state, no
+write-ahead log, no automatic checkpoint and no supervisor. That supports exactly
+one claim:
+
+- **Safe:** "The system can deterministically recover from a valid saved state."
+  A restart from a `save_state` file reproduces cash, positions, fees, P&L, the
+  order lifecycle and the event log exactly, and refuses a corrupt file rather
+  than resuming with different accounting.
+- **Unsafe, and not claimed:** "The system is crash-safe." There is no durable
+  checkpoint guarantee, so state written after the last `save_state` is lost on a
+  hard crash. A crash-safe claim would need a write-ahead log or a supervisor,
+  which this release does not have and does not claim.
+
+This limitation is acceptable for a simulation / paper release candidate: the
+caller owns the checkpoint cadence, and a lost tail is a lost tail, not a
+corrupted book.
