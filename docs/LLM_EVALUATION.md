@@ -155,10 +155,17 @@ python -m tradingagents.llm_evaluation.smoke --provider groq --record-out smoke.
 
 It checks configuration *before* any request and, if no key is present, prints
 the exact variable to set (`GROQ_API_KEY` by default) and exits without making a
-request. With a key it makes **at most one** small request, with a timeout,
-validates the returned decision with the production rating parser, and writes a
-record only when the decision and its metadata are valid. It never places an
-order and never touches execution or risk.
+request. With a key it makes **at most one** small request, with a timeout and
+`max_retries=0` (so a provider 5xx cannot silently become three billable
+attempts), validates the returned decision with the production rating parser, and
+writes a record only when the decision and its metadata are valid. It never
+places an order and never touches execution or risk.
+
+A failed request is reported, not swallowed: the report carries a
+`failure_category` from a closed vocabulary (`authentication_failure`,
+`model_unavailable`, `rate_limit`, `timeout`, `malformed_response`,
+`provider_error`, `provider_unreachable`, `configuration_error`, `other`), so the
+outcome is classified without echoing a raw response or a credential.
 
 The default provider is Groq: OpenAI-compatible, a documented Free Plan, and
 production models listed with per-token prices — see
@@ -371,14 +378,20 @@ May **not** be used for:
 
 ## Known limitations
 
-- **Genuine inference is blocked.** No credential in this environment, and the
-  full pipeline needs inputs the frozen dataset does not carry. See
-  [`docs/LLM_POINT_IN_TIME_AUDIT.md`](LLM_POINT_IN_TIME_AUDIT.md) for the
-  source-by-source audit and the named blockers, and
-  [`docs/LLM_PROVIDER_AUDIT.md`](LLM_PROVIDER_AUDIT.md) for the provider side
-  (documented free tiers, exact env vars, and the missing capture path).
-- **No capture path.** Nothing constructs a `DecisionRecord` from a real graph
-  run, so a credential alone cannot produce a record set to evaluate.
+- **Genuine inference is blocked — no credential in this environment.** Phase 9
+  attempted the first genuine inference and stopped at the credential gate: no
+  provider key (`GROQ_API_KEY` or any other) is set, and no local
+  OpenAI-compatible endpoint answers. No request was made and no record was
+  fabricated. The capture path itself is proven by offline tests that exercise
+  the **real** provider client through an `httpx.MockTransport` (the observer
+  fires only because the real client dispatched a LangChain `on_llm_end`
+  callback); see `tests/test_phase9_genuine_inference.py`. To obtain a real
+  decision, set a documented free-tier key (Groq by default) and run the smoke
+  command above.
+- **Full-graph historical evaluation stays blocked.** Even a genuine capture
+  opens only the **price-only** scope; news, sentiment and fundamentals are not
+  point-in-time safe. A current inference is a smoke test, not a historical
+  backtest observation. See [`docs/LLM_POINT_IN_TIME_AUDIT.md`](LLM_POINT_IN_TIME_AUDIT.md).
 - **Price-only by construction.** The restricted evaluation measures one input.
   `graph_readiness("full")` reports the graph not ready for a historical run, with
   named blockers, until a snapshot source is registered.

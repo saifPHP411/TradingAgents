@@ -94,6 +94,7 @@ class SmokeReport:
     mode: str = MODE_REAL_INFERENCE_CAPTURE
     notes: list[str] = field(default_factory=list)
     error: str | None = None
+    failure_category: str | None = None
 
     def to_dict(self) -> dict:
         payload = {
@@ -111,8 +112,44 @@ class SmokeReport:
             "record_path": self.record_path,
             "notes": list(self.notes),
             "error": self.error,
+            "failure_category": self.failure_category,
         }
         return assert_secret_free(payload)
+
+
+def _classify_failure(exc: BaseException) -> str:
+    """A closed-vocabulary category for a failed provider call.
+
+    Phase 9 must report the *category* of a failure, not just its text. The
+    mapping is by exception type and status, so it stays stable across providers
+    and never echoes a raw response body or a credential.
+    """
+    status = getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
+    if status is not None:
+        if status == 401:
+            return "authentication_failure"
+        if status == 403:
+            return "authentication_failure"
+        if status == 404:
+            return "model_unavailable"
+        if status == 408:
+            return "timeout"
+        if status == 429:
+            return "rate_limit"
+        if isinstance(status, int) and 500 <= status < 600:
+            return "provider_error"
+    name = type(exc).__name__.lower()
+    if "timeout" in name:
+        return "timeout"
+    if "auth" in name or "permission" in name:
+        return "authentication_failure"
+    if "connection" in name:
+        return "provider_unreachable"
+    if "value" in name or "config" in name or "key" in name:
+        return "configuration_error"
+    if "json" in name or "decode" in name or "validation" in name:
+        return "malformed_response"
+    return "other"
 
 
 def _credential_present(provider: str) -> tuple[bool, str]:
@@ -168,13 +205,19 @@ def run_smoke(
     )
     report.attempted = True
     try:
-        client = make_client(provider=provider, model=model, timeout=timeout)
+        # max_retries=0 is a cost guard, not a tuning knob: the SDK default is 3
+        # attempts on a 5xx, which would turn one "smoke test" into up to three
+        # billable requests. One request means one request.
+        client = make_client(
+            provider=provider, model=model, timeout=timeout, max_retries=0
+        )
         llm = client.get_llm()
         response = llm.invoke(_PROMPT.format(session=session))
         report.requests_made += 1
     except Exception as exc:  # a provider error is reported, not swallowed
         report.status = "SMOKE FAILED"
         report.error = f"{type(exc).__name__}: {exc}"
+        report.failure_category = _classify_failure(exc)
         return report
 
     text = getattr(response, "content", response)
@@ -292,6 +335,8 @@ def _main(argv: list[str] | None = None) -> int:
     print(json.dumps(report.to_dict(), indent=2))
     if report.record_path:
         print(f"wrote {report.record_path}")
+    if report.failure_category:
+        print(f"failure_category: {report.failure_category}")
     return 0 if report.succeeded else 1
 
 

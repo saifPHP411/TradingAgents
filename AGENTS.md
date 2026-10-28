@@ -79,7 +79,18 @@ The capture invents no size or levels; sizing is the risk engine's.
 model call. It is opt-in, bounded to one request, gated on a credential before
 any request, and never runs in the test suite. Do not call it from a test, a
 run, or any automatic path. An injected `client_factory` is the test seam and
-must never be reported as a genuine observation.
+must never be reported as a genuine observation. It sets `max_retries=0` on the
+client so a provider 5xx cannot multiply one request into three, and it reports a
+`failure_category` from a closed vocabulary rather than an error string alone.
+
+`tests/test_phase9_genuine_inference.py` is how the genuine-inference
+discriminator is proven without a credential: it drives the *real* provider
+client through an `httpx.MockTransport`, so the observer fires because the client
+dispatched a LangChain `on_llm_end` callback, not because a test said so. Keep
+that shape — an offline test that swaps in a stub proves nothing about the
+discriminator, because a stub is exactly what the discriminator must reject. A
+genuine `llm_inference` record still requires an actual provider response; no
+test may assert otherwise.
 
 The offline suite must never make an external provider call. If you add a test
 that needs a credential, skip it when the credential is absent rather than

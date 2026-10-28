@@ -176,6 +176,30 @@ path, and no configuration that produces one.
   historical evaluation is allowed — for the price-only scope only, since the
   full graph's inputs remain not PIT-safe. Input reproducibility is reported
   separately from point-in-time safety. No live trading path is added.
+- A `failure_category` on the smoke report (`llm_evaluation/smoke.py`): a failed
+  provider call is classified from a closed vocabulary (authentication failure,
+  model unavailable, rate limit, timeout, malformed response, provider error,
+  provider unreachable, configuration error, other) instead of only echoing an
+  error string. The smoke path also sets `max_retries=0`, so the SDK's default
+  three attempts on a 5xx cannot turn one opt-in request into three billable
+  ones.
+
+### Phase 9 — first genuine inference attempt (blocked)
+
+The capture path added above is exercised by the offline suite, but no genuine
+provider request had been made. Phase 9 attempted the first one and stopped at
+the credential gate: this environment holds no provider key (`GROQ_API_KEY` or
+any other) and no local OpenAI-compatible endpoint answers, so no request was
+made and no record was fabricated. The result is recorded as **PROVIDER BLOCKED**,
+not as a captured decision.
+
+The offline proof that the genuine-inference discriminator is real — not merely
+asserted — is `tests/test_phase9_genuine_inference.py`: it drives the **real**
+provider client through an `httpx.MockTransport`, so the observer fires because
+the client dispatched a LangChain `on_llm_end` callback, and it asserts a caller
+cannot force the `llm_inference` label, a missing credential blocks before any
+request, a provider failure yields no record, and replay makes zero provider
+calls. No live trading path is added.
 
 ### Fixed
 
