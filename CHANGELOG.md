@@ -262,6 +262,43 @@ Changed:
   mechanism precisely — a frame-backed vendor run is resumed from its own stored
   bars, and the refusal applies only to a source with no persistable bars.
 
+### Phase 13 — pre-Railway deployment verification
+
+A verification pass, not a feature. Its job was to prove the deployable image
+and the deployment story, not to add capability. Nothing in the trading system
+changed: no live path, no new source, no accounting change.
+
+Verified empirically (against the built image, not asserted from reading code):
+
+- **The image builds and runs.** `docker build` succeeds on `python:3.13-slim`.
+  The Railway start-command override — `python -m tradingagents.paper_experiment
+  run --root /data/paper-experiment ...` — was exercised in the container with a
+  volume at `/data`; it processed sessions, wrote `journal.json`,
+  `session_state.json` and `snapshots/`, and a second invocation **resumed**.
+- **The volume caveat is real, not theoretical.** On the image's default non-root
+  user the first write to the mount failed with `PermissionError`; running with
+  `RAILWAY_RUN_UID=0` (as `docs/RAILWAY_DEPLOYMENT.md` instructs) fixed it. The
+  doc already required the variable; this confirms *why*.
+- **The image carries no secrets.** A scan of the built image found no `.env` and
+  no key literal; `.dockerignore` excludes `**/.env*`.
+- **Error classification is intact offline.** With no credential,
+  `--source alpha_vantage` / `--source finnhub` fail closed (exit `2`) with a
+  named reason and no silent fallback to the frozen dataset.
+
+Documented:
+
+- `docs/RAILWAY_DEPLOYMENT.md` gains a **Resource usage and API quotas** section
+  (Railway plan limits and the Alpha Vantage / Finnhub / Groq free-tier limits,
+  each cited) and a note that the start command *overrides* the image ENTRYPOINT
+  in exec form, with the shell-wrapped alternative for variable expansion.
+
+Not done, and why: the real-API checks (one Alpha Vantage daily fetch, one
+Finnhub quote, one genuine Groq inference) and the resulting end-to-end paper
+run were **not executed**, because no provider credential was present in the
+environment. The gated tests remain in `tests/test_live_providers_integration.py`
+and skip cleanly when a key is absent, so CI needs no secret. See the Phase 13
+report for the exact remaining blocker.
+
 ### Phase 11 — real market-data providers
 
 Adds real vendor price sources (`paper_experiment/providers/`) so a paper

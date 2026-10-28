@@ -46,6 +46,21 @@ python -m tradingagents.paper_experiment run --root /data/paper-experiment --ses
 Note the `--root`: the paper runner has no default directory. State must point at
 the mounted volume (below), never at the container's ephemeral filesystem.
 
+Railway states that for a Dockerfile/image service "the start command **overrides
+the image's ENTRYPOINT in exec form**"
+([Start command](https://docs.railway.com/deployments/start-command)), so the
+override above replaces `tradingagents` rather than being appended to it. If you
+need variable expansion in the command, wrap it in a shell —
+`/bin/sh -c "exec python -m tradingagents.paper_experiment run ..."` — because
+"commands ran in exec form do not support variable expansion".
+
+Both forms were exercised against the built image with the volume mounted at
+`/data`, running as root (the effect of `RAILWAY_RUN_UID=0`): the run processed
+sessions, wrote `journal.json`, `session_state.json` and `snapshots/` to the
+mount, and a second invocation resumed. The same run on the image's default
+non-root user failed to write the mount with `PermissionError`, which is why
+`RAILWAY_RUN_UID=0` below is not optional.
+
 ## Python version and dependencies
 
 - `requires-python = ">=3.11"`; the `Dockerfile` builds on `python:3.13-slim`.
@@ -105,6 +120,41 @@ the recovered positions.
   the runner exits `0` on success, a clean finish does **not** trigger a restart;
   a non-zero exit does. If you deploy it as a cron service, the schedule — not the
   restart policy — drives the next run.
+
+## Resource usage and API quotas
+
+The runner is a short batch that processes a bounded number of sessions and
+exits, so its footprint is small and brief: a single Python process, no
+resident worker pool, no HTTP listener, and state files measured in kilobytes
+(one journal entry and one decision per session, plus one snapshot per
+decision). A small experiment fits comfortably inside the smallest Railway plan;
+this is a *shape* statement, not a bill. Railway's own plan limits are:
+
+> "Free For running small apps with $1 of free credit per month" and, per the
+> plan table, Free allows "1" replica with "0.5 GB" RAM, "1 vCPU", "0.5 GB"
+> volume storage; the Hobby plan "includes $5 of resource usage per month"
+> ([Plans](https://docs.railway.com/reference/pricing/plans),
+> [FAQs](https://docs.railway.com/reference/pricing/faqs)).
+
+No specific monthly charge is asserted here: Railway bills measured resource
+usage, and the runner exits rather than idling, so a stopped service accrues no
+compute. Verify current pricing before budgeting.
+
+The binding constraint is not Railway but the **free vendor quotas**, which the
+runner must not exhaust:
+
+| Provider | Free-tier limit | Why it matters here |
+|---|---|---|
+| Alpha Vantage | "25 API requests per day" ([Premium](https://www.alphavantage.co/premium/)) | one fetch per *new* run; a restart reuses persisted bars and makes **no** call |
+| Finnhub | "60 API calls/minute" on Free; OHLC is blank on Free ([Pricing](https://finnhub.io/pricing)) | one quote fetch per run; `/quote` cannot drive a multi-session window |
+| Groq | per-model RPM/RPD/TPM/TPD limits ([Rate limits](https://console.groq.com/docs/rate-limits)) | one inference per session, `max_retries=0`, so one session is one request |
+
+The design keeps polling minimal by construction: a source fetches **once**, at
+construction, and freezes the frame; `run --sessions N` processes a bounded
+batch; and a resume reads persisted bars instead of re-fetching. There is no
+timer, no polling loop, and no per-tick vendor call. A scheduled (cron) service
+should be given a cadence well inside the daily quota — e.g. at most one new
+Alpha Vantage fetch per day on the free plan.
 
 ## Config files: why none are added
 
