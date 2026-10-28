@@ -149,15 +149,26 @@ class ReplayStats:
     signals_emitted: int = 0
     signals_skipped_review: int = 0
     window_hash_mismatches: int = 0
+    config_hash_mismatches: int = 0
     records_used: int = 0
 
 
 class ReplayStrategy:
     """A strategy callable that replays recorded decisions. Calls no model."""
 
-    def __init__(self, record_set: DecisionRecordSet, *, strict_windows: bool = True) -> None:
+    def __init__(
+        self,
+        record_set: DecisionRecordSet,
+        *,
+        strict_windows: bool = True,
+        expected_config_hash: str | None = None,
+    ) -> None:
         self.record_set = record_set
         self.strict_windows = strict_windows
+        # When set, every record's config_hash must equal it: a record captured
+        # under a different protocol must not be replayed as if it were this
+        # one. None means the caller does not assert a configuration.
+        self.expected_config_hash = expected_config_hash
         self.stats = ReplayStats()
         self._by_session: dict[str, list[DecisionRecord]] = {}
         for record in record_set.decisions:
@@ -187,6 +198,19 @@ class ReplayStrategy:
                 "a priority the graph does not have"
             )
         record = records[0]
+        # A record captured under a different configuration must not be replayed
+        # as if it were this one. Checked before the window, so a config mismatch
+        # is reported as itself rather than as a data mismatch.
+        if (
+            self.expected_config_hash is not None
+            and record.config_hash != self.expected_config_hash
+        ):
+            self.stats.config_hash_mismatches += 1
+            raise ReplayError(
+                f"replay config mismatch for {record.decision_id}: the record was "
+                f"captured under config {record.config_hash[:12]}…, the replay expects "
+                f"{self.expected_config_hash[:12]}…"
+            )
         # A ticker the feed does not hold cannot be window-verified, and the
         # engine already has a guard for it. Emit the signal and let that guard
         # reject it, so the rejection is recorded rather than turned into a

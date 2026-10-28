@@ -67,6 +67,24 @@ make it read a key value or probe a provider. A free-tier claim in it must carry
 the official URL it was checked against — no URL, no claim. Readiness and
 point-in-time data are separate blockers; neither implies the other.
 
+`tradingagents/llm_evaluation/capture.py` is the only producer of a
+`DecisionRecord` from a real run. The `llm_inference` label is derived from
+`graph.inference_observed`, which an `InferenceObserver` on the *real* provider
+clients sets — never from a caller's argument. Do not add a way to set that label
+from a parameter, and do not let a scripted/stubbed model set the observer: a
+mock must stay `synthetic_fixture`, and `tests/test_llm_capture.py` asserts it.
+The capture invents no size or levels; sizing is the risk engine's.
+
+`tradingagents/llm_evaluation/smoke.py` is the only path that may make a real
+model call. It is opt-in, bounded to one request, gated on a credential before
+any request, and never runs in the test suite. Do not call it from a test, a
+run, or any automatic path. An injected `client_factory` is the test seam and
+must never be reported as a genuine observation.
+
+The offline suite must never make an external provider call. If you add a test
+that needs a credential, skip it when the credential is absent rather than
+faking a success.
+
 ## Conventions
 
 - Never add a live trading path. `ExecutionMode` has only `BACKTEST` and `PAPER`,

@@ -243,6 +243,90 @@ def _run_replay(feed, protocol: LLMEvaluationProtocol, record_set: DecisionRecor
     return results
 
 
+def _capture_status(
+    record_set: DecisionRecordSet | None, creds: dict, providers: dict
+) -> dict:
+    """The honest, field-by-field answer to "how far did we actually get?".
+
+    Kept separate from ``credentials`` (which provider keys are set) and from
+    ``provider_readiness`` (which providers are usable at all). Every field is a
+    fact about *this* environment, not a plan.
+    """
+    inference_succeeded = bool(
+        record_set is not None and record_set.mode == SOURCE_LLM_INFERENCE
+    )
+    record_captured = record_set is not None
+    inputs_reproducible = bool(
+        record_captured
+        and all(r.bar_count > 0 and len(r.data_window_hash) == 64 for r in record_set.decisions)
+    )
+    # Input reproducibility is not point-in-time safety: a hash proves the replay
+    # saw the same bars, not that the bars were available at the decision time.
+    pit = point_in_time_report(DEFAULT_PROTOCOL.input_scope)
+    inputs_pit_safe = bool(pit["readiness"]["ready"])
+    # Historical evaluation of the *declared scope*: a genuine capture whose
+    # window is reproducible and PIT-safe for that scope. The full graph always
+    # stays blocked, because news/sentiment/fundamentals are not PIT-safe.
+    historical_allowed = bool(inference_succeeded and inputs_reproducible and inputs_pit_safe)
+    full_graph_pit = point_in_time_report("full")
+    full_graph_allowed = bool(
+        inference_succeeded
+        and inputs_reproducible
+        and bool(full_graph_pit["readiness"]["ready"])
+    )
+
+    mode = "blocked"
+    if record_set is not None:
+        mode = (
+            "REAL_INFERENCE_CAPTURE"
+            if record_set.mode == SOURCE_LLM_INFERENCE
+            else "REPLAY"
+        )
+
+    blocked: list[str] = []
+    if not creds["any_credential_available"]:
+        blocked.append(
+            "no provider credential in this environment; set one of "
+            + ", ".join(
+                creds["env_var_by_provider"][p]
+                for p in creds["providers_without_credentials"]
+            )
+            + " (or a local OpenAI-compatible endpoint) to run genuine inference"
+        )
+    if not record_captured:
+        blocked.append(
+            "no genuine decision record set was captured here; run the opt-in smoke "
+            "test (python -m tradingagents.llm_evaluation.smoke) with a credential, "
+            "or supply a captured set to build_evaluation(record_set=...)"
+        )
+    if not inputs_pit_safe:
+        blocked.append(
+            "the news/sentiment/fundamentals inputs are not point-in-time safe for a "
+            "historical run, so a full historical evaluation stays blocked; see "
+            "docs/LLM_POINT_IN_TIME_AUDIT.md"
+        )
+
+    return {
+        "evaluation_mode": mode,
+        "provider_configured": bool(creds["any_credential_available"]),
+        "genuine_inference_request_succeeded": inference_succeeded,
+        "decision_record_captured": record_captured,
+        "inputs_reproducible": inputs_reproducible,
+        "inputs_point_in_time_safe": inputs_pit_safe,
+        "historical_evaluation_allowed": historical_allowed,
+        "historical_evaluation_scope": DEFAULT_PROTOCOL.input_scope,
+        "full_graph_historical_evaluation_allowed": full_graph_allowed,
+        "prospective_paper_experiment_possible": bool(record_captured),
+        "blocked_prerequisites": blocked,
+        "note": (
+            "A captured current inference is not automatically a valid historical "
+            "backtest observation. Input reproducibility (the replay sees the same "
+            "bars) is distinct from point-in-time safety (those bars were available "
+            "at the decision time)."
+        ),
+    }
+
+
 def build_evaluation(
     *,
     protocol: LLMEvaluationProtocol | None = None,
@@ -343,11 +427,14 @@ def build_evaluation(
             "the news/sentiment/fundamentals pipeline."
         )
 
+    capture_status = _capture_status(record_set, creds, providers)
+
     artifact = {
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).isoformat(),
         "status": status,
         "mode": mode,
+        "evaluation_mode": capture_status["evaluation_mode"],
         "metadata": {
             "package_version": package_version,
             "python": platform.python_version(),
@@ -356,6 +443,7 @@ def build_evaluation(
         "protocol": protocol.to_dict(),
         "credentials": creds,
         "provider_readiness": providers,
+        "capture_status": capture_status,
         "dataset_checksums": protocol.to_dict()["dataset_checksums"],
         "point_in_time": pit,
         "evaluation_scope": {
@@ -374,7 +462,13 @@ def build_evaluation(
         "reproducibility": {
             "execution_determinism": "verified by tests (same records -> identical fills/ledger)",
             "replay_determinism": "verified by tests (two replays -> identical artifact)",
-            "inference_repeatability": "not tested: requires a working credential",
+            "inference_repeatability": (
+                "not tested: requires a working credential"
+                if not capture_status["genuine_inference_request_succeeded"]
+                else "a single genuine request succeeded; repeatability across calls is not "
+                "established by one observation"
+            ),
+            "inference_determinism_claimed": False,
         },
         "limitations": {
             "point_in_time_scope": pit["readiness"]["scope"],

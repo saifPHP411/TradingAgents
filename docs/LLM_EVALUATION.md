@@ -112,10 +112,23 @@ source in the matrix is `PIT_VERIFIED`. `graph_readiness("full")` must report re
 before the pilot runs.
 
 **Step 3 — capture decisions, then replay.** Run the graph on the protocol's
-cadence, record each decision as a `DecisionRecord` (the record carries the window
-hash, the config hash and the source), then evaluate it offline. Note that **no
-capture path exists in this release**: `DecisionRecord` is built only in tests, so
-a capture step must be added before a genuine pilot can produce a record set.
+cadence and capture each completed decision with
+`llm_evaluation.capture.capture_decision(final_state, graph, feed)`. The capture
+reads the decision's rating, its window (hashed from the same session-bounded feed
+the market analyst sees), the config hash and the model/provider metadata, and
+refuses a decision whose rating has no tradeable action (`REVIEW`) rather than
+degrading it to Hold. It invents no size, stop or limit: the graph decides a
+rating, not an order.
+
+A record is labelled `llm_inference` **only when a real model call produced the
+decision**. The label is derived from the graph, not from the caller: the graph
+carries an `InferenceObserver` on its real provider clients, and a scripted or
+stubbed model never fires it. So a test, fixture or mock can never be captured as
+genuine inference — `capture_decision(..., mode=REAL_INFERENCE_CAPTURE)` on a
+stubbed graph still yields a `synthetic_fixture` record, with a note saying why.
+
+To capture a real decision without running the full graph, use the bounded,
+opt-in smoke test (see "The smoke test" below).
 
 ```bash
 python -m tradingagents.llm_evaluation.run --records records.json --out eval.json
@@ -129,6 +142,55 @@ result is marked `genuine_inference: true` only when the record set's source is
 **Step 4 — report honestly.** Compare against the frozen reference baseline
 (`docs/STRATEGY_BASELINE.md`) over the same window, costs and timing. Report the
 scope: a `price_only` result is a lower bound, not the full pipeline's result.
+
+## The smoke test
+
+`tradingagents/llm_evaluation/smoke.py` is the only path in this phase that may
+make a real model call, and it is opt-in and bounded:
+
+```bash
+# Requires a real key in the provider's env var, e.g. GROQ_API_KEY.
+python -m tradingagents.llm_evaluation.smoke --provider groq --record-out smoke.json
+```
+
+It checks configuration *before* any request and, if no key is present, prints
+the exact variable to set (`GROQ_API_KEY` by default) and exits without making a
+request. With a key it makes **at most one** small request, with a timeout,
+validates the returned decision with the production rating parser, and writes a
+record only when the decision and its metadata are valid. It never places an
+order and never touches execution or risk.
+
+The default provider is Groq: OpenAI-compatible, a documented Free Plan, and
+production models listed with per-token prices — see
+[`LLM_PROVIDER_AUDIT.md`](LLM_PROVIDER_AUDIT.md) for the official quotes. The
+credential value is never printed or written; the report names the environment
+variable only. If the credential requires billing, stop: the command makes no
+request without a key.
+
+A successful smoke test proves one thing: a real model call returned a decision
+that validated and was captured. It is a **current observation**, not a
+historical backtest point, and it says nothing about strategy quality. An
+injected client (the test seam) is reported as a fixture, never a genuine
+observation.
+
+## Evaluation modes
+
+Three modes are kept strictly apart, and the artifact records which one applies:
+
+- `REAL_INFERENCE_CAPTURE` — a genuine current graph or smoke run with captured
+  inputs. Requires a real credential and an observed model call.
+- `REPLAY` — execution from previously recorded decisions. Calls no model.
+- `MOCK_TEST` — a test-only simulated provider response, or a capture from a
+  graph that did not observe a real call.
+
+The `capture_status` block reports, field by field, how far the run actually got:
+provider configured, genuine request succeeded, record captured, inputs
+reproducible, inputs point-in-time safe, and whether historical evaluation is
+allowed. A genuine capture opens only the **price-only** scope; the full graph
+stays blocked because its news/sentiment/fundamentals inputs are not
+point-in-time safe. Reproducibility (the replay sees the same bars) is reported
+separately from point-in-time safety (those bars were available then): a hash
+proves the former, not the latter.
 
 ## The protocol
 
@@ -224,6 +286,12 @@ JSON-serialisable and versioned (`artifact_schema_version`). It contains:
   name, whether a usable key is present, whether structured output is needed, and
   any documented free tier with its official source. Derived from the client
   registries; contacts nothing.
+- `capture_status` — the honest, field-by-field answer to "how far did we get?":
+  `evaluation_mode`, whether a provider is configured, whether a genuine request
+  succeeded, whether a record was captured, whether its inputs are reproducible,
+  whether they are point-in-time safe, whether historical evaluation is allowed
+  (and for which scope), whether a prospective paper experiment is possible, and
+  the exact blocked prerequisites.
 - `reference_context` — the SMA reference and buy-and-hold SPY over the same
   windows, labelled as context, **not** LLM results.
 - `llm_results` — the per-window replay result, or `null` when no record set was

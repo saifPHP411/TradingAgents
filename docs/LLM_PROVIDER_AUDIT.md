@@ -107,39 +107,66 @@ export TRADINGAGENTS_DEEP_THINK_LLM=<local model id>
 ```
 
 Then re-run the evaluation. A key alone is not enough: the evaluation also needs
-a **captured decision record set** (see below), because no capture path exists in
-this release.
+a **captured decision record set** (see below). That capture path now exists
+(Phase 8) — see "The capture path" below.
+
+## The selected provider, and why
+
+Phase 8 selects **Groq** as the default for the bounded smoke test:
+
+- Its API is OpenAI-compatible, so it reuses the existing `create_llm_client`
+  factory with no new integration code.
+- It documents a **Free Plan** and lists production models with per-token prices
+  in its official docs, so the default model is a documented, non-preview one.
+- The default model is `openai/gpt-oss-20b`, a *production* model (not a preview
+  model, which the docs say is for evaluation and may be discontinued).
+
+Free web-chat access is not free API access, and this audit does not treat it as
+such: only providers whose **official API documentation** states a free tier are
+listed. The smoke test still stops before any request when no key is set.
+
+## The capture path
+
+`tradingagents/llm_evaluation/capture.py` turns a completed graph run into a
+validated `DecisionRecord`. It reads the rating, the input window (hashed from the
+same session-bounded feed the market analyst sees), the config hash and the
+model/provider metadata. It refuses a rating with no tradeable action rather than
+degrading it to Hold, and it invents no size, stop or limit.
+
+The record's `source` is derived from the **graph**, not the caller: the graph
+carries an `InferenceObserver` on its real provider clients, and a scripted or
+stubbed model never fires it. So a mock run is always captured as a
+`synthetic_fixture`, never `llm_inference`, even if the caller asks for
+`REAL_INFERENCE_CAPTURE`. A credential-shaped value in the decision text is
+scrubbed before it can reach a record.
 
 ## What a key alone does *not* unlock
 
 Two gaps remain after a key is set, and neither is a provider problem:
 
-1. **No capture path.** Nothing in `tradingagents/llm_evaluation/` constructs a
-   `DecisionRecord` from a real graph run. `DecisionRecord` is built only in
-   tests. So even with a working key, `build_evaluation` has no record set to
-   evaluate and stays `LLM BASELINE BLOCKED`. A capture step — run the graph over
-   the frozen dataset and serialise its decisions — is the missing piece, and it
-   is deliberately not added here: it needs the data-side blocker resolved first
-   (below), or it would capture decisions made from inputs the graph cannot
-   honestly obtain for a historical date.
-2. **No point-in-time news/sentiment/fundamentals source.** A `full`-scope
+1. **No point-in-time news/sentiment/fundamentals source.** A `full`-scope
    historical run is refused, not faked; only `price_only` (the market analyst)
-   is point-in-time safe. See the point-in-time audit.
+   is point-in-time safe. See the point-in-time audit. A genuine capture
+   therefore opens only the price-only scope; the full graph stays blocked.
+2. **Input reproducibility is not point-in-time safety.** The record carries a
+   window hash so a replay can prove it saw the same bars, but a hash is not
+   proof those bars were available at the decision time. The two are reported
+   separately in the artifact's `capture_status`.
 
 ## User action required
 
 To enable genuine inference, do exactly one of:
 
 - **Set a provider key** for a documented free tier (`groq`, `google`,
-  `openrouter`) or a paid provider you already use, *and* accept that the
-  evaluation will still be blocked until a capture path and PIT-safe inputs
-  exist; or
+  `openrouter`) or a paid provider you already use, then run the bounded smoke
+  test to capture one real decision; or
 - **Point the client at a local OpenAI-compatible endpoint** with a model that
   supports tool calling.
 
-Do not set a key expecting a performance number: the honest result today is
-`LLM BASELINE BLOCKED` with the named prerequisites, and it stays that way until
-the data-side blockers are cleared.
+Do not set a key expecting a performance number: even a successful smoke test is
+a single current observation, not a historical result. The honest evaluation
+status stays `LLM BASELINE BLOCKED` for a full-graph historical run until the
+data-side blocker is cleared.
 
 ## Limitations
 

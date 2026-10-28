@@ -1,8 +1,9 @@
 {
   "artifact_schema_version": "1.0.0",
-  "generated_at": "2026-10-28T10:45:08.215148+00:00",
+  "generated_at": "2026-10-28T11:18:56.093835+00:00",
   "status": "LLM BASELINE BLOCKED",
   "mode": "blocked",
+  "evaluation_mode": "blocked",
   "metadata": {
     "package_version": "0.7.1",
     "python": "3.13.15",
@@ -395,6 +396,23 @@
     "checked_on": "2026-10-28",
     "network_probed": false,
     "note": "Readiness is derived from environment-variable *names* and the client registries; no credential value is read into this report and no provider was contacted. A documented free tier is not proof a key is held; a key is not proof the tier is free."
+  },
+  "capture_status": {
+    "evaluation_mode": "blocked",
+    "provider_configured": false,
+    "genuine_inference_request_succeeded": false,
+    "decision_record_captured": false,
+    "inputs_reproducible": false,
+    "inputs_point_in_time_safe": true,
+    "historical_evaluation_allowed": false,
+    "historical_evaluation_scope": "price_only",
+    "full_graph_historical_evaluation_allowed": false,
+    "prospective_paper_experiment_possible": false,
+    "blocked_prerequisites": [
+      "no provider credential in this environment; set one of OPENAI_API_KEY, GOOGLE_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY, DEEPSEEK_API_KEY, MINIMAX_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, AZURE_OPENAI_API_KEY, OPENAI_COMPATIBLE_API_KEY (or a local OpenAI-compatible endpoint) to run genuine inference",
+      "no genuine decision record set was captured here; run the opt-in smoke test (python -m tradingagents.llm_evaluation.smoke) with a credential, or supply a captured set to build_evaluation(record_set=...)"
+    ],
+    "note": "A captured current inference is not automatically a valid historical backtest observation. Input reproducibility (the replay sees the same bars) is distinct from point-in-time safety (those bars were available at the decision time)."
   },
   "dataset_checksums": {
     "SPY": "302f5df85a306f701295a80050546f330d5f10205ff39e85427df958cf12e766",
@@ -901,7 +919,8 @@
   "reproducibility": {
     "execution_determinism": "verified by tests (same records -> identical fills/ledger)",
     "replay_determinism": "verified by tests (two replays -> identical artifact)",
-    "inference_repeatability": "not tested: requires a working credential"
+    "inference_repeatability": "not tested: requires a working credential",
+    "inference_determinism_claimed": false
   },
   "limitations": {
     "point_in_time_scope": "price_only",

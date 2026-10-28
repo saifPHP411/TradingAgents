@@ -145,6 +145,37 @@ path, and no configuration that produces one.
   report is embedded in the evaluation artifact as `provider_readiness`, and a
   blocked evaluation now names the documented free-tier options. Documented in
   `docs/LLM_PROVIDER_AUDIT.md`. No live trading path is added.
+- A real decision-capture path (`llm_evaluation/capture.py`): turns a completed
+  graph run into a validated `DecisionRecord`. It reads the rating, the
+  session-bounded price window (hashed, so a replay can prove it saw the same
+  bars), the config hash and the model/provider metadata, and refuses a rating
+  with no tradeable action rather than degrading it to Hold. It invents no size,
+  stop or limit. The `llm_inference` label is derived from the **graph**, not the
+  caller: the graph carries an `InferenceObserver`
+  (`llm_clients/observed.py`) on its real provider clients, so a scripted or
+  stubbed model can never be captured as genuine inference — a mock run yields a
+  `synthetic_fixture` record with a note saying why. Replay gained an optional
+  `expected_config_hash`, so a record captured under a different protocol is
+  refused rather than replayed as if it were this one.
+- A bounded, opt-in provider smoke test (`llm_evaluation/smoke.py`,
+  `python -m tradingagents.llm_evaluation.smoke`): the only path that may make a
+  real model call. It checks configuration before any request, names the exact
+  env var to set and stops if absent, makes **at most one** small request with a
+  timeout, validates the returned decision with the production rating parser, and
+  writes a record only when the decision and metadata are valid. It never places
+  an order and never touches execution or risk. Default provider is Groq (a
+  documented free tier with an OpenAI-compatible API; `openai/gpt-oss-20b` is a
+  documented production model). An injected client (the test seam) is reported as
+  a fixture, never a genuine observation, so a mocked test can never be counted
+  as real inference.
+- An `evaluation_mode` and `capture_status` block in the evaluation artifact, so
+  the report cannot conflate `REAL_INFERENCE_CAPTURE`, `REPLAY` and `MOCK_TEST`.
+  `capture_status` states, field by field, whether a provider is configured,
+  whether a genuine request succeeded, whether a record was captured, whether its
+  inputs are reproducible, whether they are point-in-time safe, and whether
+  historical evaluation is allowed — for the price-only scope only, since the
+  full graph's inputs remain not PIT-safe. Input reproducibility is reported
+  separately from point-in-time safety. No live trading path is added.
 
 ### Fixed
 

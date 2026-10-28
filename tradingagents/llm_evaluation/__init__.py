@@ -22,6 +22,18 @@ engine the audited stack uses.
 
 from __future__ import annotations
 
+from .capture import (
+    MODE_MOCK_TEST,
+    MODE_REAL_INFERENCE_CAPTURE,
+    MODE_REPLAY,
+    VALID_MODES,
+    CaptureError,
+    CaptureResult,
+    build_record,
+    capture_decision,
+    graph_observed_real_inference,
+    observed_decision,
+)
 from .evaluate import (
     ARTIFACT_SCHEMA_VERSION,
     STATUS_BLOCKED,
@@ -60,15 +72,35 @@ from .records import (
 )
 from .replay import ReplayError, ReplayStrategy, no_llm_calls, signal_from_record, window_hash
 
+# ``smoke`` is imported lazily: it is run as ``python -m ...smoke``, and a
+# package-level import of it would make the ``-m`` loader warn about a
+# double-import. Accessing the names below imports it on first use.
+_SMOKE_NAMES = {"SmokeBlocked", "SmokeReport", "run_smoke"}
+
+
+def __getattr__(name: str):
+    if name in _SMOKE_NAMES:
+        from . import smoke
+
+        return getattr(smoke, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "ARTIFACT_SCHEMA_VERSION",
     "DEFAULT_PROTOCOL",
+    "MODE_MOCK_TEST",
+    "MODE_REAL_INFERENCE_CAPTURE",
+    "MODE_REPLAY",
     "SOURCE_LLM_INFERENCE",
     "SOURCE_OPERATOR_SUPPLIED",
     "SOURCE_SYNTHETIC_FIXTURE",
     "STATUS_BLOCKED",
     "STATUS_ESTABLISHED",
     "STATUS_ESTABLISHED_WITH_FINDINGS",
+    "VALID_MODES",
+    "CaptureError",
+    "CaptureResult",
     "Classification",
     "CredentialLeakError",
     "DecisionRecord",
@@ -80,16 +112,23 @@ __all__ = [
     "ReadinessVerdict",
     "ReplayError",
     "ReplayStrategy",
+    "SmokeBlocked",
+    "SmokeReport",
     "agent_dependency_matrix",
     "build_evaluation",
+    "build_record",
+    "capture_decision",
     "credential_status",
+    "graph_observed_real_inference",
     "graph_readiness",
     "looks_like_a_real_credential",
     "no_llm_calls",
+    "observed_decision",
     "point_in_time_report",
     "provider_readiness",
     "provider_report",
     "redact_reasoning",
+    "run_smoke",
     "sha256_text",
     "signal_from_record",
     "source_facts",

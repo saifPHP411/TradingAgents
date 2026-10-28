@@ -192,17 +192,18 @@ A **full-graph historical LLM pilot** is blocked by:
    Confirmed by inspecting environment variable names only; no value was read or
    printed. Documented free-tier options and the exact env var to set are in
    [`LLM_PROVIDER_AUDIT.md`](LLM_PROVIDER_AUDIT.md).
-3. **No capture path.** Nothing constructs a `DecisionRecord` from a real graph
-   run; records are built only in tests. So even with a credential, there is
-   nothing for `build_evaluation` to evaluate. This is a code gap, not a data gap,
-   and it is deliberately left unfilled until (1) is resolved — a capture over
-   inputs the graph cannot honestly obtain for a historical date would record
-   decisions made from non-point-in-time data.
+3. **No capture path.** *Resolved in Phase 8.* `llm_evaluation/capture.py` now
+   builds a `DecisionRecord` from a real graph run, deriving the `llm_inference`
+   label from an observed model call rather than from the caller, and refusing a
+   decision whose inputs it cannot identify faithfully. The capture is honest
+   about scope: a genuine capture opens only the price-only evaluation, and a
+   capture over inputs the graph cannot honestly obtain for a historical date is
+   still not performed.
 
 A **price-only restricted pilot** is not blocked by data — it reads only
 `PIT_VERIFIED` sources — but it does not measure the news, sentiment or
-fundamentals agents, so it is not a full-graph evaluation. It remains blocked by
-the missing credential (2) and the missing capture path (3).
+fundamentals agents, so it is not a full-graph evaluation. With the capture path
+now present, it remains blocked only by the missing credential (2).
 
 ## What would unblock a full-graph historical pilot
 
@@ -212,10 +213,12 @@ the missing credential (2) and the missing capture path (3).
    `PIT_VERIFIED` for that source automatically.
 2. **Provide a credential** for one supported provider (a documented free tier or
    a local endpoint is enough) and a request budget.
-3. **Add a capture path** that runs the graph over the frozen dataset and writes
-   its decisions to a `DecisionRecordSet` with the window hash and config hash.
+3. **Run the capture path** (`llm_evaluation/capture.py`, or the bounded smoke
+   test) over the frozen dataset to write a `DecisionRecordSet` with the window
+   hash and config hash. *(Implemented in Phase 8.)*
 4. **Re-run** `graph_readiness("full")` — it should report ready once every source
    in the matrix is `PIT_VERIFIED` — then run the bounded pilot declared in
    `docs/LLM_EVALUATION.md`.
 
-Until (1), (2) and (3) hold, the honest status is `LLM BASELINE BLOCKED`.
+Until (1) and (2) hold, the honest status for a full-graph historical run is
+`LLM BASELINE BLOCKED`. The price-only scope is blocked only by (2).
