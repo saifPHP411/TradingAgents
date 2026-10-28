@@ -58,6 +58,11 @@ from .records import (
 )
 from .replay import window_hash
 
+# ``snapshot`` is imported lazily inside :func:`capture_decision`: importing it
+# at module scope would put it in ``sys.modules`` before the ``-m`` loader runs
+# ``python -m tradingagents.llm_evaluation.snapshot``, which warns about the
+# double-import. The same pattern ``smoke`` uses.
+
 # The evaluation modes this phase distinguishes. They are kept strictly apart so
 # a report can never conflate a genuine capture with a replay or a test fixture.
 MODE_REAL_INFERENCE_CAPTURE = "REAL_INFERENCE_CAPTURE"
@@ -163,6 +168,7 @@ def build_record(
     reasoning_excerpt: str = "",
     confidence: float | None = None,
     snapshot_prefix: str = "feed",
+    snapshot_id: str | None = None,
     captured_at: str | None = None,
 ) -> tuple[DecisionRecord, bool]:
     """Build a validated record from an already-resolved decision and window.
@@ -170,12 +176,17 @@ def build_record(
     Returns ``(record, window_reproducible)``. Shared by the graph-capture and
     single-call smoke paths so both produce the same format and validation. No
     size or levels are ever invented here.
+
+    ``snapshot_id`` names a reloadable price snapshot when the caller has one; it
+    takes precedence over the ``snapshot_prefix:start..end`` form, so a record can
+    point at an artifact that can be re-read and re-hashed rather than a bare
+    date range.
     """
     window_start, window_end, bar_count = _window_bounds(frame)
     window_reproducible = bar_count > 0
     if window_reproducible:
         data_window_hash = window_hash(frame)
-        data_snapshot_id = f"{snapshot_prefix}:{window_start}..{window_end}"
+        data_snapshot_id = snapshot_id or f"{snapshot_prefix}:{window_start}..{window_end}"
     else:
         data_window_hash = hashlib.sha256().hexdigest()
         data_snapshot_id = f"{snapshot_prefix}:unavailable"
@@ -263,6 +274,18 @@ def capture_decision(
         )
 
     frame = _session_frame(feed, ticker, session)
+    snapshot_id = None
+    if frame is not None and len(frame) > 0:
+        from .snapshot import PriceSnapshot, SnapshotError
+
+        try:
+            snapshot_id = PriceSnapshot.from_frame(
+                ticker, frame, source=f"frozen_baseline:{ticker}.csv"
+            ).snapshot_id
+        except SnapshotError as exc:
+            raise CaptureError(
+                f"the price window for {ticker} at {session} could not be snapshotted: {exc}"
+            ) from exc
 
     settings = graph.run_settings() if hasattr(graph, "run_settings") else {}
     provider = settings.get("deep_think_provider") or settings.get("llm_provider")
@@ -299,6 +322,7 @@ def capture_decision(
         model_name=model_name,
         reasoning_excerpt=_decision_summary(final_state),
         confidence=_confidence_for(final_state, rating),
+        snapshot_id=snapshot_id,
         captured_at=captured_at,
     )
     if not window_reproducible:

@@ -299,6 +299,13 @@ def _capture_status(
             "test (python -m tradingagents.llm_evaluation.smoke) with a credential, "
             "or supply a captured set to build_evaluation(record_set=...)"
         )
+    if not inputs_reproducible:
+        blocked.append(
+            "the captured record has no reproducible price window (bar_count 0 or an "
+            "unavailable snapshot), so it cannot anchor a prospective paper "
+            "experiment; re-capture against a session the frozen dataset covers, e.g. "
+            "python -m tradingagents.llm_evaluation.smoke --snapshot-out <path>"
+        )
     if not inputs_pit_safe:
         blocked.append(
             "the news/sentiment/fundamentals inputs are not point-in-time safe for a "
@@ -316,7 +323,7 @@ def _capture_status(
         "historical_evaluation_allowed": historical_allowed,
         "historical_evaluation_scope": DEFAULT_PROTOCOL.input_scope,
         "full_graph_historical_evaluation_allowed": full_graph_allowed,
-        "prospective_paper_experiment_possible": bool(record_captured),
+        "prospective_paper_experiment_possible": bool(record_captured and inputs_reproducible),
         "blocked_prerequisites": blocked,
         "note": (
             "A captured current inference is not automatically a valid historical "

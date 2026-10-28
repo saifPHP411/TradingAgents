@@ -92,6 +92,16 @@ discriminator, because a stub is exactly what the discriminator must reject. A
 genuine `llm_inference` record still requires an actual provider response; no
 test may assert otherwise.
 
+`tradingagents/llm_evaluation/snapshot.py` is the reproducible price input a
+record anchors to. Its `content_hash` must be the *same* function the record
+carries (`replay.window_hash`), or `snapshot.matches_record(record)` proves
+nothing — do not give it a second hashing scheme. A snapshot refuses an empty
+window at construction; do not let a missing window become a snapshot. The smoke
+default session is the frozen dataset's last covered session, not today: today is
+past the data, and a window that does not end at the decision date is dropped.
+`experiment_ready` requires a genuine decision *and* a reproducible window, so a
+genuine inference with no window must not claim it.
+
 The offline suite must never make an external provider call. If you add a test
 that needs a credential, skip it when the credential is absent rather than
 faking a success.

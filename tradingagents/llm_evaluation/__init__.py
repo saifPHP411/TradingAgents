@@ -72,17 +72,27 @@ from .records import (
 )
 from .replay import ReplayError, ReplayStrategy, no_llm_calls, signal_from_record, window_hash
 
-# ``smoke`` is imported lazily: it is run as ``python -m ...smoke``, and a
-# package-level import of it would make the ``-m`` loader warn about a
-# double-import. Accessing the names below imports it on first use.
-_SMOKE_NAMES = {"SmokeBlocked", "SmokeReport", "run_smoke"}
+# ``smoke`` and ``snapshot`` are imported lazily: both are runnable as
+# ``python -m tradingagents.llm_evaluation.<name>``, and a package-level import
+# of them would make the ``-m`` loader warn about a double-import. Accessing the
+# names below imports them on first use.
+_LAZY_NAMES = {
+    "SmokeBlocked": "smoke",
+    "SmokeReport": "smoke",
+    "run_smoke": "smoke",
+    "SNAPSHOT_SCHEMA_VERSION": "snapshot",
+    "PriceSnapshot": "snapshot",
+    "SnapshotError": "snapshot",
+    "snapshot_for_session": "snapshot",
+}
 
 
 def __getattr__(name: str):
-    if name in _SMOKE_NAMES:
-        from . import smoke
+    module = _LAZY_NAMES.get(name)
+    if module is not None:
+        import importlib
 
-        return getattr(smoke, name)
+        return getattr(importlib.import_module(f".{module}", __name__), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -112,8 +122,11 @@ __all__ = [
     "ReadinessVerdict",
     "ReplayError",
     "ReplayStrategy",
+    "SNAPSHOT_SCHEMA_VERSION",
     "SmokeBlocked",
     "SmokeReport",
+    "SnapshotError",
+    "PriceSnapshot",
     "agent_dependency_matrix",
     "build_evaluation",
     "build_record",
@@ -132,6 +145,7 @@ __all__ = [
     "sha256_text",
     "signal_from_record",
     "source_facts",
+    "snapshot_for_session",
     "window_hash",
     "write_evaluation",
 ]

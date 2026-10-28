@@ -184,6 +184,42 @@ path, and no configuration that produces one.
   three attempts on a 5xx cannot turn one opt-in request into three billable
   ones.
 
+### Phase 9.5 — reproducible price input
+
+The first genuine Groq run (Phase 9) produced a real decision but recorded
+`bar_count: 0` and `data_snapshot_id: feed:unavailable`: the inference was real,
+its input was not reproducible. Two causes, both fixed.
+
+The smoke CLI never loaded a price feed, and its default session was *today*,
+which is past the frozen dataset's last session (2024-12-30). A record requires
+its window to end at the decision date, so a window ending 2024-12-30 for a
+decision dated today was dropped. The smoke path now loads the frozen dataset
+when no feed is injected, defaults the session to the dataset's last covered
+session, and snapshots the window it captures.
+
+Added:
+
+- A versioned, self-verifying price snapshot (`llm_evaluation/snapshot.py`,
+  `python -m tradingagents.llm_evaluation.snapshot`): `snapshot_id` is
+  `<symbol>-<start>..<end>-<hash12>`; `content_hash` is the same SHA-256 the
+  decision record carries (`replay.window_hash`), so
+  `snapshot.matches_record(record)` is a checkable claim. `load` recomputes the
+  hash and refuses a tampered or drifted file; an empty window is refused at
+  construction rather than recorded as `unavailable`. A committed snapshot lives
+  at `docs/baseline/SPY_price_snapshot.json`.
+- `window_reproducible` and `experiment_ready` on the smoke report.
+  `experiment_ready` requires a genuine decision **and** a reproducible window
+  that matches its snapshot — a genuine inference alone is not enough.
+- `snapshot_id` on `build_record`, so a record names a reloadable artifact
+  rather than a bare date range.
+
+Changed:
+
+- `prospective_paper_experiment_possible` now requires a reproducible window, not
+  only a captured record. The `feed:unavailable` record no longer satisfies it.
+- The smoke report no longer claims "one genuine model call" when an injected
+  (test) client was used.
+
 ### Phase 9 — first genuine inference attempt (blocked)
 
 The capture path added above is exercised by the offline suite, but no genuine

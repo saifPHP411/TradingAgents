@@ -150,7 +150,8 @@ make a real model call, and it is opt-in and bounded:
 
 ```bash
 # Requires a real key in the provider's env var, e.g. GROQ_API_KEY.
-python -m tradingagents.llm_evaluation.smoke --provider groq --record-out smoke.json
+python -m tradingagents.llm_evaluation.smoke --provider groq \
+    --record-out smoke.json --snapshot-out smoke_snapshot.json
 ```
 
 It checks configuration *before* any request and, if no key is present, prints
@@ -160,6 +161,60 @@ request. With a key it makes **at most one** small request, with a timeout and
 attempts), validates the returned decision with the production rating parser, and
 writes a record only when the decision and its metadata are valid. It never
 places an order and never touches execution or risk.
+
+### Reproducible price input (Phase 9.5)
+
+Phase 9's first genuine Groq run produced a real decision but recorded
+`bar_count: 0` and `data_snapshot_id: feed:unavailable`. The inference was real;
+its *input* was not reproducible. Two causes, both fixed:
+
+1. The smoke CLI never loaded a price feed, so no window existed.
+2. The default session was **today**, which is past the frozen dataset's last
+   session (2024-12-30). `history(symbol, today)` then ends on 2024-12-30 while
+   the decision is dated today, and a record requires the window to end at the
+   decision date — so the window was dropped.
+
+The default session is now the last session the frozen dataset covers, and the
+smoke path snapshots the window it captures:
+
+```bash
+# Build or verify a snapshot offline; contacts no vendor.
+python -m tradingagents.llm_evaluation.snapshot --symbol SPY \
+    --session 2024-12-30 --out docs/baseline/SPY_price_snapshot.json
+python -m tradingagents.llm_evaluation.snapshot --verify docs/baseline/SPY_price_snapshot.json
+```
+
+A `PriceSnapshot` is versioned and self-verifying:
+
+- `snapshot_id` is `<symbol>-<start>..<end>-<hash12>`, so the window and its
+  fingerprint are both in the name;
+- `content_hash` is the **same** SHA-256 the record carries (`replay.window_hash`,
+  over dates and each bar's open/high/low/close at ten decimals), so
+  `snapshot.matches_record(record)` is a checkable claim, not an assertion;
+- `load` recomputes the hash and refuses a tampered or drifted file;
+- an empty window is refused at construction rather than recorded as
+  `unavailable`.
+
+The smoke report adds `window_reproducible` and `experiment_ready`.
+`experiment_ready` is true only when a genuine decision is captured **and** its
+window is reproducible and matches the snapshot. A genuine inference alone is not
+enough to anchor a prospective paper experiment. The evaluation artifact's
+`prospective_paper_experiment_possible` gate now requires a reproducible window
+too, so the record with `feed:unavailable` cannot claim it.
+
+Three "snapshot"-like things in this repository answer different questions and
+must not be conflated:
+
+- a **price snapshot** (`llm_evaluation/snapshot.py`, this section) is the input
+  window a decision record anchors to, for reproducibility of an evaluation;
+- a **paper session snapshot** (`execution/paper.py`, `portfolio/`) is a
+  reporting view of a simulated run's books;
+- a **paper session state** (`PaperSession.save_state`) is a recovery format.
+
+A price snapshot is data for an LLM evaluation. It is not a portfolio snapshot
+and not a recovery mechanism. See `docs/PAPER_TRADING.md` for the paper layer's
+snapshot-versus-recovery distinction.
+
 
 A failed request is reported, not swallowed: the report carries a
 `failure_category` from a closed vocabulary (`authentication_failure`,

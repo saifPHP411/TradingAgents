@@ -1,6 +1,6 @@
 {
   "artifact_schema_version": "1.0.0",
-  "generated_at": "2026-10-28T11:18:56.093835+00:00",
+  "generated_at": "2026-10-28T13:47:08.237745+00:00",
   "status": "LLM BASELINE BLOCKED",
   "mode": "blocked",
   "evaluation_mode": "blocked",
@@ -410,7 +410,8 @@
     "prospective_paper_experiment_possible": false,
     "blocked_prerequisites": [
       "no provider credential in this environment; set one of OPENAI_API_KEY, GOOGLE_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY, DEEPSEEK_API_KEY, MINIMAX_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, AZURE_OPENAI_API_KEY, OPENAI_COMPATIBLE_API_KEY (or a local OpenAI-compatible endpoint) to run genuine inference",
-      "no genuine decision record set was captured here; run the opt-in smoke test (python -m tradingagents.llm_evaluation.smoke) with a credential, or supply a captured set to build_evaluation(record_set=...)"
+      "no genuine decision record set was captured here; run the opt-in smoke test (python -m tradingagents.llm_evaluation.smoke) with a credential, or supply a captured set to build_evaluation(record_set=...)",
+      "the captured record has no reproducible price window (bar_count 0 or an unavailable snapshot), so it cannot anchor a prospective paper experiment; re-capture against a session the frozen dataset covers, e.g. python -m tradingagents.llm_evaluation.smoke --snapshot-out <path>"
     ],
     "note": "A captured current inference is not automatically a valid historical backtest observation. Input reproducibility (the replay sees the same bars) is distinct from point-in-time safety (those bars were available at the decision time)."
   },
