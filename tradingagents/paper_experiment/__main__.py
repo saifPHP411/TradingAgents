@@ -12,10 +12,13 @@ Commands:
   resuming if the directory already exists.
 - ``report`` — write the report from the current state.
 - ``verify`` — check the journal's hash chain.
+- ``sources`` — list the selectable price sources.
 
-The default price source is the frozen historical dataset; there is no
-current-market source, so ``run`` reports the experiment as offline paper. No
-command places a live order or contacts a broker.
+The default price source is the frozen historical dataset; a vendor source is
+opt-in via ``--source``. A vendor source is fetched once, when the experiment is
+created, and never while resuming a run: a restart reads the source from the
+saved state, so no network call happens on ``report``/``verify`` and a resumed
+``run`` does not refetch. No command places a live order or contacts a broker.
 """
 
 from __future__ import annotations
@@ -29,12 +32,16 @@ from .config import ExperimentConfig
 from .experiment import ExperimentError, PaperExperiment
 from .inference import ProviderInference, StubInference
 from .journal import JournalError
-from .report import build_report
-from .sources import (
-    FrozenPriceSource,
-    PriceSource,
-    PriceSourceError,
+from .providers import (
+    KNOWN_SOURCES,
+    ProviderError,
+    SourceSelection,
+    SourceSelectionError,
+    provider_registry,
+    select_source,
 )
+from .report import build_report
+from .sources import FrozenPriceSource, PriceSource, PriceSourceError
 
 
 class RunnerError(RuntimeError):
@@ -58,6 +65,44 @@ def _make_inference(config: ExperimentConfig, *, stub: bool):
     return ProviderInference(provider=config.provider, model=config.model)
 
 
+def _resolve_source(args, config: ExperimentConfig) -> SourceSelection:
+    """Select the price source for a *new* run, honouring an explicit fallback."""
+    requested = getattr(args, "source", None) or "frozen"
+    fallback = getattr(args, "fallback", None)
+    return select_source(
+        requested,
+        symbols=config.symbols,
+        frozen_feed_factory=_frozen_source,
+        fallback=fallback,
+    )
+
+
+def _restored_source(root: Path) -> PriceSource:
+    """The source a saved experiment recorded, rebuilt without any network call.
+
+    A resumed run must not refetch: the source is a *view* of already-fetched data
+    (a daily-bar provider freezes its frame at construction; the frozen dataset is
+    local). For a vendor run the saved provenance is enough to report honestly;
+    for the frozen run the local dataset is reloaded.
+    """
+    state_path = root / "session_state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunnerError(f"experiment state {state_path} is not usable: {exc}") from exc
+    source = state.get("source", {})
+    name = source.get("name", "frozen_baseline")
+    if name.startswith("frozen"):
+        return _frozen_source()
+    # A vendor-backed run cannot be resumed without its frames, which are not
+    # stored; say so rather than silently swapping in the frozen dataset.
+    raise RunnerError(
+        f"this experiment ran on the vendor source {name!r}, whose bars are not "
+        "stored in the experiment directory; re-running it needs the provider, and "
+        "the CLI will not silently substitute the frozen dataset"
+    )
+
+
 def _start(args) -> int:
     root = Path(args.root)
     if (root / "session_state.json").exists():
@@ -69,9 +114,9 @@ def _start(args) -> int:
         provider=args.provider,
         model=args.model,
     )
-    source = _frozen_source()
+    selection = _resolve_source(args, config)
     experiment = PaperExperiment(
-        source=source,
+        source=selection.source,
         config=config,
         root=root,
         inference=_make_inference(config, stub=args.stub),
@@ -79,30 +124,38 @@ def _start(args) -> int:
     experiment.ensure_created()
     experiment.save_state()
     print(f"started experiment {experiment.experiment_id} at {root}")
+    print(f"  source: {selection.source.name} (kind {getattr(selection.source, 'kind', '?')})")
+    if selection.switched:
+        print(f"  source switched: {selection.reason}")
     return 0
 
 
 def _run(args) -> int:
     root = Path(args.root)
-    config = ExperimentConfig.from_protocol(
-        symbols=(args.symbol,) if args.symbol else ("SPY",),
-        provider=args.provider,
-        model=args.model,
-    )
-    source = _frozen_source()
     if (root / "session_state.json").exists():
-        experiment = PaperExperiment.load(
-            root, source=source, inference=_make_inference(config, stub=args.stub)
+        source = _restored_source(root)
+        inference = StubInference() if args.stub else ProviderInference(
+            provider=args.provider, model=args.model
         )
+        experiment = PaperExperiment.load(root, source=source, inference=inference)
     else:
+        config = ExperimentConfig.from_protocol(
+            symbols=(args.symbol,) if args.symbol else ("SPY",),
+            provider=args.provider,
+            model=args.model,
+        )
+        selection = _resolve_source(args, config)
         experiment = PaperExperiment(
-            source=source,
+            source=selection.source,
             config=config,
             root=root,
             inference=_make_inference(config, stub=args.stub),
         )
         experiment.ensure_created()
+        if selection.switched:
+            print(f"source switched: {selection.reason}")
 
+    source = experiment.source
     sessions = list(source.sessions())
     if args.sessions:
         # Start after the last processed session, so a resume continues.
@@ -126,13 +179,22 @@ def _run(args) -> int:
 
 def _report(args) -> int:
     root = Path(args.root)
-    source = _frozen_source()
+    source = _restored_source(root)
     experiment = PaperExperiment.load(root, source=source)
     report = build_report(experiment)
     if args.out:
         print(f"report written to {report.write(args.out)}")
     else:
         print(json.dumps(report.to_dict(), indent=2))
+    return 0
+
+
+def _sources(args) -> int:
+    for name, cls in provider_registry().items():
+        kind = getattr(cls, "kind", "unknown")
+        current = name == "finnhub"
+        print(f"{name:16s} kind={kind:14s} current_market={current}")
+    print(f"\nknown source names: {', '.join(KNOWN_SOURCES)}")
     return 0
 
 
@@ -153,15 +215,36 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m tradingagents.paper_experiment",
         description=(
-            "Prospective paper experiment. Paper only: no live order is ever placed, "
-            "and the default price source is the frozen historical dataset."
+            "Prospective paper experiment. Paper only: no live order is ever placed. "
+            "The default price source is the frozen historical dataset; a vendor "
+            "source is opt-in with --source."
         ),
     )
-    parser.add_argument("command", choices=("start", "run", "report", "verify"))
+    parser.add_argument("command", choices=("start", "run", "report", "verify", "sources"))
     parser.add_argument("--root", required=True, help="experiment directory")
     parser.add_argument("--symbol", default=None, help="symbol (default SPY)")
     parser.add_argument("--provider", default="groq")
     parser.add_argument("--model", default="openai/gpt-oss-20b")
+    parser.add_argument(
+        "--source",
+        default="frozen",
+        choices=KNOWN_SOURCES,
+        help=(
+            "price source for a new run: frozen (default, local dataset), "
+            "alpha_vantage (free daily bars), or finnhub (free current-day quote; "
+            "cannot drive a multi-session run)"
+        ),
+    )
+    parser.add_argument(
+        "--fallback",
+        default=None,
+        choices=KNOWN_SOURCES,
+        help=(
+            "an explicit source to use if --source fails to build; the switch is "
+            "logged. Omit it to make a source failure stop the run rather than "
+            "silently change the data."
+        ),
+    )
     parser.add_argument("--sessions", type=int, default=None, help="process at most N sessions")
     parser.add_argument(
         "--stub",
@@ -175,10 +258,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default=None)
     args = parser.parse_args(argv)
 
-    handlers = {"start": _start, "run": _run, "report": _report, "verify": _verify}
+    handlers = {
+        "start": _start,
+        "run": _run,
+        "report": _report,
+        "verify": _verify,
+        "sources": _sources,
+    }
     try:
         return handlers[args.command](args)
-    except (RunnerError, ExperimentError, PriceSourceError, JournalError) as exc:
+    except (
+        RunnerError,
+        ExperimentError,
+        PriceSourceError,
+        ProviderError,
+        SourceSelectionError,
+        JournalError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

@@ -218,3 +218,13 @@ supplies that durability policy for its own use: it saves state after every
 session, keeps an append-only hash-chained journal, and records the execution
 session of every decision so a resumed run fills at the same open a straight run
 would. It adds no order-routing path.
+
+The prices that reach the simulator come from a price source, never from the
+execution layer itself. The default is the committed frozen dataset; real vendor
+sources (Alpha Vantage daily bars, Finnhub quotes) are opt-in and live in
+`paper_experiment/providers/` ([MARKET_DATA_PROVIDERS.md](MARKET_DATA_PROVIDERS.md)).
+A source is one vendor's data and is validated once, so a malformed or stale
+vendor payload is refused before it can reach a fill. Switching sources is
+explicit and never mixes two vendors within one run, and a vendor failure stops
+the run rather than silently substituting historical data. No provider places an
+order, and no live broker path exists.

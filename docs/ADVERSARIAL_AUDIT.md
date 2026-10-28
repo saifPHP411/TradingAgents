@@ -536,13 +536,28 @@ test that would fail if it were false:
   removing or reordering an entry makes `ExperimentJournal.load` raise. The
   `TestJournal` group proves it.
 
-- **Unsafe, and not claimed:** "The experiment is a live paper run." The only
-  shipped price source is the frozen historical dataset, which ends in 2024; there
-  is no current-market source, and `current_market_source_available()` returns
-  `False`. The report therefore reads `OFFLINE PAPER (reproducible, not live)` and
-  `READY FOR LIVE PAPER` is unreachable. A missing credential yields a *blocked*
-  decision, never a fabricated one, and a test stub is labelled
+- **Unsafe, and not claimed:** "The experiment is a live paper run." By default the
+  price source is the frozen historical dataset, which ends in 2024. Real vendor
+  sources now exist (`paper_experiment/providers/`) and are opt-in, so
+  `current_market_source_available()` is `True`; but `READY FOR LIVE PAPER` also
+  requires a source that can serve a session window, and a quote-only source
+  (Finnhub) cannot, so it is not reachable on a quote alone. A vendor source that
+  fails stops the run rather than silently substituting the frozen dataset, and the
+  CLI refuses to resume a vendor run on frozen data. A missing credential yields a
+  *blocked* decision, never a fabricated one, and a test stub is labelled
   `synthetic_fixture` and is never counted as genuine.
+- **Safe:** "A vendor's free plan is not assumed to include the endpoint used."
+  Alpha Vantage's free function is `TIME_SERIES_DAILY` (the adjusted variant is
+  premium and unused, and `outputsize=full` is refused without an explicit
+  opt-in); Finnhub's historical candle endpoint is premium, so its provider serves
+  a current-day quote only and refuses every historical request. `TestAlphaVantage`
+  and `TestFinnhub` pin both, and `docs/MARKET_DATA_PROVIDERS.md` cites the vendor
+  pages.
+- **Safe:** "A vendor payload cannot poison the book." Every provider's bars pass
+  through one validator that refuses NaN, infinity, a non-positive price, a high
+  below low, an open/close outside the range, a duplicate or out-of-order session,
+  and a non-numeric column. A quota or bad-key notice inside an HTTP 200 is
+  classified and raised, never parsed as data.
 - **Unsafe, and not claimed:** "The paper result is evidence of profitability." A
   paper mark-to-market is not a realised trade, the costs are the declared model
   and not observed fills, and a sample below `min_trades_for_metrics` is reported

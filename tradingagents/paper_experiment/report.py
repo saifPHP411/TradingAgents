@@ -67,7 +67,8 @@ class ExperimentReport:
         lines = [
             f"Paper experiment {p['experiment_id']}",
             f"  status: {p['readiness']['status']}",
-            f"  source: {p['data']['source_name']} (current market: "
+            f"  source: {p['data']['source_name']} "
+            f"(kind: {p['data'].get('source_kind')}, current market: "
             f"{p['data']['is_current_market']})",
             f"  sessions processed: {p['counts']['sessions_processed']}",
             f"  decisions: genuine={p['counts']['genuine_inferences']} "
@@ -185,19 +186,31 @@ def _data_block(experiment: PaperExperiment) -> dict:
     sessions = experiment.source.sessions()
     snapshots = sorted(p.name for p in experiment.snapshot_dir.glob("*.json")) \
         if experiment.snapshot_dir.exists() else []
+    provenance = getattr(experiment.source, "provenance", None)
+    kind = getattr(experiment.source, "kind", "unknown")
+    if not experiment.source.is_current_market:
+        note = (
+            "the source is historical and reproducible; it is NOT the current "
+            "market, so an experiment on it is not a live paper run"
+        )
+    elif kind == "vendor_quote":
+        note = (
+            "a current-day quote source is configured; it is current, but it "
+            "provides a single quote, not the historical OHLCV a multi-session "
+            "experiment needs"
+        )
+    else:
+        note = "a current-market source is configured"
     return {
         "source_name": experiment.source.name,
+        "source_kind": kind,
         "is_current_market": experiment.source.is_current_market,
         "dataset_start": sessions[0] if sessions else None,
         "dataset_end": sessions[-1] if sessions else None,
         "sessions_available": len(sessions),
         "snapshots_saved": len(snapshots),
-        "note": (
-            "the frozen dataset is historical and reproducible; it is NOT the current "
-            "market, so an experiment on it is not a live paper run"
-            if not experiment.source.is_current_market
-            else "a current-market source is configured"
-        ),
+        "provenance": provenance.to_dict() if provenance is not None else None,
+        "note": note,
     }
 
 
@@ -293,10 +306,16 @@ def _baseline_block(experiment: PaperExperiment) -> dict:
 def _readiness(experiment: PaperExperiment, genuine: list, counts: dict) -> dict:
     """The honest readiness verdict, with every blocker named."""
     blockers: list[str] = []
+    kind = getattr(experiment.source, "kind", "unknown")
     if not experiment.source.is_current_market:
         blockers.append(
-            "the price source is the frozen historical dataset, not the current "
-            "market; this is not a live paper run"
+            "the price source is historical, not the current market; this is not a "
+            "live paper run"
+        )
+    if kind == "vendor_quote":
+        blockers.append(
+            "the price source provides a single current-day quote, not the historical "
+            "OHLCV a multi-session paper experiment needs; it cannot drive a run"
         )
     if not genuine:
         blockers.append(
@@ -316,7 +335,11 @@ def _readiness(experiment: PaperExperiment, genuine: list, counts: dict) -> dict
             "available, so live paper readiness cannot be claimed"
         )
 
-    if genuine and experiment.source.is_current_market:
+    # "Ready for live paper" needs a genuine inference *and* a current-market source
+    # that can actually serve a session window. A quote-only source is current but
+    # cannot drive a multi-session run, so it does not qualify.
+    can_drive_sessions = kind not in ("vendor_quote",)
+    if genuine and experiment.source.is_current_market and can_drive_sessions:
         status = "READY FOR LIVE PAPER"
     elif genuine:
         status = "OFFLINE PAPER (reproducible, not live)"
@@ -334,7 +357,7 @@ def _limitations(experiment: PaperExperiment, genuine: list, performance: dict) 
     ]
     if not experiment.source.is_current_market:
         limitations.append(
-            "the frozen dataset is historical; a decision on it is a backtest-like "
+            "the source is historical; a decision on it is a backtest-like "
             "observation, not a current-market call"
         )
     if not genuine:

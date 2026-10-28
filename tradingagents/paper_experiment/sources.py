@@ -9,12 +9,19 @@ that states its own nature rather than a bare callable that hides it:
   session is fixed in the past — so an experiment on it cannot be called a live
   paper run. ``is_current_market`` is ``False`` and the report says so.
 - :class:`StaticPriceSource` is a fixed, in-memory series for tests.
+- the vendor-backed sources in :mod:`tradingagents.paper_experiment.providers`
+  (Alpha Vantage daily bars, Finnhub quotes) declare their own provenance and are
+  the only ones that touch the network. They are opt-in and never the default.
 
-A source that would represent the *current* market does not ship here: wiring one
-would mean a vendor call, and this phase adds no network path. The
-:class:`PriceSource` protocol is the seam a future current-market source would
-implement; until one exists, :func:`current_market_source_available` returns
-``False`` and the experiment refuses to claim live readiness.
+The :class:`PriceSource` protocol is the seam every source implements. A source
+states whether it represents the *current* market; a historical vendor dataset
+does not, so ``is_current_market`` stays ``False`` and the experiment refuses to
+claim live readiness on it.
+
+Data-provenance rule that every source here obeys: a frame is returned in the
+project's canonical shape (a ``DatetimeIndex`` of naive, midnight-normalised
+sessions and lowercase ``open/high/low/close/volume`` columns), so the shared
+validator and the snapshot fingerprint see the same thing whatever the vendor.
 """
 
 from __future__ import annotations
@@ -25,9 +32,212 @@ from typing import Protocol, runtime_checkable
 
 import pandas as pd
 
+# The canonical frame shape every source produces and the validator expects.
+BAR_COLUMNS = ("open", "high", "low", "close", "volume")
+SESSION_COLUMN = "session"
+
 
 class PriceSourceError(ValueError):
     """A price source cannot serve a request: unknown symbol, session, or bad data."""
+
+
+@dataclass(frozen=True)
+class SourceProvenance:
+    """Where a source's data comes from, recorded so a report cannot imply more.
+
+    ``kind`` is the closed vocabulary that separates the cases a report must not
+    conflate: ``frozen`` (the committed dataset), ``static`` (a test fixture),
+    ``vendor_daily`` (a vendor's historical daily bars) and ``vendor_quote`` (a
+    vendor's current-day quote, which is **not** historical OHLCV).
+    """
+
+    name: str
+    kind: str
+    is_current_market: bool
+    symbol: str | None = None
+    fetched_at: str | None = None
+    last_bar_date: str | None = None
+    timezone: str | None = None
+    adjusted: bool | None = None
+    dataset_start: str | None = None
+    dataset_end: str | None = None
+    snapshot_id: str | None = None
+    content_hash: str | None = None
+    notes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "is_current_market": self.is_current_market,
+            "symbol": self.symbol,
+            "fetched_at": self.fetched_at,
+            "last_bar_date": self.last_bar_date,
+            "timezone": self.timezone,
+            "adjusted": self.adjusted,
+            "dataset_start": self.dataset_start,
+            "dataset_end": self.dataset_end,
+            "snapshot_id": self.snapshot_id,
+            "content_hash": self.content_hash,
+            "notes": list(self.notes),
+        }
+
+
+def _validate_frame(frame: pd.DataFrame, symbol: str, source_name: str) -> pd.DataFrame:
+    """Return ``frame`` re-indexed by session, or raise :class:`PriceSourceError`.
+
+    The single validator every source's bars pass through, so a malformed vendor
+    payload — NaN, infinity, a non-positive price, a high below its low, an
+    open/close outside the range, a duplicate or out-of-order session, or a
+    non-numeric column — is refused here rather than poisoning the ledger later.
+    """
+    if frame is None or len(frame) == 0:
+        raise PriceSourceError(f"{source_name}: {symbol} has no bars")
+    missing = [c for c in BAR_COLUMNS if c not in frame.columns]
+    if missing:
+        raise PriceSourceError(
+            f"{source_name}: {symbol} frame is missing column(s) {missing}"
+        )
+
+    index = pd.to_datetime(frame.index, errors="coerce")
+    if index.isna().any():
+        raise PriceSourceError(f"{source_name}: {symbol} has an unparseable session")
+    if index.has_duplicates:
+        duplicated = sorted({str(d)[:10] for d in index[index.duplicated()]})
+        raise PriceSourceError(
+            f"{source_name}: {symbol} has duplicate session(s) {duplicated[:5]}"
+        )
+    if not index.is_monotonic_increasing:
+        raise PriceSourceError(
+            f"{source_name}: {symbol} sessions are not in ascending order"
+        )
+
+    clean = frame.copy()
+    clean.index = index
+    clean.index.name = SESSION_COLUMN
+
+    for column in BAR_COLUMNS:
+        values = pd.to_numeric(clean[column], errors="coerce")
+        if values.isna().any():
+            bad = clean.index[values.isna()][0]
+            raise PriceSourceError(
+                f"{source_name}: {symbol} has a non-numeric {column} at {str(bad)[:10]}"
+            )
+        clean[column] = values.astype(float)
+
+    ohlc = clean[list(BAR_COLUMNS[:4])]
+    if not ohlc.map(math.isfinite).all().all():
+        raise PriceSourceError(f"{source_name}: {symbol} has a non-finite OHLC value")
+    for column in ("open", "high", "low", "close"):
+        if (clean[column] <= 0).any():
+            bad = clean.index[clean[column] <= 0][0]
+            raise PriceSourceError(
+                f"{source_name}: {symbol} has a non-positive {column} at {str(bad)[:10]}"
+            )
+    if (clean["high"] < clean["low"]).any():
+        bad = clean.index[clean["high"] < clean["low"]][0]
+        raise PriceSourceError(
+            f"{source_name}: {symbol} has high below low at {str(bad)[:10]}"
+        )
+    for column in ("open", "close"):
+        out_of_range = (clean[column] < clean["low"] - 1e-9) | (
+            clean[column] > clean["high"] + 1e-9
+        )
+        if out_of_range.any():
+            bad = clean.index[out_of_range][0]
+            raise PriceSourceError(
+                f"{source_name}: {symbol} has {column} outside [low, high] at "
+                f"{str(bad)[:10]}"
+            )
+    return clean
+
+
+class FramePriceSource:
+    """A price source backed by in-memory OHLCV frames, one per symbol.
+
+    Shared by :class:`StaticPriceSource` and every vendor-backed source, so the
+    validation, the session set and the point-in-time ``window`` are written once
+    and a vendor cannot diverge from the frozen dataset's behaviour. Every frame
+    is validated eagerly at construction.
+    """
+
+    kind = "static"
+
+    def __init__(
+        self,
+        frames: dict[str, pd.DataFrame],
+        *,
+        name: str = "frame_source",
+        provenance: SourceProvenance | None = None,
+    ) -> None:
+        if not frames:
+            raise PriceSourceError("a price source needs at least one symbol")
+        self.name = name
+        self._frames: dict[str, pd.DataFrame] = {}
+        all_sessions: set[str] = set()
+        for symbol, frame in frames.items():
+            ordered = _validate_frame(frame, symbol, name).sort_index()
+            self._frames[symbol] = ordered
+            all_sessions |= {str(index)[:10] for index in ordered.index}
+        self._sessions = tuple(sorted(all_sessions))
+        self._session_set = all_sessions
+        self.dataset_start = self._sessions[0]
+        self.dataset_end = self._sessions[-1]
+        self.provenance = provenance or SourceProvenance(
+            name=name,
+            kind=self.kind,
+            is_current_market=False,
+            dataset_start=self.dataset_start,
+            dataset_end=self.dataset_end,
+        )
+
+    @property
+    def is_current_market(self) -> bool:
+        return bool(self.provenance.is_current_market)
+
+    def sessions(self) -> tuple[str, ...]:
+        return self._sessions
+
+    def covers(self, session: str) -> bool:
+        return session in self._session_set
+
+    def bars(self, symbol: str, session: str) -> SessionBars | None:
+        frame = self._frames.get(symbol)
+        if frame is None:
+            raise PriceSourceError(f"{self.name} does not carry {symbol!r}")
+        if not self.covers(session):
+            raise PriceSourceError(f"{session} is outside {self.name}'s sessions")
+        key = pd.Timestamp(session)
+        if key not in frame.index:
+            return None
+        row = frame.loc[key]
+        volume = row.get("volume")
+        return SessionBars(
+            symbol=symbol,
+            session=session,
+            open=float(row["open"]),
+            high=float(row["high"]),
+            low=float(row["low"]),
+            close=float(row["close"]),
+            volume=None if volume is None or pd.isna(volume) else float(volume),
+        )
+
+    def window(self, symbol: str, session: str) -> pd.DataFrame:
+        frame = self._frames.get(symbol)
+        if frame is None:
+            raise PriceSourceError(f"{self.name} does not carry {symbol!r}")
+        bounded = frame[frame.index <= pd.Timestamp(session)]
+        if len(bounded) == 0:
+            raise PriceSourceError(f"no bars for {symbol!r} at or before {session}")
+        return bounded
+
+    def frame(self, symbol: str) -> pd.DataFrame:
+        """The full stored frame for ``symbol`` (used to hash a snapshot)."""
+        frame = self._frames.get(symbol)
+        if frame is None:
+            raise PriceSourceError(f"{self.name} does not carry {symbol!r}")
+        return frame
+
 
 
 @dataclass(frozen=True)
@@ -90,14 +300,17 @@ class PriceSource(Protocol):
 
 
 def current_market_source_available() -> bool:
-    """Whether a source representing the current market is wired.
+    """Whether a source representing the *current* market is wired.
 
-    Always ``False`` in this phase: no current-market source ships, because
-    wiring one would add a vendor call. The experiment consults this before it
-    claims live readiness, so "paper-ready" cannot be reported from frozen data
-    alone.
+    ``True`` now that a vendor-backed current-market source exists (Finnhub's
+    quote endpoint reports a same-day price). It does **not** mean a live paper
+    run is available: a quote source serves only a same-day price, not the
+    historical OHLCV a multi-session experiment needs, and a daily-bar source is
+    still a historical dataset. The report keeps both facts apart.
     """
-    return False
+    from .providers import current_market_sources
+
+    return bool(current_market_sources())
 
 
 class FrozenPriceSource:
@@ -109,6 +322,8 @@ class FrozenPriceSource:
     the horizon.
     """
 
+    kind = "frozen"
+
     def __init__(self, feed, *, name: str = "frozen_baseline") -> None:
         self._feed = feed
         self.name = name
@@ -119,6 +334,17 @@ class FrozenPriceSource:
         self._session_set = set(self._sessions)
         self.dataset_start = self._sessions[0]
         self.dataset_end = self._sessions[-1]
+        self.provenance = SourceProvenance(
+            name=name,
+            kind=self.kind,
+            is_current_market=False,
+            dataset_start=self.dataset_start,
+            dataset_end=self.dataset_end,
+            notes=(
+                "the committed historical dataset; reproducible and point-in-time, "
+                "but its last session is fixed in the past",
+            ),
+        )
 
     @property
     def is_current_market(self) -> bool:
@@ -162,67 +388,16 @@ class FrozenPriceSource:
         return frame
 
 
-class StaticPriceSource:
+class StaticPriceSource(FramePriceSource):
     """A fixed in-memory series, for tests. Explicitly not the current market.
 
     ``frames`` maps a symbol to a DataFrame indexed by session date with
-    open/high/low/close/volume columns, exactly as a feed would carry it.
+    open/high/low/close/volume columns, exactly as a feed would carry it. All
+    validation and point-in-time behaviour is inherited from
+    :class:`FramePriceSource`.
     """
 
+    kind = "static"
+
     def __init__(self, frames: dict[str, pd.DataFrame], *, name: str = "static_test") -> None:
-        if not frames:
-            raise PriceSourceError("a static source needs at least one symbol")
-        self.name = name
-        self._frames: dict[str, pd.DataFrame] = {}
-        all_sessions: set[str] = set()
-        for symbol, frame in frames.items():
-            ordered = frame.sort_index()
-            self._frames[symbol] = ordered
-            all_sessions |= {str(index)[:10] for index in ordered.index}
-        self._sessions = tuple(sorted(all_sessions))
-        self._session_set = all_sessions
-        # Validate every row eagerly, so a malformed fixture fails at
-        # construction rather than part-way through a run. A test double that
-        # carries a NaN would otherwise poison the experiment quietly.
-        for symbol, session in ((s, d) for s in self._frames for d in self._sessions):
-            self.bars(symbol, session)
-
-    @property
-    def is_current_market(self) -> bool:
-        return False
-
-    def sessions(self) -> tuple[str, ...]:
-        return self._sessions
-
-    def covers(self, session: str) -> bool:
-        return session in self._session_set
-
-    def bars(self, symbol: str, session: str) -> SessionBars | None:
-        frame = self._frames.get(symbol)
-        if frame is None:
-            raise PriceSourceError(f"the static source does not carry {symbol!r}")
-        if not self.covers(session):
-            raise PriceSourceError(f"{session} is outside the static source's sessions")
-        key = pd.Timestamp(session)
-        if key not in frame.index:
-            return None
-        row = frame.loc[key]
-        volume = row.get("volume")
-        return SessionBars(
-            symbol=symbol,
-            session=session,
-            open=float(row["open"]),
-            high=float(row["high"]),
-            low=float(row["low"]),
-            close=float(row["close"]),
-            volume=None if volume is None or pd.isna(volume) else float(volume),
-        )
-
-    def window(self, symbol: str, session: str) -> pd.DataFrame:
-        frame = self._frames.get(symbol)
-        if frame is None:
-            raise PriceSourceError(f"the static source does not carry {symbol!r}")
-        bounded = frame[frame.index <= pd.Timestamp(session)]
-        if len(bounded) == 0:
-            raise PriceSourceError(f"no bars for {symbol!r} at or before {session}")
-        return bounded
+        super().__init__(frames, name=name)

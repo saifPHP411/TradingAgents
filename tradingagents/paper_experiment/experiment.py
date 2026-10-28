@@ -298,7 +298,9 @@ class PaperExperiment:
             "config_hash": self.config.config_hash(),
             "source": {
                 "name": self.source.name,
+                "kind": getattr(self.source, "kind", "unknown"),
                 "is_current_market": self.source.is_current_market,
+                "provenance": _provenance_of(self.source),
             },
             "processed_sessions": sorted(self.processed_sessions),
             "decisions": {k: v.to_dict() for k, v in sorted(self.decisions.items())},
@@ -364,9 +366,11 @@ class PaperExperiment:
                 "config_hash": self.config.config_hash(),
                 "source": {
                     "name": self.source.name,
+                    "kind": getattr(self.source, "kind", "unknown"),
                     "is_current_market": self.source.is_current_market,
                     "dataset_start": getattr(self.source, "dataset_start", None),
                     "dataset_end": getattr(self.source, "dataset_end", None),
+                    "provenance": _provenance_of(self.source),
                 },
                 "mode": self.mode.value,
                 "schema_version": PAPER_EXPERIMENT_SCHEMA_VERSION,
@@ -906,8 +910,15 @@ class PaperExperiment:
         """A fixed UTC timestamp for a session, at its close (21:00 UTC).
 
         Fixed per session so a re-run produces the same signal id and the
-        processed-signal set is meaningful across a restart.
+        processed-signal set is meaningful across a restart. A source may
+        override the instant (a vendor's own timezone), but it must stay a pure
+        function of the session, or the signal id would stop being stable.
         """
+        override = getattr(self.source, "session_timestamp", None)
+        if callable(override):
+            stamp = override(session)
+            if stamp is not None:
+                return stamp
         return datetime.fromisoformat(f"{session}T21:00:00+00:00")
 
     # -- introspection ----------------------------------------------------
@@ -931,6 +942,14 @@ def _refuse_quote(symbol: str) -> Quote:
         f"a restored experiment supplies quotes explicitly; {symbol!r} was requested "
         "without a session"
     )
+
+
+def _provenance_of(source) -> dict | None:
+    """The source's declared provenance, JSON-safe, or ``None`` if it has none."""
+    provenance = getattr(source, "provenance", None)
+    if provenance is None:
+        return None
+    return provenance.to_dict()
 
 
 def _limits_from(config: ExperimentConfig):

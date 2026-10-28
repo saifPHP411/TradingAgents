@@ -55,10 +55,16 @@ history. Three of its artifacts are deliberately distinct — the hash-chained
 a read-only view. Do not treat a report as recovery. Its one timing rule is fixed:
 a decision is made from bars through session T, executed at T+1's open, and
 evaluated at T+1+lag; the config refuses `execute_on_next_open=False`, so a
-decision can never fill at the close it was made from. There is no current-market
-price source — only the frozen historical dataset — so the experiment reports
-itself as offline paper and `current_market_source_available()` is `False`. Do not
-call it a live paper run.
+decision can never fill at the close it was made from. The default price source
+is still the frozen historical dataset, so by default the experiment reports
+itself as offline paper. Real vendor sources live in `paper_experiment/providers/`
+(Alpha Vantage daily bars, Finnhub quotes); they are opt-in, fetched once, and
+never the default. A vendor failure must stop the run rather than silently
+substituting the frozen dataset — the CLI enforces this. A current-market source
+now exists, so `current_market_source_available()` is `True`, but `READY FOR LIVE
+PAPER` additionally needs a source that can serve a session window; a quote-only
+source (Finnhub) is current but cannot, so it does not qualify. Do not call any of
+this a live paper run, and do not describe a report snapshot as durable recovery.
 
 `tradingagents/baseline/` is the reproducible *reference* baseline: one
 deterministic strategy, a frozen committed dataset, a versioned protocol, and an

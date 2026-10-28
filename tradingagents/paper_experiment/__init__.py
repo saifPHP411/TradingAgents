@@ -21,9 +21,10 @@ What this package adds is only what was missing: a durable, hash-chained
 What it deliberately does not add:
 
 - no live broker execution, no order routing, no credentials in any artifact;
-- no current-market price source — the only shipped source reads the frozen
-  historical dataset, so the experiment reports itself as offline paper, never as
-  a live run;
+- no *silent* current-market claim: the default source is still the frozen
+  historical dataset, and a vendor source is opt-in and declares its own
+  provenance. A vendor that fails stops the run rather than silently substituting
+  the frozen dataset;
 - no fabricated decision — a missing credential records a *blocked* decision,
   and a test stub is labelled ``synthetic_fixture`` and can never be counted as
   genuine inference.
@@ -52,12 +53,27 @@ from .journal import (
     JournalEntry,
     JournalError,
 )
+from .providers import (
+    AlphaVantageDailySource,
+    FinnhubQuoteSource,
+    ProviderAuthError,
+    ProviderError,
+    ProviderNotConfiguredError,
+    ProviderRateLimitedError,
+    ProviderStaleDataError,
+    ProviderUnsupportedError,
+    SourceSelection,
+    SourceSelectionError,
+    provider_registry,
+    select_source,
+)
 from .report import REPORT_SCHEMA_VERSION, ExperimentReport, build_report
 from .sources import (
     FrozenPriceSource,
     PriceSource,
     PriceSourceError,
     SessionBars,
+    SourceProvenance,
     StaticPriceSource,
     current_market_source_available,
 )
@@ -71,12 +87,14 @@ __all__ = [
     "STATE_EXECUTED",
     "STATE_PENDING",
     "STATE_UNEVALUABLE",
+    "AlphaVantageDailySource",
     "DecisionState",
     "ExperimentConfig",
     "ExperimentConfigError",
     "ExperimentError",
     "ExperimentJournal",
     "ExperimentReport",
+    "FinnhubQuoteSource",
     "FrozenPriceSource",
     "InferenceFn",
     "InferenceUnavailable",
@@ -85,9 +103,20 @@ __all__ = [
     "PaperExperiment",
     "PriceSource",
     "PriceSourceError",
+    "ProviderAuthError",
+    "ProviderError",
+    "ProviderNotConfiguredError",
+    "ProviderRateLimitedError",
+    "ProviderStaleDataError",
+    "ProviderUnsupportedError",
     "SessionBars",
     "SessionOutcome",
+    "SourceProvenance",
+    "SourceSelection",
+    "SourceSelectionError",
     "StaticPriceSource",
     "build_report",
     "current_market_source_available",
+    "provider_registry",
+    "select_source",
 ]

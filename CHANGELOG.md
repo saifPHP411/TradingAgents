@@ -220,6 +220,60 @@ Changed:
 - The smoke report no longer claims "one genuine model call" when an injected
   (test) client was used.
 
+### Phase 11 — real market-data providers
+
+Adds real vendor price sources (`paper_experiment/providers/`) so a paper
+experiment can run on live market data, still with no live trading path. A
+provider fetches data, never an order; every provider declares its own
+provenance; and a vendor failure stops the run rather than silently substituting
+historical data.
+
+Added:
+
+- **Alpha Vantage daily OHLCV** (`providers/alpha_vantage.py`): the free
+  `TIME_SERIES_DAILY` function (`outputsize=compact`), fetched once and validated.
+  The premium `TIME_SERIES_DAILY_ADJUSTED` endpoint is deliberately not used, and
+  `outputsize=full` is refused unless the caller explicitly accepts a paid call.
+  A quota or bad-key notice that arrives inside an HTTP 200 body is classified
+  (`ProviderRateLimitedError` / `ProviderAuthError`) and never parsed as data; a
+  bar whose date is older than the staleness window raises
+  `ProviderStaleDataError`.
+- **Finnhub quotes** (`providers/finnhub.py`): the free `/quote` endpoint, which
+  returns a current-day quote only. Finnhub's historical candle endpoint is
+  premium, so this source is a `vendor_quote` that *refuses* every historical
+  request (`bars`/`window`/`sessions`/`covers` raise) and can never stand in for a
+  bar history.
+- **A shared, bounded, redacting HTTP layer** (`providers/base.py`): one timeout,
+  a credential scrubbed from any error, an injectable transport (so tests never
+  touch a socket), and a bounded retry. It never returns a partially parsed body
+  and never swallows a failure.
+- **Explicit source selection with a logged fallback** (`providers/selection.py`):
+  `select_source(requested, fallback=…)` switches only to a named fallback and
+  logs it; without one, a source failure raises. An experiment runs on exactly one
+  source's bars, so a snapshot never mixes two vendors, and the CLI refuses to
+  resume a vendor run on the frozen dataset.
+- **Source provenance** (`sources.SourceProvenance`): name, kind, current-market
+  flag, symbol, fetch time, last bar date, timezone, adjusted flag, dataset
+  window, snapshot id and content hash, recorded in the experiment state, the
+  journal's creation entry and the report's `data` block.
+- **A shared frame validator** (`sources._validate_frame`): every source's bars
+  pass through one place that refuses NaN, infinity, a non-positive price, a high
+  below low, an open/close outside the range, a duplicate or out-of-order session,
+  and a non-numeric column. `FramePriceSource` factors out the validation, session
+  set and point-in-time window shared by `StaticPriceSource` and the vendors.
+- CLI `--source`/`--fallback` and a `sources` command; `docs/MARKET_DATA_PROVIDERS.md`
+  stating, with citations, what each provider can and cannot provide on its free
+  plan.
+
+Changed:
+
+- `current_market_source_available()` now returns `True` (a current-market source
+  exists), but `READY FOR LIVE PAPER` additionally requires a source that can
+  serve a session window, so a quote-only source still cannot reach it. The
+  existing Phase 10 test was tightened rather than weakened to assert this.
+- The experiment's session timestamp is now source-overridable (a vendor's own
+  timezone), still a pure function of the session so signal ids stay stable.
+
 ### Phase 10 — prospective paper experiment
 
 A resumable, prospective paper experiment (`paper_experiment/`) records an LLM

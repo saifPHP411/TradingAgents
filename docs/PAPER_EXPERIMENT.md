@@ -23,9 +23,11 @@ It is **not**:
 
 - a live trading system. There is no order routing, no broker, no credential in
   any artifact, and no `ExecutionMode.LIVE`;
-- a current-market run. The only shipped price source reads the committed
-  historical dataset, which ends in 2024. The experiment therefore reports itself
-  as *offline paper*, never as live;
+- a current-market run by default. The default price source reads the committed
+  historical dataset, which ends in 2024. A real vendor source (Alpha Vantage
+  daily bars, Finnhub quotes) can be selected, but it is opt-in and declares its
+  own provenance, and a vendor that fails stops the run rather than silently
+  falling back to 2024 data;
 - a profitability claim. A paper mark-to-market is not a realised trade.
 
 ## Three storage concepts, kept apart
@@ -58,7 +60,32 @@ python -m tradingagents.paper_experiment report --root runs/exp1 --out runs/exp1
 
 # Check the journal's hash chain.
 python -m tradingagents.paper_experiment verify --root runs/exp1
+
+# List the selectable price sources.
+python -m tradingagents.paper_experiment sources --root runs/exp1
 ```
+
+### Choosing a price source
+
+`--source` picks the source for a **new** run; `--fallback` names a source to use
+if the primary cannot be built. The fallback is explicit and logged; without it, a
+source failure stops the run rather than silently changing the data.
+
+```bash
+# Real daily bars from Alpha Vantage (free plan; set ALPHA_VANTAGE_API_KEY).
+python -m tradingagents.paper_experiment start --root runs/av \
+    --source alpha_vantage --symbol IBM
+
+# The same, with an explicit fallback to the local dataset if the vendor fails.
+python -m tradingagents.paper_experiment start --root runs/av \
+    --source alpha_vantage --fallback frozen --symbol IBM
+```
+
+A vendor source is fetched **once**, when the experiment is created. `report`,
+`verify` and a resumed `run` read the saved state and never refetch; the CLI
+refuses to resume a vendor run on the frozen dataset, so a vendor failure cannot
+be hidden behind 2024 data. See [MARKET_DATA_PROVIDERS.md](MARKET_DATA_PROVIDERS.md)
+for what each provider can and cannot provide on its free plan.
 
 `--stub` uses a non-genuine stub decision source, for an offline demonstration.
 Its decisions are labelled `synthetic_fixture` and are **never** counted as
@@ -125,8 +152,9 @@ cannot duplicate an event.
 - A stub or test client yields `synthetic_fixture`, and the report's
   `genuine_inferences` count excludes it.
 - The report's readiness status is `BLOCKED` until at least one genuine inference
-  exists, and `READY FOR LIVE PAPER` is unreachable on frozen data because the
-  source is not the current market.
+  exists. `READY FOR LIVE PAPER` needs a genuine inference *and* a current-market
+  source that can serve a session window; a historical source never qualifies, and
+  a quote-only source is current but cannot drive a multi-session run.
 
 ## Where files live and how they are protected
 
@@ -148,10 +176,11 @@ Run the report and read `readiness`:
 
 - `BLOCKED` — no genuine inference yet, or the source is not the current market.
 - `OFFLINE PAPER (reproducible, not live)` — genuine inferences exist, but the
-  source is historical. This is the expected state until a current-market source
-  is wired.
-- `READY FOR LIVE PAPER` — genuine inferences on a current-market source.
-  Unreachable in this phase, because no current-market source ships.
+  source is historical. This is the expected state for the frozen dataset and for
+  a vendor's daily bars, which are historical.
+- `READY FOR LIVE PAPER` — genuine inferences on a current-market source that can
+  serve a session window. A quote-only source (Finnhub) is current but cannot, so
+  it does not reach this state on its own.
 
 The report's `limitations` list and `readiness.blockers` are the authoritative
 statement of what the experiment does not prove. A paper result is not evidence

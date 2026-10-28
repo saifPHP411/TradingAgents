@@ -373,8 +373,36 @@ class TestHonestySafeguards:
         assert report["data"]["is_current_market"] is False
         assert "NOT the current market" in report["data"]["note"]
 
-    def test_current_market_source_is_unavailable(self):
-        assert current_market_source_available() is False
+    def test_a_current_market_source_exists_but_is_quote_only(self):
+        """Phase 11 added real providers; the honesty claim is now stronger.
+
+        A current-market source now ships (Finnhub's quote), so the old premise
+        "none exists" is obsolete. The claim that matters is kept and tightened:
+        the current-market source is a *quote* that cannot drive a multi-session
+        run, so it can never make an experiment a live paper run on its own.
+        """
+        from tradingagents.paper_experiment.providers import (
+            FinnhubQuoteSource,
+            current_market_sources,
+        )
+
+        assert current_market_source_available() is True
+        assert FinnhubQuoteSource in current_market_sources()
+        assert FinnhubQuoteSource.kind == "vendor_quote"
+
+        # The quote source refuses every historical request, so it cannot stand in
+        # for the bar history a multi-session experiment needs.
+        from tradingagents.paper_experiment.providers import ProviderUnsupportedError
+
+        source = FinnhubQuoteSource.__new__(FinnhubQuoteSource)
+        source.symbol = "SPY"
+        source.name = "finnhub_quote"
+        with pytest.raises(ProviderUnsupportedError):
+            source.sessions()
+        with pytest.raises(ProviderUnsupportedError):
+            source.bars("SPY", "2024-01-02")
+        with pytest.raises(ProviderUnsupportedError):
+            source.window("SPY", "2024-01-02")
 
     def test_a_snapshot_window_ends_at_the_decision_date(self, tmp_path):
         source = _source()
