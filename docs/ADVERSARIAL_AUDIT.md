@@ -543,9 +543,17 @@ test that would fail if it were false:
   requires a source that can serve a session window, and a quote-only source
   (Finnhub) cannot, so it is not reachable on a quote alone. A vendor source that
   fails stops the run rather than silently substituting the frozen dataset, and the
-  CLI refuses to resume a vendor run on frozen data. A missing credential yields a
-  *blocked* decision, never a fabricated one, and a test stub is labelled
-  `synthetic_fixture` and is never counted as genuine.
+  CLI refuses to resume a source on frozen data unless it stored its own bars. A
+  missing credential yields a *blocked* decision, never a fabricated one, and a test
+  stub is labelled `synthetic_fixture` and is never counted as genuine.
+- **Safe, and now proven by a restart test:** "A vendor run can be resumed on the
+  same data without a second fetch." A frame-backed source writes its validated
+  bars into `session_state.json`, so `PaperExperiment.load(root)` rebuilds the same
+  source locally. `tests/test_phase12_restart_source_persistence.py` counts the
+  mocked transport calls to prove no re-fetch, and compares a restarted run to a
+  straight one on accounting and event semantics. Before Phase 12 the resume path
+  required the caller to pass the source back in, which a CLI resume could not do;
+  a vendor run was therefore not restart-safe. It is now.
 - **Safe:** "A vendor's free plan is not assumed to include the endpoint used."
   Alpha Vantage's free function is `TIME_SERIES_DAILY` (the adjusted variant is
   premium and unused, and `outputsize=full` is refused without an explicit

@@ -82,6 +82,45 @@ class SourceProvenance:
             "notes": list(self.notes),
         }
 
+    @classmethod
+    def from_dict(cls, payload: dict) -> SourceProvenance:
+        """Rebuild a provenance from its serialized form, ignoring unknown keys."""
+        known = set(cls.__dataclass_fields__)
+        fields = {k: v for k, v in payload.items() if k in known}
+        if "notes" in fields and fields["notes"] is not None:
+            fields["notes"] = tuple(fields["notes"])
+        return cls(**fields)
+
+
+def frame_to_records(frame: pd.DataFrame) -> list[dict]:
+    """A validated frame as JSON-safe rows, so a vendor frame survives a restart.
+
+    One row per session, with the session as ``date`` and the OHLCV columns. The
+    frame is re-validated on the way back in (:meth:`FramePriceSource.from_records`),
+    so a corrupted state file is refused rather than trusted.
+    """
+    rows: list[dict] = []
+    for index, row in frame.sort_index().iterrows():
+        record = {"date": str(index)[:10]}
+        for column in BAR_COLUMNS:
+            if column in frame.columns:
+                value = row[column]
+                record[column] = None if value is None or pd.isna(value) else float(value)
+        rows.append(record)
+    return rows
+
+
+def records_to_frame(records: list[dict]) -> pd.DataFrame:
+    """The inverse of :func:`frame_to_records`: rows back to an indexed frame."""
+    if not records:
+        raise PriceSourceError("cannot rebuild a frame from an empty record list")
+    frame = pd.DataFrame(records)
+    if "date" not in frame.columns:
+        raise PriceSourceError("a stored frame row is missing its 'date'")
+    frame = frame.set_index(pd.to_datetime(frame.pop("date"), errors="raise"))
+    frame.index.name = "session"
+    return frame
+
 
 def _validate_frame(frame: pd.DataFrame, symbol: str, source_name: str) -> pd.DataFrame:
     """Return ``frame`` re-indexed by session, or raise :class:`PriceSourceError`.
@@ -237,6 +276,39 @@ class FramePriceSource:
         if frame is None:
             raise PriceSourceError(f"{self.name} does not carry {symbol!r}")
         return frame
+
+    def to_dict(self) -> dict:
+        """Serialize the source's bars and provenance, so a restart can rebuild it.
+
+        A vendor source fetches once at construction; persisting its validated
+        bars is what lets a resumed run continue on the *same* data instead of
+        re-fetching (and, on a quota-limited vendor, failing to).
+        """
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "provenance": self.provenance.to_dict(),
+            "frames": {symbol: frame_to_records(frame) for symbol, frame in self._frames.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> FramePriceSource:
+        """Rebuild a source from :meth:`to_dict`, re-validating every stored frame."""
+        frames = payload.get("frames")
+        if not frames:
+            raise PriceSourceError("a stored price source carries no frames")
+        provenance = payload.get("provenance")
+        restored = cls(
+            {symbol: records_to_frame(rows) for symbol, rows in frames.items()},
+            name=payload.get("name", "restored_source"),
+            provenance=SourceProvenance.from_dict(provenance) if provenance else None,
+        )
+        # Preserve the recorded kind (e.g. ``vendor_daily``) on the instance; the
+        # class default is only a fallback for a source with no stored kind.
+        stored_kind = payload.get("kind")
+        if stored_kind:
+            restored.kind = stored_kind
+        return restored
 
 
 

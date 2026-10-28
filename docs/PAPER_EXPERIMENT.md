@@ -82,9 +82,12 @@ python -m tradingagents.paper_experiment start --root runs/av \
 ```
 
 A vendor source is fetched **once**, when the experiment is created. `report`,
-`verify` and a resumed `run` read the saved state and never refetch; the CLI
-refuses to resume a vendor run on the frozen dataset, so a vendor failure cannot
-be hidden behind 2024 data. See [MARKET_DATA_PROVIDERS.md](MARKET_DATA_PROVIDERS.md)
+`verify` and a resumed `run` read the saved state and never refetch; a
+frame-backed vendor source stores its bars in `session_state.json`, so a resume
+rebuilds the same source locally. The CLI refuses to resume a source that carries
+no persistable bars (a quote-only source) rather than substituting the frozen
+dataset, so a vendor failure cannot be hidden behind 2024 data. See
+[MARKET_DATA_PROVIDERS.md](MARKET_DATA_PROVIDERS.md)
 for what each provider can and cannot provide on its free plan.
 
 `--stub` uses a non-genuine stub decision source, for an offline demonstration.
@@ -143,6 +146,14 @@ State is written atomically after every session. Stop the process at any point;
 `run` resumes from the last processed session and does not reprocess one already
 in `processed_sessions`. The journal is idempotent on `event_id`, so a re-run
 cannot duplicate an event.
+
+A frame-backed source (the frozen dataset, a static fixture, or a vendor daily
+source) persists its validated bars and provenance in `session_state.json`, so a
+resume rebuilds the **same** source without a second fetch. On a quota-limited
+vendor (Alpha Vantage's free tier allows 25 calls a day) that matters: a restart
+must not spend a call, and it must not silently continue on different data. A
+source that cannot be persisted — Finnhub's quote source, which carries no bar
+history — is refused on resume rather than swapped for the frozen dataset.
 
 ## Distinguishing a fixture from a real inference
 

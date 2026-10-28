@@ -20,6 +20,9 @@ quoted with its source; where a fact could not be verified it is marked as such.
 
 A provider is **opt-in**: nothing is fetched unless `--source` names it. A vendor
 source is fetched once, at construction, and frozen; a restart never refetches.
+A frame-backed source writes its validated bars and provenance into
+`session_state.json`, so a resumed run rebuilds the same source locally instead
+of spending a second vendor call.
 
 ## Alpha Vantage — daily OHLCV
 
@@ -138,7 +141,10 @@ Source: <https://finnhub.io/pricing>.
 3. **No mixing.** An experiment runs on exactly one source's bars, so a snapshot
    never blends two vendors. There is no per-session fallback.
 4. **No silent 2024 substitution.** The CLI refuses to resume a vendor run on the
-   frozen dataset, so a vendor failure cannot be hidden behind historical data.
+   frozen dataset, so a vendor failure cannot be hidden behind historical data. A
+   frame-backed vendor run is resumed from the bars stored in its own state, so
+   the refusal only applies to a source that carries no persistable bars (a
+   quote-only source).
 5. **No fabricated data.** A missing price is an error or a blocked decision, never
    an invented bar. A malformed payload is refused by the shared validator
    (`sources._validate_frame`): NaN, infinity, a non-positive price, a high below

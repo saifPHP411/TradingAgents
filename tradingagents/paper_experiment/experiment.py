@@ -301,6 +301,7 @@ class PaperExperiment:
                 "kind": getattr(self.source, "kind", "unknown"),
                 "is_current_market": self.source.is_current_market,
                 "provenance": _provenance_of(self.source),
+                "restore": _source_restore_payload(self.source),
             },
             "processed_sessions": sorted(self.processed_sessions),
             "decisions": {k: v.to_dict() for k, v in sorted(self.decisions.items())},
@@ -313,14 +314,44 @@ class PaperExperiment:
         return self.state_path
 
     @classmethod
+    def _restore_source(cls, state: dict) -> PriceSource:
+        """Rebuild the price source from the bars persisted in the state.
+
+        Raises :class:`ExperimentError` when the state carries no restorable
+        bars, so a resume never silently continues on a different dataset than
+        the run started on.
+        """
+        from .sources import FramePriceSource, PriceSourceError
+
+        payload = (state.get("source") or {}).get("restore")
+        if not payload:
+            raise ExperimentError(
+                "this experiment's state carries no restorable price bars; pass the "
+                "source explicitly to resume (a quote-only source cannot be persisted)"
+            )
+        try:
+            return FramePriceSource.from_dict(payload)
+        except (PriceSourceError, KeyError, TypeError, ValueError) as exc:
+            raise ExperimentError(
+                f"the persisted price source could not be restored: {exc}"
+            ) from exc
+
+    @classmethod
     def load(
         cls,
         root: str | Path,
         *,
-        source: PriceSource,
+        source: PriceSource | None = None,
         inference: InferenceFn | None = None,
     ) -> PaperExperiment:
-        """Restore an experiment from ``root``, verifying the journal."""
+        """Restore an experiment from ``root``, verifying the journal.
+
+        When ``source`` is omitted, the source is rebuilt from the bars persisted
+        in the state — a vendor source then resumes on the *same* data without a
+        second fetch (important on a quota-limited vendor). A caller that passes
+        ``source`` explicitly takes responsibility for supplying equivalent data;
+        the provenance recorded in the state is still the one the run started on.
+        """
         root = Path(root)
         state_path = root / "session_state.json"
         if not state_path.exists():
@@ -336,6 +367,8 @@ class PaperExperiment:
                 f"reads version {PAPER_EXPERIMENT_SCHEMA_VERSION}"
             )
         config = ExperimentConfig.from_dict(state["config"])
+        if source is None:
+            source = cls._restore_source(state)
         journal = ExperimentJournal.load(root / "journal.json")
         try:
             session = PaperSession.restore(state["session"], quotes=_refuse_quote)
@@ -950,6 +983,25 @@ def _provenance_of(source) -> dict | None:
     if provenance is None:
         return None
     return provenance.to_dict()
+
+
+def _source_restore_payload(source) -> dict | None:
+    """The source's restorable bars, when it can serialize them.
+
+    A frame-backed source (a static fixture or a vendor daily source) persists
+    its validated bars, so a restart rebuilds the *same* data without a second
+    vendor call. A source that cannot serialize (the frozen dataset, which
+    reloads locally, or a quote-only source) returns ``None``; the state then
+    records the provenance but no bars, and the CLI resumes the frozen dataset
+    from disk (checking its window) or refuses a source that cannot be persisted.
+    """
+    to_dict = getattr(source, "to_dict", None)
+    if not callable(to_dict):
+        return None
+    try:
+        return to_dict()
+    except Exception:  # noqa: BLE001 - a non-serializable source is not fatal
+        return None
 
 
 def _limits_from(config: ExperimentConfig):

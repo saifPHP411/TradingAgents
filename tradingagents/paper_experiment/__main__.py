@@ -82,8 +82,10 @@ def _restored_source(root: Path) -> PriceSource:
 
     A resumed run must not refetch: the source is a *view* of already-fetched data
     (a daily-bar provider freezes its frame at construction; the frozen dataset is
-    local). For a vendor run the saved provenance is enough to report honestly;
-    for the frozen run the local dataset is reloaded.
+    local). The bars a frame-backed source fetched are persisted in the state, so
+    a vendor run resumes on the *same* data without a second, quota-consuming
+    call. A source that cannot be persisted (a quote-only source) is refused
+    rather than silently swapped for the frozen dataset.
     """
     state_path = root / "session_state.json"
     try:
@@ -92,15 +94,40 @@ def _restored_source(root: Path) -> PriceSource:
         raise RunnerError(f"experiment state {state_path} is not usable: {exc}") from exc
     source = state.get("source", {})
     name = source.get("name", "frozen_baseline")
+    if source.get("restore"):
+        try:
+            return PaperExperiment._restore_source(state)
+        except ExperimentError as exc:
+            raise RunnerError(str(exc)) from exc
+    # No persisted bars (e.g. a quote-only source). Reloading the frozen dataset
+    # here would silently change the data source, so refuse instead.
     if name.startswith("frozen"):
-        return _frozen_source()
-    # A vendor-backed run cannot be resumed without its frames, which are not
-    # stored; say so rather than silently swapping in the frozen dataset.
+        reloaded = _frozen_source()
+        _check_frozen_window(reloaded, source.get("provenance") or {})
+        return reloaded
     raise RunnerError(
-        f"this experiment ran on the vendor source {name!r}, whose bars are not "
-        "stored in the experiment directory; re-running it needs the provider, and "
+        f"this experiment ran on the source {name!r}, whose bars are not stored in "
+        "the experiment directory; it cannot be resumed without re-fetching, and "
         "the CLI will not silently substitute the frozen dataset"
     )
+
+
+def _check_frozen_window(source: PriceSource, recorded: dict) -> None:
+    """Refuse a resume when the committed dataset no longer matches the run.
+
+    The frozen dataset is reloaded from disk on resume rather than stored in the
+    state. If the repository's dataset changed since the run began, the reloaded
+    sessions would differ from the ones the run was built on, so a silent
+    continue would mix two datasets. The recorded window is checked instead.
+    """
+    sessions = tuple(source.sessions())
+    start, end = recorded.get("dataset_start"), recorded.get("dataset_end")
+    if start and end and (sessions[0] != start or sessions[-1] != end):
+        raise RunnerError(
+            f"the committed dataset now spans {sessions[0]}..{sessions[-1]}, but this "
+            f"experiment was built on {start}..{end}; refusing to resume on a "
+            "different dataset"
+        )
 
 
 def _start(args) -> int:

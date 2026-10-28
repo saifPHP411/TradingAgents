@@ -220,6 +220,48 @@ Changed:
 - The smoke report no longer claims "one genuine model call" when an injected
   (test) client was used.
 
+### Phase 12 — restart recovery of a vendor-backed paper experiment
+
+Phase 10 proved a restart is idempotent **when the caller hands the restored
+session the same price source**. That hid a real defect: a vendor source fetches
+once at construction, so a resume that rebuilt the source from scratch either
+re-fetched (a second, quota-consuming call — and a failure on the free tier) or
+silently resumed on different data. This phase persists the source so a restart
+recovers the *same* run.
+
+Added:
+
+- **Persisted source bars** (`sources.FramePriceSource.to_dict`/`from_dict`,
+  `SourceProvenance.from_dict`): a frame-backed source (the frozen dataset, a
+  static fixture, or a vendor daily source) writes its validated bars and
+  provenance into `session_state.json` under a `source.restore` block.
+  `PaperExperiment.load(root)` now rebuilds the source from that block, so a
+  **vendor** run resumes without a second API call and on the same bars. A stored
+  frame is re-validated on restore, so a corrupted state cannot poison the book.
+- **A versioned, explicit restore path**: `load(root, source=None)` reads the
+  persisted bars; passing a source explicitly still works. A source that cannot
+  be persisted (Finnhub's quote source, which carries no bar history) is refused
+  with a clear error rather than silently swapped for the frozen dataset.
+- **Phase 12 tests** (`tests/test_phase12_restart_source_persistence.py`): a
+  restart *without* an explicit source matches a straight run on accounting and
+  events; a vendor run restarts without refetching (asserted by counting the
+  mocked transport calls); multiple symbols survive; a corrupted or absent
+  restore block is refused; and a credential in the environment never reaches the
+  state file.
+- **Credential-gated live tests** (`tests/test_live_providers_integration.py`):
+  marked `integration` and skipped unless the relevant key is present, so the
+  default suite stays hermetic. They make the minimum real calls (one Alpha
+  Vantage, one Finnhub, one LLM inference) and never print a key.
+- **`docs/RAILWAY_DEPLOYMENT.md`**: what deploying the paper runner to Railway
+  requires — a worker/cron shape, the start-command override, the volume and the
+  `RAILWAY_RUN_UID=0` caveat, and why no Config-as-Code file is committed.
+
+Changed:
+
+- `docs/PAPER_EXPERIMENT.md`, `docs/MARKET_DATA_PROVIDERS.md`: state the resume
+  mechanism precisely — a frame-backed vendor run is resumed from its own stored
+  bars, and the refusal applies only to a source with no persistable bars.
+
 ### Phase 11 — real market-data providers
 
 Adds real vendor price sources (`paper_experiment/providers/`) so a paper

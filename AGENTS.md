@@ -147,6 +147,12 @@ faking a success.
 - A strategy's `context.feed` is a view bounded at the session, not the whole
   feed. Do not hand a strategy the raw feed; that re-opens look-ahead through
   `feed.bar(symbol, future_date)`.
+- A paper experiment must be restart-safe *without* the caller re-supplying the
+  price source. A vendor source fetches once and persists its validated bars into
+  `session_state.json`, so `PaperExperiment.load(root)` rebuilds the same source
+  with no second fetch. The frozen dataset is not stored (2,515 sessions); it
+  reloads from disk and the recorded window is checked instead. A source that can
+  persist neither is refused, never silently swapped for the frozen dataset.
 
 ## Known limitation
 
