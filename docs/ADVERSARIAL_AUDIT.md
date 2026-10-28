@@ -210,6 +210,150 @@ remainder, low/high reachability, the single-acceptance guard, and the
 single-position accounting through the backtester) and
 `tests/test_paper_trading.py::TestPaperRestingLimits`.
 
+## Phase 3 — paper-trading reliability, persistence and recovery
+
+A second pass over the *paper session* specifically, asking not "does a backtest
+survive this" but "does a long-running paper process survive a restart, a data
+outage and a repeated step without changing the accounting". The reported Phase 2
+state was taken as a claim to verify, not a fact; the findings below were each
+reproduced against the working tree before any fix.
+
+### 8. There was no recovery mechanism, only a reporting snapshot
+
+Severity: high. The whole point of a paper run is that it can be stopped and
+resumed, and it could not be.
+
+`PaperSession.write_json` wrote a snapshot that looked like state but was a
+report: it omitted the ledger's event log, the per-holding realised P&L, the
+per-holding fee bookkeeping and the `seq` counter. Restoring from it would have
+silently changed the accounting, and no restore path existed in any case.
+
+Fix: a distinct, versioned recovery format. `Ledger.to_state` / `from_state` and
+`PaperSession.state` / `save_state` / `restore` capture the whole book (event log
+and sequence counter included), the risk limits, the cost schedule, the simulator
+settings, the live resting orders with their remaining size and weighted average
+fill price, the processed-signal set and the day baseline. A snapshot and a state
+file are now documented as different things. `PaperSession.restore` raises
+`PaperStateError` for a malformed file, an unknown `schema_version`, or a state
+claiming a live mode.
+
+Tests: `tests/test_paper_recovery.py::TestRestartEqualsNoRestart`,
+`TestSnapshotIsNotRecovery`, `TestFilePersistence`.
+
+### 9. A price-source exception mid-`work_resting` left the queue half-advanced
+
+Severity: high. One broken symbol could corrupt the resting queue.
+
+`work_resting` looped over the resting orders and rebuilt `self.resting` only at
+the end. A quote source that raised for one symbol propagated out of the loop
+with `self.resting` still holding the pre-loop list, so an order that had already
+filled on an earlier iteration stayed in the queue marked `FILLED` — and the next
+`work_resting` would skip it, silently. The book had moved for the fill, but the
+queue and the step list disagreed with it.
+
+Fix: the loop is exception-safe. A quote that cannot be read leaves that order
+resting, the remaining orders are still worked, and the first failure is
+re-raised *after* the loop so it is never swallowed. The book is never touched by
+a failed read, and a filled order is never re-queued.
+
+Tests: `tests/test_paper_recovery.py::TestMarketDataFailures`.
+
+### 10. A closed market rejected a resting GTC order instead of skipping it
+
+Severity: medium. It cancelled a live order for a reason that is not about the
+order.
+
+`work_resting` passed the quote's `is_open` straight into the simulator, so a
+quote that arrived with `is_open=False` made the simulator reject the resting
+order with `MARKET_CLOSED` — a terminal state for an order whose limit simply had
+not been reached. A market that is closed is a reason to wait, not to kill the
+order.
+
+Fix: a closed quote now leaves the order resting, consistent with a missing
+quote. The order is only ever cancelled when it expires or the caller asks.
+
+Tests: `tests/test_paper_recovery.py::TestMarketDataFailures`
+(`test_a_closed_market_leaves_a_resting_order_live`).
+
+### 11. A partially filled resting order's remainder was dropped on the first work
+
+Severity: medium. The remainder of a persistent limit could vanish.
+
+`on_signal` only added an order to `self.resting` when its status was exactly
+`ACCEPTED`, so a GTC limit that filled *part* of its size on the first attempt
+(participation configured, a thin quote) ended `PARTIALLY_FILLED` and was never
+queued — its remainder was silently lost, and a later `work_resting` could not
+continue it.
+
+Fix: an `ACCEPTED` *or* `PARTIALLY_FILLED` GTC order is queued, so the remainder
+rests. A partial fill's increment is what reaches the ledger, and the order's
+weighted average fill price blends the pieces.
+
+Tests: `tests/test_paper_recovery.py::TestPartialFillRecovery`.
+
+### 12. A resting order was not re-checked against the risk caps at its fill price
+
+Severity: medium. A gap to the limit could breach a position cap.
+
+The paper path re-checked a *fresh* buy at its projected fill price, but a
+resting order's later fill went straight to the simulator with no re-check. A
+resting limit sized at the cap could therefore fill at a price that left the
+position past it.
+
+Fix: `work_resting` re-checks a resting BUY's *remaining* size against the caps at
+the projected fill price, exactly as a fresh entry is; the size is reduced to the
+largest that holds, and the remainder is rejected with `RISK_LIMIT` (recorded)
+only when no positive size remains.
+
+Tests: `tests/test_paper_recovery.py::TestPartialFillRecovery::test_a_partial_fill_then_risk_rejection_of_the_remainder`.
+
+### 13. A repeated signal filled a second position
+
+Severity: high. A crash-recovery re-run or a duplicated message doubled the
+position.
+
+`on_signal` had no memory of what it had already processed. The same signal — the
+same `signal_id`, a deterministic digest of the decision — driven twice filled
+twice, charged two fees, and appended two `ORDER_FILLED` events.
+
+Fix: the session records the `signal_id`s it has processed and refuses a second
+one with an explicit `DUPLICATE_SIGNAL` step and no order. A price-source
+*failure* is not marked processed, so a data outage does not consume a decision
+that was never acted on.
+
+Tests: `tests/test_paper_recovery.py::TestDuplicateProcessing`.
+
+### 14. A resting fill reported zero fees, and the snapshot understated the order
+
+Severity: low, but it is a reporting defect on the exact figures a report shows.
+
+`work_resting` recorded `fees=0.0` on its steps even when the fill charged a fee,
+and the snapshot's `resting_orders` listed only five fields, so a reader could not
+tell `ACCEPTED` from `PARTIALLY_FILLED`, nor see the remaining quantity, the
+average fill price, the time in force or the expiry. The snapshot also carried no
+schema version and no current-time field.
+
+Fix: `work_resting` records the fee the fill actually charged (from the ledger
+delta), and the snapshot reports each order's real status, filled and remaining
+quantities, weighted average fill price, time in force and expiry, plus a
+`schema_version`, `current_time`, `day` and `day_start_equity`.
+
+Tests: `tests/test_paper_recovery.py::TestSnapshotCorrectness`.
+
+### 15. `work_resting` did not roll the day, so the daily-loss baseline went stale
+
+Severity: low. It is a real defect for a session that only ever rests orders.
+
+`on_signal` rolled the day's opening equity, but `work_resting` did not, so a
+session whose activity was entirely resting-order fills kept a stale daily
+baseline and a stale `day`.
+
+Fix: `work_resting` rolls the day from the quote's timestamp before working the
+queue.
+
+Tests: `tests/test_paper_recovery.py::TestRestartEqualsNoRestart` (day baseline
+survives the restart) and the day-roll assertions in `tests/test_paper_trading.py`.
+
 ## What the audit confirmed holds
 
 Each of these was attacked and did not break:

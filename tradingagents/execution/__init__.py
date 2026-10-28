@@ -27,8 +27,10 @@ from tradingagents.execution.orders import (
     TimeInForce,
 )
 from tradingagents.execution.paper import (
+    PAPER_STATE_SCHEMA_VERSION,
     PaperSession,
     PaperSessionError,
+    PaperStateError,
     Quote,
     QuoteSource,
     SessionStep,
@@ -39,6 +41,7 @@ from tradingagents.execution.simulator import ExecutionSimulator
 
 __all__ = [
     "NO_COSTS",
+    "PAPER_STATE_SCHEMA_VERSION",
     "CostBreakdown",
     "CostModel",
     "ExecutionEngine",
@@ -52,6 +55,7 @@ __all__ = [
     "OrderType",
     "PaperSession",
     "PaperSessionError",
+    "PaperStateError",
     "Quote",
     "QuoteSource",
     "RejectReason",

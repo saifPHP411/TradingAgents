@@ -106,10 +106,91 @@ print(steps[0].order_status, session.ledger.position_quantity("AAPL"))
 ```
 
 An order whose symbol has no quote is left resting rather than cancelled — a
-missing quote is not a reason to kill an order. `session.resting` and the JSON
-snapshot's `resting_orders` list show what is still live. A caller that never
-calls `work_resting` leaves the order resting, which is honest: an order nobody
-advanced is an order that did not fill.
+missing quote is not a reason to kill an order. A price source that *raises* is
+handled the same way for that order: it is kept live, the book is not touched,
+and the other resting orders are still worked, so one broken symbol cannot stall
+the queue. The exception is re-raised after the loop rather than swallowed, so a
+caller can retry; nothing is filled against a price that was never read.
+`session.resting` and the JSON snapshot's `resting_orders` list show what is
+still live. A caller that never calls `work_resting` leaves the order resting,
+which is honest: an order nobody advanced is an order that did not fill.
+
+A GTC limit can also fill only *part* of its size when participation is
+configured and the quote carries a volume; its remainder stays in
+`session.resting` so the next `work_resting` continues it. A resting buy is
+re-checked against the risk caps at the price it will fill at, exactly as a fresh
+entry is, so a gap to the limit cannot leave a position past its cap. An order
+that reaches its `expires_session` is cancelled with `EXPIRED` by `work_resting`,
+and a caller can cancel a live order explicitly with
+`session.cancel_resting(order)`.
+
+## Persistence, restart and recovery
+
+There are two distinct JSON files, and they answer different questions:
+
+| | `write_json` / `snapshot()` | `save_state` / `state()` |
+|---|---|---|
+| Purpose | Reporting | Recovery |
+| Holds | Headline figures, positions, steps, live orders | The whole ledger **including its event log and sequence counter**, risk limits, cost schedule, simulator settings, live orders, processed-signal set, day baseline |
+| Versioned | Yes (`schema_version`) | Yes (`schema_version`) |
+| Can it resume a run? | **No** | Yes |
+
+A snapshot is a *view*: it deliberately drops the event log, the per-holding
+realised P&L and the fee bookkeeping, so it cannot rebuild the book by replay.
+Restoring from it would silently change the accounting. The state file is the
+recovery format, and it is versioned so a reader refuses a file it does not
+understand rather than misreading it.
+
+To survive a restart, save the state and restore it into a fresh session:
+
+```python
+session.save_state("runs/paper_2026-01-05.state.json")
+
+# ... the process restarts ...
+
+from tradingagents.execution import PaperSession, dict_quote_source
+
+restored = PaperSession.restore(
+    {},                                          # or state=... directly
+    quotes=dict_quote_source({"AAPL": 196.10}),  # a callable cannot be serialised
+    path="runs/paper_2026-01-05.state.json",
+)
+restored.work_resting()   # the resting orders are still live
+```
+
+The price source is supplied again by the caller because a callable is not data.
+Everything else is restored exactly: cash, positions, average entries, realised
+P&L, fees, the event log with its sequence counter (so a resumed run's events
+continue rather than collide), the live resting orders with their remaining size
+and weighted average fill price, the risk limits, the cost schedule, the
+simulator's participation setting, and the processed-signal set.
+
+`PaperSession.restore` raises `PaperStateError` for a malformed file, an unknown
+`schema_version`, or a state claiming a live mode — it never restores a book that
+would be silently wrong. A restored session is still `PAPER` and still cannot
+reach a venue.
+
+## Duplicate processing
+
+A signal's `signal_id` is a deterministic digest of its decision, so replaying
+the same decision — a crash-recovery re-run, a duplicated message — produces the
+same id. The session records the ids it has processed and refuses a second one
+with a `DUPLICATE_SIGNAL` step and no order, so a re-driven decision cannot
+produce a second position or a second fee. The refusal is explicit, not silent.
+
+A price-source *failure* is different: the signal is not marked processed, so a
+data outage does not consume a decision that was never acted on. The caller can
+retry the same signal once the source recovers.
+
+## Determinism
+
+Given the same quotes in the same order, two runs produce the same cash, the same
+positions, the same fees and the same event semantics — whether or not one of
+them was interrupted by a save and a restore. The recovery tests assert exactly
+that: Scenario A (no restart), Scenario B (restart at the same point) and
+Scenario C (restart mid-sequence) all agree. Event `seq` numbers are part of the
+restored state, so even they match; only wall-clock timestamps, which come from
+the caller, are compared by their semantic fields rather than by value.
 
 ## Recording
 
@@ -137,3 +218,12 @@ against the price you hand it, so it cannot tell you about slippage on a thin
 book, a rejected order at a venue, or a partial fill you did not model. Those are
 the things paper trading is meant to reveal, and this simulation can only reveal
 the ones you put into the quote.
+
+It is also not a crash-proof service. The state file is a durable, versioned
+snapshot written when the caller asks for it; there is no write-ahead log, no
+automatic checkpoint on every step, and no supervisor. A restart recovers exactly
+the state that was last saved, so any step after the last `save_state` is lost —
+the caller decides how often to save. What the recovery mechanism *does* prove is
+that a restored session continues with identical accounting and no duplicated
+fills; what it does not provide is the durability policy, which belongs to the
+caller.

@@ -43,6 +43,7 @@ from tradingagents.execution.interface import (
     ExecutionMode,
     MarketContext,
     assert_simulation_only,
+    resolve_mode,
 )
 from tradingagents.execution.orders import (
     Order,
@@ -83,7 +84,10 @@ class ExecutionSimulator:
             )
         self.ledger = ledger
         self.costs = costs or CostModel()
-        self.mode = mode
+        # Resolved rather than stored as given, so ``mode`` is always the enum and
+        # a caller that passes the string form (as a restored session does) still
+        # gets a value the rest of the code can compare and serialise.
+        self.mode = resolve_mode(mode)
         # 0 disables partial fills entirely, which is the default: a caller that
         # has not supplied volumes cannot have participation modelled for it.
         self.max_volume_participation = max_volume_participation

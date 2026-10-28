@@ -431,6 +431,92 @@ class Ledger:
             prices={s: h.last_price for s, h in self.holdings.items() if h.last_price is not None},
         )
 
+    # --- Persistence --------------------------------------------------------
+
+    def to_state(self) -> dict:
+        """The ledger's complete state, JSON-safe, so a run can be resumed.
+
+        This is deliberately not :meth:`snapshot`. A snapshot is a reporting view
+        of the headline figures, and it cannot rebuild a book: it drops the
+        per-holding realised P&L, the fee bookkeeping, the marks of closed
+        positions and the whole event log. Restoring from it would silently change
+        the accounting. This captures every field the ledger holds — including the
+        sequence counter, so the restored book's next ``seq`` is the one the
+        original would have used — and :meth:`from_state` rebuilds it exactly.
+        """
+        return {
+            "initial_cash": self.initial_cash,
+            "currency": self.currency,
+            "cash": self.cash,
+            "unattributed_fees": self._unattributed_fees,
+            "seq": self._seq,
+            "holdings": {
+                symbol: {
+                    "symbol": holding.symbol,
+                    "quantity": holding.quantity,
+                    "average_entry_price": holding.average_entry_price,
+                    "last_price": holding.last_price,
+                    "realized_pnl": holding.realized_pnl,
+                    "fees_paid": holding.fees_paid,
+                    "opened_at": holding.opened_at.isoformat()
+                    if holding.opened_at is not None else None,
+                }
+                for symbol, holding in self.holdings.items()
+            },
+            "events": [
+                {
+                    "seq": event.seq,
+                    "timestamp": event.timestamp.isoformat(),
+                    "type": event.type.value,
+                    "symbol": event.symbol,
+                    "detail": event.detail,
+                    "reason": event.reason,
+                }
+                for event in self.events
+            ],
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> Ledger:
+        """Rebuild a ledger from :meth:`to_state`, with identical accounting.
+
+        The reconstruction is exact: cash, positions, average entries, realised
+        P&L, fees, marks and the event log all come back, and ``_seq`` is restored
+        to the saved value so a resumed run's event numbers continue rather than
+        restart and collide with the ones already written.
+        """
+        ledger = cls(
+            initial_cash=float(state["initial_cash"]),
+            currency=state.get("currency", "USD"),
+        )
+        ledger.cash = float(state["cash"])
+        ledger._unattributed_fees = float(state.get("unattributed_fees", 0.0))
+        for symbol, holding_state in state.get("holdings", {}).items():
+            opened_at = holding_state.get("opened_at")
+            ledger.holdings[symbol] = Holding(
+                symbol=holding_state.get("symbol", symbol),
+                quantity=float(holding_state.get("quantity", 0.0)),
+                average_entry_price=float(holding_state.get("average_entry_price", 0.0)),
+                last_price=None if holding_state.get("last_price") is None
+                else float(holding_state["last_price"]),
+                realized_pnl=float(holding_state.get("realized_pnl", 0.0)),
+                fees_paid=float(holding_state.get("fees_paid", 0.0)),
+                opened_at=datetime.fromisoformat(opened_at) if opened_at else None,
+            )
+        ledger.events = [
+            LedgerEvent(
+                seq=int(event["seq"]),
+                timestamp=datetime.fromisoformat(event["timestamp"]),
+                type=EventType(event["type"]),
+                symbol=event.get("symbol"),
+                detail=event.get("detail", {}),
+                reason=event.get("reason", ""),
+            )
+            for event in state.get("events", [])
+        ]
+        ledger._seq = int(state.get("seq", len(ledger.events)))
+        return ledger
+
 
 def _as_utc(value: datetime) -> datetime:
     """Normalize a timestamp to UTC, treating a naive one as UTC."""

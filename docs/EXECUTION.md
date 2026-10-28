@@ -177,3 +177,35 @@ Two limitations are real and are stated rather than hidden:
 
 This is not a policy that could be configured away. It is the absence of a code
 path.
+
+## Persistence and restart recovery
+
+Reporting and recovery are separate concerns with separate files:
+
+- `Ledger.snapshot()` and `PaperSession.snapshot()` / `write_json()` are
+  **reporting** views. A snapshot carries the headline figures and a summary of
+  the live orders, but not the ledger's event log, per-holding realised P&L or
+  fee bookkeeping, so it cannot rebuild a book. It is not a recovery mechanism.
+- `Ledger.to_state()` / `Ledger.from_state()` and `PaperSession.state()` /
+  `save_state()` / `restore()` are the **recovery** format. They capture the
+  whole book — including the event log and the dense `seq` counter — plus the
+  risk limits, the cost schedule, the simulator settings, the live resting orders
+  with their remaining size and weighted average fill price, the processed-signal
+  set and the day baseline.
+
+Both files carry a `schema_version` (`PAPER_STATE_SCHEMA_VERSION`, currently `1`).
+`PaperSession.restore` refuses a file whose version it does not understand, and
+raises `PaperStateError` for a malformed file or a state claiming a live mode,
+rather than restoring a book that would be silently wrong. A restored session is
+still `PAPER`: recovery adds no path to a venue.
+
+The accounting is restored exactly, not recomputed: a resumed run's cash,
+positions, average entries, realised P&L and fees equal the original's, and its
+event sequence continues rather than restarting. `tests/test_paper_recovery.py`
+proves this by running the same sequence twice — once straight through, once with
+a save/restore in the middle — and asserting the two agree on every figure and on
+the event semantics.
+
+Recovery is not a durability policy. There is no write-ahead log and no automatic
+checkpoint; the caller decides when to call `save_state`, and only the last saved
+state is recovered.

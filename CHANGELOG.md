@@ -59,6 +59,24 @@ path, and no configuration that produces one.
   reproducibility.
 - Paper trading (`execution/paper.py`): the same pipeline driven by live quotes
   from a caller-supplied source instead of historical bars.
+- Paper-session persistence and restart recovery (`execution/paper.py`,
+  `portfolio/ledger.py`): `Ledger.to_state`/`from_state` and
+  `PaperSession.state`/`save_state`/`restore` write and rebuild the *complete*
+  session — the whole book including its event log and dense `seq` counter, the
+  risk limits, the cost schedule, the simulator settings, the live resting orders
+  with their remaining size and weighted average fill price, the processed-signal
+  set and the day baseline. It is versioned (`PAPER_STATE_SCHEMA_VERSION`), and
+  `PaperSession.restore` raises `PaperStateError` for a malformed file, an unknown
+  version, or a state claiming a live mode. This is deliberately distinct from the
+  reporting snapshot (`snapshot`/`write_json`), which cannot rebuild a book.
+- Duplicate-signal refusal in a paper session: a `signal_id` already processed is
+  refused with a `DUPLICATE_SIGNAL` step and no order, so a re-driven decision
+  (crash recovery, a duplicated message) cannot create a second position or fee.
+- `PaperSession.cancel_resting` cancels a live resting order, recording exactly
+  one `ORDER_CANCELLED` event.
+- `Quote` accepts an optional intraday `low`/`high` range and validates it, so a
+  LIMIT order's reachability can use the session range in paper mode as it does
+  against a bar, and a malformed range is refused.
 - Reports (`trading_report/`): one document covering decisions, execution,
   portfolio and performance, rendered to self-contained HTML and JSON.
 - Point-in-time guarantees per data source (`dataflows/pit.py`): each source is
@@ -120,6 +138,46 @@ path, and no configuration that produces one.
   declared and documented but never read, so a schedule that set them collected
   nothing; the execution path now charges `CostModel.fee_for_fill`, which adds
   the maker rate for a resting LIMIT fill and the taker rate for a MARKET fill.
+- A price-source exception during `PaperSession.work_resting` no longer leaves the
+  resting queue half-advanced. The loop rebuilt `self.resting` only at the end, so
+  an exception for one symbol propagated out with an already-filled order still
+  queued (marked `FILLED`) and the book moved ahead of the queue. The loop is now
+  exception-safe: a failed read leaves that order resting, the remaining orders
+  are still worked, the book is never touched by a failed read, and the first
+  failure is re-raised after the loop so it is never swallowed.
+- A closed market no longer rejects a resting GTC order. `work_resting` passed the
+  quote's `is_open` to the simulator, so `is_open=False` produced a terminal
+  `MARKET_CLOSED` rejection for an order whose limit simply had not been reached;
+  a closed market is now a reason to wait, and the order stays live.
+- A partially filled resting GTC order keeps its remainder. `on_signal` queued an
+  order only when its status was exactly `ACCEPTED`, so a GTC limit that filled
+  part of its size was never queued and its remainder was silently lost; an
+  `ACCEPTED` or `PARTIALLY_FILLED` GTC order is now queued.
+- A resting buy is re-checked against the risk caps at its projected fill price
+  before it fills, so a gap to the limit cannot leave a position past its cap. The
+  size is reduced to the largest that holds, and the remainder is rejected with
+  `RISK_LIMIT` (recorded) only when no positive size remains.
+- `PaperSession.work_resting` records the fee each fill actually charged rather
+  than `0.0`, and rolls the day's opening equity from the quote's timestamp so a
+  session whose only activity is resting fills still has a current daily-loss
+  baseline.
+- A paper session's `resting_orders` snapshot reports each order's real status,
+  filled and remaining quantities, weighted average fill price, time in force and
+  expiry, so a snapshot cannot claim an order is `FILLED` when it is `ACCEPTED` or
+  `PARTIALLY_FILLED`. The snapshot also carries a `schema_version`, `current_time`,
+  `day` and `day_start_equity`.
+- `ExecutionSimulator.mode` is resolved to the `ExecutionMode` enum at
+  construction rather than stored as given, so a caller that passes the string
+  form (as a restored session does) still gets a value the rest of the code can
+  compare and serialise.
+- A paper `Quote` whose `low` is above its `high`, or whose range is non-finite,
+  is refused rather than used to decide a LIMIT order's reachability. A quote
+  source that answers with the wrong symbol for the request is refused rather than
+  filled against.
+- A price-source failure in `on_signal` no longer consumes the signal: the
+  `signal_id` is recorded as processed only once the quote is in hand, so a data
+  outage does not mark a decision that was never acted on, and the caller can
+  retry it.
 
 ### Notes
 
@@ -132,6 +190,12 @@ path, and no configuration that produces one.
   order is the price the simulator will use, so the two agree. An order type that
   filled at a price not derivable from the bar would need the re-check to reconcile
   after the fill. Recorded in `docs/PR1_INDEPENDENT_REVIEW.md`.
+- Paper-session recovery restores the state that was last saved, and there is no
+  write-ahead log or automatic checkpoint: the caller decides when to call
+  `save_state`, and any step after it is lost on a crash. The recovery mechanism
+  proves a restored session continues with identical accounting and no duplicated
+  fills; it does not provide the durability policy. Documented in
+  `docs/PAPER_TRADING.md`.
 
 
 ## [0.7.1] — 2026-10-27
