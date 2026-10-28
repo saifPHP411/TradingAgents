@@ -94,6 +94,9 @@ For a worked, reproducible use of this framework — a frozen dataset, a fixed
 protocol, a pre-registered reference strategy and a published artifact — see
 [`docs/STRATEGY_BASELINE.md`](STRATEGY_BASELINE.md).
 
+To replay recorded LLM decisions through this same engine under the same protocol,
+see [`docs/LLM_EVALUATION.md`](LLM_EVALUATION.md).
+
 ## Reproducing a run
 
 `BacktestConfig` holds everything that shapes a run: initial cash, holding

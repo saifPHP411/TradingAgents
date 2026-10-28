@@ -41,6 +41,14 @@ not established (blocked: model credentials and non-determinism).**
 This is a research scaffold, not a production result, and not live-trading
 readiness.
 
+The blocker on the LLM strategy is now partly addressed by a separate layer,
+`tradingagents/llm_evaluation/`, which captures each decision with the data window
+it saw and replays it through this same engine under the same protocol. That layer
+reports `LLM BASELINE BLOCKED` with the exact missing prerequisite when no genuine
+run is possible, and never invents a number. It does not change anything here: the
+baseline still does not measure the LLM strategy. See
+[`docs/LLM_EVALUATION.md`](LLM_EVALUATION.md).
+
 ## The protocol
 
 Every value that shapes a run lives in `tradingagents/baseline/protocol.py` as a
@@ -232,7 +240,10 @@ May **not** be used for:
 ## Known limitations
 
 - **The LLM strategy is not baselined.** Blocked on credentials and
-  non-determinism, as above. This is the single largest gap.
+  non-determinism, as above. This is the single largest gap. A decision-replay
+  layer (`docs/LLM_EVALUATION.md`) captures and replays recorded decisions through
+  this same engine, but it is price-only and does not measure the news, sentiment
+  or fundamentals agents.
 - **No slippage model beyond a fixed bps and a volume cap.** Real fills depend
   on the book, which the simulator does not model.
 - **Daily bars only.** No intraday path exists to test.

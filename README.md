@@ -445,6 +445,16 @@ python -m tradingagents.baseline.run --out docs/baseline/official_baseline.json
 
 It runs offline, needs no API key, and two runs differ only in a timestamp. See [`docs/STRATEGY_BASELINE.md`](docs/STRATEGY_BASELINE.md) for the protocol, the result, and what the numbers may and may not be used for. It is a *reference* baseline: it does not measure the LLM strategy.
 
+### Evaluating the LLM strategy itself
+
+The reference baseline above cannot measure the LLM workflow. A separate layer, `tradingagents/llm_evaluation/`, closes as much of that gap as can be closed honestly: it captures each agent decision together with the hash of the data window the model saw, then replays those recorded decisions through the same backtester and the same signal contract, calling no model.
+
+```bash
+python -m tradingagents.llm_evaluation.run
+```
+
+With no credential and no captured decisions it prints `LLM BASELINE BLOCKED` and the exact missing prerequisite, and writes an artifact rather than a number. With a captured decision record set it replays and measures. The frozen dataset is price-only, so a replay is a restricted, lower-bound evaluation — it does not exercise the news, sentiment or fundamentals agents, and the artifact says so. See [`docs/LLM_EVALUATION.md`](docs/LLM_EVALUATION.md).
+
 
 ## Evaluating decisions over time
 

@@ -1,0 +1,74 @@
+"""LLM strategy evaluation: record, replay and audit the agent decision pipeline.
+
+The reference baseline (``tradingagents/baseline/``) measures a deterministic SMA
+rule. This package measures the *actual* LLM-agent pipeline, which is a different
+strategy: it is credential-gated, its inputs include news and sentiment, and its
+outputs are not guaranteed reproducible. The two are never conflated.
+
+The evaluation is honest by construction:
+
+- A decision is captured in a :class:`~.records.DecisionRecord` that carries the
+  hash of the data window the model saw, so a replay can prove it ran on the same
+  data.
+- A :class:`~.replay.ReplayStrategy` feeds recorded decisions into the frozen
+  engine through the production signal contract, and calls no model.
+- :func:`~.evaluate.build_evaluation` reports ``LLM BASELINE BLOCKED`` with the
+  exact missing prerequisite when no genuine run is possible, and never invents a
+  number.
+
+No live trading path is added. Replay travels the same ``BACKTEST``/``PAPER``
+engine the audited stack uses.
+"""
+
+from __future__ import annotations
+
+from .evaluate import (
+    ARTIFACT_SCHEMA_VERSION,
+    STATUS_BLOCKED,
+    STATUS_ESTABLISHED,
+    STATUS_ESTABLISHED_WITH_FINDINGS,
+    EvaluationOutcome,
+    build_evaluation,
+    credential_status,
+    write_evaluation,
+)
+from .protocol import DEFAULT_PROTOCOL, LLMEvaluationProtocol
+from .records import (
+    SOURCE_LLM_INFERENCE,
+    SOURCE_OPERATOR_SUPPLIED,
+    SOURCE_SYNTHETIC_FIXTURE,
+    CredentialLeakError,
+    DecisionRecord,
+    DecisionRecordError,
+    DecisionRecordSet,
+    redact_reasoning,
+    sha256_text,
+)
+from .replay import ReplayError, ReplayStrategy, no_llm_calls, signal_from_record, window_hash
+
+__all__ = [
+    "ARTIFACT_SCHEMA_VERSION",
+    "DEFAULT_PROTOCOL",
+    "SOURCE_LLM_INFERENCE",
+    "SOURCE_OPERATOR_SUPPLIED",
+    "SOURCE_SYNTHETIC_FIXTURE",
+    "STATUS_BLOCKED",
+    "STATUS_ESTABLISHED",
+    "STATUS_ESTABLISHED_WITH_FINDINGS",
+    "CredentialLeakError",
+    "DecisionRecord",
+    "DecisionRecordError",
+    "DecisionRecordSet",
+    "EvaluationOutcome",
+    "LLMEvaluationProtocol",
+    "ReplayError",
+    "ReplayStrategy",
+    "build_evaluation",
+    "credential_status",
+    "no_llm_calls",
+    "redact_reasoning",
+    "sha256_text",
+    "signal_from_record",
+    "window_hash",
+    "write_evaluation",
+]

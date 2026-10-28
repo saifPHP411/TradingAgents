@@ -100,6 +100,27 @@ path, and no configuration that produces one.
   that produced it. Documented in `docs/STRATEGY_BASELINE.md`. This is a
   *reference* baseline: it does not measure the non-deterministic LLM strategy,
   which needs credentials and cannot be replayed to one number.
+- A decision-replay evaluation of the LLM strategy (`llm_evaluation/`): the layer
+  the reference baseline above is missing. A `DecisionRecord` captures one agent
+  decision with the hash of the data window the model saw and the config hash it
+  ran under; `ReplayStrategy` feeds recorded decisions into the *existing*
+  `PortfolioBacktester` through the production `TradingSignal` contract, so a
+  replayed decision travels the same decision → risk → order → fill → ledger path
+  as any other strategy. The replay calls no model (`no_llm_calls()` replaces the
+  client factory with one that raises), refuses a window-hash mismatch, and
+  refuses a rating/action mismatch. `build_evaluation()` reports
+  `LLM BASELINE BLOCKED` with the exact missing prerequisite — a provider
+  credential or a captured record set — and never invents a number. It records the
+  news/sentiment/fundamentals gap explicitly: the frozen dataset is price-only, so
+  a replay is a restricted, lower-bound evaluation, not the full pipeline's
+  result. Three record sources (`llm_inference`, `operator_supplied`,
+  `synthetic_fixture`) are kept strictly apart so a fixture cannot be reported as
+  performance. Every record, record set and artifact is scanned for
+  credential-shaped values before it can be written; a hit raises
+  `CredentialLeakError` naming the field, never the secret. Artifacts are
+  versioned (`artifact_schema_version`) and two builds of the same records are
+  byte-identical except for the timestamp. Documented in
+  `docs/LLM_EVALUATION.md`. No live trading path is added.
 
 ### Fixed
 
