@@ -435,6 +435,16 @@ session.write_json("runs/paper.json")
 
 See [`docs/PAPER_TRADING.md`](docs/PAPER_TRADING.md) for details, and [`docs/TRADING_SYSTEM_AUDIT.md`](docs/TRADING_SYSTEM_AUDIT.md) for the audit of what the framework had before this layer was added.
 
+### The official strategy baseline
+
+The LLM workflow is not deterministic, so it cannot be reduced to a single reproducible number. To give future changes a fixed reference anyway, there is a separate, fully deterministic baseline: one pre-registered reference strategy, a frozen committed dataset, and a versioned protocol, measured through the same backtester and performance engine.
+
+```bash
+python -m tradingagents.baseline.run --out docs/baseline/official_baseline.json
+```
+
+It runs offline, needs no API key, and two runs differ only in a timestamp. See [`docs/STRATEGY_BASELINE.md`](docs/STRATEGY_BASELINE.md) for the protocol, the result, and what the numbers may and may not be used for. It is a *reference* baseline: it does not measure the LLM strategy.
+
 
 ## Evaluating decisions over time
 

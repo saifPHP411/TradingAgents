@@ -90,6 +90,10 @@ A `Fold` validates its ordering at construction, so an out-of-sample window that
 overlaps its training window cannot be built. The intent is that parameters are
 chosen on train and validation, and the test window is read once.
 
+For a worked, reproducible use of this framework — a frozen dataset, a fixed
+protocol, a pre-registered reference strategy and a published artifact — see
+[`docs/STRATEGY_BASELINE.md`](STRATEGY_BASELINE.md).
+
 ## Reproducing a run
 
 `BacktestConfig` holds everything that shapes a run: initial cash, holding

@@ -85,6 +85,21 @@ path, and no configuration that produces one.
 - Documentation: `docs/ARCHITECTURE.md`, `docs/BACKTESTING.md`, `docs/RISK.md`,
   `docs/EXECUTION.md`, `docs/PAPER_TRADING.md`, `docs/TRADING_SYSTEM_AUDIT.md`
   and `docs/FINAL_DEVELOPMENT_REPORT.md`, plus `examples/simulated_run.py`.
+- An official strategy baseline (`tradingagents/baseline/`): a frozen, versioned
+  protocol (`BaselineProtocol`, `PROTOCOL_VERSION`), a committed dataset under
+  `tradingagents/baseline/data/` (fetched once by
+  `python -m tradingagents.baseline.fetch_data`, the only entry point in the
+  package that reaches the network, and it does so through the data layer), a
+  deterministic pre-registered reference strategy
+  (`SmaCrossover`, 20/100, fixed a priori), and a harness that runs it through the
+  existing backtester over a development/validation/test split and a rolling
+  walk-forward. It measures with the existing performance engine and recomputes
+  the headline metrics independently (`crosscheck.py`) before publishing. The
+  artifact (`docs/baseline/official_baseline.json`) records the protocol, the
+  data checksums, the strategy id and the seed, so a result always names the spec
+  that produced it. Documented in `docs/STRATEGY_BASELINE.md`. This is a
+  *reference* baseline: it does not measure the non-deterministic LLM strategy,
+  which needs credentials and cannot be replayed to one number.
 
 ### Fixed
 
