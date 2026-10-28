@@ -212,3 +212,9 @@ the event semantics.
 Recovery is not a durability policy. There is no write-ahead log and no automatic
 checkpoint; the caller decides when to call `save_state`, and only the last saved
 state is recovered.
+
+The prospective paper experiment ([PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md))
+supplies that durability policy for its own use: it saves state after every
+session, keeps an append-only hash-chained journal, and records the execution
+session of every decision so a resumed run fills at the same open a straight run
+would. It adds no order-routing path.

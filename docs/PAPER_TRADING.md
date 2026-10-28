@@ -248,3 +248,12 @@ the caller decides how often to save. What the recovery mechanism *does* prove i
 that a restored session continues with identical accounting and no duplicated
 fills; what it does not provide is the durability policy, which belongs to the
 caller.
+
+## Running a session forward over time
+
+This module is one decision at a time. To record an LLM strategy's decisions
+forward in time, execute them at the next session's open and evaluate them as
+later data arrives, use the prospective layer built on top of it:
+[PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md). It drives this same session, adds a
+durable hash-chained journal and a report, and keeps decision, execution and
+evaluation time apart. It adds no live path.

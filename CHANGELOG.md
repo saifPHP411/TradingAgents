@@ -220,6 +220,63 @@ Changed:
 - The smoke report no longer claims "one genuine model call" when an injected
   (test) client was used.
 
+### Phase 10 — prospective paper experiment
+
+A resumable, prospective paper experiment (`paper_experiment/`) records an LLM
+strategy's decisions forward in time and evaluates them as later data arrives.
+It adds no live trading path and reuses the existing book, risk engine, simulator,
+ledger, snapshot, record and metrics rather than reimplementing any of them.
+
+Added:
+
+- A durable, append-only, **hash-chained journal** (`paper_experiment/journal.py`).
+  Every entry carries the previous entry's hash, so removing, reordering or
+  editing one breaks the chain and `ExperimentJournal.load`/`verify` raise instead
+  of trusting the file. Writes are atomic (temp file + `os.replace`), and an entry
+  with an `event_id` already present is not appended twice, so a re-run after a
+  restart cannot duplicate an event. Every payload is scanned for
+  credential-shaped values before it is written.
+- An **experiment cycle** (`paper_experiment/experiment.py`) that separates three
+  times on every decision: `decision_session` (T), `execution_session` (T+1's
+  open) and `evaluation_session` (T+1+lag). A decision made from T's close is
+  re-dated to T+1 before it reaches the paper session, so no fill can be read as
+  happening at the decision's own close. Settlement runs on every session while a
+  decision is only *taken* on a cadence session, so a decision is still executed
+  at its own T+1 open even when T+1 is not itself a decision session.
+- A **versioned experiment state** (`session_state.json`) that restores the paper
+  book, every decision's lifecycle and the processed-session set, so a restart
+  resumes without reprocessing a session or duplicating a fill. A decision's full
+  `DecisionRecord` is journalled, so execution rebuilds it exactly rather than
+  reconstructing it from prose.
+- **Price sources with explicit provenance** (`paper_experiment/sources.py`).
+  `FrozenPriceSource` reads the committed historical dataset point-in-time and
+  reports `is_current_market = False`; `StaticPriceSource` is a validated,
+  in-memory series for tests. `current_market_source_available()` returns `False`,
+  so the experiment cannot claim live readiness on frozen data. A malformed bar
+  (NaN, infinity, non-positive, high below low) is refused at construction.
+- A **config frozen before results** (`paper_experiment/config.py`), with a
+  content hash recorded on the journal. `execute_on_next_open` is forced `True`:
+  filling a decision at the close it was made from is look-ahead, so the
+  configuration is refused rather than defaulted.
+- An **honest report** (`paper_experiment/report.py`): sessions processed, decision
+  counts by state, cash/equity/positions, return and drawdown, the cost model and
+  its assumptions, the data source and its provenance, and every blocker. A metric
+  below `min_trades_for_metrics` is `None` (rendered `N/A`), never `0.0`, with a
+  `sample_limited` flag and the sample size shown.
+- A **CLI** (`python -m tradingagents.paper_experiment start|run|report|verify`)
+  and a **real-inference seam** (`paper_experiment/inference.py`) that makes one
+  bounded request per session with `max_retries=0`, checks the credential before
+  the call, and raises to a *blocked* decision when there is none.
+- `tests/test_phase10_paper_experiment.py` (68 tests): journal chaining and
+  tamper detection, restart-equals-no-restart, duplicate processing, blocked
+  decisions, fixture-vs-genuine labelling, look-ahead timing, malformed data,
+  multi-symbol recovery, and the CLI.
+
+Changed:
+
+- Nothing existing. The paper session, simulator, ledger, risk engine, snapshot,
+  record and metrics are consumed as-is.
+
 ### Phase 9 — first genuine inference attempt (blocked)
 
 The capture path added above is exercised by the offline suite, but no genuine

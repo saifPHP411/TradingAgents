@@ -904,16 +904,24 @@ def new_session(
     quotes: QuoteSource,
     limits=None,
     costs=None,
+    max_volume_participation: float = 0.0,
 ) -> PaperSession:
     """Build a paper session with the standard components.
 
     A convenience, not a second implementation: it wires the same ledger, risk
-    engine and simulator a backtest uses.
+    engine and simulator a backtest uses. ``max_volume_participation`` is passed
+    through to the simulator so a caller that models a thin book gets the same
+    partial-fill behaviour the backtester has.
     """
     ledger = Ledger(initial_cash=initial_cash)
     return PaperSession(
         ledger=ledger,
         risk=RiskEngine(limits),
-        simulator=ExecutionSimulator(ledger, costs=costs or CostModel(), mode=ExecutionMode.PAPER),
+        simulator=ExecutionSimulator(
+            ledger,
+            costs=costs or CostModel(),
+            mode=ExecutionMode.PAPER,
+            max_volume_participation=max_volume_participation,
+        ),
         quotes=quotes,
     )

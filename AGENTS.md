@@ -47,6 +47,19 @@ Two similar-sounding modules are deliberately distinct:
 Do not merge either pair; they answer different questions. A package shadowing a
 module of the same name has already broken an import once here.
 
+`tradingagents/paper_experiment/` is the Phase 10 prospective layer. It owns no
+accounting of its own: it drives the existing `PaperSession` and records the
+history. Three of its artifacts are deliberately distinct — the hash-chained
+**journal** (`journal.json`) is the experiment's history, the **session state**
+(`session_state.json`) is the recovery format for the book, and the **report** is
+a read-only view. Do not treat a report as recovery. Its one timing rule is fixed:
+a decision is made from bars through session T, executed at T+1's open, and
+evaluated at T+1+lag; the config refuses `execute_on_next_open=False`, so a
+decision can never fill at the close it was made from. There is no current-market
+price source — only the frozen historical dataset — so the experiment reports
+itself as offline paper and `current_market_source_available()` is `False`. Do not
+call it a live paper run.
+
 `tradingagents/baseline/` is the reproducible *reference* baseline: one
 deterministic strategy, a frozen committed dataset, a versioned protocol, and an
 independent cross-check. It is not a baseline of the LLM strategy, which is

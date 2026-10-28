@@ -514,3 +514,36 @@ one claim:
 This limitation is acceptable for a simulation / paper release candidate: the
 caller owns the checkpoint cadence, and a lost tail is a lost tail, not a
 corrupted book.
+
+## Phase 10: the prospective paper experiment
+
+The Phase 10 layer ([PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md)) closes the
+checkpoint gap for its own use, and adds three claims of its own, each with a
+test that would fail if it were false:
+
+- **Safe:** "A restart does not duplicate a fill." The experiment saves state
+  after every session and keeps the execution session of every decision, so a
+  resumed run fills at the same open a straight run would; the session's processed
+  signal set and the journal's idempotent `event_id` stop a fill being applied
+  twice. `tests/test_phase10_paper_experiment.py::TestResumeEqualsNoRestart`
+  proves a straight run and a restarted run agree on every accounting figure and
+  on the event semantics.
+- **Safe:** "A decision is never executed at the price it was made from." A
+  decision from session T's close is re-dated to T+1 before it reaches the paper
+  session, and the config refuses `execute_on_next_open=False`, so the timing
+  cannot be relaxed. `TestLookAheadAndTiming` pins it.
+- **Safe:** "The history is tamper-evident." The journal is hash-chained; editing,
+  removing or reordering an entry makes `ExperimentJournal.load` raise. The
+  `TestJournal` group proves it.
+
+- **Unsafe, and not claimed:** "The experiment is a live paper run." The only
+  shipped price source is the frozen historical dataset, which ends in 2024; there
+  is no current-market source, and `current_market_source_available()` returns
+  `False`. The report therefore reads `OFFLINE PAPER (reproducible, not live)` and
+  `READY FOR LIVE PAPER` is unreachable. A missing credential yields a *blocked*
+  decision, never a fabricated one, and a test stub is labelled
+  `synthetic_fixture` and is never counted as genuine.
+- **Unsafe, and not claimed:** "The paper result is evidence of profitability." A
+  paper mark-to-market is not a realised trade, the costs are the declared model
+  and not observed fills, and a sample below `min_trades_for_metrics` is reported
+  as `N/A`, not as a number.
