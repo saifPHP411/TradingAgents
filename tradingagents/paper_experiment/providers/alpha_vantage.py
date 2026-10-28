@@ -68,9 +68,43 @@ def _field(row: dict, *names: str) -> str:
     raise ProviderError(f"a daily bar is missing field {names[0]!r}")
 
 
+def build_request_params(*, symbol: str, api_key: str, outputsize: str = "compact") -> dict:
+    """The exact query parameters sent to Alpha Vantage, credential included.
+
+    One source of truth for the outgoing request, so a diagnostic or a test can
+    assert that the credential reaches the ``apikey`` parameter without a second
+    copy of the mapping drifting from the real call. The returned mapping holds
+    the secret; callers must not log or print it.
+    """
+    return {
+        "function": _FUNCTION,
+        "symbol": symbol.upper(),
+        "outputsize": outputsize,
+        "datatype": "json",
+        "apikey": api_key,
+    }
+
+
+def _redact(text: str, secret: str) -> str:
+    """Remove the credential from a vendor message before it can be raised.
+
+    Only a plausibly key-length secret is replaced: a very short secret would
+    match ordinary words (a one-character key would turn "apikey" into "api***ey"),
+    mangling the message without protecting anything real.
+    """
+    if secret and len(secret) >= 8 and secret in text:
+        return text.replace(secret, "***")
+    return text
+
+
 def _classify_notice(notice: str, *, secret: str) -> None:
-    """Raise the right error for an Alpha Vantage 200-body notice."""
+    """Raise the right error for an Alpha Vantage 200-body notice.
+
+    Classification reads the *raw* notice, so redaction cannot hide a marker; the
+    message that is raised carries the redacted text.
+    """
     low = notice.lower()
+    message = _redact(notice, secret)
     if any(
         marker in low
         for marker in (
@@ -82,10 +116,10 @@ def _classify_notice(notice: str, *, secret: str) -> None:
             "thank you for using",
         )
     ):
-        raise ProviderRateLimitedError(f"Alpha Vantage quota/limit reached: {notice}")
+        raise ProviderRateLimitedError(f"Alpha Vantage quota/limit reached: {message}")
     if "api key" in low or "apikey" in low:
-        raise ProviderAuthError(f"Alpha Vantage rejected the credential: {notice}")
-    raise ProviderUnsupportedError(f"Alpha Vantage could not serve the request: {notice}")
+        raise ProviderAuthError(f"Alpha Vantage rejected the credential: {message}")
+    raise ProviderUnsupportedError(f"Alpha Vantage could not serve the request: {message}")
 
 
 class AlphaVantageDailySource(FramePriceSource):
@@ -114,8 +148,8 @@ class AlphaVantageDailySource(FramePriceSource):
                 "allow_premium_outputsize=True to accept a paid call, or keep the "
                 "free 'compact' size (latest 100 data points)"
             )
-        key = api_key or os.environ.get(API_KEY_ENV, "")
-        if not key or not key.strip():
+        key = (api_key or os.environ.get(API_KEY_ENV, "")).strip()
+        if not key:
             raise ProviderNotConfiguredError(
                 f"no Alpha Vantage credential: set the {API_KEY_ENV} environment variable"
             )
@@ -123,12 +157,9 @@ class AlphaVantageDailySource(FramePriceSource):
 
         payload = fetch_json(
             url=API_BASE_URL,
-            params={
-                "function": _FUNCTION,
-                "symbol": self.symbol,
-                "outputsize": outputsize,
-                "datatype": "json",
-            },
+            params=build_request_params(
+                symbol=self.symbol, api_key=key, outputsize=outputsize
+            ),
             timeout=timeout,
             secrets=(key,),
             transport=transport,
@@ -167,7 +198,8 @@ class AlphaVantageDailySource(FramePriceSource):
         rejection = payload.get("Error Message")
         if rejection:
             raise ProviderUnsupportedError(
-                f"Alpha Vantage rejected the request for {self.symbol!r}: {rejection}"
+                f"Alpha Vantage rejected the request for {self.symbol!r}: "
+                f"{_redact(str(rejection), key)}"
             )
 
         series = payload.get("Time Series (Daily)")

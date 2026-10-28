@@ -299,6 +299,32 @@ environment. The gated tests remain in `tests/test_live_providers_integration.py
 and skip cleanly when a key is absent, so CI needs no secret. See the Phase 13
 report for the exact remaining blocker.
 
+### Fixed — Alpha Vantage sent no `apikey`
+
+`AlphaVantageDailySource` read `ALPHA_VANTAGE_API_KEY`, refused a missing key,
+and passed the key to `fetch_json` — but only as a *redaction secret*. The
+outgoing query carried `function`, `symbol`, `outputsize` and `datatype` and
+**no `apikey`**. Alpha Vantage answers such a request with
+
+> "the parameter apikey is invalid or missing"
+
+no matter how valid the key is, so every `--source alpha_vantage` run failed with
+a message that looked like a bad key and was not. The credential is now sent as
+the `apikey` query parameter, assembled in one `build_request_params` helper so
+the parameter cannot be dropped from one call path while another keeps it.
+Credentials are also trimmed of surrounding whitespace, an all-whitespace key is
+refused like a missing one, and a vendor message that echoes the key back is
+redacted before it is raised. A regression test asserts that the key in the
+environment reaches the outgoing `apikey` parameter (with a fake key, never a
+real one).
+
+A new diagnostic reports a deployment's credential state without revealing the
+secret — `python -m tradingagents.paper_experiment diagnose --source
+alpha_vantage` prints whether the env var is present and non-blank and whether
+the request would carry `apikey`, with parameter *names* only and never the
+value, any part of it, or its length. `--root` is now optional and required only
+by the commands that act on an experiment directory.
+
 ### Phase 11 — real market-data providers
 
 Adds real vendor price sources (`paper_experiment/providers/`) so a paper

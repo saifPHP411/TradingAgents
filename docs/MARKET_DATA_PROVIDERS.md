@@ -56,6 +56,40 @@ Consequences in code:
 - Because the free function is unadjusted, the source declares `adjusted=False`
   and never mixes adjusted and unadjusted bars.
 
+### The credential is sent as the `apikey` query parameter
+
+Alpha Vantage authenticates every request with an `apikey` **query parameter**;
+there is no header alternative. `build_request_params` is the single place that
+assembles the outgoing query, so the credential cannot be dropped from one call
+path while another still carries it:
+
+```python
+{"function": "TIME_SERIES_DAILY", "symbol": ..., "outputsize": ...,
+ "datatype": "json", "apikey": key}
+```
+
+A request that omits `apikey` is answered with
+`"the parameter apikey is invalid or missing"` **regardless of whether the key
+is valid** — which is exactly why a missing parameter, not a bad key, must be
+ruled out first when that message appears.
+
+The value is read from `ALPHA_VANTAGE_API_KEY` (or the `api_key=` argument) and
+is never logged, printed, or written to the state file; it is passed to
+`fetch_json` only as a redaction secret, and a vendor that echoes it back in a
+notice or an error is scrubbed before the message is raised. A key that is
+missing, empty, or all whitespace is refused with `ProviderNotConfiguredError`
+**before any HTTP call**; a key with surrounding whitespace is trimmed.
+
+To check a deployment without exposing the secret, use the diagnostic command:
+
+```bash
+python -m tradingagents.paper_experiment diagnose --source alpha_vantage
+```
+
+It reports whether the env var is present and non-blank and whether the request
+would carry `apikey`, printing the parameter *names* only — never the value, any
+part of it, or its length.
+
 ### Rate limit and quota
 
 The free plan allows 25 requests per day:

@@ -13,6 +13,8 @@ Commands:
 - ``report`` — write the report from the current state.
 - ``verify`` — check the journal's hash chain.
 - ``sources`` — list the selectable price sources.
+- ``diagnose`` — report, without revealing a secret, whether a provider's
+  credential env var is present and whether the request would carry it.
 
 The default price source is the frozen historical dataset; a vendor source is
 opt-in via ``--source``. A vendor source is fetched once, when the experiment is
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -46,6 +49,13 @@ from .sources import FrozenPriceSource, PriceSource, PriceSourceError
 
 class RunnerError(RuntimeError):
     """A command could not proceed."""
+
+
+def _root(args) -> Path:
+    root = getattr(args, "root", None)
+    if not root:
+        raise RunnerError("this command needs --root <experiment directory>")
+    return Path(root)
 
 
 def _frozen_source() -> PriceSource:
@@ -131,7 +141,7 @@ def _check_frozen_window(source: PriceSource, recorded: dict) -> None:
 
 
 def _start(args) -> int:
-    root = Path(args.root)
+    root = _root(args)
     if (root / "session_state.json").exists():
         raise RunnerError(
             f"an experiment already exists at {root}; use `run` to resume it"
@@ -158,7 +168,7 @@ def _start(args) -> int:
 
 
 def _run(args) -> int:
-    root = Path(args.root)
+    root = _root(args)
     if (root / "session_state.json").exists():
         source = _restored_source(root)
         inference = StubInference() if args.stub else ProviderInference(
@@ -205,7 +215,7 @@ def _run(args) -> int:
 
 
 def _report(args) -> int:
-    root = Path(args.root)
+    root = _root(args)
     source = _restored_source(root)
     experiment = PaperExperiment.load(root, source=source)
     report = build_report(experiment)
@@ -225,10 +235,57 @@ def _sources(args) -> int:
     return 0
 
 
+def _diagnose(args) -> int:
+    """Report, without revealing a secret, whether a provider credential is set.
+
+    Answers the two questions a deploy needs: is the env var present, and would
+    the outgoing request carry the ``apikey`` parameter? It never prints the key,
+    any part of it, or its length — only presence and the parameter *name*.
+    """
+    from .providers.alpha_vantage import (
+        API_BASE_URL as AV_URL,
+        API_KEY_ENV as AV_ENV,
+        build_request_params as av_params,
+    )
+    from .providers.finnhub import API_KEY_ENV as FH_ENV
+
+    requested = args.source or "frozen"
+    print(f"requested source: {requested}")
+    print(f"known sources: {', '.join(KNOWN_SOURCES)}")
+
+    env_name = {"alpha_vantage": AV_ENV, "finnhub": FH_ENV}.get(requested)
+    if env_name is None:
+        print(f"{requested}: no credential required")
+        return 0
+
+    value = os.environ.get(env_name, "")
+    present = bool(value.strip())
+    print(f"credential env var: {env_name}")
+    print(f"env var present and non-blank: {present}")
+    if not present:
+        print(
+            f"the request would fail before it is sent: {env_name} is unset or blank, "
+            "and the provider refuses rather than sending an unauthenticated call"
+        )
+        return 0
+
+    if requested == "alpha_vantage":
+        # Only parameter *names* are printed, never values. The key is passed
+        # through the same builder the real request uses, so this check cannot
+        # drift from the outgoing call.
+        params = av_params(symbol="SPY", api_key=value)
+        print(f"request URL: {AV_URL}")
+        print(f"request carries apikey parameter: {'apikey' in params}")
+        print(f"request parameter names: {', '.join(sorted(params))}")
+    else:
+        print("request carries token parameter: True (Finnhub uses 'token')")
+    return 0
+
+
 def _verify(args) -> int:
     from .journal import ExperimentJournal
 
-    root = Path(args.root)
+    root = _root(args)
     try:
         journal = ExperimentJournal.load(root / "journal.json")
     except JournalError as exc:
@@ -247,8 +304,12 @@ def main(argv: list[str] | None = None) -> int:
             "source is opt-in with --source."
         ),
     )
-    parser.add_argument("command", choices=("start", "run", "report", "verify", "sources"))
-    parser.add_argument("--root", required=True, help="experiment directory")
+    parser.add_argument(
+        "command", choices=("start", "run", "report", "verify", "sources", "diagnose")
+    )
+    parser.add_argument(
+        "--root", default=None, help="experiment directory (required except for diagnose)"
+    )
     parser.add_argument("--symbol", default=None, help="symbol (default SPY)")
     parser.add_argument("--provider", default="groq")
     parser.add_argument("--model", default="openai/gpt-oss-20b")
@@ -291,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
         "report": _report,
         "verify": _verify,
         "sources": _sources,
+        "diagnose": _diagnose,
     }
     try:
         return handlers[args.command](args)

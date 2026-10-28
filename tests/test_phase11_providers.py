@@ -356,6 +356,93 @@ class TestAlphaVantage:
         assert "test-key-not-real" not in payload
         assert "test-key-not-real" not in source.frame("IBM").to_json()
 
+    def test_the_credential_from_the_environment_reaches_the_apikey_parameter(
+        self, monkeypatch
+    ):
+        """The key in the env var must appear in the outgoing request's ``apikey``.
+
+        This is the regression guard for the bug where the request omitted
+        ``apikey`` entirely, so Alpha Vantage answered "the parameter apikey is
+        invalid or missing" no matter how valid the key was. A fake key is used
+        here and nowhere else; no real credential is involved.
+        """
+        fake = "FAKE-ENV-KEY-NOT-REAL"
+        monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", fake)
+        captured = {}
+        # No api_key= argument: the source must read the environment itself.
+        AlphaVantageDailySource(
+            "IBM",
+            transport=_transport(_daily_body(["2024-02-28"]), capture=captured),
+            today=TODAY,
+        )
+        assert captured["params"]["apikey"] == fake
+
+    def test_the_apikey_parameter_is_always_present(self):
+        """Every outgoing request carries ``apikey``, whatever the source."""
+        captured = {}
+        _av(capture=captured)
+        assert "apikey" in captured["params"]
+        assert captured["params"]["apikey"] == "test-key-not-real"
+
+    def test_the_credential_is_scrubbed_from_a_vendor_rejection(self):
+        """A vendor that echoes the key back in an error body must not leak it."""
+        secret = "LEAKY-KEY-NOT-REAL"
+        body = json.dumps({"Error Message": f"Invalid API call for apikey {secret}"})
+        with pytest.raises(ProviderUnsupportedError) as excinfo:
+            AlphaVantageDailySource(
+                "IBM", api_key=secret, transport=_transport(body), today=TODAY
+            )
+        assert secret not in str(excinfo.value)
+        assert "***" in str(excinfo.value)
+
+    def test_the_credential_is_scrubbed_from_a_notice_body(self):
+        secret = "LEAKY-KEY-NOT-REAL"
+        body = json.dumps(
+            {"Information": f"the parameter apikey {secret} is invalid or missing"}
+        )
+        with pytest.raises(ProviderAuthError) as excinfo:
+            AlphaVantageDailySource(
+                "IBM", api_key=secret, transport=_transport(body), today=TODAY
+            )
+        assert secret not in str(excinfo.value)
+
+    def test_a_whitespace_only_credential_is_refused(self, monkeypatch):
+        """A key of spaces is treated as missing, not sent as an empty apikey."""
+        monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+        called = {"n": 0}
+
+        def send(**kwargs):
+            called["n"] += 1
+            return HttpResponse(200, "{}")
+
+        with pytest.raises(ProviderNotConfiguredError):
+            AlphaVantageDailySource("IBM", api_key="   ", transport=send, today=TODAY)
+        assert called["n"] == 0
+
+    def test_a_surrounding_whitespace_credential_is_trimmed(self, monkeypatch):
+        """A key pasted with a trailing newline is trimmed before it is sent."""
+        monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", "  KEY-WITH-PADDING  ")
+        captured = {}
+        AlphaVantageDailySource(
+            "IBM",
+            transport=_transport(_daily_body(["2024-02-28"]), capture=captured),
+            today=TODAY,
+        )
+        assert captured["params"]["apikey"] == "KEY-WITH-PADDING"
+
+    def test_build_request_params_matches_what_is_sent(self):
+        """The single-source-of-truth builder agrees with the real request."""
+        from tradingagents.paper_experiment.providers.alpha_vantage import (
+            build_request_params,
+        )
+
+        captured = {}
+        _av(capture=captured)
+        expected = build_request_params(
+            symbol="IBM", api_key="test-key-not-real", outputsize="compact"
+        )
+        assert captured["params"] == expected
+
 
 # ---------------------------------------------------------------------------
 # Finnhub
@@ -742,3 +829,42 @@ class TestCli:
 
         assert main(["start", "--root", str(tmp_path / "exp"), "--stub"]) == 0
         assert main(["verify", "--root", str(tmp_path / "exp")]) == 0
+
+    def test_the_diagnose_command_reports_a_present_credential_without_leaking_it(
+        self, monkeypatch, capsys
+    ):
+        from tradingagents.paper_experiment.__main__ import main
+
+        secret = "DIAGNOSE-SECRET-NOT-REAL"
+        monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", secret)
+        assert main(["diagnose", "--source", "alpha_vantage"]) == 0
+        out = capsys.readouterr().out
+        assert "ALPHA_VANTAGE_API_KEY" in out
+        assert "env var present and non-blank: True" in out
+        assert "request carries apikey parameter: True" in out
+        # The value, any part of it, and its length must never appear.
+        assert secret not in out
+        assert str(len(secret)) not in out
+
+    def test_the_diagnose_command_reports_an_absent_credential(self, monkeypatch, capsys):
+        from tradingagents.paper_experiment.__main__ import main
+
+        monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+        assert main(["diagnose", "--source", "alpha_vantage"]) == 0
+        out = capsys.readouterr().out
+        assert "env var present and non-blank: False" in out
+        assert "would fail before it is sent" in out
+
+    def test_the_diagnose_command_needs_no_root(self, monkeypatch, capsys):
+        from tradingagents.paper_experiment.__main__ import main
+
+        monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+        # No --root: diagnose is a configuration check, not an experiment command.
+        assert main(["diagnose", "--source", "alpha_vantage"]) == 0
+
+    def test_a_command_that_needs_root_without_one_is_a_clear_error(self, capsys):
+        from tradingagents.paper_experiment.__main__ import main
+
+        code = main(["verify"])
+        assert code == 2
+        assert "needs --root" in capsys.readouterr().err
