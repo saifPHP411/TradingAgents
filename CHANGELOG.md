@@ -363,6 +363,44 @@ surface, and it keeps every existing simulation-only guard.
 Documented in `docs/RAILWAY_DEPLOYMENT.md` (a "Monitoring dashboard (optional)"
 section) and covered by `tests/test_phase13_dashboard.py`.
 
+### Fixed — the dashboard's control action recorded every decision as blocked
+
+A session advanced from the dashboard loaded the experiment with **no inference
+seam** (`ExperimentView.load` passed no `inference`), so `_decide` took its
+"no inference provider is configured" branch for every session. Every decision
+was recorded `blocked`, and — because a blocked session is still added to
+`processed_sessions` — the session could not be re-decided later. The dashboard
+advanced the engine, but the engine could not decide.
+
+- `runner.build_inference(config, stub=...)` is now the one place the seam is
+  built; the CLI's `run` and the dashboard's control action both call it, so they
+  decide through the same provider (the one named in the persisted config).
+- `ExperimentView.load(inference=...)` accepts a seam; a read passes none, a run
+  passes one.
+- A resumed CLI `run` now builds its seam from the **persisted** config rather
+  than the CLI's `--provider`/`--model` defaults, so a resume cannot silently
+  switch provider.
+
+### Added — `--auto-advance`, so one service can run and monitor
+
+`serve` never advanced the engine: it bound the HTTP server and waited for a
+manual Run. A Railway service started with a bare `serve` therefore showed an
+idle experiment (cash at its opening balance, no sessions, no orders) — which
+looked like wrong data but was an engine that had not been started.
+
+`serve`/`dashboard.server` now take `--auto-advance N` and `--auto-interval
+SECONDS` (env: `TRADINGAGENTS_AUTO_ADVANCE_SESSIONS` /
+`TRADINGAGENTS_AUTO_ADVANCE_INTERVAL`). A daemon thread advances N unprocessed
+sessions per interval through the same locked `run_sessions` the Run button uses,
+logging one line per tick. It requires `--allow-control` and is refused without
+it, so the default `serve` stays a pure monitor.
+
+Documented the single-writer constraint: state is a read-modify-write of one JSON
+file, so two processes on one directory lose data (verified: the second
+`os.replace` drops the first writer's session). Run one writer — either the
+auto-advancing dashboard, or a cron `run` with a monitor-only dashboard, never
+both at once. `docs/RAILWAY_DEPLOYMENT.md` and the CHANGELOG say so.
+
 ### Fixed — the dashboard module entry point did not start the server
 
 `python -m tradingagents.paper_experiment.dashboard.server` — the start command

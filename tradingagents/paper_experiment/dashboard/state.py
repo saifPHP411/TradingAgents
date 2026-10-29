@@ -48,13 +48,20 @@ class ExperimentView:
                 f"the experiment state {self.state_path} is not usable: {exc}"
             ) from exc
 
-    def load(self):
-        """Load the experiment, restoring its price source without a network call."""
+    def load(self, *, inference=None):
+        """Load the experiment, restoring its price source without a network call.
+
+        ``inference`` is the decision seam. A *read* leaves it ``None`` (nothing is
+        decided, so nothing is needed). A caller that advances the simulation must
+        supply one — the CLI's ``run`` builds it from the arguments, and the
+        dashboard builds it from the persisted config — otherwise every decision
+        is recorded as blocked.
+        """
         from ..__main__ import _restored_source
         from ..experiment import PaperExperiment
 
         source = _restored_source(self.root)
-        return PaperExperiment.load(self.root, source=source)
+        return PaperExperiment.load(self.root, source=source, inference=inference)
 
     # -- summary ----------------------------------------------------------
 

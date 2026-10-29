@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -53,11 +54,13 @@ class Dashboard:
         token: str | None = None,
         allow_control: bool = False,
         max_sessions_per_call: int = DEFAULT_MAX_SESSIONS_PER_CALL,
+        stub: bool = False,
     ) -> None:
         self.root = Path(root)
         self.token = resolve_token(token)
         self.allow_control = allow_control
         self.max_sessions_per_call = max_sessions_per_call
+        self.stub = stub
         self._lock = threading.Lock()
         self._run_in_progress = False
         self.last_run: dict[str, Any] | None = None
@@ -73,6 +76,13 @@ class Dashboard:
         Serialised with a lock: a second call while one is running is refused
         rather than run concurrently, because two writers to one experiment
         directory would race on the state file.
+
+        The experiment is loaded with a real decision seam built from the
+        *persisted* config, so a session advanced here decides through the same
+        provider a terminal ``run`` would. Without one every decision would be
+        recorded as blocked — and, because a blocked session is still marked
+        processed, that would silently burn the session. The provider reads its
+        own credential; this method neither reads nor logs one.
         """
         if not self.allow_control:
             raise PermissionError(
@@ -86,9 +96,10 @@ class Dashboard:
             raise RuntimeError("a run is already in progress")
         try:
             self._run_in_progress = True
-            from ..runner import pending_sessions, process_pending
+            from ..runner import build_inference, pending_sessions, process_pending
 
             experiment = self.view().load()
+            experiment.inference = build_inference(experiment.config, stub=self.stub)
             remaining_before = len(pending_sessions(experiment))
             outcomes = process_pending(experiment, sessions=bounded)
             result = {
@@ -272,6 +283,30 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="enable the advance-the-simulation action (off by default)",
     )
+    parser.add_argument(
+        "--stub",
+        action="store_true",
+        help=(
+            "use the non-genuine stub decision source (offline demonstration); "
+            "decisions are labelled synthetic_fixture"
+        ),
+    )
+    parser.add_argument(
+        "--auto-advance",
+        type=int,
+        default=int(os.environ.get("TRADINGAGENTS_AUTO_ADVANCE_SESSIONS", "0") or 0),
+        help=(
+            "advance this many sessions every interval, in-process (default: "
+            "$TRADINGAGENTS_AUTO_ADVANCE_SESSIONS, else 0 = monitor only). "
+            "Requires --allow-control."
+        ),
+    )
+    parser.add_argument(
+        "--auto-interval",
+        type=float,
+        default=float(os.environ.get("TRADINGAGENTS_AUTO_ADVANCE_INTERVAL", "60") or 60),
+        help="seconds between auto-advance ticks (default: 60)",
+    )
     args = parser.parse_args(argv)
 
     if not args.root:
@@ -284,6 +319,9 @@ def main(argv: list[str] | None = None) -> int:
             port=port,
             token=args.token,
             allow_control=args.allow_control,
+            stub=args.stub,
+            auto_advance=args.auto_advance,
+            auto_interval=args.auto_interval,
         )
     except DashboardAuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -299,11 +337,20 @@ def serve(
     token: str | None = None,
     allow_control: bool = False,
     max_sessions_per_call: int = DEFAULT_MAX_SESSIONS_PER_CALL,
+    stub: bool = False,
+    auto_advance: int = 0,
+    auto_interval: float = 60.0,
 ) -> None:
     """Run the dashboard until interrupted.
 
     Refuses to bind a non-loopback host with no token, so the control surface is
     never served unauthenticated on a public interface.
+
+    ``auto_advance`` turns the dashboard into the *engine* as well as the monitor:
+    when it is a positive N, a background thread advances N unprocessed sessions
+    every ``auto_interval`` seconds, through the same locked ``run_sessions`` the
+    Run button uses. One process, one writer, so it cannot race the state file. It
+    is off by default (``0``), which leaves the server a pure monitor.
     """
     resolved = resolve_token(token)
     require_bindable(host, resolved)
@@ -312,18 +359,69 @@ def serve(
         token=resolved,
         allow_control=allow_control,
         max_sessions_per_call=max_sessions_per_call,
+        stub=stub,
     )
     httpd = ThreadingHTTPServer((host, port), make_handler(dashboard))
     httpd.daemon_threads = True
     print(f"dashboard on http://{host}:{port}  (root: {Path(root).resolve()})")
     print(f"  auth: {'token required' if resolved else 'loopback only, no token'}")
     print(f"  control: {'enabled' if allow_control else 'read-only'}")
+    if auto_advance:
+        if not allow_control:
+            print("  auto-advance: refused (needs --allow-control)", flush=True)
+        else:
+            _start_auto_advance(dashboard, auto_advance, auto_interval)
+            print(
+                f"  auto-advance: {auto_advance} session(s) every {auto_interval:g}s",
+                flush=True,
+            )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         httpd.server_close()
+
+
+def _start_auto_advance(dashboard: Dashboard, sessions: int, interval: float) -> threading.Thread:
+    """Advance the simulation on a timer, in-process, behind the control lock.
+
+    A daemon thread so it never keeps the process alive. Each tick logs one line,
+    so an operator can see from the platform's logs that sessions are progressing.
+    A tick that finds nothing to do, or that loses the lock to a manual Run, says
+    so rather than failing silently.
+    """
+
+    def loop() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                result = dashboard.run_sessions(sessions)
+            except PermissionError:
+                print("[auto] control is disabled; stopping auto-advance", flush=True)
+                return
+            except RuntimeError:
+                print("[auto] a run is already in progress; skipping this tick", flush=True)
+                continue
+            except Exception as exc:  # noqa: BLE001 - a tick failure must not kill the thread
+                print(f"[auto] tick failed: {type(exc).__name__}: {exc}", flush=True)
+                continue
+            done = result["processed"]
+            if not done:
+                print(
+                    "[auto] no unprocessed sessions remain; nothing to advance",
+                    flush=True,
+                )
+                continue
+            print(
+                f"[auto] advanced {result['processed_count']} session(s): "
+                f"{done[0]}..{done[-1]}; {result['remaining_after']} remaining",
+                flush=True,
+            )
+
+    thread = threading.Thread(target=loop, name="auto-advance", daemon=True)
+    thread.start()
+    return thread
 
 
 INDEX_HTML = """<!doctype html>

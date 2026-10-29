@@ -88,6 +88,8 @@ non-root user failed to write the mount with `PermissionError`, which is why
 | `TRADINGAGENTS_DASHBOARD_TOKEN` | the optional dashboard | bearer token; **required** for any non-loopback bind |
 | `TRADINGAGENTS_EXPERIMENT_ROOT` | the optional dashboard (module form) | experiment dir; lets `--root` be omitted |
 | `TRADINGAGENTS_DASHBOARD_HOST` | the optional dashboard (module form) | bind interface; defaults to loopback |
+| `TRADINGAGENTS_AUTO_ADVANCE_SESSIONS` | the optional dashboard | sessions per auto-advance tick; `0` (default) = monitor only |
+| `TRADINGAGENTS_AUTO_ADVANCE_INTERVAL` | the optional dashboard | seconds between ticks; default `60` |
 
 Set these as Railway **service variables** (never in the repository). The code
 reads them from the environment by name only; it never prints, logs or stores a
@@ -129,21 +131,32 @@ it is simulation-only: the one action it can take drives
 that places, modifies or cancels a broker order, and no credential is ever
 returned to the browser.
 
+**The dashboard does not run the engine by itself.** `serve` binds an HTTP server
+and waits: it advances nothing until either a caller presses Run (`POST
+/api/run`, needs `--allow-control`) or `--auto-advance` is set. This is deliberate
+— `serve` is a monitor first — but it means a service started with a bare
+`serve` shows an idle experiment (cash at its opening balance, no sessions, no
+orders). If you want one Railway service to both run and monitor, pass
+`--auto-advance`.
+
 ```bash
-# Read-only, loopback only (a local look). No token needed on loopback.
+# Monitor only (loopback): reads the experiment, advances nothing.
 python -m tradingagents.paper_experiment serve --root /data/paper-experiment
 
+# One service that runs AND monitors: advance 3 sessions every 60s.
 # Reachable from Railway: bind the interface Railway provides and set a token.
 # Railway injects $PORT; `serve` reads it when --port is omitted.
 TRADINGAGENTS_DASHBOARD_TOKEN=<a-long-random-string> \
 python -m tradingagents.paper_experiment serve \
-  --root /data/paper-experiment --host 0.0.0.0 --port "$PORT" --allow-control
+  --root /data/paper-experiment --host 0.0.0.0 --port "$PORT" \
+  --allow-control --auto-advance 3 --auto-interval 60
 
 # The module form is equivalent and takes its root from the environment, so the
 # Railway start command can be one line:
 TRADINGAGENTS_EXPERIMENT_ROOT=/data/paper-experiment \
 TRADINGAGENTS_DASHBOARD_HOST=0.0.0.0 \
 TRADINGAGENTS_DASHBOARD_TOKEN=<a-long-random-string> \
+TRADINGAGENTS_AUTO_ADVANCE_SESSIONS=3 \
 python -m tradingagents.paper_experiment.dashboard.server --allow-control
 ```
 
@@ -154,6 +167,32 @@ python -m tradingagents.paper_experiment.dashboard.server --allow-control
 > `TRADINGAGENTS_EXPERIMENT_ROOT` exits `2` with a clear message rather than
 > listening on nothing.
 
+### One writer per experiment directory
+
+State is a read-modify-write of one JSON file (`session_state.json`) plus an
+append to `journal.json`. Two processes writing the *same* directory lose data:
+the second `os.replace` overwrites the first, so the first writer's session
+disappears. The dashboard serialises its own writers behind a lock, and
+`--auto-advance` uses that same lock, so one process is safe. Across processes
+there is no lock, so run **one writer**. Either:
+
+- one dashboard service with `--auto-advance` (runs and monitors), and no cron; or
+- a cron service running `run` for the engine, and a dashboard with **no**
+  `--auto-advance` and **no** `--allow-control` (monitor only) — but even then the
+  two must not overlap: a cron tick during a manual Run can still race.
+
+If you need both, prefer the single auto-advancing dashboard service.
+
+### Decisions need a real seam
+
+A session advanced from the dashboard decides through the *same* inference seam a
+terminal `run` would: the provider named in the persisted config, or the labelled
+stub when `--stub` is set. Without a credential the decision is recorded as
+**blocked** — honestly, not fabricated — but the session is still marked
+processed, so those sessions cannot be re-decided later. Start the experiment
+with the provider credential present, or use `--stub` for an offline
+demonstration.
+
 Safety properties, all enforced in code and covered by tests:
 
 - **Auth is mandatory off loopback.** Binding a non-loopback host with no token
@@ -162,22 +201,22 @@ Safety properties, all enforced in code and covered by tests:
   in constant time. `/healthz` is the only unauthenticated route (a liveness
   probe) and returns no experiment data.
 - **Read-only by default.** `--allow-control` is required before the dashboard can
-  advance the simulation. Without it, `POST /api/run` returns 403.
+  advance the simulation. Without it, `POST /api/run` returns 403 and
+  `--auto-advance` is refused.
 - **Control is deliberate.** `POST /api/run` needs the bearer token *and* an
   explicit `X-Control-Confirm: yes` header, is bounded per call, and is refused
   while another run is in progress (the state file is single-writer).
 - **State is the same file the CLI uses.** A session advanced from the dashboard
   is processed and persisted by the same `process_session`, so the dashboard, the
-  CLI and a cron run cannot diverge.
+  CLI and a cron run cannot diverge *in code*; they must still not run at once.
 
 Railway settings for this service, when you use one: start command
-`python -m tradingagents.paper_experiment serve --root /data/paper-experiment --host 0.0.0.0 --port $PORT`
+`python -m tradingagents.paper_experiment serve --root /data/paper-experiment --host 0.0.0.0 --port $PORT --allow-control --auto-advance 3`
 (or the module form above, which reads the root and host from service
 variables), the same `/data` volume mounted, and `TRADINGAGENTS_DASHBOARD_TOKEN`
 set as a service variable. Give it a **public domain** in Railway's networking
 settings so the phone can reach it; without the token the server refuses to start
-on that bind. A dashboard service and a cron runner can share one experiment
-directory, because the state file is written atomically and read whole.
+on that bind.
 
 ## Persistent volume and where state lives
 

@@ -280,6 +280,147 @@ class TestControl:
         assert not hasattr(server_mod, "AlpacaPaperBroker")
         assert not hasattr(server_mod, "submit_order")
 
+    def test_control_decides_through_a_real_seam_not_blocked(self, experiment_root):
+        """A dashboard-driven run must decide, not record every session blocked.
+
+        Regression: the control path loaded the experiment with no inference, so
+        every decision was 'blocked' and — because a blocked session is still
+        marked processed — the session was silently burned. With a stub seam the
+        decision is a labelled fixture, not blocked.
+        """
+        dashboard = Dashboard(experiment_root, token=TOKEN, allow_control=True, stub=True)
+        dashboard.run_sessions(3)
+        raw = json.loads((experiment_root / "session_state.json").read_text())
+        states = {d["state"] for d in raw["decisions"].values()}
+        assert states, "the control run produced no decisions at all"
+        assert "blocked" not in states, f"control run recorded blocked decisions: {states}"
+
+    def test_control_without_stub_blocks_when_no_credential(self, experiment_root, monkeypatch):
+        """With no stub and no credential, a decision is blocked — honestly.
+
+        The provider's own variable is cleared, so this asserts the *documented*
+        behaviour (a missing credential blocks) rather than a silent fabricated
+        decision. It also pins that the block is a real, named reason.
+        """
+        from tradingagents.llm_clients.api_key_env import get_api_key_env
+
+        env_name = get_api_key_env("groq")
+        assert env_name, "groq must map to a credential variable for this test"
+        monkeypatch.delenv(env_name, raising=False)
+        dashboard = Dashboard(experiment_root, token=TOKEN, allow_control=True, stub=False)
+        dashboard.run_sessions(3)
+        raw = json.loads((experiment_root / "session_state.json").read_text())
+        blocked = [d for d in raw["decisions"].values() if d["state"] == "blocked"]
+        assert blocked, "expected a blocked decision when no credential is set"
+        assert any("credential" in (d.get("blocked_reason") or "") for d in blocked)
+
+
+class TestAutoAdvance:
+    """`--auto-advance`: one process runs and monitors, with a single writer."""
+
+    def test_serve_refuses_auto_advance_without_allow_control(
+        self, experiment_root, capsys, monkeypatch, allow_loopback
+    ):
+        """`serve` must not start a background writer unless control is enabled."""
+        from tradingagents.paper_experiment.dashboard import server as server_mod
+
+        started: list[tuple] = []
+
+        class _StubHTTPD:
+            def __init__(self, *a, **k):
+                pass
+
+            daemon_threads = False
+
+            def serve_forever(self):
+                raise KeyboardInterrupt  # return immediately
+
+            def server_close(self):
+                pass
+
+        monkeypatch.setattr(server_mod, "ThreadingHTTPServer", _StubHTTPD)
+        monkeypatch.setattr(
+            server_mod, "_start_auto_advance", lambda *a, **k: started.append(a)
+        )
+        server_mod.serve(
+            experiment_root, host="127.0.0.1", auto_advance=5, allow_control=False
+        )
+        assert started == [], "auto-advance started while control was disabled"
+        assert "auto-advance: refused" in capsys.readouterr().out
+
+    def test_serve_starts_auto_advance_when_allowed(
+        self, experiment_root, monkeypatch, allow_loopback
+    ):
+        from tradingagents.paper_experiment.dashboard import server as server_mod
+
+        started: list[tuple] = []
+
+        class _StubHTTPD:
+            def __init__(self, *a, **k):
+                pass
+
+            daemon_threads = False
+
+            def serve_forever(self):
+                raise KeyboardInterrupt
+
+            def server_close(self):
+                pass
+
+        monkeypatch.setattr(server_mod, "ThreadingHTTPServer", _StubHTTPD)
+        monkeypatch.setattr(
+            server_mod, "_start_auto_advance", lambda *a, **k: started.append(a)
+        )
+        server_mod.serve(
+            experiment_root, host="127.0.0.1", auto_advance=5, allow_control=True
+        )
+        assert len(started) == 1, "auto-advance did not start with control enabled"
+
+    def test_auto_advance_tick_advances_and_logs(self, experiment_root, capsys, allow_loopback):
+        from tradingagents.paper_experiment.dashboard.server import _start_auto_advance
+
+        dashboard = Dashboard(experiment_root, token=TOKEN, allow_control=True, stub=True)
+        thread = _start_auto_advance(dashboard, 2, 0.05)
+        try:
+            deadline = 5.0
+            import time as _time
+
+            start = _time.time()
+            raw = json.loads((experiment_root / "session_state.json").read_text())
+            while len(raw["processed_sessions"]) < 6 and _time.time() - start < deadline:
+                _time.sleep(0.05)
+                raw = json.loads((experiment_root / "session_state.json").read_text())
+        finally:
+            # The loop is a daemon; stop it by disabling control so it returns.
+            dashboard.allow_control = False
+            thread.join(timeout=3)
+        assert len(raw["processed_sessions"]) >= 6
+        out = capsys.readouterr().out
+        assert "[auto] advanced" in out
+
+    def test_auto_advance_is_single_writer(self, experiment_root, allow_loopback):
+        """Auto-advance and a manual run share one lock; they cannot interleave."""
+        import time as _time
+
+        from tradingagents.paper_experiment.dashboard.server import _start_auto_advance
+
+        dashboard = Dashboard(experiment_root, token=TOKEN, allow_control=True, stub=True)
+        thread = _start_auto_advance(dashboard, 1, 0.01)
+        try:
+            _time.sleep(0.05)
+            # A manual call while the timer may be mid-tick either succeeds or is
+            # refused as "already in progress" — never a corrupted state file.
+            try:
+                dashboard.run_sessions(1)
+            except RuntimeError as exc:
+                assert "already in progress" in str(exc)
+        finally:
+            dashboard.allow_control = False
+            thread.join(timeout=3)
+        # The state file is still valid JSON and monotonic in processed sessions.
+        raw = json.loads((experiment_root / "session_state.json").read_text())
+        assert len(raw["processed_sessions"]) == len(set(raw["processed_sessions"]))
+
 
 # ---------------------------------------------------------------------------
 # HTTP surface
@@ -499,8 +640,11 @@ class TestModuleEntryPoint:
 
         captured: dict[str, object] = {}
 
-        def fake_serve(root_arg, *, host, port, token, allow_control):
-            captured.update(root=str(root_arg), host=host, port=port, token=token, allow_control=allow_control)
+        def fake_serve(root_arg, *, host, port, token, allow_control, **kwargs):
+            captured.update(
+                root=str(root_arg), host=host, port=port, token=token,
+                allow_control=allow_control, **kwargs,
+            )
 
         monkeypatch.setattr(server_mod, "serve", fake_serve)
         monkeypatch.setenv("TRADINGAGENTS_EXPERIMENT_ROOT", str(root))

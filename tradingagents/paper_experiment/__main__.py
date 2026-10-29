@@ -42,7 +42,6 @@ from pathlib import Path
 from .broker import BrokerError
 from .config import ExperimentConfig
 from .experiment import ExperimentError, PaperExperiment
-from .inference import ProviderInference, StubInference
 from .journal import JournalError
 from .providers import (
     KNOWN_SOURCES,
@@ -79,9 +78,9 @@ def _frozen_source() -> PriceSource:
 
 
 def _make_inference(config: ExperimentConfig, *, stub: bool):
-    if stub:
-        return StubInference()
-    return ProviderInference(provider=config.provider, model=config.model)
+    from .runner import build_inference
+
+    return build_inference(config, stub=stub)
 
 
 def _resolve_source(args, config: ExperimentConfig) -> SourceSelection:
@@ -180,10 +179,10 @@ def _run(args) -> int:
     root = _root(args)
     if (root / "session_state.json").exists():
         source = _restored_source(root)
-        inference = StubInference() if args.stub else ProviderInference(
-            provider=args.provider, model=args.model
-        )
-        experiment = PaperExperiment.load(root, source=source, inference=inference)
+        # Build the seam from the *persisted* config, not the CLI defaults, so a
+        # resumed run decides through the provider the experiment was started with.
+        experiment = PaperExperiment.load(root, source=source)
+        experiment.inference = _make_inference(experiment.config, stub=args.stub)
     else:
         config = ExperimentConfig.from_protocol(
             symbols=(args.symbol,) if args.symbol else ("SPY",),
@@ -251,6 +250,9 @@ def _serve(args) -> int:
             port=port,
             token=args.token,
             allow_control=args.allow_control,
+            stub=args.stub,
+            auto_advance=getattr(args, "auto_advance", 0) or 0,
+            auto_interval=getattr(args, "auto_interval", 60.0) or 60.0,
         )
     except DashboardAuthError as exc:
         raise RunnerError(str(exc)) from exc
@@ -501,6 +503,23 @@ def main(argv: list[str] | None = None) -> int:
             "Off by default, so the dashboard is read-only. It stays "
             "simulation-only; no broker order can be placed."
         ),
+    )
+    parser.add_argument(
+        "--auto-advance",
+        type=int,
+        default=int(os.environ.get("TRADINGAGENTS_AUTO_ADVANCE_SESSIONS", "0") or 0),
+        help=(
+            "serve only: advance this many sessions every --auto-interval seconds, "
+            "in-process, so one service both runs and monitors the experiment "
+            "(default: $TRADINGAGENTS_AUTO_ADVANCE_SESSIONS, else 0 = monitor only). "
+            "Requires --allow-control."
+        ),
+    )
+    parser.add_argument(
+        "--auto-interval",
+        type=float,
+        default=float(os.environ.get("TRADINGAGENTS_AUTO_ADVANCE_INTERVAL", "60") or 60),
+        help="serve only: seconds between auto-advance ticks (default: 60)",
     )
     parser.add_argument(
         "--connect",

@@ -15,6 +15,25 @@ from __future__ import annotations
 from .experiment import PaperExperiment, SessionOutcome
 
 
+def build_inference(config, *, stub: bool):
+    """The decision seam for a run, from the persisted config and a stub flag.
+
+    One builder shared by the CLI's ``run`` and the dashboard's control action, so
+    a session advanced from the dashboard decides through the *same* seam a
+    terminal run would. ``stub`` selects the labelled, non-genuine fixture used for
+    offline demonstration; otherwise the real provider named in the config is used,
+    and a missing credential records a blocked decision rather than a fabricated
+    one. No credential is read here; the provider client reads its own variable.
+    """
+    if stub:
+        from .inference import StubInference
+
+        return StubInference()
+    from .inference import ProviderInference
+
+    return ProviderInference(provider=config.provider, model=config.model)
+
+
 def pending_sessions(experiment: PaperExperiment) -> list[str]:
     """The source's sessions the experiment has not processed yet, in order."""
     return [s for s in experiment.source.sessions() if s not in experiment.processed_sessions]

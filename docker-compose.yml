@@ -9,9 +9,11 @@ services:
     stdin_open: true
 
   # A local monitoring dashboard for a paper experiment. Read-only by default;
-  # uncomment the command's --allow-control to let it advance the simulation.
-  # It is simulation-only: no broker order can be placed from it. Set
-  # TRADINGAGENTS_DASHBOARD_TOKEN before binding a non-loopback host.
+  # uncomment the command's --allow-control to let it advance the simulation, and
+  # add `--auto-advance 3` to have this one service also run the engine. It is
+  # simulation-only: no broker order can be placed from it. Set
+  # TRADINGAGENTS_DASHBOARD_TOKEN before binding a non-loopback host. Run only one
+  # writer per experiment directory.
   dashboard:
     build: .
     env_file:
