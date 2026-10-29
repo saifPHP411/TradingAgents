@@ -181,6 +181,14 @@ order with a remainder, an `ACCEPTED` order with a fill). It never restores a
 book that would be silently wrong. A restored session is still `PAPER` and still
 cannot reach a venue.
 
+A caller can cancel a restored order with `session.cancel_resting(order)`, and
+that cancellation is durable: it removes the order from the live queue, records
+exactly one terminal `ORDER_CANCELLED` event, survives a further save/restore,
+and is never undone — a cancelled order is not filled when its price is reached
+on a later session. Cancelling an already-terminal order is a no-op, so a
+duplicate cancel does not log a second event.
+(`tests/test_paper_recovery.py::TestCancellationAfterRestart`.)
+
 ### What recovery does and does not guarantee
 
 The design is explicit save, restore from the last saved state — no write-ahead
@@ -190,6 +198,13 @@ log, no automatic checkpoint, no supervisor. That supports one claim:
 - **Not claimed:** the system is *crash-safe*. State written after the last
   `save_state` is lost on a hard crash. The caller owns the checkpoint cadence; a
   lost tail is lost data, not a corrupted book.
+- **Not claimed:** a *fill* is guarded against a stale price. The engine fills
+  against the quote its caller supplies; the caller owns quote freshness. The
+  session enforces one freshness rule of its own — the day clock only moves
+  forward, so a quote dated before the session's last date cannot roll the day or
+  reset the daily-loss baseline — but a quote that is merely old is still a valid
+  price to fill at, and a vendor source is expected to refuse a bar outside its
+  staleness window before it ever reaches the session.
 
 ## Duplicate processing
 

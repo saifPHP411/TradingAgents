@@ -397,6 +397,27 @@ persisted `applied_fills` set, so a fill is applied at most once across a restar
 
 Tests: `tests/test_phase3_broker.py`.
 
+### 18. Cancellation across a restart was untested
+
+Severity: low (test gap, not a live defect). The recovery suite proved that the
+*engine's* own cancel (an expiry) survives a restart, and that a caller can
+cancel a live order — but nothing proved a caller cancelling a **restored** order
+behaves: that the order leaves the live queue, that exactly one terminal
+`ORDER_CANCELLED` event is recorded, that the cancellation is not undone by a
+further restart, and that a cancelled order is not filled when its price is
+reached on a later session. The behaviour was correct when probed; it was simply
+unpinned, so a future change to `cancel_resting` or to `restore` could have
+regressed it silently.
+
+Fix: no production change was needed. `tests/test_paper_recovery.py::
+TestCancellationAfterRestart` now pins the behaviour — a restored order cancels
+exactly once, the cancellation survives a further restart, a cancelled order is
+never filled afterwards, a double cancel logs one cancellation, a partial fill
+then cancel keeps the filled part, and cancelling one restored order leaves
+another symbol's order live.
+
+Tests: `tests/test_paper_recovery.py::TestCancellationAfterRestart`.
+
 ## Phase 4 — final release-candidate adversarial audit
 
 An independent pass over the whole simulated system, attacking accounting,

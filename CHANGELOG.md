@@ -73,7 +73,10 @@ path, and no configuration that produces one.
   refused with a `DUPLICATE_SIGNAL` step and no order, so a re-driven decision
   (crash recovery, a duplicated message) cannot create a second position or fee.
 - `PaperSession.cancel_resting` cancels a live resting order, recording exactly
-  one `ORDER_CANCELLED` event.
+  one `ORDER_CANCELLED` event. The cancellation is durable: it survives a
+  save/restore, a cancelled order is not filled when its price is reached later,
+  and cancelling an already-terminal order is a no-op
+  (`tests/test_paper_recovery.py::TestCancellationAfterRestart`).
 - `Quote` accepts an optional intraday `low`/`high` range and validates it, so a
   LIMIT order's reachability can use the session range in paper mode as it does
   against a bar, and a malformed range is refused.

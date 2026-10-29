@@ -315,6 +315,113 @@ class TestExpirationAfterRestart:
 
 
 # ---------------------------------------------------------------------------
+# Cancellation across a restart
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCancellationAfterRestart:
+    """A cancellation is a lifecycle transition that must survive a restart too.
+
+    The expiration tests cover the *engine's* own cancel. This covers a caller
+    cancelling a *restored* order: the cancellation must remove the order from the
+    live queue, record exactly one terminal event, and never be undone — a
+    restored-and-cancelled order must not fill on a later session, and a second
+    cancel (or a second restart) must not log a second cancellation.
+    """
+
+    def _restored_resting(self, *, symbol="AAPL", limit_price=95.0, expires=None):
+        session = _session(quotes={symbol: 100.0})
+        session.on_signal(_limit(symbol=symbol, limit_price=limit_price, expires=expires))
+        assert len(session.resting) == 1
+        return PaperSession.restore(
+            session.state(),
+            quotes=dict_quote_source({symbol: 100.0}, timestamp=NOW),
+        )
+
+    def test_a_cancelled_order_after_a_restart_is_removed_exactly_once(self):
+        restored = self._restored_resting()
+        restored.cancel_resting(restored.resting[0], detail="manual cancel after restart")
+        assert restored.resting == []
+        cancelled = [e for e in restored.ledger.events if e.type.value == "ORDER_CANCELLED"]
+        assert len(cancelled) == 1
+        assert restored.ledger.position_quantity("AAPL") == 0.0
+
+    def test_a_cancellation_survives_a_further_restart(self):
+        restored = self._restored_resting()
+        restored.cancel_resting(restored.resting[0], detail="manual cancel after restart")
+        again = PaperSession.restore(
+            restored.state(),
+            quotes=dict_quote_source({"AAPL": 100.0}, timestamp=NOW),
+        )
+        assert again.resting == []
+        assert len([e for e in again.ledger.events if e.type.value == "ORDER_CANCELLED"]) == 1
+        assert not [e for e in again.ledger.events if e.type.value == "ORDER_FILLED"]
+
+    def test_a_cancelled_restored_order_does_not_fill_on_a_later_session(self):
+        """The price reaching the limit after a cancel must not resurrect the order."""
+        restored = self._restored_resting(limit_price=95.0)
+        restored.cancel_resting(restored.resting[0], detail="manual cancel after restart")
+        restored.quotes = lambda symbol: Quote(
+            symbol="AAPL", price=90.0, timestamp=NOW + timedelta(days=1),
+            average_daily_volume=1e9,
+        )
+        assert restored.work_resting() == []
+        assert restored.ledger.position_quantity("AAPL") == 0.0
+        assert not [e for e in restored.ledger.events if e.type.value == "ORDER_FILLED"]
+
+    def test_cancelling_twice_after_a_restart_logs_one_cancellation(self):
+        restored = self._restored_resting()
+        order = restored.resting[0]
+        restored.cancel_resting(order, detail="manual cancel after restart")
+        restored.cancel_resting(order, detail="manual cancel after restart")
+        assert len([e for e in restored.ledger.events if e.type.value == "ORDER_CANCELLED"]) == 1
+
+    def test_a_partial_fill_then_cancel_after_a_restart_keeps_the_filled_part(self):
+        """A restored remainder can be cancelled without losing the earlier fill."""
+        session = _session(
+            cash=100_000.0, quotes={"AAPL": 94.0},
+            limits=RiskLimits(max_position_size=1.0, max_portfolio_exposure=None),
+            participation=0.1,
+        )
+        session.quotes = lambda symbol: Quote(
+            symbol="AAPL", price=94.0, timestamp=NOW, average_daily_volume=4000.0
+        )
+        session.on_signal(_limit(size=0.94))
+        assert session.ledger.position_quantity("AAPL") == pytest.approx(400.0)
+        restored = PaperSession.restore(
+            session.state(),
+            quotes=dict_quote_source({"AAPL": 94.0}, timestamp=NOW),
+        )
+        assert len(restored.resting) == 1  # the 600-unit remainder
+        restored.cancel_resting(restored.resting[0], detail="manual cancel after restart")
+        assert restored.resting == []
+        assert restored.ledger.position_quantity("AAPL") == pytest.approx(400.0)
+        assert len([e for e in restored.ledger.events if e.type.value == "ORDER_CANCELLED"]) == 1
+        assert len([e for e in restored.ledger.events if e.type.value == "ORDER_FILLED"]) == 1
+
+    def test_a_second_resting_order_is_unaffected_by_cancelling_the_first(self):
+        """Cancelling one restored order must not touch another symbol's order."""
+        session = _session(quotes={"AAPL": 100.0, "MSFT": 100.0})
+        session.on_signal(_limit(symbol="AAPL", limit_price=95.0))
+        session.on_signal(_limit(symbol="MSFT", limit_price=95.0, at=NOW + timedelta(seconds=1)))
+        restored = PaperSession.restore(
+            session.state(),
+            quotes=lambda symbol: Quote(symbol=symbol, price=100.0, timestamp=NOW),
+        )
+        msft = [o for o in restored.resting if o.symbol == "MSFT"][0]
+        restored.cancel_resting(msft, detail="manual cancel after restart")
+        assert [o.symbol for o in restored.resting] == ["AAPL"]
+        restored.quotes = lambda symbol: Quote(
+            symbol=symbol, price=90.0, timestamp=NOW + timedelta(days=1),
+            average_daily_volume=1e9,
+        )
+        restored.work_resting()
+        assert restored.ledger.position_quantity("AAPL") > 0
+        assert restored.ledger.position_quantity("MSFT") == 0.0
+
+
+# ---------------------------------------------------------------------------
 # Partial-fill recovery
 # ---------------------------------------------------------------------------
 

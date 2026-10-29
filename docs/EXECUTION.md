@@ -213,6 +213,21 @@ Recovery is not a durability policy. There is no write-ahead log and no automati
 checkpoint; the caller decides when to call `save_state`, and only the last saved
 state is recovered.
 
+A cancellation is part of that state: a caller may cancel a restored order with
+`session.cancel_resting(order)`, and the cancellation is durable — the order
+leaves the live queue, exactly one terminal `ORDER_CANCELLED` event is recorded,
+it survives a further save/restore, and a cancelled order is not filled when its
+price is reached later. Cancelling an already-terminal order is a no-op.
+(`tests/test_paper_recovery.py::TestCancellationAfterRestart`.)
+
+The engine fills against the quote its caller supplies, so quote *freshness* is
+the caller's responsibility, not the session's: a quote that is merely old is
+still a valid price to fill at. The session's only freshness rule is that the day
+clock moves forward, so a quote dated before the session's last date cannot roll
+the day or reset the daily-loss baseline. A vendor source refuses a bar outside
+its staleness window before it reaches the session
+([MARKET_DATA_PROVIDERS.md](MARKET_DATA_PROVIDERS.md)).
+
 The prospective paper experiment ([PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md))
 supplies that durability policy for its own use: it saves state after every
 session, keeps an append-only hash-chained journal, and records the execution
