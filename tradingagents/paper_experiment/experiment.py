@@ -105,13 +105,22 @@ class InferenceUnavailable(RuntimeError):
 class InferenceFn(Protocol):
     """Produces a decision's rating and rationale for a session, or raises.
 
-    A real implementation calls the provider. A stub returns a fixed decision and
-    must declare ``genuine = False`` so the record is labelled a fixture.
+    A real implementation calls the provider with the session's point-in-time
+    price window. A stub returns a fixed decision and must declare
+    ``genuine = False`` so the record is labelled a fixture.
+
+    ``window`` is the source's point-in-time slice for the session: every bar up
+    to and including the decision session, and never a later one. It is passed
+    because a directional decision taken with no data is not a decision; the
+    experiment already builds this window to anchor the record, so the model is
+    shown the same input the record attests to.
     """
 
     genuine: bool
 
-    def __call__(self, *, symbol: str, session: str) -> tuple[str, str]:  # pragma: no cover
+    def __call__(
+        self, *, symbol: str, session: str, window=None
+    ) -> tuple[str, str]:  # pragma: no cover
         ...
 
 
@@ -536,8 +545,26 @@ class PaperExperiment:
                 "no inference provider is configured; set a provider credential to "
                 "produce a genuine decision",
             )
+        if snapshot is None:
+            # The record could not be anchored to a reproducible window, so the
+            # decision would be refused below regardless. Refuse it before the
+            # request: asking the model to decide with no data is the defect this
+            # seam exists to avoid, and it must not spend a paid call either.
+            return self._block(
+                outcome,
+                decision_id,
+                symbol,
+                session,
+                execution_session,
+                "no reproducible price window for this session, so no decision can "
+                "be anchored; the model is not asked to decide blind",
+            )
         try:
-            rating, reasoning = self.inference(symbol=symbol, session=session)
+            rating, reasoning = self.inference(
+                symbol=symbol,
+                session=session,
+                window=snapshot.to_frame(),
+            )
         except InferenceUnavailable as exc:
             return self._block(outcome, decision_id, symbol, session, execution_session, str(exc))
         except Exception as exc:  # noqa: BLE001 - a provider failure is recorded, not hidden

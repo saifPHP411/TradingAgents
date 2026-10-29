@@ -110,10 +110,13 @@ date, so a record can never be built from bars the model could not have seen.
 
 ## The cycle, stated once
 
-1. **Decide at T.** The window is every bar up to and including T. The model (or
-   a blocked marker) produces a decision dated T. A decision is only taken on a
-   cadence session (every `decision_frequency_sessions`), but settlement runs on
-   every session.
+1. **Decide at T.** The window is every bar up to and including T. The model is
+   shown that window — the trailing `WINDOW_BARS` (30) rows, oldest first, as
+   `date,open,high,low,close,volume` — and produces a decision dated T. A session
+   with no reproducible window is blocked *before* any request: the model is
+   never asked to decide with no data. A decision is only taken on a cadence
+   session (every `decision_frequency_sessions`), but settlement runs on every
+   session.
 2. **Execute at T+1's open.** A decision from T's close cannot fill at T's close.
    The signal is re-dated to the execution session before it reaches the paper
    session, so nothing downstream can read the fill as happening at T.
@@ -156,6 +159,32 @@ decisions were all settled, and none was ever an order. A tradeable decision
 does produce a simulated fill; the funnel shows `submitted` and `filled` rise
 together. To get fills, the model must return a tradeable rating (Buy,
 Overweight, Underweight, Sell) rather than Hold, and risk must approve the size.
+
+### Why a run returned Hold on every decision
+
+A run that returns Hold on every decision is only informative if the model was
+given something to decide *from*. The first real-inference prompt was not: it
+asked for a rating while telling the model "given no further data", so `Hold` was
+the only safe answer and 20 HOLD out of 20 decisions followed by construction.
+The seam's signature was `(symbol, session)`, so the window the experiment
+already built could not reach the prompt; it was used only afterwards, to hash
+and anchor the record. The record therefore attested to an input the model never
+saw.
+
+The fix passes the session's point-in-time window into the seam and renders it
+into the request (`PAPER_INFERENCE_PROMPT_VERSION = "paper-inference-2"`). Two
+invariants now hold and are tested in `tests/test_paper_inference_prompt.py`:
+
+- the request contains only bars up to and including the decision session, capped
+  at the last `WINDOW_BARS` (30) bars, so it can never carry a future bar;
+- a window with a non-finite value, or no window at all, blocks the decision
+  *before* any request is made, so no paid call is spent and no decision is taken
+  blind.
+
+A windowless session is blocked with `no reproducible price window …`, not
+decided. If a future run still returns Hold on every decision, the model was
+shown real data and genuinely chose Hold — the counters can then be read as a
+result.
 
 ## When the key is missing, or the provider fails
 

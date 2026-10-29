@@ -392,6 +392,45 @@ The execution path itself was already correct: a tradeable Buy decision produces
 a simulated fill with a position, cash movement and fees. A zero fill is a HOLD
 or a risk refusal, never a broken simulator.
 
+### Fixed — every paper decision was HOLD because the model was asked with no data
+
+A live experiment returned `Hold` on all 20 decisions and submitted no order. The
+counter fix above made the funnel legible, but it did not explain the HOLDs. The
+cause was upstream of the counters: the real-inference prompt asked for a
+directional rating while telling the model *"given no further data"*.
+
+```
+You are a portfolio manager. For SPY on 2026-06-08, given no further
+data, reply in exactly this format and nothing else:
+**Rating**: <one of Buy, Overweight, Hold, Underweight, Sell>
+```
+
+A directional question with no data has one safe answer, and 20 HOLD out of 20
+decisions followed by construction. The seam's signature was `(symbol, session)`,
+so the point-in-time window the experiment already built could not reach the
+prompt; the window was used only *after* the rating returned, to hash and anchor
+the record. The record therefore attested to a price window the model never saw,
+which is why the run looked like a strategy result rather than a wiring gap.
+
+The seam now takes the session's window and the request carries it:
+
+- `ProviderInference.__call__` accepts `window`; `InferenceFn` documents it;
+  `PaperExperiment._decide` passes `snapshot.to_frame()`, the same slice the
+  record is anchored to.
+- The request renders the trailing `WINDOW_BARS` (30) bars, oldest first, as
+  `date,open,high,low,close,volume`, and states that the history ends at the
+  decision session. `PAPER_INFERENCE_PROMPT_VERSION` is `paper-inference-2`.
+- A non-finite value in the window raises `InferenceUnavailable` and makes **no
+  request**; a session with no reproducible window is blocked *before* the call,
+  with `no reproducible price window …`, instead of being decided blind or
+  spending a paid request on a decision that would be refused anyway.
+
+No direction is forced, no threshold is lowered and no risk limit is changed: the
+model is given data and may still return Hold. Covered by
+`tests/test_paper_inference_prompt.py` (deterministic, no provider call);
+documented in `docs/PAPER_EXPERIMENT.md` ("Why a run returned Hold on every
+decision").
+
 ### Fixed — `report`/`verify` failed in a shell with `No module named 'dotenv'`
 
 A login shell (`bash -lc`, `sh -lc`) sources Debian's `/etc/profile`, which

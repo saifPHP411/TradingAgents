@@ -318,7 +318,7 @@ class TestDuplicateProcessing:
 @pytest.mark.unit
 class TestHonestySafeguards:
     def test_no_credential_records_a_blocked_decision_not_a_fabricated_one(self, tmp_path):
-        def failing(*, symbol, session):
+        def failing(*, symbol, session, window=None):
             raise InferenceUnavailable("no credential for provider 'groq'")
 
         source = _source()
@@ -341,7 +341,7 @@ class TestHonestySafeguards:
         assert outcome.decision_state == STATE_BLOCKED
 
     def test_a_provider_failure_blocks_and_does_not_raise(self, tmp_path):
-        def exploding(*, symbol, session):
+        def exploding(*, symbol, session, window=None):
             raise RuntimeError("upstream 500")
 
         source = _source()

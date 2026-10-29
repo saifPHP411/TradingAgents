@@ -135,6 +135,12 @@ faking a success.
   funnel is. Never read `executed` as `filled` — a run can legitimately report
   `executed: 1, filled_orders: 0` when the tail decision is a HOLD. See
   `tests/test_paper_experiment_counters.py`.
+- The paper experiment's inference seam takes `(symbol, session, window)`, and the
+  window is the session's point-in-time slice. A model asked for a directional
+  call with no data can only answer Hold, so never strip the window from the
+  request, and never spend a request on a session whose window cannot be anchored.
+  A non-finite window value blocks before any call. See
+  `tests/test_paper_inference_prompt.py`.
 - Every cash or position change goes through `Ledger.apply_fill`, so the
   accounting rules stay in one place and the event log stays complete.
 - Rejections carry a named reason from a closed vocabulary, never prose only.
