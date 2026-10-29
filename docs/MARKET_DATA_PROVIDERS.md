@@ -207,10 +207,20 @@ journal's creation entry and the report's `data` block:
 
 `name`, `kind` (`frozen` / `static` / `vendor_daily` / `vendor_quote`),
 `is_current_market`, `symbol`, `fetched_at`, `last_bar_date`, `timezone`,
-`adjusted`, `dataset_start`, `dataset_end`, `snapshot_id`, `content_hash`, and
-`notes`. The snapshot fingerprint itself is the existing
+`adjusted`, `dataset_start`, `dataset_end`, `snapshot_id`, `content_hash`,
+`max_stale_days`, and `notes`. The snapshot fingerprint itself is the existing
 `llm_evaluation.replay.window_hash`, so a snapshot and the record that names it
 must agree.
+
+`max_stale_days` is the freshness rule the source applied, and it exists so that
+currency can be *re-checked*. `is_current_market` is computed once at fetch time
+and persisted, but it is a claim about the clock; on restore it is re-evaluated
+against the current date from `last_bar_date` and `max_stale_days`. A snapshot
+written while its bar was fresh therefore stops claiming the current market once
+the bar has gone stale, instead of carrying a stale "current" claim into a report.
+A source that declares no rule (the frozen dataset, a fixture) keeps its recorded
+flag, because its currency is a property of the source rather than of the day it
+is read.
 
 ## Testing
 

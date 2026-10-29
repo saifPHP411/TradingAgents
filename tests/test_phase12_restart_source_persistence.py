@@ -32,6 +32,9 @@ from tradingagents.paper_experiment import (
 )
 from tradingagents.paper_experiment.inference import StubInference
 from tradingagents.paper_experiment.providers import AlphaVantageDailySource
+from tradingagents.paper_experiment.providers.alpha_vantage import (
+    DEFAULT_MAX_STALE_DAYS,
+)
 from tradingagents.paper_experiment.sources import (
     FramePriceSource,
     SourceProvenance,
@@ -266,11 +269,15 @@ class TestVendorSourceRestart:
         experiment.save_state()
 
         restored = PaperExperiment.load(tmp_path / "exp")
-        # The bar is recent relative to TODAY, so the source stays current-market;
-        # what matters is that the recorded provenance survives the restart.
-        assert restored.source.is_current_market is True
+        # What matters is that the recorded provenance survives the restart. The
+        # currency flag is deliberately *not* asserted as True: on restore there is
+        # no injected "today", so freshness is re-evaluated against the real clock,
+        # and these 2024 bars are long stale by the time the test runs. Trusting the
+        # flag captured at fetch time is the defect this re-evaluation fixes.
         assert restored.source.provenance.last_bar_date == "2024-02-28"
         assert restored.source.provenance.kind == "vendor_daily"
+        assert restored.source.provenance.max_stale_days == DEFAULT_MAX_STALE_DAYS
+        assert restored.source.is_current_market is False
 
     def test_a_vendor_restart_matches_a_straight_run(self, tmp_path):
         sessions = ["2024-02-26", "2024-02-27", "2024-02-28", "2024-02-29", "2024-03-01"]
@@ -420,3 +427,83 @@ class TestFrozenWindowGuard:
                 self._fake(["2024-01-01", "2024-06-30"]),
                 {"dataset_start": "2024-01-01", "dataset_end": "2024-01-02"},
             )
+
+
+@pytest.mark.unit
+class TestRestoredFreshnessIsReevaluated:
+    """A restored provenance must not keep claiming the current market.
+
+    The defect this guards: ``is_current_market`` was computed once at fetch time
+    and trusted verbatim on restore, so a snapshot persisted while its bar was
+    fresh still claimed currency weeks later. That is what made a report show a
+    months-old "current market" date. The flag is now re-evaluated against the
+    real clock, using the freshness rule the source recorded.
+    """
+
+    def _stale_vendor_source(self, last_bar: str, *, max_stale_days: int = 10):
+        frame = pd.DataFrame(
+            {
+                "open": [100.0],
+                "high": [102.0],
+                "low": [99.0],
+                "close": [101.0],
+                "volume": [1_000_000.0],
+            },
+            index=pd.to_datetime([last_bar]),
+        )
+        provenance = SourceProvenance(
+            name="alpha_vantage_daily",
+            kind="vendor_daily",
+            is_current_market=True,  # captured when the bar *was* fresh
+            symbol="SPY",
+            last_bar_date=last_bar,
+            dataset_start=last_bar,
+            dataset_end=last_bar,
+            max_stale_days=max_stale_days,
+        )
+        return FramePriceSource({"SPY": frame}, name="alpha_vantage_daily", provenance=provenance)
+
+    def test_a_snapshot_whose_bar_has_gone_stale_is_no_longer_current(self):
+        source = self._stale_vendor_source("2026-06-22")  # long past by now
+        restored = FramePriceSource.from_dict(source.to_dict())
+        assert restored.is_current_market is False
+
+    def test_the_recorded_flag_is_preserved_when_the_source_has_no_rule(self):
+        # A frozen dataset or a fixture declares no freshness rule; its flag is a
+        # property of the source's nature, not of the clock, so it is kept.
+        provenance = SourceProvenance(
+            name="frozen_baseline", kind="frozen", is_current_market=False,
+            dataset_start="2015-01-02", dataset_end="2024-12-30", max_stale_days=None,
+        )
+        restored = SourceProvenance.from_dict(provenance.to_dict())
+        assert restored.is_current_market is False
+        assert restored.max_stale_days is None
+
+    def test_a_recent_bar_stays_current_after_a_restore(self):
+        from datetime import UTC, datetime, timedelta
+
+        today = datetime.now(UTC).date()
+        recent = (today - timedelta(days=1)).isoformat()
+        source = self._stale_vendor_source(recent)
+        restored = FramePriceSource.from_dict(source.to_dict())
+        assert restored.is_current_market is True
+
+    def test_the_freshness_rule_survives_the_round_trip(self):
+        source = self._stale_vendor_source("2026-06-22", max_stale_days=7)
+        restored = FramePriceSource.from_dict(source.to_dict())
+        assert restored.provenance.max_stale_days == 7
+
+    def test_a_snapshot_written_while_fresh_does_not_claim_currency_later(self):
+        # The precise end-to-end symptom: persist while fresh, restore when stale.
+        from datetime import UTC, datetime, timedelta
+
+        today = datetime.now(UTC).date()
+        fetched_while_fresh = (today - timedelta(days=2)).isoformat()
+        source = self._stale_vendor_source(fetched_while_fresh, max_stale_days=10)
+        assert source.is_current_market is True  # fresh at fetch time
+        payload = source.to_dict()
+        # Simulate the passage of time by widening the staleness rule to 0 days,
+        # so the same stored bar is now judged stale against the same clock.
+        payload["provenance"]["max_stale_days"] = 0
+        restored = FramePriceSource.from_dict(payload)
+        assert restored.is_current_market is False

@@ -196,3 +196,43 @@ Run the report and read `readiness`:
 The report's `limitations` list and `readiness.blockers` are the authoritative
 statement of what the experiment does not prove. A paper result is not evidence
 of profitability, and a small sample is reported as `N/A`, not as a number.
+
+## Currency is re-checked on restore, not trusted from the file
+
+`is_current_market` is a *claim about the clock*, so it is re-evaluated when a
+state file is read, not carried over as a fact. A vendor source records the
+freshness rule it applied (`max_stale_days`), and on restore the flag is recomputed
+against the current date from the newest bar. A snapshot persisted while its bar
+was fresh therefore stops claiming the current market once the bar is stale, so a
+report cannot describe months-old data as current. A source with no freshness rule
+(the frozen dataset, a test fixture) keeps its recorded flag: its currency is a
+property of the source, not of the day it is read.
+
+## Alpaca paper broker (separate, opt-in, paper-only)
+
+`tradingagents/paper_experiment/broker/` is a **separate** path for Alpaca Paper
+Trading. It is not the internal simulator and it is not a live path.
+
+- It has its **own** account state and its own recovery file; it never imports or
+  writes the internal ledger or the simulator, so a broker fill cannot be
+  double-counted as an internal fill.
+- The endpoint is hard-validated to Alpaca's paper host. Every live host, and any
+  unapproved host, is refused. Credentials come from
+  `ALPACA_PAPER_API_KEY`/`ALPACA_PAPER_API_SECRET` only; live variable names are
+  refused, not used as a fallback.
+- Constructing the broker performs **no** request. `connect()` is a read-only
+  account check. An order is placed only with an explicit `allow_orders=True`,
+  after a confirmed account read.
+- Each order carries a stable `client_order_id`. Intent is persisted before the
+  request, a lost response is reconciled by that id rather than re-submitted, and
+  a fill is applied at most once (a persisted `applied_fills` set).
+
+```bash
+# Report whether the paper broker is configured, without printing a secret.
+python -m tradingagents.paper_experiment broker-check
+# Also read the account (read-only; still places no order).
+python -m tradingagents.paper_experiment broker-check --connect
+```
+
+There is no CLI flag that submits an order. `ExecutionMode` is unchanged
+(`BACKTEST` and `PAPER` only); this adapter does not add a live path.

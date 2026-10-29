@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from typing import Protocol, runtime_checkable
 
 import pandas as pd
@@ -63,6 +64,16 @@ class SourceProvenance:
     dataset_end: str | None = None
     snapshot_id: str | None = None
     content_hash: str | None = None
+    max_stale_days: int | None = None
+    """The freshness rule the source applied, in days, or ``None`` if it has none.
+
+    Persisted so a restart can *re-evaluate* ``is_current_market`` against the
+    current date instead of trusting the flag captured at fetch time. A snapshot
+    fetched when its newest bar was fresh stays in the state file for weeks; by the
+    time it is read again the flag would be a stale claim of currency. ``None``
+    means the source has no freshness rule (a frozen dataset, a test fixture), so
+    its recorded flag is kept as-is.
+    """
     notes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
@@ -79,17 +90,64 @@ class SourceProvenance:
             "dataset_end": self.dataset_end,
             "snapshot_id": self.snapshot_id,
             "content_hash": self.content_hash,
+            "max_stale_days": self.max_stale_days,
             "notes": list(self.notes),
         }
 
     @classmethod
     def from_dict(cls, payload: dict) -> SourceProvenance:
-        """Rebuild a provenance from its serialized form, ignoring unknown keys."""
+        """Rebuild a provenance from its serialized form, ignoring unknown keys.
+
+        When the source recorded a freshness rule (``max_stale_days``) and a
+        newest bar date, ``is_current_market`` is *recomputed* against the current
+        date rather than trusted from the file: a snapshot written while its bar
+        was fresh must not keep claiming currency weeks later. Without a rule the
+        stored flag is kept, so a frozen dataset or a fixture is unchanged.
+        """
         known = set(cls.__dataclass_fields__)
         fields = {k: v for k, v in payload.items() if k in known}
         if "notes" in fields and fields["notes"] is not None:
             fields["notes"] = tuple(fields["notes"])
-        return cls(**fields)
+        provenance = cls(**fields)
+        reevaluated = _recompute_current_market(provenance)
+        if reevaluated is not provenance.is_current_market:
+            fields["is_current_market"] = reevaluated
+            provenance = cls(**fields)
+        return provenance
+
+
+def bar_is_fresh(last_bar_date: str | None, *, reference: date, max_stale_days: int | None) -> bool:
+    """Whether a newest bar is within ``max_stale_days`` of ``reference``.
+
+    The one freshness rule the sources share, so a stored flag and a fresh fetch
+    agree. ``None`` on either the date or the limit means the rule cannot be
+    applied, and the answer is ``False`` — unknown recency is never "current".
+    """
+    if last_bar_date is None or max_stale_days is None:
+        return False
+    try:
+        bar = date.fromisoformat(str(last_bar_date)[:10])
+    except ValueError:
+        return False
+    return (reference - bar).days <= max_stale_days
+
+
+def _recompute_current_market(provenance: SourceProvenance) -> bool:
+    """Re-evaluate a restored provenance's currency against the current date.
+
+    Returns the stored flag unchanged when the source declared no freshness rule
+    (``max_stale_days is None``), so a frozen dataset or a static fixture is not
+    silently reclassified. When a rule exists, the flag is recomputed so a
+    persisted snapshot cannot keep claiming the current market after its bar has
+    gone stale.
+    """
+    if provenance.max_stale_days is None:
+        return provenance.is_current_market
+    return bar_is_fresh(
+        provenance.last_bar_date,
+        reference=datetime.now(UTC).date(),
+        max_stale_days=provenance.max_stale_days,
+    )
 
 
 def frame_to_records(frame: pd.DataFrame) -> list[dict]:

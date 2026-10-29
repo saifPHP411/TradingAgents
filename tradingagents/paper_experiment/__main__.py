@@ -31,6 +31,7 @@ import os
 import sys
 from pathlib import Path
 
+from .broker import BrokerError
 from .config import ExperimentConfig
 from .experiment import ExperimentError, PaperExperiment
 from .inference import ProviderInference, StubInference
@@ -295,6 +296,58 @@ def _verify(args) -> int:
     return 0
 
 
+def _broker_check(args) -> int:
+    """Report the Alpaca paper broker's configuration, and read the account.
+
+    Read-only and secret-free: it prints whether the paper credentials are present
+    (never their value) and whether the endpoint is the approved paper host. With
+    ``--connect`` it also performs the account read, which places **no** order.
+    There is no flag that submits an order from the CLI: a paper order is placed
+    only from code, deliberately, with ``allow_orders=True``.
+    """
+    from .broker import (
+        PAPER_BASE_URL,
+        AlpacaPaperBroker,
+        BrokerError,
+        BrokerNotConfiguredError,
+        broker_status,
+    )
+
+    status = broker_status()
+    print(f"approved paper endpoint: {status.paper_endpoint}")
+    print(f"endpoint is the approved paper host: {status.endpoint_ok}")
+    print(f"paper key env var: {status.key_env} present: {status.key_present}")
+    print(f"paper secret env var: {status.secret_env} present: {status.secret_present}")
+    if status.live_credentials_present:
+        print(
+            "note: live credential variables are present and will NOT be used: "
+            + ", ".join(status.live_credentials_present)
+        )
+    if not (status.key_present and status.secret_present):
+        print(
+            "the broker path is not configured; set the paper credentials to use it. "
+            "No order is placed by this command."
+        )
+        return 0
+    if not getattr(args, "connect", False):
+        print("configuration OK (pass --connect to read the account; still no order)")
+        return 0
+    try:
+        broker = AlpacaPaperBroker(base_url=PAPER_BASE_URL)
+        account = broker.connect()
+    except (BrokerNotConfiguredError, BrokerError) as exc:
+        print(f"broker check failed: {exc}", file=sys.stderr)
+        return 2
+    print(f"account: {account.account_id} status={account.status}")
+    print(f"cash: {account.cash} equity: {account.equity} buying_power: {account.buying_power}")
+    print(
+        f"trading_blocked: {account.trading_blocked} "
+        f"account_blocked: {account.account_blocked}"
+    )
+    print("read-only check complete; no order was placed")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m tradingagents.paper_experiment",
@@ -305,7 +358,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "command", choices=("start", "run", "report", "verify", "sources", "diagnose")
+        "command",
+        choices=("start", "run", "report", "verify", "sources", "diagnose", "broker-check"),
     )
     parser.add_argument(
         "--root", default=None, help="experiment directory (required except for diagnose)"
@@ -344,6 +398,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--report-out", default=None)
     parser.add_argument("--out", default=None)
+    parser.add_argument(
+        "--connect",
+        action="store_true",
+        help=(
+            "broker-check only: also read the Alpaca paper account (read-only; "
+            "places no order). There is no CLI flag that submits an order."
+        ),
+    )
     args = parser.parse_args(argv)
 
     handlers = {
@@ -353,6 +415,7 @@ def main(argv: list[str] | None = None) -> int:
         "verify": _verify,
         "sources": _sources,
         "diagnose": _diagnose,
+        "broker-check": _broker_check,
     }
     try:
         return handlers[args.command](args)
@@ -363,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
         ProviderError,
         SourceSelectionError,
         JournalError,
+        BrokerError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

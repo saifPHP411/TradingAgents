@@ -354,6 +354,49 @@ queue.
 Tests: `tests/test_paper_recovery.py::TestRestartEqualsNoRestart` (day baseline
 survives the restart) and the day-roll assertions in `tests/test_paper_trading.py`.
 
+### 16. A restored provenance kept claiming the current market after its bar went stale
+
+Severity: high for honesty. It made a report describe months-old data as current.
+
+`SourceProvenance.is_current_market` was computed **once**, at fetch time, from
+the newest bar and that day's date, and then written to the state file and trusted
+verbatim on restore. A vendor snapshot persisted while its newest bar was fresh
+(for example an Alpha Vantage daily series fetched in June, whose last bar was
+within the staleness window *then*) still reported `current market: True` when the
+same state was read in October. The report's data block reads that flag to decide
+whether the run may be described as current, so a stale snapshot was described as
+current — the "2026-06" date that prompted this pass. `_is_recent` itself was
+correct; it is a pure function of the bar date and the date it is asked about. The
+defect was that it was never asked again.
+
+Fix: the freshness *rule* is now persisted (`SourceProvenance.max_stale_days`) and
+`SourceProvenance.from_dict` **re-evaluates** `is_current_market` against the
+current date when a rule is present, using the one shared helper `bar_is_fresh`
+that a fresh fetch also uses. A source with no rule (the frozen dataset, a static
+fixture) keeps its recorded flag, because its currency is a property of the source,
+not of the clock. A snapshot written while fresh can therefore no longer claim
+currency after it has gone stale.
+
+Tests: `tests/test_phase12_restart_source_persistence.py::TestRestoredFreshnessIsReevaluated`.
+
+### 17. Alpaca paper broker integration (isolated)
+
+Not a defect; a deliberate, safely isolated addition. Alpaca Paper Trading has its
+own simulated broker account, so wiring it into the internal simulator would
+double-count a fill. The adapter in `tradingagents/paper_experiment/broker/` is a
+**separate** path with its own account state and its own recovery format; it never
+imports or writes the internal ledger or the simulator, and the internal ledger
+never reads it. Paper-only is enforced structurally: `assert_paper_endpoint`
+refuses every live Alpaca host and any unapproved host, and construction performs
+no request. An order is placed only with an explicit `allow_orders=True`, after a
+read-only `connect()` has confirmed the account; a submission carries a stable
+`client_order_id`, its intent is persisted before the request, and a lost response
+is reconciled by that id rather than re-submitted. Fills are guarded by a
+persisted `applied_fills` set, so a fill is applied at most once across a restart.
+`ExecutionMode` is unchanged (`BACKTEST`, `PAPER` only), so no live path is added.
+
+Tests: `tests/test_phase3_broker.py`.
+
 ## Phase 4 — final release-candidate adversarial audit
 
 An independent pass over the whole simulated system, attacking accounting,

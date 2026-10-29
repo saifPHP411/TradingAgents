@@ -262,6 +262,38 @@ Changed:
   mechanism precisely — a frame-backed vendor run is resumed from its own stored
   bars, and the refusal applies only to a source with no persistable bars.
 
+### Phase 3 (reliability) — restored currency, and an isolated Alpaca paper broker
+
+Two changes, both aimed at making the paper path more honest and safer. Neither
+adds a live path: `ExecutionMode` still has only `BACKTEST` and `PAPER`.
+
+**Fixed — a restored provenance kept claiming the current market after its bar
+went stale.** `SourceProvenance.is_current_market` was computed once at fetch time
+and trusted verbatim on restore, so a vendor snapshot persisted while its newest
+bar was fresh still reported `current market: True` weeks later — the stale date
+that showed up in a report. The freshness *rule* is now persisted
+(`SourceProvenance.max_stale_days`) and re-evaluated against the current date on
+restore, through the one shared helper (`bar_is_fresh`) a fresh fetch also uses. A
+source with no freshness rule (the frozen dataset, a fixture) keeps its recorded
+flag. Tests:
+`tests/test_phase12_restart_source_persistence.py::TestRestoredFreshnessIsReevaluated`.
+
+**Added — `tradingagents/paper_experiment/broker/`, an Alpaca *paper* broker
+adapter, isolated from the internal simulator.** Alpaca Paper has its own
+simulated account, so the adapter keeps its **own** account state and recovery
+file and never imports or writes the internal ledger or simulator — a broker fill
+cannot be double-counted. Paper-only is enforced structurally:
+`assert_paper_endpoint` refuses every live Alpaca host and any unapproved host;
+credentials come from `ALPACA_PAPER_API_KEY`/`ALPACA_PAPER_API_SECRET` only (live
+variable names are refused, not used as a fallback); construction performs no
+request; an order needs an explicit `allow_orders=True` after a read-only
+`connect()`. Each order carries a stable `client_order_id`; intent is persisted
+before the request; a lost response is reconciled by that id rather than
+re-submitted; and a fill is applied at most once across a restart (a persisted
+`applied_fills` set). A read-only `broker-check` CLI command reports
+configuration without printing a secret and places no order. Tests:
+`tests/test_phase3_broker.py`.
+
 ### Phase 13 — pre-Railway deployment verification
 
 A verification pass, not a feature. Its job was to prove the deployable image

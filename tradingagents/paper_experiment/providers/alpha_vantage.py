@@ -35,6 +35,7 @@ from ..sources import (
     PriceSourceError,
     SourceProvenance,
     _validate_frame,
+    bar_is_fresh,
 )
 from .base import (
     ProviderAuthError,
@@ -181,6 +182,7 @@ class AlphaVantageDailySource(FramePriceSource):
             adjusted=False,
             dataset_start=str(frame.index[0])[:10],
             dataset_end=str(frame.index[-1])[:10],
+            max_stale_days=max_stale_days,
             notes=(
                 "Alpha Vantage TIME_SERIES_DAILY (free plan, unadjusted, as-traded)",
                 "quota: 25 requests/day on the free plan",
@@ -273,6 +275,5 @@ class AlphaVantageDailySource(FramePriceSource):
 
 
 def _is_recent(last_bar: str, reference: date, max_stale_days: int | None) -> bool:
-    if max_stale_days is None:
-        return False
-    return (reference - date.fromisoformat(last_bar)).days <= max_stale_days
+    """Delegate to the shared freshness rule, so a fetch and a restore agree."""
+    return bar_is_fresh(last_bar, reference=reference, max_stale_days=max_stale_days)

@@ -228,3 +228,11 @@ vendor payload is refused before it can reach a fill. Switching sources is
 explicit and never mixes two vendors within one run, and a vendor failure stops
 the run rather than silently substituting historical data. No provider places an
 order, and no live broker path exists.
+
+An Alpaca *paper* broker adapter exists at
+`paper_experiment/broker/` ([PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md#alpaca-paper-broker-separate-opt-in-paper-only)),
+but it is a **separate** path with its own account state. It does not import or
+write this ledger, and this ledger never reads it, so a broker fill cannot be
+double-counted here. The endpoint is hard-validated to Alpaca's paper host (every
+live host is refused), and an order requires an explicit `allow_orders=True` after
+a read-only account check. `ExecutionMode` still has only `BACKTEST` and `PAPER`.

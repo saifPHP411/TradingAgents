@@ -249,6 +249,17 @@ that a restored session continues with identical accounting and no duplicated
 fills; what it does not provide is the durability policy, which belongs to the
 caller.
 
+## A broker connection, when you actually want one
+
+The simulated session above fills against the price you hand it. When you want to
+drive a real *paper* account — a broker that accepts orders and fills them against
+a live feed, with its own simulated money — use
+`tradingagents/paper_experiment/broker/` (Alpaca Paper). It is deliberately
+separate: it keeps its own account state, never writes this session's ledger, and
+cannot be pointed at a live venue. See
+[PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md#alpaca-paper-broker-separate-opt-in-paper-only).
+This session remains the offline simulator; the broker is the online paper venue.
+
 ## Running a session forward over time
 
 This module is one decision at a time. To record an LLM strategy's decisions
