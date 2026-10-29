@@ -76,6 +76,41 @@ non-root user failed to write the mount with `PermissionError`, which is why
   The Groq LLM path uses the existing OpenAI-compatible client (`requests`).
 - `.dockerignore` already excludes `.git`, `**/.env*`, `results`, `build`, `dist`.
 
+### One interpreter for the app and for a shell
+
+The image installs the project into a virtualenv at `/opt/venv` and prepends it
+to `PATH` with `ENV PATH="/opt/venv/bin:$PATH"`. That is the interpreter the
+`ENTRYPOINT` and any `sh -c`/exec-form command use, so the running service and
+the dashboard always see the project's dependencies.
+
+A **login shell is different**. Debian's `/etc/profile` *overwrites* `PATH`
+outright, which discards the `ENV` prepend; `python` then resolves to the base
+image's interpreter, which has none of the project's dependencies. Running a
+maintenance command that way fails with `ModuleNotFoundError`:
+
+```
+$ bash -lc 'python -m tradingagents.paper_experiment report --root /data/paper-experiment'
+ModuleNotFoundError: No module named 'dotenv'
+```
+
+`dotenv` is *not* missing: `python-dotenv` is a declared dependency
+(`pyproject.toml`) and is installed in `/opt/venv`. The fault is the shell
+choosing the wrong interpreter. The `Dockerfile` closes this by writing
+`/etc/profile.d/10-venv-path.sh`, which re-prepends `/opt/venv/bin`. Because
+`/etc/profile` resets `PATH` *before* sourcing `/etc/profile.d/*`, the venv wins
+again for login shells too, and the manual command above works unchanged.
+
+If you prefer not to rely on that (or run an image built before the fix), call
+the interpreter explicitly — this is always correct regardless of shell:
+
+```
+/opt/venv/bin/python -m tradingagents.paper_experiment report --root /data/paper-experiment
+```
+
+Both forms are covered by `tests/test_docker_interpreter.py`, which asserts the
+dependency is declared, the package imports it, and the Dockerfile restores the
+venv path for login shells.
+
 ## Environment variables
 
 | Variable | Needed for | Notes |

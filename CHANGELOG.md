@@ -363,6 +363,20 @@ surface, and it keeps every existing simulation-only guard.
 Documented in `docs/RAILWAY_DEPLOYMENT.md` (a "Monitoring dashboard (optional)"
 section) and covered by `tests/test_phase13_dashboard.py`.
 
+### Fixed — `report`/`verify` failed in a shell with `No module named 'dotenv'`
+
+A login shell (`bash -lc`, `sh -lc`) sources Debian's `/etc/profile`, which
+*overwrites* `PATH` and so discards the `ENV PATH="/opt/venv/bin:$PATH"` the
+`Dockerfile` sets. `python` then resolved to the base image's interpreter, which
+has none of the project's dependencies, and any `python -m ...` command died
+with `ModuleNotFoundError` — most visibly `No module named 'dotenv'`. The
+dependency was never missing: `python-dotenv` is declared in `pyproject.toml`
+and installed in `/opt/venv`. The `Dockerfile` now writes
+`/etc/profile.d/10-venv-path.sh` to re-prepend the venv, which `/etc/profile`
+sources *after* it resets `PATH`, so the app and a manual `report`/`verify` use
+the same interpreter. Covered by `tests/test_docker_interpreter.py`; documented
+in `docs/RAILWAY_DEPLOYMENT.md`.
+
 ### Fixed — the dashboard's control action recorded every decision as blocked
 
 A session advanced from the dashboard loaded the experiment with **no inference
