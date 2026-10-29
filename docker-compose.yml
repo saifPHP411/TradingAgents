@@ -8,6 +8,37 @@ services:
     tty: true
     stdin_open: true
 
+  # A local monitoring dashboard for a paper experiment. Read-only by default;
+  # uncomment the command's --allow-control to let it advance the simulation.
+  # It is simulation-only: no broker order can be placed from it. Set
+  # TRADINGAGENTS_DASHBOARD_TOKEN before binding a non-loopback host.
+  dashboard:
+    build: .
+    env_file:
+      - .env
+    # The image ENTRYPOINT is the `tradingagents` analysis CLI, so override it to
+    # run the paper runner's module directly.
+    entrypoint:
+      - python
+      - -m
+      - tradingagents.paper_experiment
+    command:
+      - serve
+      - --root
+      - /home/appuser/.tradingagents/paper-experiment
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    environment:
+      - TRADINGAGENTS_DASHBOARD_TOKEN=${TRADINGAGENTS_DASHBOARD_TOKEN:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${TRADINGAGENTS_DATA_DIR:-tradingagents_data}:/home/appuser/.tradingagents
+    profiles:
+      - dashboard
+
   ollama:
     image: ollama/ollama:latest
     volumes:

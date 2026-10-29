@@ -19,6 +19,10 @@ Commands:
   diagnostic. Reports whether the paper credential env vars are present (presence
   only) and, with ``--connect``, reads the paper account and reports its figures
   and restrictions. It places no order and changes nothing.
+- ``serve`` — run the local monitoring dashboard (a small stdlib HTTP server).
+  Read-only by default; ``--allow-control`` adds the ability to advance the
+  simulation, still simulation-only. It binds loopback by default and refuses a
+  public bind without a token.
 
 The default price source is the frozen historical dataset; a vendor source is
 opt-in via ``--source``. A vendor source is fetched once, when the experiment is
@@ -198,19 +202,16 @@ def _run(args) -> int:
             print(f"source switched: {selection.reason}")
 
     source = experiment.source
-    sessions = list(source.sessions())
-    if args.sessions:
-        # Start after the last processed session, so a resume continues.
-        processed = experiment.processed_sessions
-        remaining = [s for s in sessions if s not in processed]
-        to_run = remaining[: args.sessions]
-    else:
-        to_run = [s for s in sessions if s not in experiment.processed_sessions]
+    from .runner import process_pending
 
-    for session in to_run:
-        outcome = experiment.process_session(session)
+    if args.sessions:
+        outcomes = process_pending(experiment, sessions=args.sessions)
+    else:
+        outcomes = process_pending(experiment)
+
+    for outcome in outcomes:
         state = outcome.decision_state or "?"
-        print(f"{session}: {state}")
+        print(f"{outcome.session}: {state}")
 
     report = build_report(experiment)
     print(report.summary())
@@ -228,6 +229,31 @@ def _report(args) -> int:
         print(f"report written to {report.write(args.out)}")
     else:
         print(json.dumps(report.to_dict(), indent=2))
+    return 0
+
+
+def _serve(args) -> int:
+    """Run the local dashboard. Simulation-only monitoring and control.
+
+    The server is read-only unless ``--allow-control`` is passed. It binds
+    loopback by default; a non-loopback bind requires a token
+    (``TRADINGAGENTS_DASHBOARD_TOKEN`` or ``--token``), refused otherwise.
+    """
+    from .dashboard import DashboardAuthError, serve
+
+    root = _root(args)
+    # Honour a platform-provided port (Railway sets $PORT) when --port is omitted.
+    port = args.port if args.port is not None else int(os.environ.get("PORT", "8000"))
+    try:
+        serve(
+            root,
+            host=args.host,
+            port=port,
+            token=args.token,
+            allow_control=args.allow_control,
+        )
+    except DashboardAuthError as exc:
+        raise RunnerError(str(exc)) from exc
     return 0
 
 
@@ -404,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
             "diagnose",
             "broker-check",
             "alpaca-diagnose",
+            "serve",
         ),
     )
     parser.add_argument(
@@ -444,6 +471,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report-out", default=None)
     parser.add_argument("--out", default=None)
     parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "serve only: interface to bind. Defaults to loopback. A non-loopback "
+            "host requires a token, and is refused without one."
+        ),
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="serve only: port to listen on (default: $PORT, else 8000)",
+    )
+    parser.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "serve only: dashboard token. Defaults to the "
+            "TRADINGAGENTS_DASHBOARD_TOKEN environment variable. Required for a "
+            "non-loopback bind; never logged."
+        ),
+    )
+    parser.add_argument(
+        "--allow-control",
+        action="store_true",
+        help=(
+            "serve only: enable the dashboard's advance-the-simulation action. "
+            "Off by default, so the dashboard is read-only. It stays "
+            "simulation-only; no broker order can be placed."
+        ),
+    )
+    parser.add_argument(
         "--connect",
         action="store_true",
         help=(
@@ -463,6 +522,7 @@ def main(argv: list[str] | None = None) -> int:
         "diagnose": _diagnose,
         "broker-check": _broker_check,
         "alpaca-diagnose": _broker_check,  # an explicit, discoverable alias
+        "serve": _serve,
     }
     try:
         return handlers[args.command](args)

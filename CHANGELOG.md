@@ -328,6 +328,41 @@ re-submitted; and a fill is applied at most once across a restart (a persisted
 configuration without printing a secret and places no order. Tests:
 `tests/test_phase3_broker.py`.
 
+### Phase 14 — paper monitoring dashboard (simulation-only)
+
+A small, phone-friendly dashboard for a paper experiment, added because the
+project had no web surface at all (the CLI was the only way to look at a run).
+It is a **monitoring and control surface for the simulation**, not a trading
+surface, and it keeps every existing simulation-only guard.
+
+- `tradingagents/paper_experiment/dashboard/` — a standard-library HTTP server
+  (no new dependency). `GET /` serves one self-contained HTML page (no external
+  assets), `GET /healthz` is an unauthenticated liveness probe, and
+  `GET /api/summary`, `/api/decisions`, `/api/journal`, `/api/control/status`
+  are read-only JSON views of the persisted experiment. `POST /api/run` advances
+  the simulation by N sessions.
+- Auth: every `/api` route requires `Authorization: Bearer <token>`, compared in
+  constant time. Binding a **non-loopback** host with no token is **refused at
+  startup**, so the surface is never served unauthenticated on a public
+  interface. The token comes from `TRADINGAGENTS_DASHBOARD_TOKEN` or `--token`,
+  and is never logged.
+- Control is **off by default** (`--allow-control` enables it), needs a bearer
+  token *and* an explicit `X-Control-Confirm: yes` header, is bounded per call,
+  and refuses a concurrent run so the state file stays single-writer.
+- `tradingagents/paper_experiment/runner.py` — one shared
+  `process_pending`/`pending_sessions` path, so the CLI's `run` and the
+  dashboard's control action process and persist sessions through the *same*
+  code. There is no second implementation to drift.
+- CLI: `serve` (`--host`, `--port`, `--token`, `--allow-control`), reading
+  `$PORT` when `--port` is omitted. `docker-compose.yml` gains an optional
+  `dashboard` service under a `dashboard` profile.
+- Safety boundary unchanged: no live broker execution, no order routing, no
+  credential, no `ExecutionMode.LIVE`, no weakened guard. There is no route that
+  places, modifies or cancels a broker order.
+
+Documented in `docs/RAILWAY_DEPLOYMENT.md` (a "Monitoring dashboard (optional)"
+section) and covered by `tests/test_phase13_dashboard.py`.
+
 ### Phase 13 — pre-Railway deployment verification
 
 A verification pass, not a feature. Its job was to prove the deployable image

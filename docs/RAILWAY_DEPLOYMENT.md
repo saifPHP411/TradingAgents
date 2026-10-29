@@ -34,6 +34,11 @@ Railway's restart policy for no benefit.
 > ([Cron Jobs](https://docs.railway.com/reference/cron-jobs)). The runner exits on
 > its own, so it satisfies that requirement.
 
+An **optional dashboard service** is the one web-shaped service in this repo: a
+small standard-library HTTP server (`serve`) that reads the experiment directory
+and can advance the simulation. It is *not* required to run the experiment, and
+it is not a trading surface. See "Monitoring dashboard" below.
+
 ## Start command
 
 Railway's start command defaults to the Dockerfile's `ENTRYPOINT`/`CMD`
@@ -80,6 +85,7 @@ non-root user failed to write the mount with `PermissionError`, which is why
 | `FINNHUB_API_KEY` | `--source finnhub` | free current-day quote only |
 | `ALPACA_PAPER_API_KEY` | the read-only Alpaca **paper** diagnostic | paper key id; **no order is placed** |
 | `ALPACA_PAPER_API_SECRET` | the read-only Alpaca **paper** diagnostic | paper secret; **no order is placed** |
+| `TRADINGAGENTS_DASHBOARD_TOKEN` | the optional dashboard | bearer token; **required** for any non-loopback bind |
 
 Set these as Railway **service variables** (never in the repository). The code
 reads them from the environment by name only; it never prints, logs or stores a
@@ -111,6 +117,50 @@ confirmed and that no order was placed. It fails safe (non-zero exit, clear
 message, no fallback) if a credential is missing, authentication fails, the
 request times out, or the paper environment cannot be proven. It never submits,
 modifies or cancels an order — there is no flag that does.
+
+## Monitoring dashboard (optional)
+
+A small dashboard can be run to monitor and — if explicitly enabled — advance the
+simulation. It is built from the standard library only (no extra dependency), and
+it is simulation-only: the one action it can take drives
+`PaperExperiment.process_session`, which never reaches a venue. There is no route
+that places, modifies or cancels a broker order, and no credential is ever
+returned to the browser.
+
+```bash
+# Read-only, loopback only (a local look). No token needed on loopback.
+python -m tradingagents.paper_experiment serve --root /data/paper-experiment
+
+# Reachable from Railway: bind the interface Railway provides and set a token.
+# Railway injects $PORT; `serve` reads it when --port is omitted.
+TRADINGAGENTS_DASHBOARD_TOKEN=<a-long-random-string> \
+python -m tradingagents.paper_experiment serve \
+  --root /data/paper-experiment --host 0.0.0.0 --port "$PORT" --allow-control
+```
+
+Safety properties, all enforced in code and covered by tests:
+
+- **Auth is mandatory off loopback.** Binding a non-loopback host with no token
+  is *refused* at startup, so the surface is never served open on a public
+  interface. Every `/api` route requires `Authorization: Bearer <token>`, compared
+  in constant time. `/healthz` is the only unauthenticated route (a liveness
+  probe) and returns no experiment data.
+- **Read-only by default.** `--allow-control` is required before the dashboard can
+  advance the simulation. Without it, `POST /api/run` returns 403.
+- **Control is deliberate.** `POST /api/run` needs the bearer token *and* an
+  explicit `X-Control-Confirm: yes` header, is bounded per call, and is refused
+  while another run is in progress (the state file is single-writer).
+- **State is the same file the CLI uses.** A session advanced from the dashboard
+  is processed and persisted by the same `process_session`, so the dashboard, the
+  CLI and a cron run cannot diverge.
+
+Railway settings for this service, when you use one: start command
+`python -m tradingagents.paper_experiment serve --root /data/paper-experiment --host 0.0.0.0 --port $PORT`,
+the same `/data` volume mounted, and `TRADINGAGENTS_DASHBOARD_TOKEN` set as a
+service variable. Give it a **public domain** in Railway's networking settings so
+the phone can reach it; without the token the server refuses to start on that
+bind. A dashboard service and a cron runner can share one experiment directory,
+because the state file is written atomically and read whole.
 
 ## Persistent volume and where state lives
 
@@ -155,10 +205,11 @@ the recovered positions.
 
 The runner is a short batch that processes a bounded number of sessions and
 exits, so its footprint is small and brief: a single Python process, no
-resident worker pool, no HTTP listener, and state files measured in kilobytes
-(one journal entry and one decision per session, plus one snapshot per
-decision). A small experiment fits comfortably inside the smallest Railway plan;
-this is a *shape* statement, not a bill. Railway's own plan limits are:
+resident worker pool, and state files measured in kilobytes (one journal entry
+and one decision per session, plus one snapshot per decision). The optional
+dashboard is the only long-lived process, and only when you choose to run it. A
+small experiment fits comfortably inside the smallest Railway plan; this is a
+*shape* statement, not a bill. Railway's own plan limits are:
 
 > "Free For running small apps with $1 of free credit per month" and, per the
 > plan table, Free allows "1" replica with "0.5 GB" RAM, "1 vCPU", "0.5 GB"
