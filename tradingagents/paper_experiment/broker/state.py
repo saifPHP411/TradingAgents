@@ -78,6 +78,14 @@ class BrokerAccountState:
     orders: dict[str, dict] = field(default_factory=dict)
     """Client order ids whose fill has already been applied to this state."""
     applied_fills: set[str] = field(default_factory=set)
+    """The broker's own positions, last read, keyed by symbol.
+
+    Persisted so a restart can report what the account held, and so a worker can
+    refuse a sell against a stale-but-non-empty position set rather than assume
+    flat. It is a cache, not a claim: ``positions_at`` records when it was read.
+    """
+    positions: dict[str, dict] = field(default_factory=dict)
+    positions_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -94,6 +102,8 @@ class BrokerAccountState:
             "confirmed_at": self.confirmed_at,
             "orders": {k: dict(v) for k, v in sorted(self.orders.items())},
             "applied_fills": sorted(self.applied_fills),
+            "positions": {k: dict(v) for k, v in sorted(self.positions.items())},
+            "positions_at": self.positions_at,
         }
 
     @classmethod
@@ -112,6 +122,9 @@ class BrokerAccountState:
         applied = payload.get("applied_fills") or []
         if not isinstance(applied, list):
             raise BrokerStateError("broker state 'applied_fills' must be a list")
+        positions = payload.get("positions") or {}
+        if not isinstance(positions, dict):
+            raise BrokerStateError("broker state 'positions' must be a mapping")
         return cls(
             schema_version=version,
             endpoint=payload.get("endpoint", ""),
@@ -126,6 +139,8 @@ class BrokerAccountState:
             confirmed_at=payload.get("confirmed_at"),
             orders={k: dict(v) for k, v in orders.items()},
             applied_fills=set(applied),
+            positions={k: dict(v) for k, v in positions.items()},
+            positions_at=payload.get("positions_at"),
         )
 
 

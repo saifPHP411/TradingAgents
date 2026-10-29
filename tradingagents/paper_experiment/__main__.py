@@ -237,6 +237,10 @@ def _serve(args) -> int:
     The server is read-only unless ``--allow-control`` is passed. It binds
     loopback by default; a non-loopback bind requires a token
     (``TRADINGAGENTS_DASHBOARD_TOKEN`` or ``--token``), refused otherwise.
+
+    ``--allow-paper-trading`` additionally enables the START/STOP control for the
+    Alpaca **paper** worker. It is off by default, so the dashboard cannot place a
+    paper order unless the operator opts in, and it never enables live trading.
     """
     from .dashboard import DashboardAuthError, serve
 
@@ -253,6 +257,8 @@ def _serve(args) -> int:
             stub=args.stub,
             auto_advance=getattr(args, "auto_advance", 0) or 0,
             auto_interval=getattr(args, "auto_interval", 60.0) or 60.0,
+            allow_paper_trading=getattr(args, "allow_paper_trading", False),
+            paper_order_notional=getattr(args, "paper_order_notional", 25.0) or 25.0,
         )
     except DashboardAuthError as exc:
         raise RunnerError(str(exc)) from exc
@@ -325,6 +331,45 @@ def _verify(args) -> int:
         print(f"JOURNAL INVALID: {exc}", file=sys.stderr)
         return 1
     print(f"journal OK: {len(journal)} entries, chain verified")
+    return 0
+
+
+def _paper_trade(args) -> int:
+    """Run one explicit Alpaca **paper** trading cycle from the CLI.
+
+    This is the deliberate, opt-in path: it loads the experiment, builds the
+    paper worker, runs preflight (broker connection, account status, buying power,
+    market data, risk config), processes **at most one** decision, and stops. It
+    places an order only if the decision source yields a tradeable decision *and*
+    every local risk check passes.
+
+    ``--dry-run`` performs preflight and reports what would happen without placing
+    an order. There is no flag that reaches a live endpoint: the broker's gate
+    refuses every live host, and the endpoint is not configurable here.
+    """
+    from .dashboard.paper_control import PaperTradingController
+
+    root = _root(args)
+    controller = PaperTradingController(
+        root,
+        enabled=True,
+        order_notional=getattr(args, "paper_order_notional", 25.0) or 25.0,
+    )
+    if getattr(args, "dry_run", False):
+        worker = controller._ensure_worker()  # noqa: SLF001 - the CLI owns the worker
+        result = worker.preflight()
+        print(json.dumps({"preflight": result, "placed_order": False}, indent=2, default=str))
+        return 0
+
+    started = controller.start()
+    print(f"paper worker: {started['status']}")
+    for check in started.get("checks", []):
+        print(f"  preflight {check['check']}: {'ok' if check['ok'] else 'FAILED'}")
+    try:
+        cycle = controller.run_once()
+    finally:
+        controller.stop()
+    print(json.dumps(cycle, indent=2, default=str))
     return 0
 
 
@@ -432,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
             "diagnose",
             "broker-check",
             "alpaca-diagnose",
+            "paper-trade",
             "serve",
         ),
     )
@@ -505,6 +551,25 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--allow-paper-trading",
+        action="store_true",
+        help=(
+            "serve only: enable the dashboard's START/STOP control for the Alpaca "
+            "PAPER worker. Off by default. Paper only: the broker endpoint is fixed "
+            "to Alpaca's paper host and every live endpoint is refused. Requires "
+            "ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET in the environment."
+        ),
+    )
+    parser.add_argument(
+        "--paper-order-notional",
+        type=float,
+        default=float(os.environ.get("TRADINGAGENTS_PAPER_ORDER_NOTIONAL", "25") or 25),
+        help=(
+            "paper trading: target cash per order (default: "
+            "$TRADINGAGENTS_PAPER_ORDER_NOTIONAL, else 25)"
+        ),
+    )
+    parser.add_argument(
         "--auto-advance",
         type=int,
         default=int(os.environ.get("TRADINGAGENTS_AUTO_ADVANCE_SESSIONS", "0") or 0),
@@ -530,6 +595,14 @@ def main(argv: list[str] | None = None) -> int:
             "submits an order."
         ),
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "paper-trade only: run preflight and report, without processing a "
+            "decision or placing an order."
+        ),
+    )
     args = parser.parse_args(argv)
 
     handlers = {
@@ -541,6 +614,7 @@ def main(argv: list[str] | None = None) -> int:
         "diagnose": _diagnose,
         "broker-check": _broker_check,
         "alpaca-diagnose": _broker_check,  # an explicit, discoverable alias
+        "paper-trade": _paper_trade,
         "serve": _serve,
     }
     try:

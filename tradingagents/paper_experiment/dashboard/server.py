@@ -32,13 +32,24 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from ..broker import BANNER, BrokerError
 from .auth import DashboardAuthError, check_bearer, require_bindable, resolve_token
+from .paper_control import PaperTradingController, PaperTradingDisabled
 from .state import DashboardStateError, ExperimentView
 
 DEFAULT_MAX_SESSIONS_PER_CALL = 50
 """The most sessions one control call may advance, so a request stays bounded."""
 
 CONTROL_CONFIRM_HEADER = "X-Control-Confirm"
+
+PAPER_CONFIRM_HEADER = "X-Paper-Confirm"
+"""The explicit confirmation header a paper start/stop must carry.
+
+Distinct from the run-confirm header on purpose: a stray "advance the simulation"
+request must not be able to start the broker-backed worker. Starting the worker is
+the one dashboard action that can lead to a broker order, so it requires its own
+deliberate confirmation.
+"""
 
 ROOT_ENV = "TRADINGAGENTS_EXPERIMENT_ROOT"
 """Environment variable the module entry point reads ``--root`` from."""
@@ -55,6 +66,9 @@ class Dashboard:
         allow_control: bool = False,
         max_sessions_per_call: int = DEFAULT_MAX_SESSIONS_PER_CALL,
         stub: bool = False,
+        allow_paper_trading: bool = False,
+        paper_order_notional: float = 25.0,
+        broker_factory=None,
     ) -> None:
         self.root = Path(root)
         self.token = resolve_token(token)
@@ -64,6 +78,13 @@ class Dashboard:
         self._lock = threading.Lock()
         self._run_in_progress = False
         self.last_run: dict[str, Any] | None = None
+        self.paper = PaperTradingController(
+            self.root,
+            enabled=allow_paper_trading,
+            order_notional=paper_order_notional,
+            stub=stub,
+            broker_factory=broker_factory,
+        )
 
     def view(self) -> ExperimentView:
         return ExperimentView(self.root)
@@ -188,6 +209,8 @@ def make_handler(dashboard: Dashboard):
                             "last_run": dashboard.last_run,
                         },
                     )
+                elif path == "/api/paper/status":
+                    self._send_json(200, dashboard.paper.status())
                 else:
                     self._send_json(404, {"error": "not found"})
             except DashboardStateError as exc:
@@ -197,6 +220,9 @@ def make_handler(dashboard: Dashboard):
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib name
             path = urlsplit(self.path).path
+            if path in ("/api/paper/start", "/api/paper/stop"):
+                self._handle_paper_control(path)
+                return
             if path != "/api/run":
                 self._send_json(404, {"error": "not found"})
                 return
@@ -230,6 +256,43 @@ def make_handler(dashboard: Dashboard):
                 self._send_json(409, {"error": str(exc)})
             except DashboardStateError as exc:
                 self._send_json(404, {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
+
+        # -- paper trading control ------------------------------------
+
+        def _handle_paper_control(self, path: str) -> None:
+            """Start or stop the Alpaca **paper** worker. Auth + confirmation required.
+
+            The endpoint cannot change the broker endpoint: the worker builds its
+            broker from the server's own configuration, and the broker's gate
+            refuses any non-paper host. No credential is accepted from the body or
+            any header — the broker reads its own environment variables.
+            """
+            if not self._authed():
+                return
+            if (self.headers.get(PAPER_CONFIRM_HEADER) or "").lower() != "yes":
+                self._send_json(
+                    403,
+                    {
+                        "error": "confirmation header required",
+                        "hint": f"send {PAPER_CONFIRM_HEADER}: yes",
+                    },
+                )
+                return
+            try:
+                if path == "/api/paper/start":
+                    result = dashboard.paper.start()
+                    self._send_json(200, {"started": True, **result})
+                else:
+                    result = dashboard.paper.stop()
+                    self._send_json(200, {"stopped": True, **result})
+            except PaperTradingDisabled as exc:
+                self._send_json(403, {"error": str(exc)})
+            except BrokerError as exc:
+                # A preflight/broker failure is a safe, secret-free 502; the
+                # worker has recorded ERROR and is not running.
+                self._send_json(502, {"error": f"{type(exc).__name__}: {exc}"})
             except Exception as exc:  # noqa: BLE001
                 self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
 
@@ -284,6 +347,22 @@ def main(argv: list[str] | None = None) -> int:
         help="enable the advance-the-simulation action (off by default)",
     )
     parser.add_argument(
+        "--allow-paper-trading",
+        action="store_true",
+        help=(
+            "enable the START/STOP control for the Alpaca PAPER worker (off by "
+            "default). Paper only: the broker endpoint is fixed to Alpaca's paper "
+            "host and every live endpoint is refused. Requires "
+            "ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET in the environment."
+        ),
+    )
+    parser.add_argument(
+        "--paper-order-notional",
+        type=float,
+        default=float(os.environ.get("TRADINGAGENTS_PAPER_ORDER_NOTIONAL", "25") or 25),
+        help="target cash per paper order (default: $TRADINGAGENTS_PAPER_ORDER_NOTIONAL, else 25)",
+    )
+    parser.add_argument(
         "--stub",
         action="store_true",
         help=(
@@ -322,6 +401,8 @@ def main(argv: list[str] | None = None) -> int:
             stub=args.stub,
             auto_advance=args.auto_advance,
             auto_interval=args.auto_interval,
+            allow_paper_trading=args.allow_paper_trading,
+            paper_order_notional=args.paper_order_notional,
         )
     except DashboardAuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -340,6 +421,9 @@ def serve(
     stub: bool = False,
     auto_advance: int = 0,
     auto_interval: float = 60.0,
+    allow_paper_trading: bool = False,
+    paper_order_notional: float = 25.0,
+    broker_factory=None,
 ) -> None:
     """Run the dashboard until interrupted.
 
@@ -351,6 +435,10 @@ def serve(
     every ``auto_interval`` seconds, through the same locked ``run_sessions`` the
     Run button uses. One process, one writer, so it cannot race the state file. It
     is off by default (``0``), which leaves the server a pure monitor.
+
+    ``allow_paper_trading`` enables the START/STOP control for the Alpaca paper
+    worker. It is off by default, so the dashboard cannot place a paper order
+    unless the operator opts in; it never enables live trading.
     """
     resolved = resolve_token(token)
     require_bindable(host, resolved)
@@ -360,12 +448,23 @@ def serve(
         allow_control=allow_control,
         max_sessions_per_call=max_sessions_per_call,
         stub=stub,
+        allow_paper_trading=allow_paper_trading,
+        paper_order_notional=paper_order_notional,
+        broker_factory=broker_factory,
     )
     httpd = ThreadingHTTPServer((host, port), make_handler(dashboard))
     httpd.daemon_threads = True
     print(f"dashboard on http://{host}:{port}  (root: {Path(root).resolve()})")
     print(f"  auth: {'token required' if resolved else 'loopback only, no token'}")
     print(f"  control: {'enabled' if allow_control else 'read-only'}")
+    print(
+        "  paper trading: "
+        + (
+            f"enabled ({BANNER}, order notional {paper_order_notional:g})"
+            if allow_paper_trading
+            else "disabled (pass --allow-paper-trading to enable)"
+        )
+    )
     if auto_advance:
         if not allow_control:
             print("  auto-advance: refused (needs --allow-control)", flush=True)
@@ -485,6 +584,14 @@ INDEX_HTML = """<!doctype html>
     padding:11px 12px;font-size:16px;width:100%}
   .muted{color:var(--mut);font-size:12.5px}
   .hide{display:none}
+  .livewarn{background:rgba(255,107,107,.14);border:1px solid rgba(255,107,107,.5);
+    color:#ffb3b3;border-radius:var(--radius);padding:9px 12px;margin:10px 0;font-size:13px;
+    font-weight:700;letter-spacing:.04em;text-align:center}
+  .state-RUNNING{background:rgba(61,220,132,.18);color:var(--ok)}
+  .state-STARTING,.state-STOPPING{background:rgba(255,204,77,.18);color:var(--warn)}
+  .state-STOPPED,.state-DISABLED{background:rgba(142,160,179,.18);color:var(--mut)}
+  .state-ERROR{background:rgba(255,107,107,.18);color:var(--bad)}
+  button.stop{background:var(--bad);color:#1a0505}
 </style>
 </head>
 <body>
@@ -509,11 +616,14 @@ INDEX_HTML = """<!doctype html>
 
 <div id="err" class="err"></div>
 
+<div id="livewarn" class="livewarn">ALPACA PAPER — NOT LIVE</div>
+
 <nav id="nav" class="hide">
   <button data-t="overview" class="on">Overview</button>
   <button data-t="book">Book</button>
   <button data-t="decisions">Decisions</button>
   <button data-t="journal">Journal</button>
+  <button data-t="paper">Paper trading</button>
   <button data-t="control">Control</button>
 </nav>
 
@@ -537,6 +647,25 @@ INDEX_HTML = """<!doctype html>
 
   <section id="journal">
     <div class="card"><h2>Journal (latest)</h2><ul class="clean" id="jlist"></ul></div>
+  </section>
+
+  <section id="paper">
+    <div class="card">
+      <h2>Alpaca paper worker</h2>
+      <div class="livewarn" style="margin-top:0">ALPACA PAPER — NOT LIVE</div>
+      <div class="row" style="margin-top:6px">
+        <span id="pstate" class="pill state-STOPPED">…</span>
+        <span class="grow"></span>
+        <button class="act" id="pstart" onclick="doPaperStart()">START PAPER TRADING</button>
+        <button class="act stop" id="pstop" onclick="doPaperStop()">STOP PAPER TRADING</button>
+      </div>
+      <p class="muted" id="pnote" style="margin-bottom:0"></p>
+    </div>
+    <div class="card"><h2>Account</h2><div id="paccount" class="kv"></div></div>
+    <div class="card"><h2>Positions</h2><div id="ppositions"></div></div>
+    <div class="card"><h2>Orders</h2><div id="porders"></div></div>
+    <div class="card"><h2>Last cycle</h2><div id="pcycle" class="mono">—</div></div>
+    <div class="card"><h2>Risk limits</h2><div id="prisk" class="kv"></div></div>
   </section>
 
   <section id="control">
@@ -714,12 +843,77 @@ async function doRun(){
   finally{ $("runbtn").disabled = false; }
 }
 
+function paperState(status){
+  const known = ["STOPPED","STARTING","RUNNING","STOPPING","ERROR","DISABLED"];
+  const s = known.includes(status) ? status : "STOPPED";
+  const el = $("pstate");
+  el.textContent = status || "STOPPED";
+  el.className = "pill state-" + s;
+}
+async function refreshPaper(){
+  try{
+    const p = await api("/api/paper/status");
+    paperState(p.status);
+    $("pnote").textContent = p.enabled
+      ? `Mode ${p.mode} · endpoint ${p.endpoint} · paper-only ${p.paper_endpoint_only?"yes":"NO"}`
+      : (p.reason || "paper trading is disabled on this dashboard");
+    $("pstart").disabled = !p.enabled || p.status==="RUNNING" || p.status==="STARTING";
+    $("pstop").disabled = !p.enabled || p.status==="STOPPED" || p.status==="STOPPING";
+    const a = p.account || {};
+    $("paccount").innerHTML = kv({
+      "Status": a.status || "—",
+      "Cash": money(a.cash),
+      "Equity": money(a.equity),
+      "Buying power": money(a.buying_power),
+      "Currency": a.currency || "—",
+      "Restrictions": (a.restrictions && a.restrictions.length) ? a.restrictions.join(", ") : "none reported",
+      "Positions read": p.positions_at || "never",
+    });
+    const pos = Object.entries(p.positions || {});
+    $("ppositions").innerHTML = pos.length
+      ? '<ul class="clean">'+pos.map(([sym,x])=>`<li><b>${sym}</b> · qty ${x.quantity}
+          <div class="mono">mv ${money(x.market_value)} · avg ${money(x.average_entry_price)}</div></li>`).join("")+"</ul>"
+      : '<p class="muted">No positions reported.</p>';
+    const orders = Object.entries(p.orders || {});
+    $("porders").innerHTML = orders.length
+      ? '<ul class="clean">'+orders.map(([cid,o])=>`<li><b>${o.symbol}</b> ${o.side} ${o.quantity}
+          <span class="pill">${o.status}</span>
+          <div class="mono">${cid}<br>filled ${o.filled_quantity}${o.filled_avg_price?" @ "+money(o.filled_avg_price):""}
+          · broker ${o.broker_order_id||"—"}</div></li>`).join("")+"</ul>"
+      : '<p class="muted">No orders.</p>';
+    $("pcycle").textContent = p.last_cycle ? JSON.stringify(p.last_cycle, null, 2)
+      : (p.last_error ? ("error: "+p.last_error) : "—");
+    $("prisk").innerHTML = kv(p.risk_limits || {});
+  }catch(e){ showErr(e.message); }
+}
+async function doPaperStart(){
+  $("pstart").disabled = true;
+  try{
+    await api("/api/paper/start", {
+      method:"POST", headers:{"X-Paper-Confirm":"yes"},
+    });
+    await refreshPaper();
+  }catch(e){ showErr(e.message); }
+  finally{ refreshPaper(); }
+}
+async function doPaperStop(){
+  $("pstop").disabled = true;
+  try{
+    await api("/api/paper/stop", {
+      method:"POST", headers:{"X-Paper-Confirm":"yes"},
+    });
+    await refreshPaper();
+  }catch(e){ showErr(e.message); }
+  finally{ refreshPaper(); }
+}
+
 document.querySelectorAll("nav button").forEach(b=>{
   b.onclick = () => {
     document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("on", x===b));
     document.querySelectorAll("section").forEach(s=>s.classList.toggle("on", s.id===b.dataset.t));
     if(b.dataset.t==="decisions") refreshDecisions();
     if(b.dataset.t==="journal") refreshJournal();
+    if(b.dataset.t==="paper") refreshPaper();
     if(b.dataset.t==="control") refreshControl();
   };
 });

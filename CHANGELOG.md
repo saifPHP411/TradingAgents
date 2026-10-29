@@ -16,6 +16,44 @@ path, and no configuration that produces one.
 
 ### Added
 
+- Alpaca **paper** trading worker (`paper_experiment/broker/trading.py`): a
+  deliberate, opt-in loop over the existing read-only Alpaca Paper adapter. It is
+  paper-only and adds no live path. `start()` runs preflight (broker connection,
+  account status, buying power, market data, risk config) and places no order; a
+  failed preflight leaves the worker `ERROR`, never `RUNNING`. `run_once()`
+  processes at most one decision and places at most one order, and refuses unless
+  `RUNNING`. Local risk checks (buying power, per-order notional cap, daily order
+  count, open-position count, optional symbol allow-list, long-only) run before
+  the broker. Each decision maps to a deterministic `client_order_id`, so a
+  duplicate decision is skipped and a known order is reconciled by id rather than
+  re-submitted. State is persisted to `<root>/worker_state.json` (versioned with
+  `schema_version`) and read back as `STOPPED`. `stop()` closes no position and
+  cancels no order. A missing, `NaN`, `inf`, zero or negative price — or a
+  price-source exception — refuses the order as `MarketDataError` rather than
+  fabricating a fill.
+- A strategy→worker decision bridge (`paper_experiment/paper_trading.py`): turns
+  an experiment's pending decisions into worker `TradingDecision`s, deterministically
+  ordered. A "Hold" decision yields nothing.
+- Dashboard start/stop for the paper worker (`paper_experiment/dashboard/`): a
+  **Paper trading** tab with START/STOP, plus `/api/paper/status`,
+  `/api/paper/start` and `/api/paper/stop`. Off by default
+  (`--allow-paper-trading`); both control endpoints require the bearer token *and*
+  an `X-Paper-Confirm: yes` header, and the worker builds its own paper-only
+  broker, so a live endpoint cannot be configured in.
+- `paper-trade` CLI command (`paper_experiment/__main__.py`): one explicit paper
+  cycle, or `--dry-run` for preflight only. There is no flag that reaches a live
+  endpoint.
+
+### Changed
+
+- `AlpacaPaperBroker` gained `refresh_account()` and `positions()`, and a
+  side-aware `_check_risk` (buying-power, per-order notional, open-position and
+  long-only constraints). `submit_order` accepts `side` and an explicit
+  `refresh`; the default preserves prior behaviour. `BrokerAccountState` now
+  persists positions.
+
+### Added (simulated trading system)
+
 - Persistent LIMIT orders (`execution/`, `backtesting/`): an order can rest
   across sessions instead of being single-shot. `TimeInForce.DAY`/`GTC`, an
   `expires_session` and a `limit_order_ttl_sessions` bound how long it may rest;

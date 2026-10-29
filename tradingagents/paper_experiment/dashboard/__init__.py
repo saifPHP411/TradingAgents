@@ -27,6 +27,7 @@ from .auth import (
 from .state import DashboardStateError, ExperimentView
 
 if TYPE_CHECKING:  # for type checkers only; no runtime import of .server
+    from .paper_control import PaperTradingController, PaperTradingDisabled
     from .server import Dashboard, serve
 
 __all__ = [
@@ -35,6 +36,8 @@ __all__ = [
     "DashboardAuthError",
     "DashboardStateError",
     "ExperimentView",
+    "PaperTradingController",
+    "PaperTradingDisabled",
     "check_bearer",
     "is_loopback",
     "require_bindable",
@@ -49,4 +52,8 @@ def __getattr__(name: str) -> Any:
         from . import server
 
         return getattr(server, name)
+    if name in ("PaperTradingController", "PaperTradingDisabled"):
+        from . import paper_control
+
+        return getattr(paper_control, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

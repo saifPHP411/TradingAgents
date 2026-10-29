@@ -35,6 +35,7 @@ a mocked HTTP response and no socket. The default transport is ``requests``.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import urllib.parse
@@ -279,6 +280,12 @@ class PaperRiskLimits:
     Every one is explicit and finite; there is no "unlimited" default for the
     notional cap, because an order with no cap is the thing a safe default is
     meant to prevent.
+
+    ``max_order_notional`` is a *local* ceiling on one order's notional. It is
+    enforced *in addition to* the account's own buying power: an order is refused
+    when it exceeds either. ``allow_short`` defaults ``False`` because a cash
+    paper account typically has shorting disabled, and a short must be a
+    deliberate opt-in rather than an accident of a SELL with no holding.
     """
 
     max_order_notional: float = 1_000.0
@@ -286,6 +293,13 @@ class PaperRiskLimits:
     max_daily_orders: int = 10
     allowed_symbols: tuple[str, ...] = ()
     """An empty tuple means "no allowlist"; a non-empty one is enforced."""
+    allow_short: bool = False
+    """When ``False`` (the default), a SELL beyond the held quantity is refused."""
+    buying_power_fraction: float = 1.0
+    """The most of the account's buying power one order may commit, as a fraction.
+
+    ``1.0`` means "up to the whole buying power"; a smaller value leaves headroom.
+    """
 
     def __post_init__(self) -> None:
         if not (self.max_order_notional > 0):
@@ -294,6 +308,40 @@ class PaperRiskLimits:
             raise PaperRiskRejected("max_open_positions must be at least 1")
         if self.max_daily_orders < 1:
             raise PaperRiskRejected("max_daily_orders must be at least 1")
+        if not 0.0 < self.buying_power_fraction <= 1.0:
+            raise PaperRiskRejected(
+                "buying_power_fraction must be in (0, 1], got "
+                f"{self.buying_power_fraction}"
+            )
+
+
+@dataclass(frozen=True)
+class BrokerPosition:
+    """One position as the broker reports it (``GET /v2/positions``).
+
+    Only the fields a paper order decision needs. A missing/blank field is
+    reported as ``0.0`` for a quantity (a position with no quantity is not a
+    position) and ``None`` for a price (an unknown price is not zero).
+    """
+
+    symbol: str
+    quantity: float
+    market_value: float | None
+    average_entry_price: float | None
+    side: str | None = None
+
+    @property
+    def is_short(self) -> bool:
+        return self.quantity < 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "quantity": self.quantity,
+            "market_value": self.market_value,
+            "average_entry_price": self.average_entry_price,
+            "side": self.side,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +451,11 @@ class AlpacaPaperBroker:
         )
         self._daily_orders = 0
         self._orders_submitted: list[str] = []
+        # The broker's own view of positions, refreshed on demand. ``None`` means
+        # "not read this process", which is *not* the same as "flat": a sell
+        # against an unknown position is refused rather than assumed to be flat.
+        self._positions: dict[str, BrokerPosition] | None = None
+        self._account: BrokerAccount | None = None
 
     # -- headers -----------------------------------------------------------
 
@@ -480,10 +533,38 @@ class AlpacaPaperBroker:
         against the paper endpoint and reports the account's figures and
         restrictions, without submitting anything.
         """
+        return self.refresh_account()
+
+    def refresh_account(self) -> BrokerAccount:
+        """Re-read ``GET /v2/account`` and update the cached account state.
+
+        Distinct from :meth:`connect` only in intent: a running worker calls this
+        before each order so the buying-power and blocked-account checks are made
+        against the account *now*, not against a figure read at start-up. It places
+        no order and changes nothing at the broker.
+        """
         payload = self._request("GET", "/v2/account")
+        account = self._parse_account(payload)
+        self._account = account
+        self._state.endpoint = self.base_url
+        self._state.account_id = account.account_id
+        self._state.cash = account.cash
+        self._state.equity = account.equity
+        self._state.buying_power = account.buying_power
+        self._state.currency = account.currency
+        self._state.trading_blocked = account.trading_blocked
+        self._state.account_blocked = account.account_blocked
+        self._state.confirmed = True
+        self._state.confirmed_at = datetime.now(UTC).isoformat()
+        if self._store:
+            self._store.save(self._state)
+        return account
+
+    @staticmethod
+    def _parse_account(payload: Any) -> BrokerAccount:
         if not isinstance(payload, dict) or "id" not in payload:
             raise BrokerError("the broker account response was not the expected object")
-        account = BrokerAccount(
+        return BrokerAccount(
             account_id=str(payload.get("id", "")),
             status=str(payload.get("status", "")),
             cash=_as_float(payload.get("cash")),
@@ -503,24 +584,60 @@ class AlpacaPaperBroker:
             trade_suspended_by_user=_as_optional_bool(payload.get("trade_suspended_by_user")),
             daytrade_count=_as_optional_int(payload.get("daytrade_count")),
         )
-        self._state.endpoint = self.base_url
-        self._state.account_id = account.account_id
-        self._state.cash = account.cash
-        self._state.equity = account.equity
-        self._state.buying_power = account.buying_power
-        self._state.currency = account.currency
-        self._state.trading_blocked = account.trading_blocked
-        self._state.account_blocked = account.account_blocked
-        self._state.confirmed = True
-        self._state.confirmed_at = datetime.now(UTC).isoformat()
-        if self._store:
-            self._store.save(self._state)
-        return account
+
+    def positions(self, *, refresh: bool = True) -> dict[str, BrokerPosition]:
+        """Read ``GET /v2/positions`` (the broker's own positions), keyed by symbol.
+
+        Cached per process. ``refresh=False`` returns the cached view (or an empty
+        mapping if never read) without a request — useful for a read-only view that
+        must not call out. A position with a zero quantity is dropped, so a closed
+        position does not read as open.
+        """
+        if refresh or self._positions is None:
+            payload = self._request("GET", "/v2/positions")
+            if not isinstance(payload, list):
+                raise BrokerError("the broker positions response was not the expected list")
+            found: dict[str, BrokerPosition] = {}
+            for entry in payload:
+                if not isinstance(entry, dict):
+                    continue
+                symbol = str(entry.get("symbol", "")).upper()
+                if not symbol:
+                    continue
+                quantity = _as_float(entry.get("qty"))
+                if quantity == 0.0:
+                    continue
+                found[symbol] = BrokerPosition(
+                    symbol=symbol,
+                    quantity=quantity,
+                    market_value=_as_optional_float(entry.get("market_value")),
+                    average_entry_price=_as_optional_float(entry.get("avg_entry_price")),
+                    side=_as_optional_str(entry.get("side")),
+                )
+            self._positions = found
+            self._state.positions = {s: p.to_dict() for s, p in sorted(found.items())}
+            self._state.positions_at = datetime.now(UTC).isoformat()
+            if self._store:
+                self._store.save(self._state)
+        return dict(self._positions)
+
+    def open_position_count(self, *, refresh: bool = True) -> int:
+        """How many positions the broker currently holds."""
+        return len(self.positions(refresh=refresh))
 
     # -- order lifecycle ---------------------------------------------------
 
-    def _check_risk(self, *, symbol: str, quantity: float, reference_price: float) -> float:
-        """Enforce the local limits and return the order notional. Raises to refuse."""
+    def _check_risk(
+        self, *, symbol: str, quantity: float, side: str, reference_price: float
+    ) -> float:
+        """Enforce the local limits and return the order notional. Raises to refuse.
+
+        Checked *before* any request, so a limit breach is a local refusal rather
+        than a hope that the broker will reject it. Order of checks: the cheap,
+        purely-local ones first (symbol, daily count, price/quantity shape), then
+        the account-state ones (buying power, open positions, long-only), so a
+        malformed order is refused without needing a fresh account read.
+        """
         if self.limits.allowed_symbols and symbol.upper() not in {
             s.upper() for s in self.limits.allowed_symbols
         }:
@@ -528,6 +645,11 @@ class AlpacaPaperBroker:
         if self._daily_orders >= self.limits.max_daily_orders:
             raise PaperRiskRejected(
                 f"the daily order limit ({self.limits.max_daily_orders}) is reached"
+            )
+        if not math.isfinite(reference_price) or not math.isfinite(quantity):
+            raise PaperRiskRejected(
+                f"a finite reference price and quantity are required, got "
+                f"price={reference_price}, quantity={quantity}"
             )
         if not (reference_price > 0) or quantity <= 0:
             raise PaperRiskRejected(
@@ -540,7 +662,66 @@ class AlpacaPaperBroker:
                 f"the order notional {notional:.2f} exceeds the cap "
                 f"{self.limits.max_order_notional:.2f}"
             )
+
+        side = (side or "").lower()
+        if side == "sell":
+            self._check_sell_is_not_a_short(symbol=symbol, quantity=quantity)
+        else:
+            self._check_buy_against_account(symbol=symbol, notional=notional)
         return notional
+
+    def _check_buy_against_account(self, *, symbol: str, notional: float) -> None:
+        """A BUY must fit the account's buying power and the open-position cap."""
+        account = self._account
+        if account is None:
+            raise PaperRiskRejected(
+                "the account has not been read; refresh it before an order so buying "
+                "power is known rather than assumed"
+            )
+        affordable = account.buying_power * self.limits.buying_power_fraction
+        if notional > affordable:
+            raise PaperRiskRejected(
+                f"the order notional {notional:.2f} exceeds the affordable buying power "
+                f"{affordable:.2f} (buying power {account.buying_power:.2f} x "
+                f"fraction {self.limits.buying_power_fraction})"
+            )
+        # The open-position cap needs the broker's positions. When they have been
+        # read, a buy that would open a *new* symbol past the cap is refused; when
+        # they have not, the worker reads them before ordering, so this is only
+        # skipped by a caller that deliberately did not ask the broker.
+        if self._positions is None:
+            return
+        held = symbol.upper() in self._positions
+        if not held and len(self._positions) >= self.limits.max_open_positions:
+            raise PaperRiskRejected(
+                f"opening {symbol} would exceed the open-position limit "
+                f"({self.limits.max_open_positions}); {len(self._positions)} are open"
+            )
+
+    def _check_sell_is_not_a_short(self, *, symbol: str, quantity: float) -> None:
+        """A SELL must not create a short unless shorting is explicitly allowed.
+
+        The broker's own positions are required: a sell against an *unknown*
+        holding is refused rather than assumed to be flat, because assuming flat
+        would turn a long-only account's accidental short into a placed order.
+        """
+        if self._positions is None:
+            raise PaperRiskRejected(
+                "positions have not been read; refresh them before a sell so the held "
+                "quantity is known rather than assumed to be zero"
+            )
+        held = self._positions.get(symbol.upper())
+        held_quantity = held.quantity if held is not None else 0.0
+        if quantity <= held_quantity:
+            return
+        account = self._account
+        account_allows_short = account is not None and account.shorting_enabled is True
+        if not self.limits.allow_short or not account_allows_short:
+            raise PaperRiskRejected(
+                f"selling {quantity} of {symbol} exceeds the held {held_quantity}; this "
+                "would open a short, which is refused (shorting is not enabled for this "
+                "account or allow_short is False)"
+            )
 
     def submit_order(
         self,
@@ -553,6 +734,7 @@ class AlpacaPaperBroker:
         order_type: str = "market",
         time_in_force: str = "day",
         allow_orders: bool = False,
+        refresh: bool = False,
     ) -> BrokerOrder:
         """Submit a paper order, safely.
 
@@ -562,6 +744,12 @@ class AlpacaPaperBroker:
         ``client_order_id`` so a lost response can be reconciled rather than
         re-submitted. Intent is persisted *before* the request, so a crash between
         submission and confirmation is recoverable.
+
+        ``refresh`` re-reads the account and the broker's positions immediately
+        before the risk check, so buying power and held quantity are the account's
+        *current* figures rather than a start-up snapshot. It defaults ``False`` to
+        preserve the exact request sequence a caller already relies on; the trading
+        worker passes ``True`` so every order is checked against live account state.
         """
         if not allow_orders:
             raise PaperRiskRejected(
@@ -586,8 +774,14 @@ class AlpacaPaperBroker:
         if client_order_id in self._state.orders:
             return self._reconcile(client_order_id)
 
+        if refresh:
+            self.refresh_account()
+            self.positions(refresh=True)
+            if self._state.account_blocked or self._state.trading_blocked:
+                raise BrokerError("the broker account is blocked from trading")
+
         notional = self._check_risk(
-            symbol=symbol, quantity=quantity, reference_price=reference_price
+            symbol=symbol, quantity=quantity, side=side, reference_price=reference_price
         )
 
         intent = _OrderIntent(

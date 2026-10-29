@@ -307,3 +307,61 @@ There is no CLI flag that submits an order. `ExecutionMode` is unchanged
 integration test (`tests/test_live_providers_integration.py::TestAlpacaPaperLive`)
 runs the real read-only check when both paper credentials are present, and skips
 otherwise, so the default suite needs no secret.
+
+## The paper trading worker (explicit opt-in, paper-only)
+
+`tradingagents/paper_experiment/broker/trading.py` turns the read-only adapter
+above into a *deliberate* paper trading loop. It is still not a live path, and it
+is off unless an operator opts in.
+
+- **One worker per state file.** `start()` runs preflight — broker connection,
+  account status, positive buying power, an available market-data source, and a
+  valid risk configuration — and places **no** order. A failed preflight leaves
+  the worker `ERROR`, never `RUNNING`.
+- **A decision is one order, at most.** `run_once()` processes at most one
+  strategy decision and places at most one order. It refuses unless `RUNNING`.
+- **Local risk checks run before the broker.** Buying power, a per-order notional
+  cap, a daily order count, an open-position count, an optional symbol allow-list,
+  and long-only (no short) are enforced by the worker and the broker's own
+  `_check_risk` before any request leaves the process.
+- **Idempotent by construction.** Each decision maps to a deterministic
+  `client_order_id`. A decision already processed is skipped; a decision whose
+  order the worker already knows is *reconciled* through the broker by that id
+  rather than re-submitted. A lost response is reconciled, not guessed.
+- **A restart comes back `STOPPED`.** The worker's state (processed decision,
+  orders, positions, account, timestamps) is written to
+  `<root>/worker_state.json`, versioned with `schema_version`. It is read back as
+  `STOPPED`; nothing resumes `RUNNING` on its own.
+- **Stop is graceful.** `stop()` closes no position and cancels no order.
+- **A bad price refuses the order.** A missing, `NaN`, `inf`, zero or negative
+  price, or a price-source exception, is surfaced as `MarketDataError` and the
+  cycle does nothing — no fabricated fill, no state corruption.
+
+### Start and stop from the CLI
+
+```bash
+# One explicit cycle: preflight, then at most one decision. Places an order only
+# if a decision is tradeable and every risk check passes.
+python -m tradingagents.paper_experiment paper-trade --root runs/exp1
+
+# Preflight and report, without processing a decision or placing an order.
+python -m tradingagents.paper_experiment paper-trade --root runs/exp1 --dry-run
+```
+
+### Start and stop from the dashboard
+
+The dashboard's **Paper trading** tab has START and STOP buttons, and shows the
+account, positions, orders, last cycle and risk limits. The control is **off by
+default**: a dashboard started without `--allow-paper-trading` reports the feature
+as disabled and refuses every start/stop. Both endpoints require the bearer token
+*and* an `X-Paper-Confirm: yes` header, and a live endpoint cannot be configured in
+— the worker builds its own paper-only broker.
+
+```bash
+python -m tradingagents.paper_experiment serve --root runs/exp1 \
+  --allow-paper-trading --token "$TRADINGAGENTS_DASHBOARD_TOKEN"
+```
+
+`ExecutionMode` remains `BACKTEST` and `PAPER` only. There is no live broker, no
+order routing, no credential in any artifact, and no flag that reaches a live
+endpoint.

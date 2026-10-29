@@ -275,6 +275,11 @@ cannot be pointed at a live venue. See
 [PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md#alpaca-paper-broker-separate-opt-in-paper-only).
 This session remains the offline simulator; the broker is the online paper venue.
 
+The broker has a deliberate start/stop loop (`broker/trading.py`), with its own
+durable, versioned state file (`worker_state.json`) and a dashboard **Paper
+trading** tab. It is opt-in (`--allow-paper-trading`) and paper-only; see
+[PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md#the-paper-trading-worker-explicit-opt-in-paper-only).
+
 ## Running a session forward over time
 
 This module is one decision at a time. To record an LLM strategy's decisions
