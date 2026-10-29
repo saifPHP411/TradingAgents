@@ -443,6 +443,124 @@ class TestAlphaVantage:
         )
         assert captured["params"] == expected
 
+    def test_a_newest_first_body_is_reordered_to_ascending(self):
+        """Alpha Vantage returns newest-first; the source must serve oldest-first.
+
+        This is the regression guard for the bug where the raw vendor order was
+        passed straight to the validator, so every real Alpha Vantage run failed
+        with "sessions are not in ascending order". The fixture's default order is
+        deliberately *not* used here: the payload is built newest-first, as the
+        vendor actually sends it.
+        """
+        newest_first = ("2024-02-28", "2024-02-27", "2024-02-26")
+        source = AlphaVantageDailySource(
+            "IBM",
+            api_key="test-key-not-real",
+            transport=_transport(_daily_body(list(newest_first))),
+            today=TODAY,
+        )
+        assert source.sessions() == ("2024-02-26", "2024-02-27", "2024-02-28")
+        frame = source.frame("IBM")
+        assert list(frame.index) == sorted(frame.index)
+
+    def test_reordering_does_not_reverse_or_change_the_ohlcv_values(self):
+        """Each bar's own OHLCV must stay attached to its own session date."""
+        newest_first = ("2024-02-28", "2024-02-27", "2024-02-26")
+        source = AlphaVantageDailySource(
+            "IBM",
+            api_key="test-key-not-real",
+            transport=_transport(_daily_body(list(newest_first))),
+            today=TODAY,
+        )
+        frame = source.frame("IBM")
+        # _daily_body sets base = start + i over the *given* order, so the first
+        # (newest) session carries the smallest values: close = base + 1 gives
+        # 2024-02-28 -> 101, 2024-02-27 -> 102, 2024-02-26 -> 103. If the frame
+        # were reversed as a whole (rather than sorted by label), each bar would
+        # be paired with the wrong date and this mapping would flip.
+        by_date = {str(idx)[:10]: row for idx, row in frame.iterrows()}
+        assert by_date["2024-02-26"]["close"] == pytest.approx(103.0)
+        assert by_date["2024-02-27"]["close"] == pytest.approx(102.0)
+        assert by_date["2024-02-28"]["close"] == pytest.approx(101.0)
+        # Ascending order therefore yields the values newest-lowest first.
+        assert frame["close"].tolist() == [103.0, 102.0, 101.0]
+
+    def test_a_shuffled_body_is_reordered_to_ascending(self):
+        """The reorder is a sort, not a reversal: any input order becomes ascending."""
+        shuffled = ("2024-02-27", "2024-02-28", "2024-02-26")
+        source = AlphaVantageDailySource(
+            "IBM",
+            api_key="test-key-not-real",
+            transport=_transport(_daily_body(list(shuffled))),
+            today=TODAY,
+        )
+        assert source.sessions() == ("2024-02-26", "2024-02-27", "2024-02-28")
+        assert source.dataset_start == "2024-02-26"
+        assert source.dataset_end == "2024-02-28"
+
+    def test_the_newest_bar_is_the_last_session_after_reordering(self):
+        """Provenance's newest bar must be the newest date, not the first row."""
+        newest_first = ("2024-02-28", "2024-02-27", "2024-02-26")
+        source = AlphaVantageDailySource(
+            "IBM",
+            api_key="test-key-not-real",
+            transport=_transport(_daily_body(list(newest_first))),
+            today=TODAY,
+        )
+        assert source.provenance.last_bar_date == "2024-02-28"
+        assert source.provenance.dataset_start == "2024-02-26"
+        assert source.provenance.dataset_end == "2024-02-28"
+
+    def test_a_newest_first_body_is_point_in_time_correct(self):
+        """A window over reordered bars must not leak a later session."""
+        newest_first = ("2024-02-28", "2024-02-27", "2024-02-26")
+        source = AlphaVantageDailySource(
+            "IBM",
+            api_key="test-key-not-real",
+            transport=_transport(_daily_body(list(newest_first))),
+            today=TODAY,
+        )
+        window = source.window("IBM", "2024-02-27")
+        assert list(window.index) == list(pd.to_datetime(["2024-02-26", "2024-02-27"]))
+
+    def test_the_reorder_does_not_hide_a_duplicate_session(self):
+        """A duplicate label must still be refused, not merged by the sort.
+
+        ``_parse`` sorts with ``kind="stable"`` before validating, so equal labels
+        stay adjacent and the validator's duplicate check still fires. A JSON
+        object cannot hold a duplicate key, so the frame the parser would build is
+        exercised directly, exactly as the existing duplicate test does.
+        """
+        from tradingagents.paper_experiment.sources import _validate_frame
+
+        frame = pd.DataFrame(
+            {"open": [1.0, 2.0], "high": [3.0, 4.0], "low": [0.5, 1.5],
+             "close": [2.5, 3.5], "volume": [1.0, 2.0]},
+            index=pd.to_datetime(["2024-02-27", "2024-02-27"]),
+        )
+        # The parser's own step, then the validator it hands the frame to.
+        with pytest.raises(PriceSourceError, match="duplicate"):
+            _validate_frame(frame.sort_index(kind="stable"), "IBM", "vendor_daily")
+
+    def test_the_reorder_does_not_hide_an_unparseable_session(self):
+        """A session that will not parse is refused, not dropped by the sort."""
+        body = json.loads(_daily_body(["2024-02-26", "2024-02-27", "2024-02-28"]))
+        series = body["Time Series (Daily)"]
+        series["not-a-date"] = series.pop("2024-02-27")
+        with pytest.raises(ProviderError, match="unparseable session"):
+            AlphaVantageDailySource(
+                "IBM", api_key="k", transport=_transport(json.dumps(body)), today=TODAY
+            )
+
+    def test_the_reorder_does_not_hide_a_malformed_bar(self):
+        """A malformed OHLC value is still refused after the reorder."""
+        body = json.loads(_daily_body(["2024-02-26", "2024-02-27", "2024-02-28"]))
+        body["Time Series (Daily)"]["2024-02-27"]["3. low"] = "999"
+        with pytest.raises(ProviderError, match="high below low"):
+            AlphaVantageDailySource(
+                "IBM", api_key="k", transport=_transport(json.dumps(body)), today=TODAY
+            )
+
 
 # ---------------------------------------------------------------------------
 # Finnhub

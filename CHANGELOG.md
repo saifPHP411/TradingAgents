@@ -299,7 +299,7 @@ environment. The gated tests remain in `tests/test_live_providers_integration.py
 and skip cleanly when a key is absent, so CI needs no secret. See the Phase 13
 report for the exact remaining blocker.
 
-### Fixed — Alpha Vantage sent no `apikey`
+### Fixed — Alpha Vantage sent no `apikey`; then rejected its own session order
 
 `AlphaVantageDailySource` read `ALPHA_VANTAGE_API_KEY`, refused a missing key,
 and passed the key to `fetch_json` — but only as a *redaction secret*. The
@@ -317,6 +317,20 @@ refused like a missing one, and a vendor message that echoes the key back is
 redacted before it is raised. A regression test asserts that the key in the
 environment reaches the outgoing `apikey` parameter (with a fake key, never a
 real one).
+
+With the credential fixed, the next run failed with
+
+> "vendor_daily: SPY sessions are not in ascending order"
+
+`TIME_SERIES_DAILY` lists its bars **newest-first**, but the shared price-source
+validator requires **oldest-first**, and the parser handed the vendor's raw order
+straight to it. The parsed frame is now sorted by session label before
+validation. The sort is stable, so a genuine duplicate still reaches the
+validator's duplicate check rather than being merged away, and no OHLCV value is
+changed — each bar stays attached to its own date. The reorder is a sort, not a
+reversal. The old test fixture happened to build its body in ascending order, so
+it never exercised the vendor's real ordering; the new tests build the body
+newest-first and would fail without the fix.
 
 A new diagnostic reports a deployment's credential state without revealing the
 secret — `python -m tradingagents.paper_experiment diagnose --source

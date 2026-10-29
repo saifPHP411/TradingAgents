@@ -56,6 +56,18 @@ Consequences in code:
 - Because the free function is unadjusted, the source declares `adjusted=False`
   and never mixes adjusted and unadjusted bars.
 
+### Sessions are reordered to oldest-first
+
+Alpha Vantage's `TIME_SERIES_DAILY` body lists its bars **newest-first**, but the
+price-source contract every source must satisfy is **oldest-first**
+(`_validate_frame` refuses a frame whose sessions are not in ascending order).
+The provider therefore sorts the parsed frame by session label before validation.
+The sort is stable, so equal labels keep their insertion order and a genuine
+duplicate still reaches the validator's duplicate check rather than being merged
+away; the bar values themselves are never touched, so each OHLCV row stays
+attached to its own session date. The reorder is a sort, not a reversal: any
+input order becomes ascending.
+
 ### The credential is sent as the `apikey` query parameter
 
 Alpha Vantage authenticates every request with an `apikey` **query parameter**;

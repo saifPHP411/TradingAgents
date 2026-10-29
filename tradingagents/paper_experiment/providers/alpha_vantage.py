@@ -15,10 +15,11 @@ support page (not assumed):
   key inside an **HTTP 200** body (``"Information"`` / ``"Note"``), and a rejected
   call as ``"Error Message"``; each is classified and raised, never parsed as data.
 
-The provider fetches once, at construction, validates the frame through the shared
-validator, and freezes it. It therefore never sees a bar after the fetch, and a
-requested session the frame does not cover is refused rather than answered with a
-neighbouring day's price.
+The provider fetches once, at construction, reorders the vendor's newest-first
+series to oldest-first (the price-source contract), validates the frame through
+the shared validator, and freezes it. It therefore never sees a bar after the
+fetch, and a requested session the frame does not cover is refused rather than
+answered with a neighbouring day's price.
 """
 
 from __future__ import annotations
@@ -228,6 +229,13 @@ class AlphaVantageDailySource(FramePriceSource):
 
         frame = pd.DataFrame.from_dict(rows, orient="index")
         frame.index = pd.to_datetime(frame.index, format="%Y-%m-%d", errors="coerce")
+        # Alpha Vantage returns its daily series newest-first, but the price-source
+        # contract is oldest-to-newest. Reorder to ascending before validation,
+        # which is what ``_validate_frame`` demands. ``sort_index`` is stable, so
+        # equal labels keep their insertion order and a genuine duplicate stays
+        # adjacent for the validator to reject rather than being silently hidden;
+        # the bar values themselves are untouched.
+        frame = frame.sort_index(kind="stable")
         # The shared validator raises on NaN, infinity, a non-positive price, a
         # high below low, an open/close outside the range, a duplicate or an
         # out-of-order session, and a non-numeric column. A malformed *vendor*
