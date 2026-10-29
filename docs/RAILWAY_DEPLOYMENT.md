@@ -2,8 +2,10 @@
 
 This document states what deploying the **prospective paper experiment** to
 Railway requires, and what it does not. It describes a simulation-only workload:
-no broker connection, no order routing, no credential beyond a market-data and an
-LLM provider key, and no `ExecutionMode.LIVE` (which does not exist).
+no order routing, no credential beyond a market-data and an LLM provider key plus
+the optional read-only Alpaca paper check, and no `ExecutionMode.LIVE` (which does
+not exist). The one broker-facing command is a **read-only** Alpaca paper account
+check that places no order.
 
 ## What kind of service this is
 
@@ -76,11 +78,39 @@ non-root user failed to write the mount with `PermissionError`, which is why
 | `GROQ_API_KEY` | genuine LLM inference | provider `groq`, model `openai/gpt-oss-20b` |
 | `ALPHA_VANTAGE_API_KEY` | `--source alpha_vantage` | free daily bars; 25 calls/day |
 | `FINNHUB_API_KEY` | `--source finnhub` | free current-day quote only |
+| `ALPACA_PAPER_API_KEY` | the read-only Alpaca **paper** diagnostic | paper key id; **no order is placed** |
+| `ALPACA_PAPER_API_SECRET` | the read-only Alpaca **paper** diagnostic | paper secret; **no order is placed** |
 
 Set these as Railway **service variables** (never in the repository). The code
 reads them from the environment by name only; it never prints, logs or stores a
 value. If a variable is missing, a decision is recorded as **blocked** rather
 than fabricated, and the run exits cleanly.
+
+The two `ALPACA_PAPER_*` variables are used only by the read-only diagnostic
+below. They are the **paper** credentials — the adapter refuses every live Alpaca
+host and refuses the live variable names (`APCA_API_KEY_ID`, `ALPACA_API_KEY`, …)
+rather than using them as a fallback. No value is ever placed in a URL or a log.
+
+## Read-only Alpaca paper connection check
+
+Once the two `ALPACA_PAPER_*` service variables are set, confirm the paper
+connection from the Railway shell without placing any order:
+
+```bash
+# Presence-only check: no network call, no order.
+python -m tradingagents.paper_experiment alpaca-diagnose
+
+# Read-only account check: one GET /v2/account, no order, no state change.
+python -m tradingagents.paper_experiment alpaca-diagnose --connect
+```
+
+`broker-check` is the same command under its original name. On success the
+`--connect` form prints the account id, status, currency, cash, equity, buying
+power and any active restrictions, and states that the paper environment is
+confirmed and that no order was placed. It fails safe (non-zero exit, clear
+message, no fallback) if a credential is missing, authentication fails, the
+request times out, or the paper environment cannot be proven. It never submits,
+modifies or cancels an order — there is no flag that does.
 
 ## Persistent volume and where state lives
 

@@ -230,9 +230,23 @@ Trading. It is not the internal simulator and it is not a live path.
 ```bash
 # Report whether the paper broker is configured, without printing a secret.
 python -m tradingagents.paper_experiment broker-check
+# The same command under an explicit Alpaca name.
+python -m tradingagents.paper_experiment alpaca-diagnose
 # Also read the account (read-only; still places no order).
-python -m tradingagents.paper_experiment broker-check --connect
+python -m tradingagents.paper_experiment alpaca-diagnose --connect
 ```
 
+`--connect` performs one read-only `GET /v2/account` and reports the account id,
+status, currency, cash, equity, buying power and any active restrictions
+(`TRADING_BLOCKED`, `ACCOUNT_BLOCKED`, `TRANSFERS_BLOCKED`,
+`TRADE_SUSPENDED_BY_USER`, `SHORTING_DISABLED`). A successful read proves the
+paper environment, because the paper host is the only URL the adapter can
+request. It fails safe — non-zero exit, clear message, no live fallback — if a
+credential is missing, authentication fails, the request times out, or the
+response is not the expected object.
+
 There is no CLI flag that submits an order. `ExecutionMode` is unchanged
-(`BACKTEST` and `PAPER` only); this adapter does not add a live path.
+(`BACKTEST` and `PAPER` only); this adapter does not add a live path. A gated
+integration test (`tests/test_live_providers_integration.py::TestAlpacaPaperLive`)
+runs the real read-only check when both paper credentials are present, and skips
+otherwise, so the default suite needs no secret.

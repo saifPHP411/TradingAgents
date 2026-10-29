@@ -15,6 +15,10 @@ Commands:
 - ``sources`` — list the selectable price sources.
 - ``diagnose`` — report, without revealing a secret, whether a provider's
   credential env var is present and whether the request would carry it.
+- ``broker-check`` (alias ``alpaca-diagnose``) — read-only Alpaca **paper**
+  diagnostic. Reports whether the paper credential env vars are present (presence
+  only) and, with ``--connect``, reads the paper account and reports its figures
+  and restrictions. It places no order and changes nothing.
 
 The default price source is the frozen historical dataset; a vendor source is
 opt-in via ``--source``. A vendor source is fetched once, when the experiment is
@@ -297,13 +301,23 @@ def _verify(args) -> int:
 
 
 def _broker_check(args) -> int:
-    """Report the Alpaca paper broker's configuration, and read the account.
+    """Read-only Alpaca **paper** diagnostic. Places no order, changes nothing.
 
-    Read-only and secret-free: it prints whether the paper credentials are present
-    (never their value) and whether the endpoint is the approved paper host. With
-    ``--connect`` it also performs the account read, which places **no** order.
-    There is no flag that submits an order from the CLI: a paper order is placed
-    only from code, deliberately, with ``allow_orders=True``.
+    Reports, without any secret value (never the key, any part of it, or its
+    length):
+
+    - that the only endpoint used is the approved Alpaca paper host;
+    - whether the paper credential env vars are present (presence only);
+    - whether any *live* credential variable is present (a misconfiguration it
+      will not use).
+
+    With ``--connect`` it performs the single read-only ``GET /v2/account`` call
+    and reports the account's cash, equity, buying power, currency and active
+    restrictions. It never submits, modifies or cancels an order, and there is no
+    flag that does: a paper order is placed only from code, deliberately, with
+    ``allow_orders=True``. It fails safe (a non-zero exit with a clear message) if
+    the credentials are absent, authentication fails, or the paper environment
+    cannot be proven.
     """
     from .broker import (
         PAPER_BASE_URL,
@@ -323,26 +337,48 @@ def _broker_check(args) -> int:
             "note: live credential variables are present and will NOT be used: "
             + ", ".join(status.live_credentials_present)
         )
-    if not (status.key_present and status.secret_present):
-        print(
-            "the broker path is not configured; set the paper credentials to use it. "
-            "No order is placed by this command."
+    configured = status.key_present and status.secret_present
+    if not configured:
+        message = (
+            f"the broker path is not configured: set {status.key_env} and "
+            f"{status.secret_env} (values are never printed)."
         )
+        if getattr(args, "connect", False):
+            # An explicit request to connect cannot be honoured; fail safely.
+            print(f"broker check failed: {message}", file=sys.stderr)
+            return 2
+        print(f"{message} No order is placed by this command.")
         return 0
     if not getattr(args, "connect", False):
         print("configuration OK (pass --connect to read the account; still no order)")
         return 0
+
     try:
         broker = AlpacaPaperBroker(base_url=PAPER_BASE_URL)
         account = broker.connect()
     except (BrokerNotConfiguredError, BrokerError) as exc:
+        # Safe, secret-free failure: a missing key, a refused credential, a
+        # timeout, or a non-object response. Never a fallback to a live host.
         print(f"broker check failed: {exc}", file=sys.stderr)
         return 2
-    print(f"account: {account.account_id} status={account.status}")
-    print(f"cash: {account.cash} equity: {account.equity} buying_power: {account.buying_power}")
+
+    # Reaching here proves the paper environment: the only URL this adapter can
+    # request is the validated paper host, so a successful account read is proof
+    # that the credentials are paper credentials.
+    print("paper environment: CONFIRMED (account read from the approved paper host)")
+    print(f"account id: {account.account_id} status: {account.status}")
+    print(f"currency: {account.currency or 'unknown'}")
     print(
-        f"trading_blocked: {account.trading_blocked} "
-        f"account_blocked: {account.account_blocked}"
+        f"cash: {account.cash} equity: {account.equity} "
+        f"buying_power: {account.buying_power}"
+    )
+    if account.portfolio_value is not None:
+        print(f"portfolio_value: {account.portfolio_value}")
+    if account.multiplier is not None:
+        print(f"multiplier: {account.multiplier}")
+    restrictions = account.restrictions()
+    print(
+        "restrictions: " + (", ".join(restrictions) if restrictions else "none reported")
     )
     print("read-only check complete; no order was placed")
     return 0
@@ -359,7 +395,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "command",
-        choices=("start", "run", "report", "verify", "sources", "diagnose", "broker-check"),
+        choices=(
+            "start",
+            "run",
+            "report",
+            "verify",
+            "sources",
+            "diagnose",
+            "broker-check",
+            "alpaca-diagnose",
+        ),
     )
     parser.add_argument(
         "--root", default=None, help="experiment directory (required except for diagnose)"
@@ -402,8 +447,9 @@ def main(argv: list[str] | None = None) -> int:
         "--connect",
         action="store_true",
         help=(
-            "broker-check only: also read the Alpaca paper account (read-only; "
-            "places no order). There is no CLI flag that submits an order."
+            "broker-check / alpaca-diagnose only: also read the Alpaca paper "
+            "account (read-only; places no order). There is no CLI flag that "
+            "submits an order."
         ),
     )
     args = parser.parse_args(argv)
@@ -416,6 +462,7 @@ def main(argv: list[str] | None = None) -> int:
         "sources": _sources,
         "diagnose": _diagnose,
         "broker-check": _broker_check,
+        "alpaca-diagnose": _broker_check,  # an explicit, discoverable alias
     }
     try:
         return handlers[args.command](args)

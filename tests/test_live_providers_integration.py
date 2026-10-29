@@ -199,3 +199,54 @@ def _frame(periods: int = 12) -> pd.DataFrame:
         },
         index=index,
     )
+
+
+# ---------------------------------------------------------------------------
+# Alpaca **paper** read-only connection check (credential-gated)
+# ---------------------------------------------------------------------------
+
+requires_alpaca_paper = pytest.mark.skipif(
+    not (_present("ALPACA_PAPER_API_KEY") and _present("ALPACA_PAPER_API_SECRET")),
+    reason="ALPACA_PAPER_API_KEY/ALPACA_PAPER_API_SECRET not set; skipping live paper check",
+)
+
+
+@pytest.mark.integration
+@requires_alpaca_paper
+class TestAlpacaPaperLive:
+    """One real, read-only ``GET /v2/account`` against Alpaca **paper**.
+
+    This is the only test in the suite that reaches Alpaca, and it is skipped
+    unless both paper credentials are present, so the default run needs no secret.
+    It places **no** order and changes nothing: ``connect`` is read-only. It
+    proves the credentials authenticate against the paper host and that the
+    account is readable, and it asserts the endpoint is the paper host so a live
+    endpoint can never be reached by this path.
+    """
+
+    def test_the_paper_account_is_readable(self):
+        from tradingagents.paper_experiment.broker import (
+            PAPER_BASE_URL,
+            AlpacaPaperBroker,
+        )
+
+        broker = AlpacaPaperBroker(base_url=PAPER_BASE_URL)
+        assert broker.base_url == PAPER_BASE_URL  # paper host, never live
+        account = broker.connect()  # read-only
+        assert account.account_id, "the paper account response carried no id"
+        assert account.status, "the paper account response carried no status"
+        # A paper account reports a currency and non-negative headline figures.
+        assert account.currency
+        assert account.cash >= 0
+        assert account.equity >= 0
+        # The account is confirmed, and no order was placed to confirm it.
+        assert broker._state.confirmed is True
+        assert broker._orders_submitted == []
+
+    def test_the_diagnostic_command_reads_the_paper_account(self, capsys):
+        from tradingagents.paper_experiment.__main__ import main
+
+        assert main(["alpaca-diagnose", "--connect"]) == 0
+        out = capsys.readouterr().out
+        assert "paper environment: CONFIRMED" in out
+        assert "no order was placed" in out

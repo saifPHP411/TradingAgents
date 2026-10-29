@@ -196,7 +196,13 @@ def _map_status(raw: str | None) -> str:
 
 @dataclass(frozen=True)
 class BrokerAccount:
-    """The broker account facts a paper run needs, from the read-only endpoint."""
+    """The broker account facts a paper run needs, from the read-only endpoint.
+
+    Only fields Alpaca documents on ``GET /v2/account`` are read. The optional
+    ones default to ``None`` so an older or trimmed response is still usable
+    rather than mis-parsed; a missing field is reported as unknown, never as a
+    fabricated zero.
+    """
 
     account_id: str
     status: str
@@ -206,6 +212,36 @@ class BrokerAccount:
     currency: str
     trading_blocked: bool
     account_blocked: bool
+    account_number: str | None = None
+    portfolio_value: float | None = None
+    last_equity: float | None = None
+    long_market_value: float | None = None
+    short_market_value: float | None = None
+    multiplier: str | None = None
+    shorting_enabled: bool | None = None
+    transfers_blocked: bool | None = None
+    trade_suspended_by_user: bool | None = None
+    daytrade_count: int | None = None
+
+    def restrictions(self) -> list[str]:
+        """The account restrictions that are active, as a closed vocabulary.
+
+        A blocked or suspended account is the thing a paper run must know before
+        it acts, so this is a named list rather than prose. ``shorting_enabled``
+        being false is reported too, since it constrains a short strategy.
+        """
+        active: list[str] = []
+        if self.trading_blocked:
+            active.append("TRADING_BLOCKED")
+        if self.account_blocked:
+            active.append("ACCOUNT_BLOCKED")
+        if self.transfers_blocked:
+            active.append("TRANSFERS_BLOCKED")
+        if self.trade_suspended_by_user:
+            active.append("TRADE_SUSPENDED_BY_USER")
+        if self.shorting_enabled is False:
+            active.append("SHORTING_DISABLED")
+        return active
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -217,6 +253,17 @@ class BrokerAccount:
             "currency": self.currency,
             "trading_blocked": self.trading_blocked,
             "account_blocked": self.account_blocked,
+            "account_number": self.account_number,
+            "portfolio_value": self.portfolio_value,
+            "last_equity": self.last_equity,
+            "long_market_value": self.long_market_value,
+            "short_market_value": self.short_market_value,
+            "multiplier": self.multiplier,
+            "shorting_enabled": self.shorting_enabled,
+            "transfers_blocked": self.transfers_blocked,
+            "trade_suspended_by_user": self.trade_suspended_by_user,
+            "daytrade_count": self.daytrade_count,
+            "restrictions": self.restrictions(),
         }
 
 
@@ -445,6 +492,16 @@ class AlpacaPaperBroker:
             currency=str(payload.get("currency", "")),
             trading_blocked=bool(payload.get("trading_blocked", False)),
             account_blocked=bool(payload.get("account_blocked", False)),
+            account_number=_as_optional_str(payload.get("account_number")),
+            portfolio_value=_as_optional_float(payload.get("portfolio_value")),
+            last_equity=_as_optional_float(payload.get("last_equity")),
+            long_market_value=_as_optional_float(payload.get("long_market_value")),
+            short_market_value=_as_optional_float(payload.get("short_market_value")),
+            multiplier=_as_optional_str(payload.get("multiplier")),
+            shorting_enabled=_as_optional_bool(payload.get("shorting_enabled")),
+            transfers_blocked=_as_optional_bool(payload.get("transfers_blocked")),
+            trade_suspended_by_user=_as_optional_bool(payload.get("trade_suspended_by_user")),
+            daytrade_count=_as_optional_int(payload.get("daytrade_count")),
         )
         self._state.endpoint = self.base_url
         self._state.account_id = account.account_id
@@ -669,6 +726,43 @@ def _as_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _as_optional_float(value: Any) -> float | None:
+    """Parse a documented numeric field, or ``None`` when absent/unparseable.
+
+    Distinct from :func:`_as_float`: a missing optional field is *unknown*, not
+    zero, so it is reported as ``None`` rather than a fabricated figure.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_optional_str(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
+def _as_optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _as_optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------

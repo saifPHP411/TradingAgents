@@ -818,10 +818,195 @@ class TestBrokerCheckCommand:
         with pytest.raises(SystemExit):
             main(["broker-check", "--allow-orders"])  # unrecognised, so refused
 
-    def test_connect_without_credentials_is_a_clear_error(self, monkeypatch, capsys):
+    def test_connect_without_credentials_fails_safe(self, monkeypatch, capsys):
         from tradingagents.paper_experiment.__main__ import main
 
         monkeypatch.delenv("ALPACA_PAPER_API_KEY", raising=False)
         monkeypatch.delenv("ALPACA_PAPER_API_SECRET", raising=False)
-        # Without credentials it returns before connecting; still no order, no crash.
+        # An explicit request to connect cannot be honoured, so it fails safely
+        # with a non-zero exit and a clear, secret-free message; it never falls
+        # back to a live host and never places an order.
+        assert main(["broker-check", "--connect"]) == 2
+        captured = capsys.readouterr()
+        assert "not configured" in captured.err
+        assert "ALPACA_PAPER_API_KEY" in captured.err
+        assert "no order" not in captured.out.lower()
+
+    def test_the_alias_command_behaves_identically(self, monkeypatch, capsys):
+        from tradingagents.paper_experiment.__main__ import main
+
+        monkeypatch.delenv("ALPACA_PAPER_API_KEY", raising=False)
+        monkeypatch.delenv("ALPACA_PAPER_API_SECRET", raising=False)
+        assert main(["alpaca-diagnose"]) == 0
+        out = capsys.readouterr().out
+        assert "approved paper endpoint: https://paper-api.alpaca.markets" in out
+        assert "No order is placed" in out
+
+
+# ---------------------------------------------------------------------------
+# 13. The read-only --connect diagnostic, end to end (transport faked only)
+# ---------------------------------------------------------------------------
+
+
+def _patch_transport(monkeypatch, routes, *, calls=None, fail=None):
+    """Replace the broker's default transport with a fake one.
+
+    The real broker, the real credential handling, the real response parsing and
+    the real CLI rendering all run; only the socket is faked. This is the same
+    seam the rest of the suite uses, so nothing about the adapter is mocked away.
+    """
+    import tradingagents.paper_experiment.broker.alpaca_paper as mod
+
+    monkeypatch.setattr(mod, "_default_transport", _transport(routes, calls=calls, fail_on=fail))
+
+
+class TestReadOnlyConnectDiagnostic:
+    def test_it_reads_the_account_and_reports_the_figures(self, monkeypatch, capsys):
+        from tradingagents.paper_experiment.__main__ import main
+
+        monkeypatch.setenv("ALPACA_PAPER_API_KEY", "paper-key-value")
+        monkeypatch.setenv("ALPACA_PAPER_API_SECRET", "paper-secret-value")
+        calls = []
+        _patch_transport(monkeypatch, {("GET", "/v2/account"): _Resp(200, _ACCOUNT)}, calls=calls)
+
         assert main(["broker-check", "--connect"]) == 0
+        out = capsys.readouterr().out
+        assert "paper environment: CONFIRMED" in out
+        assert "https://paper-api.alpaca.markets" in out
+        assert "cash: 25000.0" in out
+        assert "equity: 25000.0" in out
+        assert "buying_power: 50000.0" in out
+        assert "currency: USD" in out
+        assert "restrictions: none reported" in out
+        assert "no order was placed" in out
+        # Read-only: every request is a GET; there is no POST/PUT/DELETE.
+        assert calls and all(c["method"] == "GET" for c in calls)
+
+    def test_it_never_prints_a_secret(self, monkeypatch, capsys):
+        from tradingagents.paper_experiment.__main__ import main
+
+        key, secret = "PAPERKEY-do-not-print-9999", "PAPERSECRET-do-not-print-8888"
+        monkeypatch.setenv("ALPACA_PAPER_API_KEY", key)
+        monkeypatch.setenv("ALPACA_PAPER_API_SECRET", secret)
+        _patch_transport(monkeypatch, {("GET", "/v2/account"): _Resp(200, _ACCOUNT)})
+
+        assert main(["broker-check", "--connect"]) == 0
+        captured = capsys.readouterr()
+        for stream in (captured.out, captured.err):
+            assert key not in stream
+            assert secret not in stream
+            assert str(len(key)) not in stream
+            assert str(len(secret)) not in stream
+
+    def test_an_auth_failure_fails_safe_without_leaking(self, monkeypatch, capsys):
+        from tradingagents.paper_experiment.__main__ import main
+
+        key = "PAPERKEY-leaky-1234"
+        monkeypatch.setenv("ALPACA_PAPER_API_KEY", key)
+        monkeypatch.setenv("ALPACA_PAPER_API_SECRET", "paper-secret-value")
+        _patch_transport(
+            monkeypatch,
+            {("GET", "/v2/account"): _Resp(401, f'{{"message": "unauthorized {key}"}}')},
+        )
+
+        assert main(["broker-check", "--connect"]) == 2
+        captured = capsys.readouterr()
+        assert "refused the credential" in captured.err
+        assert key not in captured.err
+        assert key not in captured.out
+
+    def test_a_timeout_fails_safe(self, monkeypatch, capsys):
+        from tradingagents.paper_experiment.__main__ import main
+
+        monkeypatch.setenv("ALPACA_PAPER_API_KEY", "paper-key-value")
+        monkeypatch.setenv("ALPACA_PAPER_API_SECRET", "paper-secret-value")
+        _patch_transport(
+            monkeypatch,
+            {("GET", "/v2/account"): _Resp(200, _ACCOUNT)},
+            fail=lambda m, u, b: True,
+        )
+
+        assert main(["broker-check", "--connect"]) == 2
+        captured = capsys.readouterr()
+        assert "broker check failed" in captured.err
+
+    def test_a_non_object_response_fails_safe(self, monkeypatch, capsys):
+        from tradingagents.paper_experiment.__main__ import main
+
+        monkeypatch.setenv("ALPACA_PAPER_API_KEY", "paper-key-value")
+        monkeypatch.setenv("ALPACA_PAPER_API_SECRET", "paper-secret-value")
+        _patch_transport(monkeypatch, {("GET", "/v2/account"): _Resp(200, {"nope": 1})})
+
+        assert main(["broker-check", "--connect"]) == 2
+        assert "broker check failed" in capsys.readouterr().err
+
+    def test_a_blocked_account_is_reported_as_a_restriction(self, monkeypatch, capsys):
+        from tradingagents.paper_experiment.__main__ import main
+
+        monkeypatch.setenv("ALPACA_PAPER_API_KEY", "paper-key-value")
+        monkeypatch.setenv("ALPACA_PAPER_API_SECRET", "paper-secret-value")
+        blocked = dict(_ACCOUNT, trading_blocked=True, transfers_blocked=True)
+        _patch_transport(monkeypatch, {("GET", "/v2/account"): _Resp(200, blocked)})
+
+        assert main(["broker-check", "--connect"]) == 0
+        out = capsys.readouterr().out
+        assert "TRADING_BLOCKED" in out
+        assert "TRANSFERS_BLOCKED" in out
+
+    def test_it_sends_no_order_request(self, monkeypatch, capsys):
+        from tradingagents.paper_experiment.__main__ import main
+
+        monkeypatch.setenv("ALPACA_PAPER_API_KEY", "paper-key-value")
+        monkeypatch.setenv("ALPACA_PAPER_API_SECRET", "paper-secret-value")
+        calls = []
+        # Any POST would have no route and raise AssertionError out of the transport.
+        _patch_transport(monkeypatch, {("GET", "/v2/account"): _Resp(200, _ACCOUNT)}, calls=calls)
+
+        assert main(["broker-check", "--connect"]) == 0
+        assert {c["method"] for c in calls} == {"GET"}
+        assert all("/v2/orders" not in c["url"] for c in calls)
+
+
+# ---------------------------------------------------------------------------
+# 14. Account restriction vocabulary
+# ---------------------------------------------------------------------------
+
+
+class TestAccountRestrictions:
+    def _account(self, **over):
+        from tradingagents.paper_experiment.broker import BrokerAccount
+
+        base = {
+            "account_id": "a",
+            "status": "ACTIVE",
+            "cash": 1.0,
+            "equity": 1.0,
+            "buying_power": 1.0,
+            "currency": "USD",
+            "trading_blocked": False,
+            "account_blocked": False,
+        }
+        base.update(over)
+        return BrokerAccount(**base)
+
+    def test_a_clean_account_reports_no_restriction(self):
+        assert self._account().restrictions() == []
+
+    def test_each_block_is_a_named_restriction(self):
+        assert "TRADING_BLOCKED" in self._account(trading_blocked=True).restrictions()
+        assert "ACCOUNT_BLOCKED" in self._account(account_blocked=True).restrictions()
+        assert "TRANSFERS_BLOCKED" in self._account(transfers_blocked=True).restrictions()
+        assert (
+            "TRADE_SUSPENDED_BY_USER"
+            in self._account(trade_suspended_by_user=True).restrictions()
+        )
+
+    def test_shorting_disabled_is_reported_only_when_explicitly_false(self):
+        assert "SHORTING_DISABLED" in self._account(shorting_enabled=False).restrictions()
+        assert "SHORTING_DISABLED" not in self._account(shorting_enabled=True).restrictions()
+        assert "SHORTING_DISABLED" not in self._account().restrictions()  # unknown, not false
+
+    def test_a_missing_optional_field_is_unknown_not_zero(self):
+        # portfolio_value absent -> None (unknown), not a fabricated 0.0.
+        assert self._account().portfolio_value is None
+        assert self._account().to_dict()["portfolio_value"] is None

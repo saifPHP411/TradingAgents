@@ -262,6 +262,40 @@ Changed:
   mechanism precisely — a frame-backed vendor run is resumed from its own stored
   bars, and the refusal applies only to a source with no persistable bars.
 
+### Phase 3 (reliability) — read-only Alpaca paper connection verification
+
+Extends the Alpaca paper broker adapter from a mocked-only check to a **real,
+read-only** connection check, without adding any order path.
+
+**Added — `alpaca-diagnose` (alias of `broker-check`), a read-only paper
+diagnostic.** It reports, without any secret value, whether the paper credential
+env vars (`ALPACA_PAPER_API_KEY` / `ALPACA_PAPER_API_SECRET`) are present and
+whether the endpoint is the approved paper host. With `--connect` it performs one
+read-only `GET /v2/account` and reports the account id, status, currency, cash,
+equity, buying power and active restrictions. It places no order and changes
+nothing; there is no flag that submits one. It fails safe — non-zero exit, clear
+secret-free message, no live fallback — when a credential is missing,
+authentication fails, the request times out, or the response is not the expected
+object.
+
+**Added — richer, documented account fields.** `BrokerAccount` now reads the
+optional fields Alpaca documents on `GET /v2/account` (`account_number`,
+`portfolio_value`, `last_equity`, `long_market_value`, `short_market_value`,
+`multiplier`, `shorting_enabled`, `transfers_blocked`, `trade_suspended_by_user`,
+`daytrade_count`) and exposes a `restrictions()` list from a closed vocabulary. A
+missing optional field is reported as unknown (`None`), never a fabricated zero.
+
+**Added — a credential-gated live check.**
+`tests/test_live_providers_integration.py::TestAlpacaPaperLive` runs the real
+read-only paper account check when both paper credentials are present and skips
+otherwise, so the default suite needs no secret and CI stays hermetic.
+
+The adapter remains paper-only and separate: the endpoint is hard-validated to
+Alpaca's paper host (every live host is refused), live credential variable names
+are refused rather than used as a fallback, and the module never imports or writes
+the internal ledger or simulator. `ExecutionMode` still has only `BACKTEST` and
+`PAPER`. Tests: `tests/test_phase3_broker.py`.
+
 ### Phase 3 (reliability) — restored currency, and an isolated Alpaca paper broker
 
 Two changes, both aimed at making the paper path more honest and safer. Neither
