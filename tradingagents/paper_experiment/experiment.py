@@ -74,7 +74,13 @@ PAPER_EXPERIMENT_SCHEMA_VERSION = 1
 STATE_PENDING = "pending"
 """A decision was recorded but its execution session has not been processed yet."""
 STATE_EXECUTED = "executed"
-"""The decision's order was executed (filled, partially filled, or rejected)."""
+"""The decision was carried to its execution session and settled there.
+
+*Settled* means the order was submitted to the simulator, or the decision was a
+HOLD, or risk refused it before an order existed — see ``order_created`` and
+``order_status``. It does **not** mean the order filled: a HOLD settles here with
+no order at all. Read the order funnel in the report (``orders``) for that.
+"""
 STATE_EVALUATED = "evaluated"
 """Enough later bars exist and the outcome has been measured."""
 STATE_BLOCKED = "blocked"
@@ -142,6 +148,8 @@ class DecisionState:
     data_window_hash: str | None = None
     signal_id: str | None = None
     order_status: str | None = None
+    order_created: bool = False
+    order_reason: str | None = None
     filled_quantity: float = 0.0
     average_fill_price: float | None = None
     fees: float = 0.0
@@ -161,6 +169,8 @@ class DecisionState:
             "data_window_hash": self.data_window_hash,
             "signal_id": self.signal_id,
             "order_status": self.order_status,
+            "order_created": self.order_created,
+            "order_reason": self.order_reason,
             "filled_quantity": self.filled_quantity,
             "average_fill_price": self.average_fill_price,
             "fees": self.fees,
@@ -806,6 +816,11 @@ class PaperExperiment:
         state.state = STATE_EXECUTED
         state.signal_id = signal.signal_id
         state.order_status = step.order_status
+        # An order exists only when the simulator returned a real order status.
+        # A HOLD or a pre-order refusal reports ``NONE``; recording that lets the
+        # report separate "settled" from "an order actually existed".
+        state.order_created = step.order_status != "NONE"
+        state.order_reason = step.reason or None
         state.filled_quantity = float(step.quantity)
         state.average_fill_price = float(step.fill_price) if step.fill_price else None
         state.fees = float(step.fees)
@@ -816,6 +831,7 @@ class PaperExperiment:
                 "execution_session": session,
                 "signal_id": signal.signal_id,
                 "status": step.order_status,
+                "order_created": state.order_created,
                 "approved": step.approved,
                 "filled_quantity": state.filled_quantity,
                 "fill_price": state.average_fill_price,

@@ -41,7 +41,7 @@ from .experiment import (
     PaperExperiment,
 )
 
-REPORT_SCHEMA_VERSION = "1.0.0"
+REPORT_SCHEMA_VERSION = "1.1.0"
 
 
 @dataclass
@@ -107,6 +107,7 @@ def build_report(experiment: PaperExperiment) -> ExperimentReport:
     data_block = _data_block(experiment)
     readiness = _readiness(experiment, genuine, counts)
     baseline = _baseline_block(experiment)
+    orders = _order_funnel(decisions)
 
     payload = {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -130,6 +131,7 @@ def build_report(experiment: PaperExperiment) -> ExperimentReport:
             "unevaluable": counts.get(STATE_UNEVALUABLE, 0),
             "filled_orders": len(filled),
         },
+        "orders": orders,
         "book": book,
         "performance": performance,
         "costs": _costs_block(experiment),
@@ -168,6 +170,81 @@ def _book(experiment: PaperExperiment) -> dict:
         "positions": positions,
         "resting_orders": len(experiment.session.resting),
     }
+
+
+class _OrderStatus:
+    """Tally the order funnel from the settled decisions' own fields."""
+
+    def __init__(self) -> None:
+        self.settled = 0
+        self.submitted = 0
+        self.filled = 0
+        self.partially_filled = 0
+        self.rejected = 0
+        self.cancelled = 0
+        self.resting = 0
+        self.without_order = 0
+        self.without_order_reasons: dict[str, int] = {}
+
+    def count(self, decision) -> None:
+        self.settled += 1
+        status = decision.order_status
+        if not decision.order_created or status in (None, "NONE"):
+            self.without_order += 1
+            reason = decision.order_reason or "no order"
+            self.without_order_reasons[reason] = self.without_order_reasons.get(reason, 0) + 1
+            return
+        self.submitted += 1
+        if status == "FILLED":
+            self.filled += 1
+        elif status == "PARTIALLY_FILLED":
+            self.partially_filled += 1
+        elif status == "REJECTED":
+            self.rejected += 1
+        elif status == "CANCELLED":
+            self.cancelled += 1
+        elif status == "ACCEPTED":
+            # A LIMIT the bar did not reach is still live; a filled-then-rested
+            # remainder is a partial fill, already counted above.
+            self.resting += 1
+
+    def to_dict(self) -> dict:
+        return {
+            "settled": self.settled,
+            "submitted": self.submitted,
+            "filled": self.filled,
+            "partially_filled": self.partially_filled,
+            "rejected": self.rejected,
+            "cancelled": self.cancelled,
+            "resting": self.resting,
+            "without_order": self.without_order,
+            "without_order_reasons": dict(sorted(self.without_order_reasons.items())),
+            "note": (
+                "counts.executed counts decisions carried to their execution session "
+                "(a HOLD included); this block counts what the orders themselves did"
+            ),
+        }
+
+
+def _order_funnel(decisions: list) -> dict:
+    """What each settled decision's order did, in closed-vocabulary terms.
+
+    ``counts.executed`` answers "was the decision carried to its execution
+    session", which is true for a HOLD. It is not the number of orders. This
+    block makes the funnel explicit so ``executed`` cannot be read as "filled":
+
+    - ``settled`` — decisions carried to their execution session (a HOLD included);
+    - ``submitted`` — a real order reached the simulator (a HOLD is not one);
+    - ``filled`` / ``partially_filled`` / ``rejected`` / ``cancelled`` / ``resting``
+      — the order's own terminal-or-live status, each counted once;
+    - ``without_order`` — settled decisions that produced no order at all (HOLD, or
+      a refusal before an order existed), with their reasons tallied.
+    """
+    funnel = _OrderStatus()
+    for decision in decisions:
+        if decision.state in (STATE_EXECUTED, STATE_EVALUATED, STATE_UNEVALUABLE):
+            funnel.count(decision)
+    return funnel.to_dict()
 
 
 def _costs_block(experiment: PaperExperiment) -> dict:

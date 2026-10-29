@@ -363,6 +363,35 @@ surface, and it keeps every existing simulation-only guard.
 Documented in `docs/RAILWAY_DEPLOYMENT.md` (a "Monitoring dashboard (optional)"
 section) and covered by `tests/test_phase13_dashboard.py`.
 
+### Fixed — `executed: 1` with `filled orders: 0` read as a lost order
+
+A live experiment reported `executed: 1`, `filled orders: 0`, `positions: 0` and
+`resting_orders: 0`, which read as if one order had vanished between the decision
+and the book. Nothing was lost. `counts.executed` counts *decisions carried to
+their execution session*, and a **HOLD is one** — the decision was taken, the
+session settled it, and no order was ever going to exist. The number was never a
+count of orders; the report simply had no way to say so.
+
+The report now carries an explicit order funnel, `orders`, so the two questions
+cannot be conflated:
+
+- `settled`, `submitted`, `filled`, `partially_filled`, `rejected`, `cancelled`,
+  `resting`, and `without_order` with `without_order_reasons`;
+- the identities `settled == submitted + without_order` and
+  `submitted == filled + partially_filled + rejected + cancelled + resting`;
+- a note stating that `counts.executed` is not a fill count.
+
+Each decision now persists `order_created` and `order_reason`, so the funnel is
+derived from the decision itself rather than re-parsed from prose. The dashboard
+shows "Settled (executed)", "Orders submitted" and "Without an order" as separate
+rows, and the report schema is `1.1.0`. Covered by
+`tests/test_paper_experiment_counters.py`; documented in `docs/PAPER_EXPERIMENT.md`
+("Reading the counters: settled is not filled").
+
+The execution path itself was already correct: a tradeable Buy decision produces
+a simulated fill with a position, cash movement and fees. A zero fill is a HOLD
+or a risk refusal, never a broken simulator.
+
 ### Fixed — `report`/`verify` failed in a shell with `No module named 'dotenv'`
 
 A login shell (`bash -lc`, `sh -lc`) sources Debian's `/etc/profile`, which

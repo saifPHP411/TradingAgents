@@ -81,6 +81,7 @@ class ExperimentView:
             "generated_at": report["generated_at"],
             "last_session_processed": report["last_session_processed"],
             "counts": report["counts"],
+            "orders": report["orders"],
             "book": report["book"],
             "performance": report["performance"],
             "costs": report["costs"],

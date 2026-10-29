@@ -197,6 +197,13 @@ class TestViews:
         assert summary["readiness"]["status"] in {"BLOCKED", "OFFLINE PAPER (reproducible, not live)"}
         assert summary["schema_version"] == 1
 
+    def test_summary_exposes_the_order_funnel(self, experiment_root):
+        """The dashboard must distinguish settled decisions from real orders."""
+        summary = ExperimentView(experiment_root).summary()
+        orders = summary["orders"]
+        assert orders["settled"] == orders["submitted"] + orders["without_order"]
+        assert set(orders) >= {"settled", "submitted", "filled", "without_order"}
+
     def test_summary_is_read_only(self, experiment_root):
         before = (experiment_root / "session_state.json").read_text()
         ExperimentView(experiment_root).summary()

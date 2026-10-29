@@ -129,6 +129,34 @@ fill here. Setting `max_volume_participation` (in the config, or via
 `from_protocol`) models a thin book: an order larger than the bar can absorb fills
 partially across sessions, and the remaining size rests until it is worked again.
 
+## Reading the counters: settled is not filled
+
+The report's `counts` block and its `orders` funnel answer two different
+questions, and conflating them is how "`executed: 1`, `filled orders: 0`" reads
+as a lost order when nothing is lost.
+
+- `counts.executed` counts **decisions carried to their execution session**. A
+  HOLD is one: the decision was taken, the session settled it, and no order was
+  ever going to exist. So `executed` is not a count of orders and must not be
+  read as `filled`.
+- The `orders` funnel counts what the orders themselves did, once each:
+  `settled`, `submitted`, `filled`, `partially_filled`, `rejected`, `cancelled`,
+  `resting`, and `without_order` (with `without_order_reasons` tallying why).
+
+The identity that always holds:
+
+```
+settled == submitted + without_order
+submitted == filled + partially_filled + rejected + cancelled + resting
+```
+
+A run whose every decision is a HOLD reports `submitted: 0`, `filled: 0` and
+`without_order: 20` with `without_order_reasons: {"no order: HOLD": 20}` — the
+decisions were all settled, and none was ever an order. A tradeable decision
+does produce a simulated fill; the funnel shows `submitted` and `filled` rise
+together. To get fills, the model must return a tradeable rating (Buy,
+Overweight, Underweight, Sell) rather than Hold, and risk must approve the size.
+
 ## When the key is missing, or the provider fails
 
 If no credential is configured, or the provider call fails, or the response has

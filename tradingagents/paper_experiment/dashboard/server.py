@@ -612,11 +612,13 @@ async function refresh(){
       "Sessions processed": s.counts.sessions_processed,
       "Decisions": s.counts.decisions_total,
       "Genuine inferences": s.counts.genuine_inferences,
-      "Executed": s.counts.executed,
+      "Settled (executed)": s.counts.executed,
       "Evaluated": s.counts.evaluated,
       "Blocked": s.counts.blocked,
       "Pending": s.counts.pending,
+      "Orders submitted": s.orders.submitted,
       "Filled orders": s.counts.filled_orders,
+      "Without an order": s.orders.without_order,
     });
     $("perf").innerHTML = kv({
       "Total return": pct(s.performance.total_return),

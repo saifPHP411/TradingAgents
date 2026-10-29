@@ -130,6 +130,11 @@ faking a success.
 - Never add a live trading path. `ExecutionMode` has only `BACKTEST` and `PAPER`,
   and `resolve_mode` raises on live-sounding names. Tests assert this.
 - Undefined metrics are `None`, not `0.0`. A flat run has no Sharpe ratio.
+- `counts.executed` in the paper report counts *decisions settled at their
+  execution session*, and a HOLD is one. It is not a fill count; the `orders`
+  funnel is. Never read `executed` as `filled` — a run can legitimately report
+  `executed: 1, filled_orders: 0` when the tail decision is a HOLD. See
+  `tests/test_paper_experiment_counters.py`.
 - Every cash or position change goes through `Ledger.apply_fill`, so the
   accounting rules stay in one place and the event log stays complete.
 - Rejections carry a named reason from a closed vocabulary, never prose only.
