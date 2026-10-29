@@ -86,6 +86,8 @@ non-root user failed to write the mount with `PermissionError`, which is why
 | `ALPACA_PAPER_API_KEY` | the read-only Alpaca **paper** diagnostic | paper key id; **no order is placed** |
 | `ALPACA_PAPER_API_SECRET` | the read-only Alpaca **paper** diagnostic | paper secret; **no order is placed** |
 | `TRADINGAGENTS_DASHBOARD_TOKEN` | the optional dashboard | bearer token; **required** for any non-loopback bind |
+| `TRADINGAGENTS_EXPERIMENT_ROOT` | the optional dashboard (module form) | experiment dir; lets `--root` be omitted |
+| `TRADINGAGENTS_DASHBOARD_HOST` | the optional dashboard (module form) | bind interface; defaults to loopback |
 
 Set these as Railway **service variables** (never in the repository). The code
 reads them from the environment by name only; it never prints, logs or stores a
@@ -136,7 +138,21 @@ python -m tradingagents.paper_experiment serve --root /data/paper-experiment
 TRADINGAGENTS_DASHBOARD_TOKEN=<a-long-random-string> \
 python -m tradingagents.paper_experiment serve \
   --root /data/paper-experiment --host 0.0.0.0 --port "$PORT" --allow-control
+
+# The module form is equivalent and takes its root from the environment, so the
+# Railway start command can be one line:
+TRADINGAGENTS_EXPERIMENT_ROOT=/data/paper-experiment \
+TRADINGAGENTS_DASHBOARD_HOST=0.0.0.0 \
+TRADINGAGENTS_DASHBOARD_TOKEN=<a-long-random-string> \
+python -m tradingagents.paper_experiment.dashboard.server --allow-control
 ```
+
+> Use the module form only through its entry point, as above. Importing the
+> module without running it (`python -c "import ...dashboard.server"`) does not
+> start the server; `dashboard/server.py` binds and serves under
+> `if __name__ == "__main__"`. Running it with no `--root` and no
+> `TRADINGAGENTS_EXPERIMENT_ROOT` exits `2` with a clear message rather than
+> listening on nothing.
 
 Safety properties, all enforced in code and covered by tests:
 
@@ -155,12 +171,13 @@ Safety properties, all enforced in code and covered by tests:
   CLI and a cron run cannot diverge.
 
 Railway settings for this service, when you use one: start command
-`python -m tradingagents.paper_experiment serve --root /data/paper-experiment --host 0.0.0.0 --port $PORT`,
-the same `/data` volume mounted, and `TRADINGAGENTS_DASHBOARD_TOKEN` set as a
-service variable. Give it a **public domain** in Railway's networking settings so
-the phone can reach it; without the token the server refuses to start on that
-bind. A dashboard service and a cron runner can share one experiment directory,
-because the state file is written atomically and read whole.
+`python -m tradingagents.paper_experiment serve --root /data/paper-experiment --host 0.0.0.0 --port $PORT`
+(or the module form above, which reads the root and host from service
+variables), the same `/data` volume mounted, and `TRADINGAGENTS_DASHBOARD_TOKEN`
+set as a service variable. Give it a **public domain** in Railway's networking
+settings so the phone can reach it; without the token the server refuses to start
+on that bind. A dashboard service and a cron runner can share one experiment
+directory, because the state file is written atomically and read whole.
 
 ## Persistent volume and where state lives
 

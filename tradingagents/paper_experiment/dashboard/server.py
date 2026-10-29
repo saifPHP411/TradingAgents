@@ -24,19 +24,23 @@ whose runtime is deliberately small.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from .auth import check_bearer, require_bindable, resolve_token
+from .auth import DashboardAuthError, check_bearer, require_bindable, resolve_token
 from .state import DashboardStateError, ExperimentView
 
 DEFAULT_MAX_SESSIONS_PER_CALL = 50
 """The most sessions one control call may advance, so a request stays bounded."""
 
 CONTROL_CONFIRM_HEADER = "X-Control-Confirm"
+
+ROOT_ENV = "TRADINGAGENTS_EXPERIMENT_ROOT"
+"""Environment variable the module entry point reads ``--root`` from."""
 
 
 class Dashboard:
@@ -219,6 +223,72 @@ def make_handler(dashboard: Dashboard):
                 self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
 
     return Handler
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the dashboard as ``python -m ...dashboard.server``.
+
+    A thin wrapper over :func:`serve` for a platform (Railway, Docker) that runs
+    a module directly rather than the ``serve`` subcommand. ``--root`` falls back
+    to ``TRADINGAGENTS_EXPERIMENT_ROOT`` and the port to ``$PORT``, so the start
+    command can be as short as ``python -m ...dashboard.server``.
+    """
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(
+        prog="python -m tradingagents.paper_experiment.dashboard.server",
+        description=(
+            "Paper-experiment dashboard. Simulation only: no broker order is ever "
+            "placed. Read-only unless --allow-control is passed."
+        ),
+    )
+    parser.add_argument(
+        "--root",
+        default=os.environ.get(ROOT_ENV) or None,
+        help=f"experiment directory (default: ${ROOT_ENV})",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("TRADINGAGENTS_DASHBOARD_HOST", "127.0.0.1"),
+        help="interface to bind (default: $TRADINGAGENTS_DASHBOARD_HOST, else loopback)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="port to listen on (default: $PORT, else 8000)",
+    )
+    parser.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "dashboard token (default: $TRADINGAGENTS_DASHBOARD_TOKEN). Required "
+            "for a non-loopback bind; never logged."
+        ),
+    )
+    parser.add_argument(
+        "--allow-control",
+        action="store_true",
+        help="enable the advance-the-simulation action (off by default)",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.root:
+        parser.error(f"an experiment directory is required: pass --root or set {ROOT_ENV}")
+    port = args.port if args.port is not None else int(os.environ.get("PORT", "8000"))
+    try:
+        serve(
+            args.root,
+            host=args.host,
+            port=port,
+            token=args.token,
+            allow_control=args.allow_control,
+        )
+    except DashboardAuthError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 0
 
 
 def serve(
@@ -565,3 +635,7 @@ boot();
 </body>
 </html>
 """
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
+    raise SystemExit(main())

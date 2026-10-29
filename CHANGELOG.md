@@ -363,6 +363,28 @@ surface, and it keeps every existing simulation-only guard.
 Documented in `docs/RAILWAY_DEPLOYMENT.md` (a "Monitoring dashboard (optional)"
 section) and covered by `tests/test_phase13_dashboard.py`.
 
+### Fixed — the dashboard module entry point did not start the server
+
+`python -m tradingagents.paper_experiment.dashboard.server` — the start command
+a platform (Railway) would reach for — emitted a runpy `RuntimeWarning`
+("'...dashboard.server' found in sys.modules after import of package
+'...dashboard', but prior to execution") and then **exited without listening**:
+`dashboard/__init__.py` imported `.server` eagerly, so runpy found it already
+loaded, and `server.py` had no `__main__` guard, so the module ran and stopped.
+
+- `dashboard/__init__.py` now re-exports `Dashboard`/`serve` lazily (PEP 562), so
+  importing the package no longer pulls `.server` into `sys.modules` and the
+  runpy warning is gone. `from ...dashboard import Dashboard, serve` still works.
+- `dashboard/server.py` gains a `main()` entry point and an
+  `if __name__ == "__main__"` guard. `--root` falls back to
+  `TRADINGAGENTS_EXPERIMENT_ROOT`, `--host` to `TRADINGAGENTS_DASHBOARD_HOST`
+  (default loopback) and `--port` to `$PORT`, so the start command can be one
+  line. A missing root exits `2`; a non-loopback bind with no token is still
+  refused before the socket is opened.
+
+Verified by running the real module as a subprocess: it serves `/healthz` on
+`0.0.0.0:$PORT`, and its output carries no `RuntimeWarning`.
+
 ### Phase 13 — pre-Railway deployment verification
 
 A verification pass, not a feature. Its job was to prove the deployable image

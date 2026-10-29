@@ -445,6 +445,128 @@ class TestCliServe:
         assert len(pending_sessions(experiment)) == len(experiment.source.sessions()) - 3
 
 
+class TestModuleEntryPoint:
+    """`python -m ...dashboard.server` — the Railway/Docker start command.
+
+    Importing the package used to pull ``.server`` into ``sys.modules`` before
+    runpy could execute it, which made runpy warn and — with no ``__main__`` guard
+    in ``server.py`` — meant the module ran and *exited without listening*. These
+    tests pin both halves of the fix: the lazy package import, and a real entry
+    point that binds and serves.
+    """
+
+    def test_package_import_does_not_load_server(self):
+        """The eager import that caused the runpy warning is gone."""
+        import subprocess
+        import sys
+
+        code = (
+            "import sys, tradingagents.paper_experiment.dashboard as d;"
+            "print('tradingagents.paper_experiment.dashboard.server' in sys.modules)"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        )
+        assert out.stdout.strip() == "False", out.stderr
+
+    def test_lazy_attributes_resolve(self):
+        import tradingagents.paper_experiment.dashboard as d
+
+        assert d.Dashboard is not None
+        assert callable(d.serve)
+        with pytest.raises(AttributeError):
+            _ = d.does_not_exist
+
+    def test_main_refuses_a_public_bind_without_a_token(self, tmp_path):
+        from tradingagents.paper_experiment.dashboard.server import main
+
+        # Returns 2 rather than blocking, because the bind is refused first.
+        assert main(["--root", str(tmp_path), "--host", "0.0.0.0"]) == 2
+
+    def test_main_requires_a_root(self, monkeypatch):
+        from tradingagents.paper_experiment.dashboard.server import main
+
+        monkeypatch.delenv("TRADINGAGENTS_EXPERIMENT_ROOT", raising=False)
+        with pytest.raises(SystemExit):
+            main([])
+
+    def test_main_reads_root_and_port_from_the_environment(self, tmp_path, monkeypatch, allow_loopback):
+        """`--root` falls back to the env var; the port to $PORT."""
+        from tradingagents.paper_experiment.dashboard import server as server_mod
+
+        root = tmp_path / "env_exp"
+        _experiment(root, periods=6, processed=1)
+
+        captured: dict[str, object] = {}
+
+        def fake_serve(root_arg, *, host, port, token, allow_control):
+            captured.update(root=str(root_arg), host=host, port=port, token=token, allow_control=allow_control)
+
+        monkeypatch.setattr(server_mod, "serve", fake_serve)
+        monkeypatch.setenv("TRADINGAGENTS_EXPERIMENT_ROOT", str(root))
+        monkeypatch.setenv("PORT", "9123")
+        monkeypatch.setenv("TRADINGAGENTS_DASHBOARD_TOKEN", "env-token")
+
+        assert server_mod.main([]) == 0
+        assert captured["port"] == 9123
+        assert captured["root"] == str(root)
+        # `serve` resolves the token from the environment, so `main` passes None.
+        assert captured["token"] is None
+        assert server_mod.resolve_token(captured["token"]) == "env-token"
+
+    def test_module_entry_point_actually_listens(self, experiment_root, allow_loopback):
+        """Run the real module as a subprocess and prove it serves HTTP."""
+        import os
+        import socket
+        import subprocess
+        import sys
+        import time
+
+        # Reserve a free port, then hand it to the subprocess.
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        env = {
+            **os.environ,
+            "TRADINGAGENTS_EXPERIMENT_ROOT": str(experiment_root),
+            "TRADINGAGENTS_DASHBOARD_TOKEN": TOKEN,
+            "PORT": str(port),
+        }
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "tradingagents.paper_experiment.dashboard.server",
+             "--host", "127.0.0.1"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            deadline = time.time() + 20
+            last_error = None
+            while time.time() < deadline:
+                try:
+                    status, body = _get(f"http://127.0.0.1:{port}/healthz")
+                    if status == 200:
+                        break
+                except Exception as exc:  # noqa: BLE001 - retry until the deadline
+                    last_error = exc
+                time.sleep(0.2)
+            else:
+                proc.kill()
+                raise AssertionError(f"server never listened: {last_error}")
+            # No runpy warning on stderr.
+            proc.kill()
+            output = proc.communicate(timeout=10)[0]
+            assert "RuntimeWarning" not in output, output
+            assert "sys.modules" not in output, output
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+
+
 class TestRunner:
     def test_process_pending_respects_the_bound(self, tmp_path):
         from tradingagents.paper_experiment.runner import process_pending
