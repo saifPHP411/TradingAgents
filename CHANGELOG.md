@@ -46,6 +46,20 @@ path, and no configuration that produces one.
 
 ### Changed
 
+- The dashboard **START** button now runs the paper worker **continuously**
+  (`paper_experiment/broker/trading.py`): `start()` launches one background loop
+  that waits `poll_interval_seconds` and then calls `run_once()` once per interval
+  until `stop()`. Previously START only set the state to `RUNNING` and the cycle
+  needed an external call. The loop waits one interval *before* its first cycle,
+  so START still places no order and an immediate STOP prevents the first one.
+  `stop()` signals the loop and waits for the in-flight cycle to finish rather than
+  killing the thread; a second `start()` while the loop is live raises instead of
+  starting a second loop; an unexpected cycle failure sets `ERROR` and stops the
+  loop without crashing the process; a restart still loads as `STOPPED` and never
+  auto-starts. `GET /api/paper/status` now also reports `loop_running`,
+  `next_cycle_at`, `cycles_completed` and `poll_interval_seconds`. The dashboard
+  stops the loop gracefully on process shutdown. State gains an additive,
+  backward-compatible `cycles_completed` field.
 - `AlpacaPaperBroker` gained `refresh_account()` and `positions()`, and a
   side-aware `_check_risk` (buying-power, per-order notional, open-position and
   long-only constraints). `submit_order` accepts `side` and an explicit

@@ -11,6 +11,14 @@ The path, stated once:
     decision source -> risk checks -> AlpacaPaperBroker -> Alpaca Paper API
                     -> order status / fills -> durable worker state
 
+``start()`` also launches a **background loop** so ``START`` means "run
+continuously" rather than "set a flag". The loop waits ``poll_interval_seconds``
+*first*, then calls :meth:`PaperTradingWorker.run_once` once per interval until
+:meth:`PaperTradingWorker.stop` is called. Waiting before the first cycle is the
+safe choice: it gives an operator a window to press STOP before any order can be
+placed, and it makes "start places no order" true for a whole interval, not just
+for the instant of the call.
+
 Design rules, each of which a test pins:
 
 - **Paper only.** The broker's own endpoint gate is the single chokepoint: only
@@ -21,6 +29,8 @@ Design rules, each of which a test pins:
 - **No order on start.** ``start()`` runs preflight checks and sets the state to
   ``RUNNING``; it places no order. An order is placed only when the decision
   source yields a decision *and* the local risk checks pass.
+- **One loop.** A second ``start()`` while the loop is live raises instead of
+  spawning a second loop; ``stop()`` then ``start()`` yields exactly one new loop.
 - **Idempotent.** Each decision maps to a deterministic ``client_order_id``
   derived from the decision id, symbol and side. A re-run, a timeout, or a
   restart reconciles by that id rather than submitting a second order.
@@ -30,7 +40,11 @@ Design rules, each of which a test pins:
   reject it.
 - **Graceful stop.** ``stop()`` refuses further cycles and stops the loop; it does
   not close positions and does not cancel open orders. An order already in flight
-  is reported with its status, not abandoned silently.
+  is reported with its status, not abandoned silently. ``stop()`` waits for the
+  in-flight cycle to finish rather than killing the thread.
+- **A cycle failure is contained.** An unexpected exception inside a cycle is
+  recorded, the state goes to ``ERROR``, and the loop stops — the process does not
+  crash, and the loop does not spin.
 
 Secrets never appear here: the broker reads ``ALPACA_PAPER_API_KEY`` /
 ``ALPACA_PAPER_API_SECRET`` from the environment itself, and this module never
@@ -45,9 +59,10 @@ import json
 import math
 import os
 import tempfile
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -306,6 +321,17 @@ class WorkerStateError(RuntimeError):
     """The persisted worker state is malformed, truncated, or a newer version."""
 
 
+def _as_int(value: Any, default: int) -> int:
+    """Coerce a persisted counter, tolerating a missing or malformed value.
+
+    Additive fields must not make an otherwise readable state file unusable, so a
+    bad counter falls back to the default rather than raising.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return value
+
+
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".worker-state-", suffix=".tmp")
@@ -346,6 +372,10 @@ class WorkerState:
     positions: dict[str, dict] = field(default_factory=dict)
     positions_at: str | None = None
     account: dict[str, Any] = field(default_factory=dict)
+    cycles_completed: int = 0
+    """Cycles the loop has run since the last start. Additive and optional: an
+    older state file without the field reads back as ``0``, and a reader of an
+    older file ignores it, so the schema version does not need to change."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -362,6 +392,7 @@ class WorkerState:
             "positions": {k: dict(v) for k, v in sorted(self.positions.items())},
             "positions_at": self.positions_at,
             "account": dict(self.account),
+            "cycles_completed": self.cycles_completed,
         }
 
     @classmethod
@@ -394,6 +425,7 @@ class WorkerState:
             positions={k: dict(v) for k, v in (payload.get("positions") or {}).items()},
             positions_at=payload.get("positions_at"),
             account=dict(payload.get("account") or {}),
+            cycles_completed=_as_int(payload.get("cycles_completed"), 0),
         )
 
 
@@ -476,6 +508,13 @@ class PaperTradingWorker:
         self.state.status = STATUS_STOPPED
         self.state.strategy_id = config.strategy_id
         self.last_cycle: CycleResult | None = None
+        # The loop. `_lock` serialises control transitions (start/stop) and is the
+        # same lock a cycle holds while it runs, so a stop cannot interleave a
+        # start with a cycle mid-flight. `_stop_event` is the loop's stop signal.
+        self._lock = threading.RLock()
+        self._stop_event = threading.Event()
+        self._loop: threading.Thread | None = None
+        self._next_cycle_at: str | None = None
 
     # -- construction helpers --------------------------------------------
 
@@ -515,6 +554,10 @@ class PaperTradingWorker:
             "last_cycle_at": self.state.last_cycle_at,
             "started_at": self.state.started_at,
             "stopped_at": self.state.stopped_at,
+            "loop_running": self.loop_running,
+            "next_cycle_at": self._next_cycle_at,
+            "cycles_completed": self.state.cycles_completed,
+            "poll_interval_seconds": self.config.poll_interval_seconds,
             "orders": {k: dict(v) for k, v in sorted(self.state.orders.items())},
             "positions": {k: dict(v) for k, v in sorted(self.state.positions.items())},
             "positions_at": self.state.positions_at,
@@ -592,46 +635,138 @@ class PaperTradingWorker:
         return {"checks": checks, "account": self.state.account}
 
     def start(self) -> dict[str, Any]:
-        """Run preflight, then mark the worker ``RUNNING``. Places no order.
+        """Run preflight, mark the worker ``RUNNING``, and launch the loop.
 
-        Refuses if the worker is already running (one worker per state file), and
-        refuses if preflight fails — setting ``ERROR`` with the failing check
-        recorded, never ``RUNNING``.
+        Places no order: preflight only reads, and the loop waits one
+        ``poll_interval_seconds`` before its first cycle, so a STOP right after
+        START prevents even the first order.
+
+        Refuses if a loop is already live (one loop per worker), and refuses if
+        preflight fails — setting ``ERROR`` with the failing check recorded, never
+        ``RUNNING``, and never starting the loop.
         """
-        if self.state.status in (STATUS_RUNNING, STATUS_STARTING):
-            raise WorkerError("a worker is already running; stop it before starting another")
-        self.state.status = STATUS_STARTING
-        self.state.last_error = None
-        self._save()
-        try:
-            result = self.preflight()
-        except (BrokerError, PreflightError, WorkerError) as exc:
-            self.state.status = STATUS_ERROR
-            self.state.last_error = f"{type(exc).__name__}: {exc}"
+        with self._lock:
+            if self.loop_running:
+                raise WorkerError("a worker is already running; stop it before starting another")
+            self.state.status = STATUS_STARTING
+            self.state.last_error = None
             self._save()
-            raise
-        self.state.status = STATUS_RUNNING
-        self.state.started_at = datetime.now(UTC).isoformat()
-        self.state.stopped_at = None
-        self._save()
+            try:
+                result = self.preflight()
+            except (BrokerError, PreflightError, WorkerError) as exc:
+                self.state.status = STATUS_ERROR
+                self.state.last_error = f"{type(exc).__name__}: {exc}"
+                self._save()
+                raise
+            self.state.status = STATUS_RUNNING
+            self.state.started_at = datetime.now(UTC).isoformat()
+            self.state.stopped_at = None
+            self.state.cycles_completed = 0
+            self._save()
+            self._start_loop()
         return {"status": self.state.status, **result}
 
     def stop(self) -> dict[str, Any]:
-        """Stop gracefully: refuse further cycles. Closes no position, cancels no order.
+        """Stop gracefully: signal the loop, wait for the in-flight cycle, then stop.
 
-        An order already submitted is left alone (it belongs to the broker now);
-        its last known status stays in :meth:`status`, so a caller can see it.
+        Closes no position and cancels no order. An order already submitted is left
+        alone (it belongs to the broker now); its last known status stays in
+        :meth:`status`. The in-flight cycle is allowed to finish under the lock
+        rather than being killed, so the ledger and the state file stay consistent.
         """
-        if self.state.status in (STATUS_STOPPED, STATUS_STOPPING):
+        with self._lock:
+            # Signal the loop first, so a cycle it is about to start is skipped.
+            self._stop_event.set()
+            thread = self._loop
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=self._join_timeout())
+        with self._lock:
+            self._loop = None
+            self._next_cycle_at = None
             self.state.status = STATUS_STOPPED
+            self.state.stopped_at = datetime.now(UTC).isoformat()
             self._save()
             return self.status()
-        self.state.status = STATUS_STOPPING
-        self._save()
-        self.state.status = STATUS_STOPPED
-        self.state.stopped_at = datetime.now(UTC).isoformat()
-        self._save()
-        return self.status()
+
+    # -- the loop ---------------------------------------------------------
+
+    @property
+    def loop_running(self) -> bool:
+        """Whether the background loop thread is alive."""
+        thread = self._loop
+        return bool(thread is not None and thread.is_alive())
+
+    def _join_timeout(self) -> float:
+        """How long ``stop()`` waits for the in-flight cycle to finish.
+
+        One poll interval plus a small margin: a cycle does at most one broker
+        round trip, so this is generous without blocking shutdown indefinitely.
+        """
+        return self.config.poll_interval_seconds + 5.0
+
+    def _start_loop(self) -> None:
+        """Spawn the single loop thread. Caller holds ``_lock``."""
+        self._stop_event.clear()
+        self._next_cycle_at = self._in_seconds(self.config.poll_interval_seconds)
+        thread = threading.Thread(target=self._loop_body, name="paper-trading-loop", daemon=True)
+        self._loop = thread
+        thread.start()
+
+    def _loop_body(self) -> None:
+        """Wait one interval, run one cycle, repeat until stopped.
+
+        The wait uses ``Event.wait`` so a stop interrupts it immediately instead of
+        sleeping out the full interval, and so there is no busy loop. The interval
+        is re-read from the config on every pass. The whole iteration — the cycle
+        and its bookkeeping save — is wrapped, so nothing inside can kill the
+        thread with an unhandled error.
+        """
+        while not self._stop_event.is_set():
+            interval = self.config.poll_interval_seconds
+            if self._stop_event.wait(interval):
+                break
+            try:
+                self._run_cycle_locked()
+                with self._lock:
+                    if self._stop_event.is_set():
+                        break
+                    self.state.cycles_completed += 1
+                    self._save()
+                    self._next_cycle_at = self._in_seconds(self.config.poll_interval_seconds)
+            except Exception as exc:  # noqa: BLE001 - a cycle failure must not crash the process
+                self._fail_cycle(exc)
+                break
+
+    def _run_cycle_locked(self) -> None:
+        """Run exactly one cycle, skipping it if a stop was requested first.
+
+        Holds ``_lock`` for the duration, so ``stop()`` cannot observe the worker
+        as stopped while a cycle is mid-flight, and a start/stop cannot interleave.
+        """
+        with self._lock:
+            if self._stop_event.is_set():
+                return
+            self.run_once()
+
+    def _fail_cycle(self, exc: BaseException) -> None:
+        """Contain an unexpected cycle failure: record it, stop safely.
+
+        The loop stops (no auto-retry of a possibly-submitted order), the state
+        goes to ``ERROR``, and the process is left running. The persisted order
+        memory is untouched, so a later manual start reconciles instead of
+        re-submitting. A failure to write the error state is swallowed: the loop
+        is stopping anyway, and the thread must not die with a traceback.
+        """
+        with self._lock:
+            self.state.status = STATUS_ERROR
+            self.state.last_error = f"{type(exc).__name__}: {exc}"
+            self.state.stopped_at = datetime.now(UTC).isoformat()
+            self._next_cycle_at = None
+            with contextlib.suppress(Exception):
+                self._save()
+
+    def _in_seconds(self, seconds: float) -> str:
+        return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
 
     # -- one cycle --------------------------------------------------------
 

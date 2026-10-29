@@ -479,6 +479,13 @@ def serve(
     except KeyboardInterrupt:
         pass
     finally:
+        # Stop the paper worker's loop before the process exits, so a shutdown
+        # never leaves a cycle mid-flight and never places a new order. This is
+        # best-effort: a stop failure must not mask the server's own shutdown.
+        try:
+            dashboard.paper.shutdown()
+        except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+            print(f"  paper trading: stop on shutdown failed: {type(exc).__name__}", flush=True)
         httpd.server_close()
 
 

@@ -24,6 +24,7 @@ dashboard never sees them.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -142,15 +143,34 @@ class PaperTradingController:
             return worker.start()
 
     def stop(self) -> dict[str, Any]:
-        """Stop the worker gracefully. Closes no position, cancels no order."""
+        """Stop the worker gracefully. Closes no position, cancels no order.
+
+        Signals the worker's loop, waits for the in-flight cycle to finish, and
+        leaves the state ``STOPPED``. Never builds a worker just to stop one.
+        """
         if not self.enabled:
             raise PaperTradingDisabled(
                 "paper trading is not enabled; start the dashboard with "
                 "--allow-paper-trading to enable it"
             )
         with self._lock:
-            worker = self._ensure_worker()
+            worker = self._worker
+        if worker is None:
+            return {"status": "STOPPED", "stopped": False, "reason": "no worker was started"}
+        with self._lock:
             return worker.stop()
+
+    def shutdown(self) -> None:
+        """Best-effort stop for process shutdown. Never raises, never builds a worker.
+
+        Only touches a worker that was already started, so an idle dashboard's
+        shutdown performs no request and needs no credential.
+        """
+        worker = self._worker
+        if worker is None:
+            return
+        with contextlib.suppress(Exception):
+            worker.stop()
 
     def run_once(self) -> dict[str, Any]:
         """Process at most one decision (used by tests and an explicit CLI tick)."""

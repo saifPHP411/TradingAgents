@@ -27,6 +27,7 @@ not actually enforced, not merely if the code crashes.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 import threading
@@ -194,12 +195,42 @@ def _worker(
         limits=limits or PaperRiskLimits(),
         state_path=tmp_path / name,
     )
-    return PaperTradingWorker(
+    worker = PaperTradingWorker(
         config=config,
         decision_source=_Source(decisions),
         market_data=StaticMarketData(prices or {"SPY": 10.0}),
         broker_factory=_broker_factory(routes or _default_routes(), calls=calls, fail_on=fail_on, limits=limits),
     )
+    _WORKERS.append(worker)
+    return worker
+
+
+_WORKERS: list[PaperTradingWorker] = []
+
+
+def _worker_obj(**kwargs) -> PaperTradingWorker:
+    """Build a worker and register it for teardown (for tests that need a custom
+    market-data source or no broker factory, which ``_worker`` cannot express)."""
+    worker = PaperTradingWorker(**kwargs)
+    _WORKERS.append(worker)
+    return worker
+
+
+@pytest.fixture(autouse=True)
+def _stop_workers():
+    """Stop every worker started in a test, so no loop outlives the test.
+
+    ``start()`` now launches a non-terminating loop. Tests here exercise the
+    lifecycle and often call ``start()`` without ``stop()``; without this teardown
+    those loops would keep running (and keep writing state) for the rest of the
+    session.
+    """
+    start = len(_WORKERS)
+    yield
+    for worker in _WORKERS[start:]:
+        with contextlib.suppress(Exception):
+            worker.stop()
+    del _WORKERS[start:]
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +278,7 @@ class TestLifecycle:
         monkeypatch.delenv("ALPACA_PAPER_API_KEY", raising=False)
         monkeypatch.delenv("ALPACA_PAPER_API_SECRET", raising=False)
         config = PaperTradingConfig(state_path=tmp_path / "w.json")
-        worker = PaperTradingWorker(
+        worker = _worker_obj(
             config=config,
             decision_source=_Source([]),
             market_data=StaticMarketData({"SPY": 100.0}),
@@ -271,7 +302,7 @@ class TestLifecycle:
 
     def test_unavailable_market_data_blocks_start(self, tmp_path):
         config = PaperTradingConfig(state_path=tmp_path / "w.json")
-        worker = PaperTradingWorker(
+        worker = _worker_obj(
             config=config,
             decision_source=_Source([]),
             market_data=StaticMarketData({}),
@@ -731,6 +762,9 @@ def paper_dashboard(paper_root, allow_loopback):
     )
     httpd, base = _serve_in_thread(dashboard)
     yield base, dashboard
+    # Tear the paper worker's loop down too, so a test that pressed START without
+    # STOP leaves no loop running against a deleted temp directory.
+    dashboard.paper.shutdown()
     httpd.shutdown()
     httpd.server_close()
 
@@ -875,7 +909,7 @@ class TestMarketDataFailures:
                 raise MarketDataError(f"the price source failed for {symbol!r}")
 
         config = PaperTradingConfig(state_path=tmp_path / "w.json")
-        worker = PaperTradingWorker(
+        worker = _worker_obj(
             config=config,
             decision_source=_Source([_decision()]),
             market_data=_Exploding(),
@@ -896,7 +930,7 @@ class TestMarketDataFailures:
                 raise KeyError("a bug in the source")
 
         config = PaperTradingConfig(state_path=tmp_path / "w.json")
-        worker = PaperTradingWorker(
+        worker = _worker_obj(
             config=config,
             decision_source=_Source([_decision()]),
             market_data=_Buggy(),

@@ -317,7 +317,13 @@ is off unless an operator opts in.
 - **One worker per state file.** `start()` runs preflight — broker connection,
   account status, positive buying power, an available market-data source, and a
   valid risk configuration — and places **no** order. A failed preflight leaves
-  the worker `ERROR`, never `RUNNING`.
+  the worker `ERROR`, never `RUNNING`. On success `start()` launches one
+  background loop; a second `start()` while it is live raises rather than starting
+  a second loop.
+- **START means "run continuously".** The loop waits `poll_interval_seconds`
+  *first*, then calls `run_once()` once per interval until `stop()`. Waiting before
+  the first cycle is deliberate: it gives an operator a window to press STOP
+  before any order, and it makes "start places no order" true for a whole interval.
 - **A decision is one order, at most.** `run_once()` processes at most one
   strategy decision and places at most one order. It refuses unless `RUNNING`.
 - **Local risk checks run before the broker.** Buying power, a per-order notional
@@ -332,7 +338,12 @@ is off unless an operator opts in.
   orders, positions, account, timestamps) is written to
   `<root>/worker_state.json`, versioned with `schema_version`. It is read back as
   `STOPPED`; nothing resumes `RUNNING` on its own.
-- **Stop is graceful.** `stop()` closes no position and cancels no order.
+- **Stop is graceful.** `stop()` signals the loop, waits for the in-flight cycle
+  to finish rather than killing the thread, and closes no position and cancels no
+  order. `poll_interval_seconds` is the loop's interval; the default is 60 s.
+- **A cycle failure is contained.** An unexpected exception inside a cycle is
+  recorded, the state goes `ERROR`, the loop stops, and the process keeps running.
+  A later manual `start()` reconciles rather than re-submitting.
 - **A bad price refuses the order.** A missing, `NaN`, `inf`, zero or negative
   price, or a price-source exception, is surfaced as `MarketDataError` and the
   cycle does nothing — no fabricated fill, no state corruption.
@@ -351,11 +362,15 @@ python -m tradingagents.paper_experiment paper-trade --root runs/exp1 --dry-run
 ### Start and stop from the dashboard
 
 The dashboard's **Paper trading** tab has START and STOP buttons, and shows the
-account, positions, orders, last cycle and risk limits. The control is **off by
-default**: a dashboard started without `--allow-paper-trading` reports the feature
-as disabled and refuses every start/stop. Both endpoints require the bearer token
-*and* an `X-Paper-Confirm: yes` header, and a live endpoint cannot be configured in
-— the worker builds its own paper-only broker.
+account, positions, orders, last cycle and risk limits. **START now runs the
+worker continuously** — it launches the loop described above; **STOP** stops it.
+The control is **off by default**: a dashboard started without
+`--allow-paper-trading` reports the feature as disabled and refuses every
+start/stop. Both endpoints require the bearer token *and* an `X-Paper-Confirm: yes`
+header, and a live endpoint cannot be configured in — the worker builds its own
+paper-only broker. `GET /api/paper/status` reports the live state (`STOPPED`,
+`STARTING`, `RUNNING`, `ERROR`), the loop flag, the next-cycle time and the cycles
+completed. On process shutdown the dashboard stops the loop gracefully.
 
 ```bash
 python -m tradingagents.paper_experiment serve --root runs/exp1 \

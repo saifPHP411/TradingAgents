@@ -277,7 +277,10 @@ This session remains the offline simulator; the broker is the online paper venue
 
 The broker has a deliberate start/stop loop (`broker/trading.py`), with its own
 durable, versioned state file (`worker_state.json`) and a dashboard **Paper
-trading** tab. It is opt-in (`--allow-paper-trading`) and paper-only; see
+trading** tab. The dashboard **START** runs the worker **continuously**: one
+background loop that waits `poll_interval_seconds` and then calls `run_once()`
+once per interval until **STOP**, which signals the loop and waits for the
+in-flight cycle to finish. It is opt-in (`--allow-paper-trading`) and paper-only; see
 [PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md#the-paper-trading-worker-explicit-opt-in-paper-only).
 
 ## Running a session forward over time
