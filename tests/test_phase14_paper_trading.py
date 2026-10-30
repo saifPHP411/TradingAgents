@@ -347,9 +347,14 @@ class TestOrderPath:
     def test_insufficient_buying_power_refuses_before_submitting(self, tmp_path):
         calls = []
         routes = _default_routes(account=_Resp(200, dict(_ACCOUNT, buying_power="10")))
-        # 5 shares at 100 = 500 > 10 buying power, and under the 1000 cap.
+        # 5 shares at 100 = 500 > 10 buying power. The cap is raised so buying
+        # power, not the notional cap, is the binding constraint under test.
         worker = _worker(
-            tmp_path, decisions=[_decision(quantity=5)], routes=routes, calls=calls
+            tmp_path,
+            decisions=[_decision(quantity=5)],
+            routes=routes,
+            limits=PaperRiskLimits(max_order_notional=10_000),
+            calls=calls,
         )
         worker.start()
         result = worker.run_once()
@@ -413,6 +418,7 @@ class TestOrderPath:
             tmp_path,
             decisions=[_decision(side="sell", quantity=1)],
             prices={"SPY": 100.0},
+            limits=PaperRiskLimits(max_order_notional=10_000),
             calls=calls,
         )
         worker.start()
@@ -434,6 +440,7 @@ class TestOrderPath:
             tmp_path,
             decisions=[_decision(side="sell", quantity=5)],
             routes=routes,
+            limits=PaperRiskLimits(max_order_notional=10_000),
             calls=calls,
         )
         worker.start()

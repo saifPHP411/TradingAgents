@@ -46,6 +46,21 @@ path, and no configuration that produces one.
 
 ### Changed
 
+- The default `PaperRiskLimits.max_order_notional` is now `25.0` (was `1000.0`),
+  sized to the ~50 USD paper account this path is used with, so the local
+  per-order cap is a real second layer rather than a nominal one. The target
+  `order_notional` (default `25.0`) must not exceed it; the existing configuration
+  check already enforces `order_notional <= max_order_notional`.
+- The Alpaca paper worker's **daily-order counter is now durable**
+  (`paper_experiment/broker/state.py`): the count and the UTC day it belongs to
+  are persisted in the broker's state file, so a restart on the same day keeps the
+  count and a new day starts fresh with no explicit reset. Only an order the
+  broker accepted is counted — a local refusal or a broker rejection does not
+  count, and a partial fill of one order is still one order. The fields are
+  additive and optional, so an older state file without them still loads.
+
+### Changed
+
 - The dashboard **START** button now runs the paper worker **continuously**
   (`paper_experiment/broker/trading.py`): `start()` launches one background loop
   that waits `poll_interval_seconds` and then calls `run_once()` once per interval

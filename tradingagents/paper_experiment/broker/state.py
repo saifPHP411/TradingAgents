@@ -35,6 +35,18 @@ class BrokerStateError(RuntimeError):
     """The persisted broker state is malformed, truncated, or a newer version."""
 
 
+def _as_non_negative_int(value: Any, default: int) -> int:
+    """Coerce a persisted counter, tolerating a missing or malformed value.
+
+    An additive field must not make an otherwise readable state file unusable, so
+    a bad counter falls back to the default rather than raising. A bool is not a
+    counter, and a negative count is treated as the default.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return default
+    return value
+
+
 def _atomic_write(path: Path, text: str) -> None:
     import contextlib
     import os
@@ -86,6 +98,18 @@ class BrokerAccountState:
     """
     positions: dict[str, dict] = field(default_factory=dict)
     positions_at: str | None = None
+    daily_orders_count: int = 0
+    daily_orders_date: str | None = None
+    """Daily-order counter, persisted so it survives a restart.
+
+    ``daily_orders_count`` is the number of orders the broker actually accepted
+    on ``daily_orders_date`` (a UTC calendar day, ``YYYY-MM-DD``). Only an
+    accepted order increments it: a locally refused or broker-rejected order does
+    not, and a partial fill of one order is still one order. On read, a count
+    whose date is not today is treated as zero, so a new day starts fresh with no
+    explicit reset. Additive and optional: an older state file without these
+    fields reads back as "no orders today", so the schema version does not change.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -104,6 +128,8 @@ class BrokerAccountState:
             "applied_fills": sorted(self.applied_fills),
             "positions": {k: dict(v) for k, v in sorted(self.positions.items())},
             "positions_at": self.positions_at,
+            "daily_orders_count": self.daily_orders_count,
+            "daily_orders_date": self.daily_orders_date,
         }
 
     @classmethod
@@ -141,6 +167,8 @@ class BrokerAccountState:
             applied_fills=set(applied),
             positions={k: dict(v) for k, v in positions.items()},
             positions_at=payload.get("positions_at"),
+            daily_orders_count=_as_non_negative_int(payload.get("daily_orders_count"), 0),
+            daily_orders_date=payload.get("daily_orders_date") or None,
         )
 
 

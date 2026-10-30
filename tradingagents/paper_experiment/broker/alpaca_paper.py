@@ -90,6 +90,11 @@ def _host_of(url: str) -> str:
     return (urllib.parse.urlsplit(url).hostname or "").lower()
 
 
+def _today() -> str:
+    """The current UTC calendar day, ``YYYY-MM-DD``. The daily-order window."""
+    return datetime.now(UTC).date().isoformat()
+
+
 def assert_paper_endpoint(base_url: str) -> str:
     """Return ``base_url`` if it is the approved paper endpoint, else raise.
 
@@ -288,7 +293,16 @@ class PaperRiskLimits:
     deliberate opt-in rather than an accident of a SELL with no holding.
     """
 
-    max_order_notional: float = 1_000.0
+    max_order_notional: float = 25.0
+    """A *local* ceiling on one order's notional, and the binding second layer.
+
+    Sized to the smallest account this path is used with (a ~50 USD paper
+    account), so it actually constrains an order instead of being nominal. It is
+    enforced *in addition to* the account's own buying power: an order is refused
+    when it exceeds either. ``order_notional`` (the target size) must not exceed
+    it, checked at configuration time, so ``order_notional <= max_order_notional``
+    always holds.
+    """
     max_open_positions: int = 5
     max_daily_orders: int = 10
     allowed_symbols: tuple[str, ...] = ()
@@ -449,7 +463,6 @@ class AlpacaPaperBroker:
         self._state: BrokerAccountState = (
             self._store.load() if self._store else BrokerAccountState()
         )
-        self._daily_orders = 0
         self._orders_submitted: list[str] = []
         # The broker's own view of positions, refreshed on demand. ``None`` means
         # "not read this process", which is *not* the same as "flat": a sell
@@ -625,6 +638,27 @@ class AlpacaPaperBroker:
         """How many positions the broker currently holds."""
         return len(self.positions(refresh=refresh))
 
+    def daily_orders(self) -> int:
+        """The number of orders accepted today, read from the persisted state.
+
+        A count whose stored date is not today reads as zero, so a new UTC day
+        starts fresh without an explicit reset. The count is durable: a restart on
+        the same day sees the same number.
+        """
+        if self._state.daily_orders_date != _today():
+            return 0
+        return self._state.daily_orders_count
+
+    def _record_daily_order(self) -> None:
+        """Count one accepted order against today, rolling the day over first."""
+        today = _today()
+        if self._state.daily_orders_date != today:
+            self._state.daily_orders_date = today
+            self._state.daily_orders_count = 0
+        self._state.daily_orders_count += 1
+        if self._store:
+            self._store.save(self._state)
+
     # -- order lifecycle ---------------------------------------------------
 
     def _check_risk(
@@ -642,7 +676,7 @@ class AlpacaPaperBroker:
             s.upper() for s in self.limits.allowed_symbols
         }:
             raise PaperRiskRejected(f"{symbol} is not in the allowed symbol list")
-        if self._daily_orders >= self.limits.max_daily_orders:
+        if self.daily_orders() >= self.limits.max_daily_orders:
             raise PaperRiskRejected(
                 f"the daily order limit ({self.limits.max_daily_orders}) is reached"
             )
@@ -826,7 +860,7 @@ class AlpacaPaperBroker:
 
         order = self._parse_order(payload, fallback_client_id=client_order_id)
         self._record_order(order)
-        self._daily_orders += 1
+        self._record_daily_order()
         return order
 
     def _reconcile(self, client_order_id: str) -> BrokerOrder:

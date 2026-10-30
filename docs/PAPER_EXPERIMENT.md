@@ -329,7 +329,14 @@ is off unless an operator opts in.
 - **Local risk checks run before the broker.** Buying power, a per-order notional
   cap, a daily order count, an open-position count, an optional symbol allow-list,
   and long-only (no short) are enforced by the worker and the broker's own
-  `_check_risk` before any request leaves the process.
+  `_check_risk` before any request leaves the process. The per-order cap defaults
+  to `25.0`, sized to a ~50 USD paper account, so it is a real second layer rather
+  than a nominal one; the target `order_notional` must not exceed it.
+- **The daily order count is durable.** It is persisted in the broker's state
+  file with the UTC day it belongs to, so a restart on the same day keeps the
+  count and a new day starts fresh without an explicit reset. Only an order the
+  broker accepted is counted: a local refusal or a broker rejection does not
+  count, and a partial fill of one order is still one order.
 - **Idempotent by construction.** Each decision maps to a deterministic
   `client_order_id`. A decision already processed is skipped; a decision whose
   order the worker already knows is *reconciled* through the broker by that id
