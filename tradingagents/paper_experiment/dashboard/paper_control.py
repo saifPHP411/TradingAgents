@@ -32,11 +32,14 @@ from typing import Any
 
 from ..broker import (
     BANNER,
+    STATUS_STOPPED,
     AlpacaPaperBroker,
     PaperTradingConfig,
     PaperTradingWorker,
     SourceMarketData,
     StaticMarketData,
+    WorkerStateStore,
+    worker_status_view,
 )
 
 
@@ -72,6 +75,33 @@ class PaperTradingController:
 
     # -- worker construction ---------------------------------------------
 
+    def _worker_config(self) -> PaperTradingConfig:
+        """The config the worker runs with, from the persisted experiment config.
+
+        Shared by :meth:`_build_worker` and the read-only :meth:`status`, so the
+        status view reports the same limits the worker would enforce without
+        building — and therefore without freezing — a worker.
+        """
+        from ..experiment import PaperExperiment
+
+        experiment = PaperExperiment.load(self.root, inference=None)
+        return PaperTradingConfig(
+            strategy_id=experiment.config.strategy_id,
+            order_notional=self.order_notional,
+            state_path=self.root / "worker_state.json",
+        )
+
+    def _reload_experiment(self):
+        """Re-read the experiment state from disk, for the decision source.
+
+        Read-only: it loads the persisted experiment (no inference, so nothing is
+        decided) and returns it, so the source sees decisions another writer has
+        recorded since the worker was built. Loading never mutates the experiment.
+        """
+        from ..experiment import PaperExperiment
+
+        return PaperExperiment.load(self.root, inference=None)
+
     def _build_worker(self) -> PaperTradingWorker:
         from ..experiment import PaperExperiment
         from ..paper_trading import ExperimentDecisionSource
@@ -89,7 +119,19 @@ class PaperTradingController:
         market = (
             SourceMarketData(source, sessions[-1]) if sessions else StaticMarketData({})
         )
-        decision_source = ExperimentDecisionSource(experiment, order_notional=self.order_notional)
+        # The source re-reads the experiment state from disk on every decision, so a
+        # decision produced *after* this worker was built — by an autonomous
+        # auto-advance progressing the experiment, for example — is still discovered.
+        # It also filters against the worker's own durable processed-decision set,
+        # wired through a late-bound holder so the source (which the worker needs at
+        # construction) can consult the worker's state once it exists.
+        holder: dict[str, PaperTradingWorker] = {}
+        decision_source = ExperimentDecisionSource(
+            experiment,
+            order_notional=self.order_notional,
+            reload=self._reload_experiment,
+            is_consumed=lambda decision_id: holder["worker"]._is_processed(decision_id),
+        )
         kwargs: dict[str, Any] = {
             "config": config,
             "decision_source": decision_source,
@@ -97,7 +139,9 @@ class PaperTradingController:
         }
         if self._broker_factory is not None:
             kwargs["broker_factory"] = self._broker_factory
-        return self._worker_factory(**kwargs)
+        worker = self._worker_factory(**kwargs)
+        holder["worker"] = worker
+        return worker
 
     def _ensure_worker(self) -> PaperTradingWorker:
         if self._worker is None:
@@ -107,7 +151,15 @@ class PaperTradingController:
     # -- control ----------------------------------------------------------
 
     def status(self) -> dict[str, Any]:
-        """A secret-free status view. Never raises for a disabled controller."""
+        """A secret-free status view. Never raises for a disabled controller.
+
+        Read-only and **build-free**: it never constructs a worker (which would
+        construct the decision source and could freeze a live view). It reports a
+        live worker's state when one exists, and otherwise reads the persisted
+        worker state from disk as ``STOPPED``. That is what makes a dashboard that
+        polls ``status`` every few seconds leave the worker unbuilt until an
+        operator presses START.
+        """
         base: dict[str, Any] = {
             "banner": BANNER,
             "enabled": self.enabled,
@@ -118,17 +170,20 @@ class PaperTradingController:
             base.update({"status": "DISABLED", "reason": "paper trading is not enabled"})
             return base
         with self._lock:
-            try:
-                worker = self._ensure_worker()
-            except Exception as exc:  # noqa: BLE001 - a build failure is reported
-                base.update(
-                    {
-                        "status": "ERROR",
-                        "last_error": f"{type(exc).__name__}: {exc}",
-                    }
-                )
-                return base
+            worker = self._worker
+        if worker is not None:
             base.update(worker.status())
+            return base
+        try:
+            config = self._worker_config()
+        except Exception as exc:  # noqa: BLE001 - a build failure is reported
+            base.update({"status": "ERROR", "last_error": f"{type(exc).__name__}: {exc}"})
+            return base
+        state = WorkerStateStore(self.root / "worker_state.json").load()
+        # Nothing is running (no worker object exists), so the persisted state is
+        # reported as STOPPED, never as a stale RUNNING from a previous process.
+        state.status = STATUS_STOPPED
+        base.update(worker_status_view(state=state, config=config))
         return base
 
     def start(self) -> dict[str, Any]:

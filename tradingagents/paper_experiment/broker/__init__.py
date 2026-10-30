@@ -60,6 +60,7 @@ from .trading import (
     WorkerState,
     WorkerStateError,
     WorkerStateStore,
+    worker_status_view,
 )
 
 __all__ = [
@@ -101,4 +102,5 @@ __all__ = [
     "WorkerStateStore",
     "assert_paper_endpoint",
     "broker_status",
+    "worker_status_view",
 ]

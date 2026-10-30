@@ -326,6 +326,18 @@ is off unless an operator opts in.
   before any order, and it makes "start places no order" true for a whole interval.
 - **A decision is one order, at most.** `run_once()` processes at most one
   strategy decision and places at most one order. It refuses unless `RUNNING`.
+- **A decision produced while the worker runs is still delivered.** The decision
+  source re-reads the experiment on every cycle (the dashboard's worker reloads it
+  from disk), so an autonomous `auto-advance` progressing the experiment does not
+  hide a decision from a running worker. Starting a worker does not replay the
+  experiment's settled history: only a decision that was pending when the worker
+  was built, or one produced after it, is offered. A decision that is a HOLD, is
+  blocked, or has no bar yet for its execution session is never an order.
+- **`status` never builds the worker.** `GET /api/paper/status` is a read-only,
+  build-free view: it reports a live worker if one exists, and otherwise reads the
+  persisted worker state from disk as `STOPPED`. A dashboard that polls status
+  every few seconds therefore leaves the worker unbuilt until an operator presses
+  START, rather than freezing an empty decision view.
 - **Local risk checks run before the broker.** Buying power, a per-order notional
   cap, a daily order count, an open-position count, an optional symbol allow-list,
   and long-only (no short) are enforced by the worker and the broker's own
@@ -340,9 +352,14 @@ is off unless an operator opts in.
 - **Idempotent by construction.** Each decision maps to a deterministic
   `client_order_id`. A decision already processed is skipped; a decision whose
   order the worker already knows is *reconciled* through the broker by that id
-  rather than re-submitted. A lost response is reconciled, not guessed.
-- **A restart comes back `STOPPED`.** The worker's state (processed decision,
-  orders, positions, account, timestamps) is written to
+  rather than re-submitted. A lost response is reconciled, not guessed. The
+  worker remembers **every** decision it has acted on, not only the last one, in
+  a durable `processed_decisions` set — so after a restart an earlier decision is
+  not re-ordered. A refusal (a local risk refusal or a broker rejection) is
+  definitive for that decision too: it is not re-attempted on every later cycle,
+  which keeps a refused decision from becoming an unbounded retry loop.
+- **A restart comes back `STOPPED`.** The worker's state (the processed-decision
+  set, orders, positions, account, timestamps) is written to
   `<root>/worker_state.json`, versioned with `schema_version`. It is read back as
   `STOPPED`; nothing resumes `RUNNING` on its own.
 - **Stop is graceful.** `stop()` signals the loop, waits for the in-flight cycle

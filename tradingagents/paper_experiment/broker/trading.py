@@ -376,6 +376,17 @@ class WorkerState:
     """Cycles the loop has run since the last start. Additive and optional: an
     older state file without the field reads back as ``0``, and a reader of an
     older file ignores it, so the schema version does not need to change."""
+    processed_decisions: set[str] = field(default_factory=set)
+    """Every decision id the worker has already acted on — the durable "do not
+    order this decision again" set.
+
+    ``last_processed_decision_id`` records only the most recent decision, which is
+    enough to skip an immediate repeat but not to tell, after a restart, whether an
+    *earlier* decision was already submitted. This set is that memory: the worker
+    adds a decision when it submits an order for it, reconciles an existing one, or
+    the broker definitively rejects it, and a resumed worker skips every id in the
+    set. It is additive and optional: an older state file without the field reads
+    back as "nothing processed", so the schema version does not change."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -393,6 +404,7 @@ class WorkerState:
             "positions_at": self.positions_at,
             "account": dict(self.account),
             "cycles_completed": self.cycles_completed,
+            "processed_decisions": sorted(self.processed_decisions),
         }
 
     @classmethod
@@ -426,6 +438,7 @@ class WorkerState:
             positions_at=payload.get("positions_at"),
             account=dict(payload.get("account") or {}),
             cycles_completed=_as_int(payload.get("cycles_completed"), 0),
+            processed_decisions=set(payload.get("processed_decisions") or []),
         )
 
 
@@ -474,6 +487,54 @@ class CycleResult:
             "skipped_reason": self.skipped_reason,
             "error": self.error,
         }
+
+
+def worker_status_view(
+    *,
+    state: WorkerState,
+    config: PaperTradingConfig,
+    loop_running: bool = False,
+    next_cycle_at: str | None = None,
+    last_cycle: CycleResult | None = None,
+) -> dict[str, Any]:
+    """The secret-free status of a paper worker, from its state and config alone.
+
+    Split out from :meth:`PaperTradingWorker.status` so a read-only caller can
+    report the persisted state **without building a worker** (and therefore without
+    constructing the decision source or touching the broker). Every field is
+    derived from data, so a build cannot freeze a live view: the decision source is
+    never involved, which is the whole point.
+    """
+    return {
+        "banner": BANNER,
+        "mode": "ALPACA_PAPER",
+        "live": False,
+        "status": state.status,
+        "strategy_id": state.strategy_id,
+        "endpoint": config.base_url,
+        "paper_endpoint_only": config.base_url == PAPER_BASE_URL,
+        "last_processed_decision_id": state.last_processed_decision_id,
+        "last_error": state.last_error,
+        "last_cycle_at": state.last_cycle_at,
+        "started_at": state.started_at,
+        "stopped_at": state.stopped_at,
+        "loop_running": loop_running,
+        "next_cycle_at": next_cycle_at,
+        "cycles_completed": state.cycles_completed,
+        "poll_interval_seconds": config.poll_interval_seconds,
+        "orders": {k: dict(v) for k, v in sorted(state.orders.items())},
+        "positions": {k: dict(v) for k, v in sorted(state.positions.items())},
+        "positions_at": state.positions_at,
+        "account": dict(state.account),
+        "last_cycle": last_cycle.to_dict() if last_cycle is not None else None,
+        "risk_limits": {
+            "max_order_notional": config.limits.max_order_notional,
+            "max_open_positions": config.limits.max_open_positions,
+            "max_daily_orders": config.limits.max_daily_orders,
+            "allow_short": config.limits.allow_short,
+            "order_notional": config.order_notional,
+        },
+    }
 
 
 class PaperTradingWorker:
@@ -537,40 +598,29 @@ class PaperTradingWorker:
         if self._store:
             self._store.save(self.state)
 
+    def _is_processed(self, decision_id: str) -> bool:
+        """Whether this decision has already been acted on (durably)."""
+        return (
+            decision_id in self.state.processed_decisions
+            or decision_id == self.state.last_processed_decision_id
+        )
+
+    def _mark_processed(self, decision_id: str) -> None:
+        """Remember a decision as done, so no cycle — and no restart — repeats it."""
+        self.state.last_processed_decision_id = decision_id
+        self.state.processed_decisions.add(decision_id)
+
     # -- status -----------------------------------------------------------
 
     def status(self) -> dict[str, Any]:
         """A secret-free view of the worker, for the dashboard and the CLI."""
-        return {
-            "banner": BANNER,
-            "mode": "ALPACA_PAPER",
-            "live": False,
-            "status": self.state.status,
-            "strategy_id": self.state.strategy_id,
-            "endpoint": self.config.base_url,
-            "paper_endpoint_only": self.config.base_url == PAPER_BASE_URL,
-            "last_processed_decision_id": self.state.last_processed_decision_id,
-            "last_error": self.state.last_error,
-            "last_cycle_at": self.state.last_cycle_at,
-            "started_at": self.state.started_at,
-            "stopped_at": self.state.stopped_at,
-            "loop_running": self.loop_running,
-            "next_cycle_at": self._next_cycle_at,
-            "cycles_completed": self.state.cycles_completed,
-            "poll_interval_seconds": self.config.poll_interval_seconds,
-            "orders": {k: dict(v) for k, v in sorted(self.state.orders.items())},
-            "positions": {k: dict(v) for k, v in sorted(self.state.positions.items())},
-            "positions_at": self.state.positions_at,
-            "account": dict(self.state.account),
-            "last_cycle": self.last_cycle.to_dict() if self.last_cycle else None,
-            "risk_limits": {
-                "max_order_notional": self.config.limits.max_order_notional,
-                "max_open_positions": self.config.limits.max_open_positions,
-                "max_daily_orders": self.config.limits.max_daily_orders,
-                "allow_short": self.config.limits.allow_short,
-                "order_notional": self.config.order_notional,
-            },
-        }
+        return worker_status_view(
+            state=self.state,
+            config=self.config,
+            loop_running=self.loop_running,
+            next_cycle_at=self._next_cycle_at,
+            last_cycle=self.last_cycle,
+        )
 
     # -- lifecycle --------------------------------------------------------
 
@@ -795,7 +845,7 @@ class PaperTradingWorker:
             self.last_cycle = result
             return result
 
-        if decision.decision_id == self.state.last_processed_decision_id:
+        if self._is_processed(decision.decision_id):
             self._save()
             result = CycleResult(
                 ran=False,
@@ -809,7 +859,7 @@ class PaperTradingWorker:
         # A decision whose order the worker already knows is not re-submitted.
         if client_order_id in self.state.orders:
             order = self._reconcile(client_order_id)
-            self.state.last_processed_decision_id = decision.decision_id
+            self._mark_processed(decision.decision_id)
             self._record_order(order)
             result = CycleResult(
                 ran=False,
@@ -864,6 +914,10 @@ class PaperTradingWorker:
             # A local refusal or a broker rejection is recorded, not hidden, and the
             # worker stays RUNNING so the next cycle can act.
             self.state.last_error = f"{type(exc).__name__}: {exc}"
+            # A refusal is definitive for this decision: the worker stays RUNNING
+            # for the next decision, but this one is not re-attempted on every
+            # subsequent cycle, exactly as a one-shot source would not re-yield it.
+            self._mark_processed(decision.decision_id)
             self._save()
             result = CycleResult(
                 ran=False,
@@ -875,7 +929,7 @@ class PaperTradingWorker:
             self.last_cycle = result
             return result
 
-        self.state.last_processed_decision_id = decision.decision_id
+        self._mark_processed(decision.decision_id)
         self.state.last_error = None
         self._record_order(order)
         result = CycleResult(

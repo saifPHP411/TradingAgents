@@ -164,6 +164,18 @@ faking a success.
   with no second fetch. The frozen dataset is not stored (2,515 sessions); it
   reloads from disk and the recorded window is checked instead. A source that can
   persist neither is refused, never silently swapped for the frozen dataset.
+- The broker decision bridge (`paper_experiment/paper_trading.py`) must re-read the
+  experiment on every decision; it must never cache a decision list at build time.
+  A worker is often built before any decision exists (the dashboard builds it on
+  START), and `auto-advance` records decisions from another writer, so a cached
+  list freezes the worker at "no decision is due" forever. Two guards keep it from
+  going wrong the other way: a build-time baseline suppresses decisions already
+  *settled* when the source was built (START must not replay history), and the
+  worker's durable `processed_decisions` set suppresses any decision it has already
+  ordered. See `tests/test_phase17_decision_delivery.py`.
+- `PaperTradingController.status()` must not build the worker. A status poll that
+  constructs the worker (and so the decision source) is what froze a live view; the
+  status path reads the persisted `worker_state.json` as `STOPPED` instead.
 
 ## Known limitation
 

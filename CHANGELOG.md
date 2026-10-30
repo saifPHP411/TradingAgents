@@ -33,7 +33,12 @@ path, and no configuration that produces one.
   fabricating a fill.
 - A strategy→worker decision bridge (`paper_experiment/paper_trading.py`): turns
   an experiment's pending decisions into worker `TradingDecision`s, deterministically
-  ordered. A "Hold" decision yields nothing.
+  ordered. A "Hold" decision yields nothing. The bridge **re-reads** the
+  experiment on every decision (through a caller-supplied `reload`), so a decision
+  produced *after* the worker was built is still discovered; it suppresses
+  decisions that were already settled when the source was built, so starting a
+  worker does not replay history; and it filters against the worker's durable
+  processed-decision set, so a decision is never offered twice.
 - Dashboard start/stop for the paper worker (`paper_experiment/dashboard/`): a
   **Paper trading** tab with START/STOP, plus `/api/paper/status`,
   `/api/paper/start` and `/api/paper/stop`. Off by default
@@ -80,6 +85,31 @@ path, and no configuration that produces one.
   long-only constraints). `submit_order` accepts `side` and an explicit
   `refresh`; the default preserves prior behaviour. `BrokerAccountState` now
   persists positions.
+
+### Fixed
+
+- **Decisions did not reach the Alpaca paper worker.** Three causes, all fixed
+  and each pinned by a test in `tests/test_phase17_decision_delivery.py`:
+  - `ExperimentDecisionSource` loaded the experiment's decisions once and cached
+    them, so a decision recorded after the worker was built was never seen. It now
+    re-reads the experiment on every decision through a caller-supplied `reload`
+    (the dashboard supplies one that reloads from disk), so an autonomous
+    `auto-advance` progressing the experiment cannot hide a decision from a running
+    worker. A build-time baseline of already-settled decisions means starting a
+    worker does not replay history, and a decision that was pending at build time —
+    or produced afterwards — is still delivered.
+  - `PaperTradingController.status()` built the worker (and therefore the decision
+    source) on a status poll, so a dashboard that polls status could freeze a live
+    view before any decision existed. `status()` is now build-free: it reports a
+    live worker if one exists, and otherwise reads the persisted worker state from
+    disk as `STOPPED`. The worker is built only on START.
+  - The worker remembered only the single most recent decision id, which is not
+    enough to tell after a restart whether an *earlier* decision was already
+    ordered. `WorkerState` now carries a durable `processed_decisions` set: the
+    worker adds a decision when it submits an order for it, reconciles an existing
+    one, or the broker definitively rejects it, and a resumed worker skips every id
+    in the set. The field is additive and optional, so an older state file still
+    loads.
 
 ### Added (simulated trading system)
 
