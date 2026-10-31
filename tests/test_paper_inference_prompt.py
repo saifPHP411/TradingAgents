@@ -157,6 +157,110 @@ class TestTheRequestCarriesTheWindow:
 
     def test_the_prompt_version_is_bumped_past_the_blind_one(self):
         assert PAPER_INFERENCE_PROMPT_VERSION != "paper-inference-1"
+        assert PAPER_INFERENCE_PROMPT_VERSION != "paper-inference-2"
+
+
+# ---------------------------------------------------------------------------
+# The request carries the computed indicator evidence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestTheRequestCarriesTheIndicatorEvidence:
+    def test_the_prompt_states_the_indicators(self, credential):
+        factory, client = _factory()
+        inference = ProviderInference(
+            provider="groq", model="openai/gpt-oss-20b", client_factory=factory
+        )
+        frame = _frame(periods=260)
+        inference(symbol="SPY", session=str(frame.index[-1])[:10], window=frame)
+
+        prompt = client.llm.last_prompt
+        assert "Indicators for SPY" in prompt
+        for label in ("RSI", "MACD", "Bollinger", "ATR", "trend"):
+            assert label in prompt, label
+
+    def test_the_prompt_asks_for_supporting_and_opposing_factors(self, credential):
+        factory, client = _factory()
+        inference = ProviderInference(
+            provider="groq", model="openai/gpt-oss-20b", client_factory=factory
+        )
+        frame = _frame(periods=260)
+        inference(symbol="SPY", session=str(frame.index[-1])[:10], window=frame)
+
+        prompt = client.llm.last_prompt
+        assert "Supporting factors" in prompt
+        assert "Opposing factors" in prompt
+
+    def test_the_indicator_window_is_the_same_bounded_window(self, credential):
+        """No later bar may reach the indicator block either."""
+        factory, client = _factory()
+        inference = ProviderInference(
+            provider="groq", model="openai/gpt-oss-20b", client_factory=factory
+        )
+        frame = _frame(periods=260)
+        session = str(frame.index[100])[:10]
+        bounded = frame[frame.index <= pd.Timestamp(session)]
+        inference(symbol="SPY", session=session, window=bounded)
+
+        prompt = client.llm.last_prompt
+        for later in frame.index[101:]:
+            assert str(later)[:10] not in prompt
+
+    def test_a_malformed_window_blocks_before_any_indicator_is_rendered(self, credential):
+        factory, client = _factory()
+        inference = ProviderInference(
+            provider="groq", model="openai/gpt-oss-20b", client_factory=factory
+        )
+        frame = _frame(periods=260)
+        frame.iloc[-1, frame.columns.get_loc("close")] = math.nan
+        with pytest.raises(InferenceUnavailable):
+            inference(symbol="SPY", session=str(frame.index[-1])[:10], window=frame)
+        assert client.llm.calls == 0
+
+
+# ---------------------------------------------------------------------------
+# The record's provenance is the seam that actually ran, not the graph's
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestTheRecordProvenanceIsThePaperSeam:
+    def _experiment(self, tmp_path, inference):
+        source = StaticPriceSource({"SPY": _frame(periods=60)})
+        config = ExperimentConfig.from_protocol(
+            symbols=("SPY",), decision_frequency_sessions=1, evaluation_lag_sessions=2
+        )
+        experiment = PaperExperiment(
+            source=source, config=config, root=tmp_path / "exp", inference=inference
+        )
+        experiment.ensure_created()
+        return experiment, source
+
+    def test_the_record_names_the_paper_prompt_not_the_graph_prompt(self, tmp_path):
+        experiment, source = self._experiment(tmp_path, StubInference(rating="Buy"))
+        outcome = experiment.process_session(source.sessions()[0])
+        record = experiment._record_for(experiment.decisions[outcome.decision_id])
+
+        assert record.prompt_version == PAPER_INFERENCE_PROMPT_VERSION
+        assert record.prompt_version != "tradingagents-default"
+
+    def test_the_record_does_not_claim_the_agent_graph_ran(self, tmp_path):
+        experiment, source = self._experiment(tmp_path, StubInference(rating="Buy"))
+        outcome = experiment.process_session(source.sessions()[0])
+        record = experiment._record_for(experiment.decisions[outcome.decision_id])
+
+        assert record.graph_version == "paper-single-call"
+        assert record.graph_version != "tradingagents-graph"
+
+    def test_the_config_carries_the_paper_protocol_identity(self):
+        config = ExperimentConfig.from_protocol(
+            symbols=("SPY",), decision_frequency_sessions=1, evaluation_lag_sessions=2
+        )
+        from tradingagents.paper_experiment.protocol import PAPER_PROTOCOL
+
+        assert config.protocol_version == PAPER_PROTOCOL.version
+        assert config.protocol_config_hash == PAPER_PROTOCOL.config_hash()
 
 
 # ---------------------------------------------------------------------------

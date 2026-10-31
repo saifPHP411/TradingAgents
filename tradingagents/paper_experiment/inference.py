@@ -35,10 +35,16 @@ from dataclasses import dataclass
 from tradingagents.llm_clients.api_key_env import get_api_key_env
 
 from .experiment import InferenceUnavailable
+from .indicators import IndicatorError, render_indicator_context
+from .protocol import PAPER_INFERENCE_PROMPT_VERSION
 
-PAPER_INFERENCE_PROMPT_VERSION = "paper-inference-2"
-"""Bumped when the request shape changes. ``paper-inference-1`` was the data-blind
-prompt that could only elicit ``Hold``; a record captured under it saw no bars."""
+__all__ = [
+    "PAPER_INFERENCE_PROMPT_VERSION",
+    "WINDOW_BARS",
+    "InferenceUnavailable",
+    "ProviderInference",
+    "StubInference",
+]
 
 WINDOW_BARS = 30
 """How many trailing bars are shown to the model, matching the verified market
@@ -49,13 +55,23 @@ _BAR_COLUMNS = ("open", "high", "low", "close", "volume")
 
 _PROMPT = (
     "You are a portfolio manager. Decide a position for {symbol} as of {session}.\n"
-    "Use only the daily price history below, which ends at the decision session and\n"
-    "contains no later bar. Reply in exactly this format and nothing else:\n"
-    "**Rating**: <one of Buy, Overweight, Hold, Underweight, Sell>\n"
-    "**Executive Summary**: <one short sentence>\n"
+    "Use only the evidence below, which is computed from daily bars up to and\n"
+    "including the decision session and contains no later bar.\n"
+    "\n"
+    "Indicators for {symbol} (computed from the same window):\n"
+    "{indicators}\n"
     "\n"
     "Daily bars for {symbol} (oldest first):\n"
-    "{window}"
+    "{window}\n"
+    "\n"
+    "Weigh the trend, momentum and volatility evidence. State the factors that\n"
+    "support your call and the factors that oppose it; if you choose Hold, give a\n"
+    "concrete reason grounded in the evidence above rather than a general caution.\n"
+    "Reply in exactly this format and nothing else:\n"
+    "**Rating**: <one of Buy, Overweight, Hold, Underweight, Sell>\n"
+    "**Supporting factors**: <one short sentence>\n"
+    "**Opposing factors**: <one short sentence>\n"
+    "**Executive Summary**: <one short sentence>\n"
 )
 
 
@@ -88,6 +104,22 @@ def _render_window(window, *, limit: int = WINDOW_BARS) -> str:
             values.append(f"{value:g}")
         lines.append(",".join([str(stamp)[:10], *values]))
     return "\n".join(lines)
+
+
+def _render_indicators(window) -> str:
+    """Render the indicator block, refusing a malformed window before any request.
+
+    The same fail-closed rule as :func:`_render_window`: a non-finite or missing
+    OHLCV value raises :class:`InferenceUnavailable` so the caller records a
+    blocked decision, rather than sending the model evidence computed from a
+    number that is not real.
+    """
+    try:
+        return render_indicator_context(window)
+    except IndicatorError as exc:
+        raise InferenceUnavailable(
+            f"the indicator context could not be computed from the price window: {exc}"
+        ) from exc
 
 
 @dataclass
@@ -151,7 +183,10 @@ class ProviderInference:
         from tradingagents.llm_evaluation.capture import observed_decision
 
         prompt = _PROMPT.format(
-            symbol=symbol, session=session, window=_render_window(window)
+            symbol=symbol,
+            session=session,
+            indicators=_render_indicators(window),
+            window=_render_window(window),
         )
         make_client = self._client_factory or factory.create_llm_client
         try:

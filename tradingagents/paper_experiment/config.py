@@ -24,7 +24,9 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 
-from tradingagents.llm_evaluation.protocol import DEFAULT_PROTOCOL, LLMEvaluationProtocol
+from tradingagents.llm_evaluation.protocol import LLMEvaluationProtocol
+
+from .protocol import PAPER_PROTOCOL
 
 
 class ExperimentConfigError(ValueError):
@@ -45,7 +47,7 @@ class ExperimentConfig:
     evaluation_lag_sessions: int = 5
     initial_cash: float = 100_000.0
     holding_period_days: int = 21
-    protocol_version: str = DEFAULT_PROTOCOL.version
+    protocol_version: str = PAPER_PROTOCOL.version
     protocol_config_hash: str = ""
     costs: dict = field(default_factory=dict)
     limits: dict = field(default_factory=dict)
@@ -96,8 +98,13 @@ class ExperimentConfig:
         protocol: LLMEvaluationProtocol | None = None,
         **overrides,
     ) -> ExperimentConfig:
-        """Build a config from the frozen protocol, with explicit overrides."""
-        protocol = protocol or DEFAULT_PROTOCOL
+        """Build a config from the frozen protocol, with explicit overrides.
+
+        The default protocol is the *paper* protocol, not the agent graph's: the
+        experiment makes one bounded model call, so its records must carry the
+        prompt and seam it actually used rather than the graph's.
+        """
+        protocol = protocol or PAPER_PROTOCOL
         base = {
             "symbols": (protocol.benchmark,),
             "decision_frequency_sessions": protocol.decision_frequency_sessions,

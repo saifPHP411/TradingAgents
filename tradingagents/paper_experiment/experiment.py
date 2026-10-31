@@ -45,7 +45,6 @@ from typing import Protocol
 from tradingagents.execution.interface import ExecutionMode, resolve_mode
 from tradingagents.execution.paper import PaperSession, PaperStateError, Quote, new_session
 from tradingagents.llm_evaluation.capture import CaptureError, build_record
-from tradingagents.llm_evaluation.protocol import DEFAULT_PROTOCOL
 from tradingagents.llm_evaluation.records import (
     SOURCE_LLM_INFERENCE,
     SOURCE_SYNTHETIC_FIXTURE,
@@ -65,6 +64,7 @@ from .journal import (
     KIND_SESSION_PROCESSED,
     ExperimentJournal,
 )
+from .protocol import PAPER_PROTOCOL
 from .sources import PriceSource, PriceSourceError
 
 PAPER_EXPERIMENT_SCHEMA_VERSION = 1
@@ -437,7 +437,9 @@ class PaperExperiment:
         """Process one session: settle what is due, then decide at T.
 
         Idempotent: a session already processed returns a no-op outcome without
-        touching the book or the journal again.
+        touching the book or the journal again. Sessions advance forward: a call
+        for a session earlier than one already processed raises rather than
+        silently reordering the book.
 
         A decision is only *taken* on a cadence session (every
         ``decision_frequency_sessions`` sessions, and never beyond
@@ -454,6 +456,19 @@ class PaperExperiment:
             raise ExperimentError(
                 f"{session} is not covered by the price source {self.source.name!r} "
                 f"({sessions[0]}..{sessions[-1]})"
+            )
+
+        # Sessions advance forward. A call for a session earlier than one already
+        # processed is refused rather than accepted silently: settling and working
+        # the book against a past bar reorders the ledger's event log and changes
+        # the accounting, so the same set of sessions processed in two orders would
+        # produce two different results. A named refusal keeps a caller that lost
+        # its place from corrupting the run.
+        latest = self._latest_processed_session()
+        if latest is not None and session < latest:
+            raise ExperimentError(
+                f"{session} is out of order: {latest} has already been processed, and "
+                "sessions must advance forward"
             )
 
         # Execute and evaluate anything due at or before this session first, so a
@@ -501,6 +516,13 @@ class PaperExperiment:
         )
         self.save_state()
         return outcome
+
+    def _latest_processed_session(self) -> str | None:
+        """The latest session processed so far, or ``None`` when none has been.
+
+        ISO session strings sort lexicographically, so ``max`` is the latest.
+        """
+        return max(self.processed_sessions) if self.processed_sessions else None
 
     def _is_decision_session(self, session: str) -> bool:
         """Whether a decision is due on ``session``.
@@ -598,7 +620,7 @@ class PaperExperiment:
                 rating=rating,
                 action=action,
                 frame=frame,
-                protocol=DEFAULT_PROTOCOL,
+                protocol=PAPER_PROTOCOL,
                 source=source,
                 provider=self.config.provider,
                 model_name=self.config.model,

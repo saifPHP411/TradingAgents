@@ -47,12 +47,14 @@ from .experiment import (
     PaperExperiment,
     SessionOutcome,
 )
+from .indicators import IndicatorError, IndicatorSet, compute_indicators, render_indicator_context
 from .journal import (
     JOURNAL_SCHEMA_VERSION,
     ExperimentJournal,
     JournalEntry,
     JournalError,
 )
+from .protocol import PAPER_GRAPH_VERSION, PAPER_INFERENCE_PROMPT_VERSION, PAPER_PROTOCOL
 from .providers import (
     AlphaVantageDailySource,
     FinnhubQuoteSource,
@@ -81,6 +83,9 @@ from .sources import (
 __all__ = [
     "JOURNAL_SCHEMA_VERSION",
     "PAPER_EXPERIMENT_SCHEMA_VERSION",
+    "PAPER_GRAPH_VERSION",
+    "PAPER_INFERENCE_PROMPT_VERSION",
+    "PAPER_PROTOCOL",
     "REPORT_SCHEMA_VERSION",
     "STATE_BLOCKED",
     "STATE_EVALUATED",
@@ -98,6 +103,8 @@ __all__ = [
     "FrozenPriceSource",
     "InferenceFn",
     "InferenceUnavailable",
+    "IndicatorError",
+    "IndicatorSet",
     "JournalEntry",
     "JournalError",
     "PaperExperiment",
@@ -116,7 +123,9 @@ __all__ = [
     "SourceSelectionError",
     "StaticPriceSource",
     "build_report",
+    "compute_indicators",
     "current_market_source_available",
     "provider_registry",
+    "render_indicator_context",
     "select_source",
 ]

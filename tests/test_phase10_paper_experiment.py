@@ -309,6 +309,53 @@ class TestDuplicateProcessing:
         reloaded.process_session(sessions[3])
         assert _accounting(reloaded) == before
 
+    def test_a_session_earlier_than_one_already_processed_is_refused(self, tmp_path):
+        """Forward-only: a backwards step would reorder the book silently."""
+        source = _source()
+        experiment = _experiment(tmp_path, source=source)
+        sessions = source.sessions()
+        experiment.process_session(sessions[5])
+        with pytest.raises(ExperimentError, match="out of order"):
+            experiment.process_session(sessions[2])
+
+    def test_the_refused_backwards_step_changes_nothing(self, tmp_path):
+        source = _source()
+        experiment = _experiment(tmp_path, source=source)
+        sessions = source.sessions()
+        experiment.process_session(sessions[5])
+        before = _accounting(experiment)
+        events_before = len(experiment.session.ledger.events)
+        with pytest.raises(ExperimentError):
+            experiment.process_session(sessions[2])
+        assert _accounting(experiment) == before
+        assert len(experiment.session.ledger.events) == events_before
+        assert sessions[2] not in experiment.processed_sessions
+
+    def test_a_backwards_step_after_a_restart_is_also_refused(self, tmp_path):
+        source = _source()
+        experiment = _experiment(tmp_path, source=source)
+        sessions = source.sessions()
+        # Leave the first two sessions unprocessed, then advance past them.
+        for session in sessions[2:8]:
+            experiment.process_session(session)
+        experiment.save_state()
+        reloaded = PaperExperiment.load(
+            tmp_path / "exp", source=source, inference=StubInference(rating="Buy")
+        )
+        assert sessions[1] not in reloaded.processed_sessions
+        with pytest.raises(ExperimentError, match="out of order"):
+            reloaded.process_session(sessions[1])
+
+    def test_forward_processing_still_works_after_a_gap(self, tmp_path):
+        """A skipped session is not a backwards step, so it stays allowed."""
+        source = _source()
+        experiment = _experiment(tmp_path, source=source)
+        sessions = source.sessions()
+        experiment.process_session(sessions[0])
+        experiment.process_session(sessions[6])
+        assert sessions[6] in experiment.processed_sessions
+        assert sessions[6] > sessions[0]
+
 
 # ---------------------------------------------------------------------------
 # Phase D: honesty safeguards

@@ -88,6 +88,36 @@ path, and no configuration that produces one.
 
 ### Fixed
 
+- **The paper request now carries the computed indicator evidence, and its
+  records no longer claim the agent graph ran.** Rendering the raw window (above)
+  fixed the data-blind failure, but still left the model to recompute trend,
+  momentum and volatility from the bar table itself. Two changes:
+  - `paper_experiment/indicators.py` computes a deterministic indicator block from
+    the *same* point-in-time window — SMA20/50/200, EMA10/20, RSI(14),
+    MACD(12,26,9), Bollinger(20,2), ATR(14) and ATR as a fraction of close, volume
+    versus its 20-day average, 20-day realised volatility, 1/5/20-day returns and
+    the position within the 20-day high–low range — and the request renders it
+    alongside the bars. `PAPER_INFERENCE_PROMPT_VERSION` is `paper-inference-3`,
+    and the prompt asks for the factors *supporting* and *opposing* the call, so a
+    `Hold` must be reasoned. An indicator the window is too short for is rendered
+    `insufficient history (need N bars, have M)` and is never zero-filled or
+    extrapolated; a non-finite or missing OHLCV value raises and blocks the
+    decision before any request.
+  - Paper records inherited the graph's `prompt_version` (`tradingagents-default`)
+    and `graph_version` (`tradingagents-graph`), attesting to prompts and a
+    pipeline the single-call decision never used.
+    `paper_experiment/protocol.py` derives a paper protocol that keeps the
+    frozen universe, costs, limits, holding period and capital but names the real
+    seam (`graph_version = "paper-single-call"`). Covered by
+    `tests/test_paper_indicators.py` and `tests/test_paper_inference_prompt.py`.
+- **A backwards `process_session` call is now refused, not silently accepted.**
+  `process_session` is idempotent for a session already processed, but a call for
+  a session *earlier* than one already processed used to be accepted. It settled
+  the book against a past bar, which reorders the ledger's event log: the same set
+  of sessions processed in two orders produced two different cash, fee and
+  position results. It now raises `ExperimentError` and leaves the state
+  untouched. Forward progress across a gap is still allowed. Covered by
+  `tests/test_phase10_paper_experiment.py::TestDuplicateProcessing`.
 - **Decisions did not reach the Alpaca paper worker.** Three causes, all fixed
   and each pinned by a test in `tests/test_phase17_decision_delivery.py`:
   - `ExperimentDecisionSource` loaded the experiment's decisions once and cached

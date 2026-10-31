@@ -181,10 +181,45 @@ invariants now hold and are tested in `tests/test_paper_inference_prompt.py`:
   *before* any request is made, so no paid call is spent and no decision is taken
   blind.
 
+### The request now also carries the indicators
+
+Rendering the raw bars fixed the data-blind failure, but it still left the model
+to recompute trend, momentum and volatility from the table itself — work that a
+language model does unreliably, and where one arithmetic slip is
+indistinguishable from a considered opinion. The request now includes a
+deterministic indicator block, computed in code from the *same* point-in-time
+window (`tradingagents/paper_experiment/indicators.py`,
+`PAPER_INFERENCE_PROMPT_VERSION = "paper-inference-3"`): SMA20/50/200, EMA10/20,
+RSI(14), MACD(12,26,9), Bollinger(20,2), ATR(14) and ATR as a fraction of close,
+volume versus its 20-day average, 20-day realised volatility, 1/5/20-day returns,
+and the position within the 20-day high–low range. The prompt asks for the
+factors *supporting* and *opposing* the call, so a `Hold` must be reasoned rather
+than reflexive.
+
+Two further invariants hold and are tested in `tests/test_paper_indicators.py`:
+
+- every indicator is a function of the bounded window only, so no later bar can
+  reach a value;
+- an indicator the window is too short to compute is reported as
+  `insufficient history (need N bars, have M)` and is never zero-filled or
+  extrapolated. A non-finite or missing OHLCV value raises, so the decision is
+  blocked rather than computed from a number that is not real.
+
+### The record's provenance names the seam that actually ran
+
+The paper experiment is one model call, not the agent graph. Its records used to
+inherit the graph's `prompt_version` (`tradingagents-default`) and
+`graph_version` (`tradingagents-graph`), which attested to prompts and a pipeline
+the decision never used. They now carry the paper protocol
+(`tradingagents/paper_experiment/protocol.py`): the paper prompt version and
+`graph_version = "paper-single-call"`. The universe, costs, risk limits, holding
+period and capital are still inherited from the frozen protocol, so paper and
+graph results stay directly comparable.
+
 A windowless session is blocked with `no reproducible price window …`, not
 decided. If a future run still returns Hold on every decision, the model was
-shown real data and genuinely chose Hold — the counters can then be read as a
-result.
+shown real data and the computed evidence and genuinely chose Hold — the counters
+can then be read as a result.
 
 ## When the key is missing, or the provider fails
 
