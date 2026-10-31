@@ -78,6 +78,18 @@ class ExperimentReport:
             f"  total return: {_fmt_pct(p['performance']['total_return'])}",
             f"  max drawdown: {_fmt_pct(p['performance']['max_drawdown'])}",
         ]
+        cadence = p.get("cadence")
+        if cadence:
+            if cadence["max_decisions_reached"]:
+                detail = f"max_decisions {cadence['max_decisions']} reached"
+            elif cadence["next_decision_session"]:
+                detail = f"next decision session {cadence['next_decision_session']}"
+            else:
+                detail = "no further decision session in the data"
+            lines.append(
+                f"  cadence: every {cadence['decision_frequency_sessions']} session(s); "
+                f"{detail}"
+            )
         for blocker in p["readiness"]["blockers"]:
             lines.append(f"  blocker: {blocker}")
         return "\n".join(lines)
@@ -131,6 +143,7 @@ def build_report(experiment: PaperExperiment) -> ExperimentReport:
             "unevaluable": counts.get(STATE_UNEVALUABLE, 0),
             "filled_orders": len(filled),
         },
+        "cadence": experiment.decision_cadence(),
         "orders": orders,
         "book": book,
         "performance": performance,

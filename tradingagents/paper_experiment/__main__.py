@@ -246,7 +246,10 @@ def _run(args) -> int:
 
     for outcome in outcomes:
         state = outcome.decision_state or "?"
-        print(f"{outcome.session}: {state}")
+        if outcome.decision_skip_reason:
+            print(f"{outcome.session}: no decision ({outcome.decision_skip_reason})")
+        else:
+            print(f"{outcome.session}: {state}")
 
     report = build_report(experiment)
     print(report.summary())

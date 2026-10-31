@@ -137,6 +137,15 @@ class Dashboard:
             result = {
                 "processed": [o.session for o in outcomes],
                 "processed_count": len(outcomes),
+                "decisions": [o.decision_id for o in outcomes if o.decision_id],
+                "decision_count": sum(1 for o in outcomes if o.decision_id),
+                "no_decision_reasons": sorted(
+                    {
+                        o.decision_skip_reason
+                        for o in outcomes
+                        if o.decision_skip_reason is not None
+                    }
+                ),
                 "remaining_before": remaining_before,
                 "remaining_after": len(pending_sessions(experiment)),
                 "bounded_to": bounded,
@@ -501,6 +510,13 @@ def serve(
         httpd.server_close()
 
 
+def _reasons_suffix(reasons: object) -> str:
+    """Name why advanced sessions took no decision, so a tick that looks idle explains itself."""
+    if not reasons:
+        return ""
+    return f" (no decision: {', '.join(reasons)})"
+
+
 def _start_auto_advance(dashboard: Dashboard, sessions: int, interval: float) -> threading.Thread:
     """Advance the simulation on a timer, in-process, behind the control lock.
 
@@ -536,7 +552,9 @@ def _start_auto_advance(dashboard: Dashboard, sessions: int, interval: float) ->
                 continue
             print(
                 f"[auto] advanced {result['processed_count']} session(s): "
-                f"{done[0]}..{done[-1]}; {result['remaining_after']} remaining"
+                f"{done[0]}..{done[-1]}; {result['remaining_after']} remaining; "
+                f"{result.get('decision_count', 0)} decision(s)"
+                + _reasons_suffix(result.get("no_decision_reasons"))
                 + (f" | {line}" if line else ""),
                 flush=True,
             )

@@ -41,6 +41,23 @@ path, and no configuration that produces one.
     small sidecar (`data_refresh.json`), and surfaces it in the dashboard's
     `refresh` block and a compact `[data]` auto-advance log line, so an idle
     engine says *why* it is idle (last data date, newest session, last processed).
+- **A processed session that took no decision now names the reason**
+  (`experiment.DECISION_SKIP_REASONS`). A refresh can succeed — sessions append and
+  advance — and still produce no decision, because a decision is only taken on a
+  cadence session (every `decision_frequency_sessions`) and only until
+  `max_decisions` is reached. That is correct, but it was silent: the auto-advance
+  line said `[auto] advanced 2 session(s)` with no hint that neither was a decision
+  session, and `last_session_processed` ahead of the newest decision was ambiguous.
+  The reason (`not a decision session` or `max_decisions reached`) is now carried on
+  the session outcome, in the `session_processed` journal entry, and in a new
+  report `cadence` block that also reports `next_decision_session` (a session that
+  will actually decide, or `null` when capped or no cadence bar remains),
+  `max_decisions_reached` and `decisions_taken`. The auto-advance log line and the
+  dashboard run result carry the decision count and the reasons, and the CLI prints
+  `no decision (<reason>)` per session. No behaviour changes: the same sessions
+  decide as before, and the cadence stays anchored to the source's first session, so
+  it does not drift when the vendor's sliding `compact` window moves its earliest
+  bar forward.
 - Alpaca **paper** trading worker (`paper_experiment/broker/trading.py`): a
   deliberate, opt-in loop over the existing read-only Alpaca Paper adapter. It is
   paper-only and adds no live path. `start()` runs preflight (broker connection,

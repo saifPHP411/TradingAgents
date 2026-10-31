@@ -127,6 +127,26 @@ date, so a record can never be built from bars the model could not have seen.
    never asked to decide with no data. A decision is only taken on a cadence
    session (every `decision_frequency_sessions`), but settlement runs on every
    session.
+
+   A processed session that took no decision now says *why*, from a closed
+   vocabulary (`experiment.DECISION_SKIP_REASONS`): `not a decision session` for
+   an off-cadence session, or `max_decisions reached` once the declared cap is
+   hit. The reason is carried on the session outcome, in the `session_processed`
+   journal entry, and in the report's `cadence` block. This matters because
+   `last_session_processed` can sit ahead of the newest decision and, without the
+   reason, that state is ambiguous — it could be a cadence gap, a reached cap, or
+   a lost decision. The report's `cadence` block names it, with
+   `next_decision_session` (a session that will actually decide, or `null` when
+   the cap is reached or no cadence bar remains), `max_decisions_reached`, and
+   `decisions_taken`.
+
+   The cadence is anchored to the source's **first** session, not to how many
+   sessions have been processed, so a resumed run computes the same cadence
+   sessions as a fresh one. The anchor is preserved across a refresh even when the
+   vendor's sliding `compact` window moves its earliest bar forward: a refresh is
+   append-only and forward, so it never drops the leading bar the cadence is
+   measured from. If the anchor could move, which sessions decide would shift
+   silently under a running experiment.
 2. **Execute at T+1's open.** A decision from T's close cannot fill at T's close.
    The signal is re-dated to the execution session before it reaches the paper
    session, so nothing downstream can read the fill as happening at T.

@@ -88,6 +88,15 @@ STATE_BLOCKED = "blocked"
 STATE_UNEVALUABLE = "unevaluable"
 """The decision was executed but cannot be evaluated (missing later data)."""
 
+# Why a processed session took no decision. Most sessions are not decision
+# sessions: the cadence means they only settle and work the book. Naming the
+# reason is what stops a run that advanced without a decision from being read as
+# a run that produced one — ``last_processed`` alone cannot tell the two apart.
+SKIP_NOT_DECISION_SESSION = "not a decision session"
+SKIP_MAX_DECISIONS_REACHED = "max_decisions reached"
+DECISION_SKIP_REASONS = (SKIP_NOT_DECISION_SESSION, SKIP_MAX_DECISIONS_REACHED)
+"""The closed vocabulary of reasons a session is processed without a decision."""
+
 
 class ExperimentError(RuntimeError):
     """The experiment was driven in a way it cannot support."""
@@ -140,6 +149,13 @@ class SessionOutcome:
     fees: float = 0.0
     snapshot_id: str | None = None
     evaluated: tuple[str, ...] = ()
+    decision_skip_reason: str | None = None
+    """Why this processed session took no decision, from a closed vocabulary.
+
+    ``None`` when a decision was taken (or attempted). A non-``None`` value is
+    one of :data:`DECISION_SKIP_REASONS`, so a session that advanced without a
+    decision says so rather than being indistinguishable from one that decided.
+    """
 
 
 @dataclass
@@ -509,7 +525,8 @@ class PaperExperiment:
 
         decision_ids: list[str] = []
         blocked_reasons: list[str] = []
-        if self._is_decision_session(session):
+        skip_reason = self._decision_skip_reason(session)
+        if skip_reason is None:
             for symbol in self.config.symbols:
                 outcome = self._decide(symbol, session)
                 if outcome.decision_id:
@@ -527,7 +544,11 @@ class PaperExperiment:
                 execution_session=self._next_session(session),
             )
         else:
-            outcome = SessionOutcome(session=session, processed=True)
+            # No decision this session: the cadence, or the decision cap. Recorded
+            # by name so an advanced session with no decision is explainable.
+            outcome = SessionOutcome(
+                session=session, processed=True, decision_skip_reason=skip_reason
+            )
         outcome.evaluated = evaluated
 
         self.processed_sessions.add(session)
@@ -537,6 +558,7 @@ class PaperExperiment:
                 "session": session,
                 "decision_id": outcome.decision_id,
                 "decision_state": outcome.decision_state,
+                "decision_skip_reason": outcome.decision_skip_reason,
                 "evaluated": list(evaluated),
             },
             event_id=f"{self.experiment_id}:session:{session}",
@@ -552,27 +574,38 @@ class PaperExperiment:
         return max(self.processed_sessions) if self.processed_sessions else None
 
     def _is_decision_session(self, session: str) -> bool:
-        """Whether a decision is due on ``session``.
+        """Whether a decision is due on ``session``."""
+        return self._decision_skip_reason(session) is None
 
-        The cadence is measured in sessions from the source's first session, so a
-        resumed run computes the same cadence sessions as a fresh one — the check
-        is a function of the session, not of how many have been processed.
+    def _decision_skip_reason(self, session: str) -> str | None:
+        """Why no decision is due on ``session``, or ``None`` when one is.
+
+        Two gates, each named so a processed session without a decision is
+        explainable rather than silent:
+
+        - ``max_decisions``: the declared cap counts decision *events* (one per
+          symbol per cadence session), so a multi-symbol experiment still respects
+          it. Once reached, later cadence sessions settle but do not decide.
+        - the cadence: a decision is due only every ``decision_frequency_sessions``
+          sessions. The cadence is measured from the source's *first* session, so a
+          resumed run computes the same cadence sessions as a fresh one — the check
+          is a function of the session, not of how many have been processed.
         """
-        # ``max_decisions`` counts decision *events* (one per symbol per cadence
-        # session), so a multi-symbol experiment still respects the declared cap.
         decided_events = {
             d.decision_session
             for d in self.decisions.values()
             if d.source != "blocked"
         }
         if len(decided_events) * len(self.config.symbols) >= self.config.max_decisions:
-            return False
+            return SKIP_MAX_DECISIONS_REACHED
         sessions = self.source.sessions()
         try:
             index = sessions.index(session)
         except ValueError:
-            return False
-        return index % self.config.decision_frequency_sessions == 0
+            return SKIP_NOT_DECISION_SESSION
+        if index % self.config.decision_frequency_sessions == 0:
+            return None
+        return SKIP_NOT_DECISION_SESSION
 
     def _decide(self, symbol: str, session: str) -> SessionOutcome:
         execution_session = self._next_session(session)
@@ -1110,6 +1143,38 @@ class PaperExperiment:
         for state in self.decisions.values():
             counts[state.state] = counts.get(state.state, 0) + 1
         return counts
+
+    def decision_cadence(self) -> dict:
+        """Why a session does or does not take a decision, for the report.
+
+        A run can advance many sessions without producing a decision — most
+        sessions are not cadence sessions, and once ``max_decisions`` is reached
+        no later session decides. Without these fields a report showing
+        ``last_session_processed`` ahead of the newest decision is ambiguous: it
+        could be a cadence gap, a reached cap, or a lost decision. Naming the
+        reason (and the next due session) makes the state checkable rather than
+        inferred.
+        """
+        sessions = list(self.source.sessions())
+        cadence = self.config.decision_frequency_sessions
+        decided = {
+            d.decision_session for d in self.decisions.values() if d.source != "blocked"
+        }
+        capped = len(decided) * len(self.config.symbols) >= self.config.max_decisions
+        next_due = None
+        if not capped:
+            for index, session in enumerate(sessions):
+                if index % cadence == 0 and session not in decided:
+                    next_due = session
+                    break
+        return {
+            "decision_frequency_sessions": cadence,
+            "max_decisions": self.config.max_decisions,
+            "decisions_taken": len(decided),
+            "max_decisions_reached": capped,
+            "next_decision_session": next_due,
+            "skip_reasons": list(DECISION_SKIP_REASONS),
+        }
 
 
 def _refuse_quote(symbol: str) -> Quote:
