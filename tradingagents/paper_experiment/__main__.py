@@ -51,6 +51,7 @@ from .providers import (
     provider_registry,
     select_source,
 )
+from .refresh import REFRESH_STATE_FILENAME, REFRESHABLE_KINDS
 from .report import build_report
 from .sources import FrozenPriceSource, PriceSource, PriceSourceError
 
@@ -130,6 +131,32 @@ def _restored_source(root: Path) -> PriceSource:
     )
 
 
+def _record_initial_fetch(root: Path, source: PriceSource) -> None:
+    """Record the experiment's first vendor fetch in the refresh sidecar.
+
+    Only a refreshable vendor source counts; a frozen dataset or a fixture makes no
+    network call and needs no bookkeeping. Best-effort: a failure here must not
+    abort a successful `start`.
+    """
+    if getattr(source, "kind", None) not in REFRESHABLE_KINDS:
+        return
+    from datetime import UTC, datetime
+
+    from .refresh import STATUS_INITIAL_FETCH, RefreshState
+
+    provenance = getattr(source, "provenance", None)
+    now = datetime.now(UTC)
+    state = RefreshState(
+        day=now.date().isoformat(),
+        fetches_today=1,
+        last_attempt_at=now.isoformat(),
+        last_success_at=now.isoformat(),
+        last_status=STATUS_INITIAL_FETCH,
+        last_bar_date=getattr(provenance, "last_bar_date", None),
+    )
+    state.save(root / REFRESH_STATE_FILENAME)
+
+
 def _check_frozen_window(source: PriceSource, recorded: dict) -> None:
     """Refuse a resume when the committed dataset no longer matches the run.
 
@@ -168,6 +195,10 @@ def _start(args) -> int:
     )
     experiment.ensure_created()
     experiment.save_state()
+    # Record the initial fetch in the refresh sidecar, so the daily quota count is
+    # accurate (the initial fetch is a vendor call) and the throttle holds, rather
+    # than a `run` immediately spending a second call.
+    _record_initial_fetch(root, selection.source)
     print(f"started experiment {experiment.experiment_id} at {root}")
     print(f"  source: {selection.source.name} (kind {getattr(selection.source, 'kind', '?')})")
     if selection.switched:
@@ -201,12 +232,17 @@ def _run(args) -> int:
             print(f"source switched: {selection.reason}")
 
     source = experiment.source
-    from .runner import process_pending
+    from .runner import advance
 
-    if args.sessions:
-        outcomes = process_pending(experiment, sessions=args.sessions)
-    else:
-        outcomes = process_pending(experiment)
+    advanced = (
+        advance(experiment, sessions=args.sessions)
+        if args.sessions
+        else advance(experiment)
+    )
+    outcomes = advanced.outcomes
+
+    if advanced.refresh is not None:
+        print(advanced.refresh.summary_line())
 
     for outcome in outcomes:
         state = outcome.decision_state or "?"

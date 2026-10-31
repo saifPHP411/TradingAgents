@@ -213,6 +213,13 @@ Recovery is not a durability policy. There is no write-ahead log and no automati
 checkpoint; the caller decides when to call `save_state`, and only the last saved
 state is recovered.
 
+Recovery is also not a data-refresh mechanism. A restored session continues on the
+bars its state carried and does not re-fetch them; the prospective paper experiment
+adds an explicit, append-only refresh on top of recovery
+([PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md#refreshing-vendor-data)). Refresh is a
+separate concern: it grows the source, it does not change the accounting, and a
+plain resume never triggers it.
+
 A cancellation is part of that state: a caller may cancel a restored order with
 `session.cancel_resting(order)`, and the cancellation is durable — the order
 leaves the live queue, exactly one terminal `ORDER_CANCELLED` event is recorded,

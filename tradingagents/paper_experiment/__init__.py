@@ -69,6 +69,16 @@ from .providers import (
     provider_registry,
     select_source,
 )
+from .refresh import (
+    REFRESH_STATE_FILENAME,
+    REFRESH_STATUSES,
+    REFRESHABLE_KINDS,
+    RefreshOutcome,
+    RefreshPolicy,
+    RefreshState,
+    read_refresh_state,
+    refresh_source,
+)
 from .report import REPORT_SCHEMA_VERSION, ExperimentReport, build_report
 from .sources import (
     FrozenPriceSource,
@@ -86,6 +96,9 @@ __all__ = [
     "PAPER_GRAPH_VERSION",
     "PAPER_INFERENCE_PROMPT_VERSION",
     "PAPER_PROTOCOL",
+    "REFRESHABLE_KINDS",
+    "REFRESH_STATE_FILENAME",
+    "REFRESH_STATUSES",
     "REPORT_SCHEMA_VERSION",
     "STATE_BLOCKED",
     "STATE_EVALUATED",
@@ -110,6 +123,9 @@ __all__ = [
     "PaperExperiment",
     "PriceSource",
     "PriceSourceError",
+    "RefreshOutcome",
+    "RefreshPolicy",
+    "RefreshState",
     "ProviderAuthError",
     "ProviderError",
     "ProviderNotConfiguredError",
@@ -126,6 +142,8 @@ __all__ = [
     "compute_indicators",
     "current_market_source_available",
     "provider_registry",
+    "read_refresh_state",
+    "refresh_source",
     "render_indicator_context",
     "select_source",
 ]

@@ -233,9 +233,15 @@ class TestDecisionSourceFreshness:
         Every decision already settled (executed/evaluated) when the source is
         built is history and is never offered; a decision still awaiting execution
         is, because it is exactly what the worker exists to act on.
+
+        The run stops one session short of the end: a decision taken on the newest
+        bar has no T+1 yet, so it is unresolved and correctly withheld. Processing
+        all but the last session leaves one decision whose successor bar exists, so
+        it is genuinely awaiting execution and must be offered.
         """
         experiment = _experiment(tmp_path / "exp")
-        for session in _sessions(experiment):
+        sessions = _sessions(experiment)
+        for session in sessions[:-1]:
             experiment.process_session(session)
 
         settled = {
@@ -252,6 +258,7 @@ class TestDecisionSourceFreshness:
         assert not (set(offered) & settled)
         # ...and the one still-pending decision is.
         pending = {d.decision_id for d in experiment.decisions.values() if d.state == "pending"}
+        assert pending  # the premise: there is a live tail to offer
         assert set(offered) == pending
 
     def test_a_reload_failure_falls_back_without_duplicating(self, tmp_path):

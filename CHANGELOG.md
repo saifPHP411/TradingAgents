@@ -16,6 +16,31 @@ path, and no configuration that produces one.
 
 ### Added
 
+- **A running paper experiment can now grow its market data without a restart**
+  (`paper_experiment/refresh.py`, `runner.advance`). A vendor daily source is
+  fetched once and frozen, and a resume rebuilds that frozen source from the state
+  without re-fetching — so once every session of the original fetch had been
+  processed, `pending_sessions` was empty for good and the auto-advance loop
+  printed `[auto] no unprocessed sessions remain; nothing to advance` forever. A
+  `run` (and the dashboard's auto-advance tick) now *refreshes* a vendor daily
+  source before advancing: it asks the vendor for its current series and appends
+  any session strictly newer than the experiment's last. The refresh:
+  - merges into the **same** experiment, preserving `experiment_id`, `created_at`,
+    `processed_sessions`, `decisions` and the session book, and appending to the
+    journal rather than rewriting it;
+  - is **append-only and forward** — a backfilled older session is ignored, and a
+    session the run already processed is never re-added, so a duplicate can never
+    be filled twice;
+  - refuses a **restated** bar (`conflict`) rather than letting a vendor change a
+    number the ledger already booked;
+  - is **quota-aware** (a minimum interval and a per-UTC-day cap, defaulting to
+    one call an hour and 24 a day, so the free tier is not exhausted) and **never
+    fatal** — a quota notice, stale feed, network error or malformed body is
+    returned as a status and the already-available sessions are processed anyway;
+  - records its outcome in a closed vocabulary (`refresh.REFRESH_STATUSES`) and a
+    small sidecar (`data_refresh.json`), and surfaces it in the dashboard's
+    `refresh` block and a compact `[data]` auto-advance log line, so an idle
+    engine says *why* it is idle (last data date, newest session, last processed).
 - Alpaca **paper** trading worker (`paper_experiment/broker/trading.py`): a
   deliberate, opt-in loop over the existing read-only Alpaca Paper adapter. It is
   paper-only and adds no live path. `start()` runs preflight (broker connection,
@@ -88,6 +113,20 @@ path, and no configuration that produces one.
 
 ### Fixed
 
+- **A decision taken on the newest bar no longer executes at its own decision
+  price.** `DecisionState.execution_session` was pinned to the decision session
+  when `_next_session` returned `None` (the decision session was the frame's last
+  bar). On a frozen frame that case was only ever the final, never-settled
+  decision, so it was latent. Making the frame grow exposed it: a later bar would
+  settle the decision against the decision bar's open — a fill at a price that did
+  not exist when the decision was made, and a refreshed run diverging from a run
+  that had the whole frame from the start. `execution_session` is now left
+  unresolved (`None`) on the frontier and resolves to the real successor when a
+  newer session arrives (a refresh), so a decision never executes at its own
+  decision bar. A state written by the older build is normalised on load
+  (`_normalise_frontier_executions`): a still-pending decision whose execution
+  session equals its decision session has that field cleared and re-resolved; an
+  already-executed decision is left alone, because its fill is booked.
 - **The paper request now carries the computed indicator evidence, and its
   records no longer claim the agent graph ran.** Rendering the raw window (above)
   fixed the data-blind failure, but still left the model to recompute trend,

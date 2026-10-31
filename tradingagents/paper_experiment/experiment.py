@@ -149,7 +149,12 @@ class DecisionState:
     decision_id: str
     symbol: str
     decision_session: str
-    execution_session: str
+    # ``None`` until the successor bar exists. A decision at the frame's frontier
+    # (its own session is the newest bar) has no T+1 yet, so its execution session
+    # is *unresolved* rather than guessed as the decision session — guessing would
+    # let a later bar settle it against a price that did not exist when the
+    # decision was made. It resolves when a newer session arrives (a refresh).
+    execution_session: str | None
     evaluation_session: str | None
     state: str
     source: str
@@ -191,6 +196,27 @@ class DecisionState:
     def from_dict(cls, payload: dict) -> DecisionState:
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in payload.items() if k in known})
+
+
+def _normalise_frontier_executions(decisions: dict) -> None:
+    """Un-resolve a frontier execution session written by an older build.
+
+    An earlier build pinned a decision's execution session to its own decision
+    session when no successor bar existed yet. That value is indistinguishable, on
+    reload, from a legitimate T+1 pin *except* when the two are equal — which is
+    exactly the look-ahead case. Clearing it lets ``_settle_due`` re-resolve it to
+    the real successor if one now exists, or leave it pending if none does. An
+    already-executed decision is left alone: its fill is booked, and the ledger
+    cannot un-book it.
+    """
+    for state in decisions.values():
+        if (
+            state.execution_session is not None
+            and state.execution_session == state.decision_session
+            and state.state == STATE_PENDING
+        ):
+            state.execution_session = None
+            state.evaluation_session = None
 
 
 class SessionQuoteSource:
@@ -394,6 +420,7 @@ class PaperExperiment:
         except PaperStateError as exc:
             raise ExperimentError(f"the paper session state could not be restored: {exc}") from exc
         decisions = {k: DecisionState.from_dict(v) for k, v in state.get("decisions", {}).items()}
+        _normalise_frontier_executions(decisions)
         return cls(
             source=source,
             config=config,
@@ -655,8 +682,13 @@ class PaperExperiment:
             decision_id=decision_id,
             symbol=symbol,
             decision_session=session,
-            execution_session=execution_session or session,
-            evaluation_session=self._evaluation_session(execution_session or session),
+            # ``_next_session`` returns ``None`` on the newest bar: the decision is
+            # unresolved until a successor exists, rather than pinned to its own
+            # session (which would be a fill at the decision price).
+            execution_session=execution_session,
+            evaluation_session=(
+                self._evaluation_session(execution_session) if execution_session else None
+            ),
             state=STATE_PENDING,
             source=source,
             snapshot_id=snapshot.snapshot_id,
@@ -697,7 +729,7 @@ class PaperExperiment:
             decision_id=decision_id,
             symbol=symbol,
             decision_session=session,
-            execution_session=execution_session or session,
+            execution_session=execution_session,
             evaluation_session=None,
             state=STATE_BLOCKED,
             source="blocked",
@@ -727,10 +759,16 @@ class PaperExperiment:
         gap in processing settle a due decision without moving its execution to a
         later bar, which would break the decision/execution timing rule.
         """
+        self._resolve_execution_sessions()
         evaluated: list[str] = []
         for state in list(self.decisions.values()):
-            if state.state == STATE_PENDING and state.execution_session <= session:
+            if (
+                state.state == STATE_PENDING
+                and state.execution_session is not None
+                and state.execution_session <= session
+            ):
                 self._execute(state, state.execution_session)
+        self._resolve_evaluation_sessions()
         for state in list(self.decisions.values()):
             if (
                 state.state == STATE_EXECUTED
@@ -740,6 +778,45 @@ class PaperExperiment:
                 self._evaluate(state)
                 evaluated.append(state.decision_id)
         return tuple(evaluated)
+
+    def _resolve_execution_sessions(self) -> None:
+        """Resolve the execution (and evaluation) session of a frontier decision.
+
+        A decision taken on the newest bar has no T+1 yet, so its execution session
+        is unresolved and it stays pending. When a newer session arrives — from a
+        refresh, or simply from processing the next bar — the successor exists and
+        the decision is pinned to it, exactly as a fresh run would have pinned it
+        had the successor been present at decision time. This is what keeps a
+        refreshed run identical to a run that had the whole frame from the start,
+        and it never executes a decision against its own decision bar.
+        """
+        for state in self.decisions.values():
+            if state.execution_session is None:
+                successor = self._next_session(state.decision_session)
+                if successor is not None:
+                    state.execution_session = successor
+                    state.evaluation_session = self._evaluation_session(successor)
+
+    def _resolve_evaluation_sessions(self) -> None:
+        """Resolve the evaluation session of a decision executed at the frontier.
+
+        A decision executed at T+1 is evaluated at T+1+lag. That bar may not have
+        existed when the decision was executed — the execution was itself the newest
+        session — so the field is left unresolved and the decision stays
+        ``executed``. When the frame grows, the bar exists and the evaluation is
+        pinned and run, exactly as a run that had the whole frame would have done.
+        Without this, an incrementally grown run would leave every decision
+        ``executed`` forever and diverge from the straight run.
+        """
+        for state in self.decisions.values():
+            if (
+                state.state == STATE_EXECUTED
+                and state.evaluation_session is None
+                and state.execution_session is not None
+            ):
+                evaluation = self._evaluation_session(state.execution_session)
+                if evaluation is not None:
+                    state.evaluation_session = evaluation
 
     def _work_resting(self, session: str) -> None:
         """Work resting GTC limits against ``session``'s bar, one symbol at a time.

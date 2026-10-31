@@ -81,7 +81,7 @@ python -m tradingagents.paper_experiment start --root runs/av \
     --source alpha_vantage --fallback frozen --symbol IBM
 ```
 
-A vendor source is fetched **once**, when the experiment is created. `report`,
+A vendor source is fetched once, when the experiment is created. `report`,
 `verify` and a resumed `run` read the saved state and never refetch; a
 frame-backed vendor source stores its bars in `session_state.json`, so a resume
 rebuilds the same source locally. The CLI refuses to resume a source that carries
@@ -89,6 +89,16 @@ no persistable bars (a quote-only source) rather than substituting the frozen
 dataset, so a vendor failure cannot be hidden behind 2024 data. See
 [MARKET_DATA_PROVIDERS.md](MARKET_DATA_PROVIDERS.md)
 for what each provider can and cannot provide on its free plan.
+
+Because that first fetch is frozen, a long-running experiment would run out of
+sessions to advance once every bar of the original fetch had been processed. A
+`run` (and the dashboard's auto-advance) therefore *refreshes* a vendor daily
+source before it advances: it asks the vendor for its current series and appends
+any session strictly newer than the last one the experiment holds. The refresh is
+best-effort, throttled (at most one call an hour and a bounded number a UTC day,
+so the free tier is not exhausted), and never fatal — a quota notice, a stale
+feed or a network error is reported and the already-available sessions are
+processed anyway. See [Refreshing vendor data](#refreshing-vendor-data) below.
 
 `--stub` uses a non-genuine stub decision source, for an offline demonstration.
 Its decisions are labelled `synthetic_fixture` and are **never** counted as
@@ -246,6 +256,48 @@ vendor (Alpha Vantage's free tier allows 25 calls a day) that matters: a restart
 must not spend a call, and it must not silently continue on different data. A
 source that cannot be persisted — Finnhub's quote source, which carries no bar
 history — is refused on resume rather than swapped for the frozen dataset.
+
+## Refreshing vendor data
+
+A resume is cheap but frozen, so the experiment needs a *separate*, explicit step
+to grow. `runner.advance` is that step: it refreshes a vendor daily source, then
+processes the pending sessions. The refresh lives in
+`paper_experiment/refresh.py` and obeys four rules:
+
+- **Same experiment.** New bars are merged into the running source and the
+  experiment is saved through its normal `save_state`. The `experiment_id`,
+  `created_at`, `processed_sessions`, `decisions` and the session book are all
+  preserved; the journal is appended to, never rewritten.
+- **Append-only and forward.** Only sessions strictly newer than the source's
+  current last session are added. A backfilled older session is ignored, because
+  inserting a past session would let the engine settle the book against a bar it
+  has already passed — the reordering `process_session` refuses. A session the run
+  has already processed is never re-added.
+- **No silent restatement.** A session present in both the old and the new frame
+  must carry identical OHLCV. A vendor restating a bar the run already used is
+  refused (`conflict`) rather than allowed to change a booked number.
+- **Quota-aware and never fatal.** A fetch is throttled by a minimum interval and
+  a per-UTC-day cap. A quota notice, a stale feed, a network error or a malformed
+  body is returned as a status, not raised; the engine keeps running.
+
+The outcome is a closed vocabulary (`refresh.REFRESH_STATUSES`): `appended`,
+`no_new_sessions`, `throttled`, `quota_guard`, `unavailable`, `conflict`,
+`not_refreshable`, `disabled`. The dashboard shows the last outcome (and the last
+data date) in its `refresh` block, and the auto-advance log line carries a compact
+`[data]` summary, so an idle engine says *why* it is idle. The bookkeeping lives
+in a small sidecar (`data_refresh.json`), so the recovery file is only ever grown.
+
+**Frontier decisions.** A decision taken on the newest bar has no T+1 yet, so its
+`execution_session` is unresolved (`None`) and it stays pending. When a newer
+session arrives — from a refresh — it resolves to that successor, exactly as a
+fresh run would have pinned it had the successor been present at decision time.
+It is never executed against its own decision bar, which would be a fill at the
+decision price. The same holds for evaluation: a decision executed at T+1 is
+evaluated at T+1+lag, and that bar may not exist yet, so its `evaluation_session`
+is resolved when the frame grows. An incrementally grown run therefore ends with
+the same decision lifecycle as a run that had every bar from the start — this is
+pinned by
+`tests/test_phase18_data_refresh.py::TestAppendNewSessions::test_growing_one_session_at_a_time_matches_a_whole_frame_run`.
 
 ## Distinguishing a fixture from a real inference
 

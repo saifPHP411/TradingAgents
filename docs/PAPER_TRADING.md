@@ -264,6 +264,15 @@ that a restored session continues with identical accounting and no duplicated
 fills; what it does not provide is the durability policy, which belongs to the
 caller.
 
+A restored run continues on the bars it saved, and it does not re-fetch them. That
+is deliberate on a quota-limited vendor, but it also means the run's data does not
+grow on its own. The prospective paper experiment
+([PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md#refreshing-vendor-data)) adds an
+explicit, append-only *refresh* on top of recovery: before advancing, a vendor
+daily source's newer sessions are appended to the same experiment. That is a
+separate concern from recovery — a resume still never re-fetches — and the two
+should not be described as the same thing.
+
 ## A broker connection, when you actually want one
 
 The simulated session above fills against the price you hand it. When you want to

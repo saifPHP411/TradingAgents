@@ -69,6 +69,8 @@ class Dashboard:
         allow_paper_trading: bool = False,
         paper_order_notional: float = 25.0,
         broker_factory=None,
+        refresh_policy=None,
+        refresh_fetcher=None,
     ) -> None:
         self.root = Path(root)
         self.token = resolve_token(token)
@@ -78,6 +80,8 @@ class Dashboard:
         self._lock = threading.Lock()
         self._run_in_progress = False
         self.last_run: dict[str, Any] | None = None
+        self.refresh_policy = refresh_policy
+        self.refresh_fetcher = refresh_fetcher
         self.paper = PaperTradingController(
             self.root,
             enabled=allow_paper_trading,
@@ -117,18 +121,26 @@ class Dashboard:
             raise RuntimeError("a run is already in progress")
         try:
             self._run_in_progress = True
-            from ..runner import build_inference, pending_sessions, process_pending
+            from ..runner import advance, build_inference, pending_sessions
 
             experiment = self.view().load()
             experiment.inference = build_inference(experiment.config, stub=self.stub)
             remaining_before = len(pending_sessions(experiment))
-            outcomes = process_pending(experiment, sessions=bounded)
+            advanced = advance(
+                experiment,
+                sessions=bounded,
+                refresh_policy=self.refresh_policy,
+                fetcher=self.refresh_fetcher,
+            )
+            outcomes = advanced.outcomes
+            refresh = advanced.refresh
             result = {
                 "processed": [o.session for o in outcomes],
                 "processed_count": len(outcomes),
                 "remaining_before": remaining_before,
                 "remaining_after": len(pending_sessions(experiment)),
                 "bounded_to": bounded,
+                "refresh": refresh.to_dict() if refresh is not None else None,
             }
             self.last_run = result
             return result
@@ -513,15 +525,19 @@ def _start_auto_advance(dashboard: Dashboard, sessions: int, interval: float) ->
                 print(f"[auto] tick failed: {type(exc).__name__}: {exc}", flush=True)
                 continue
             done = result["processed"]
+            refresh = result.get("refresh")
+            line = refresh.get("summary") if isinstance(refresh, dict) else None
             if not done:
                 print(
-                    "[auto] no unprocessed sessions remain; nothing to advance",
+                    "[auto] no unprocessed sessions remain; nothing to advance"
+                    + (f" | {line}" if line else ""),
                     flush=True,
                 )
                 continue
             print(
                 f"[auto] advanced {result['processed_count']} session(s): "
-                f"{done[0]}..{done[-1]}; {result['remaining_after']} remaining",
+                f"{done[0]}..{done[-1]}; {result['remaining_after']} remaining"
+                + (f" | {line}" if line else ""),
                 flush=True,
             )
 
@@ -809,7 +825,7 @@ async function refreshDecisions(){
     $("declist").innerHTML = d.decisions.length ? d.decisions.map(x=>`<li>
       <b>${x.symbol}</b> ${x.decision_session}
       <span class="pill s-${x.state}">${x.state}</span>
-      <div class="mono">src ${x.source} · exec ${x.execution_session} · ${x.order_status||"—"}
+      <div class="mono">src ${x.source} · exec ${x.execution_session||"—"} · ${x.order_status||"—"}
       · filled ${x.filled_quantity}${x.average_fill_price?" @ "+money(x.average_fill_price):""}
       · fees ${money(x.fees)}</div>
       ${x.blocked_reason?`<div class="mono" style="color:var(--bad)">${x.blocked_reason}</div>`:""}

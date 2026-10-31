@@ -579,6 +579,24 @@ This limitation is acceptable for a simulation / paper release candidate: the
 caller owns the checkpoint cadence, and a lost tail is a lost tail, not a
 corrupted book.
 
+Distinct from recovery is **growing the data**. A saved state is restored exactly
+and no session is reprocessed, but the vendor frame it holds is frozen; a running
+experiment therefore needs a separate, explicit refresh to see a newer bar (Phase
+18 below). Snapshot, persistence, restart recovery and refresh are four different
+things and are not to be conflated:
+
+- a **snapshot** (`PaperSession.write_json`) is a reporting *view*: a caller asks
+  for it and it carries the headline figures. It is not read back to resume, and
+  it is not a recovery mechanism;
+- **persistence** (`save_state` / `PaperExperiment.load`) is what a restart reads.
+  It is written after every session and holds the ledger, the decisions, the
+  processed-session set and the source's bars;
+- **restart recovery** is `load` + continue: same accounting, no reprocessed
+  session, no duplicated fill;
+- **refresh** (`refresh_source` / `runner.advance`) appends a vendor's newer
+  sessions to the same experiment, so a long run keeps having sessions to advance.
+  It is append-only and never re-fetches on a plain resume.
+
 ## Phase 10: the prospective paper experiment
 
 The Phase 10 layer ([PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md)) closes the
@@ -634,3 +652,110 @@ test that would fail if it were false:
   paper mark-to-market is not a realised trade, the costs are the declared model
   and not observed fills, and a sample below `min_trades_for_metrics` is reported
   as `N/A`, not as a number.
+
+## Phase 18: growing a running experiment's data
+
+A paper run on a vendor daily source fetches once and freezes. A resume rebuilds
+that frozen source from `session_state.json` without re-fetching (Phase 12), which
+is what keeps a restart cheap on a quota-limited vendor — but it also means the
+session set can never grow. Once every session of the original fetch had been
+processed, `pending_sessions` was empty for good and the auto-advance loop printed
+`[auto] no unprocessed sessions remain; nothing to advance` forever. Two findings.
+
+### 19. A frozen vendor frame could never grow, so auto-advance stalled forever
+
+Severity: high (the reported symptom). The refresh path did not exist:
+`Dashboard.run_sessions` → `ExperimentView.load` → `_restored_source` rebuilt the
+source from the persisted bars and never re-fetched, and `pending_sessions` only
+ever returned unprocessed sessions *of that frozen frame*. New vendor sessions
+never reached the experiment, and a free-tier experiment would have to be
+restarted by hand to see a new bar.
+
+Fix: `paper_experiment/refresh.py` plus `runner.advance`. Before advancing, a
+vendor daily source is refreshed — the vendor's current series is fetched and any
+session strictly newer than the experiment's last is appended. The rules keep a
+refresh from corrupting the run: it merges into the **same** experiment
+(identity, book, `processed_sessions`, `decisions` and the journal are preserved);
+it is **append-only and forward** (a backfilled older session is ignored, and a
+processed session is never re-added, so a duplicate can never be filled twice); a
+**restated** bar is refused (`conflict`) rather than allowed to change a booked
+number; and it is **quota-aware** (a minimum interval and a per-UTC-day cap) and
+**never fatal** (a quota notice, stale feed, network error or malformed body is a
+status, not an exception). The outcome is a closed vocabulary, recorded in a
+sidecar and surfaced in the dashboard's `refresh` block and a compact `[data]`
+auto-advance line.
+
+Tests: `tests/test_phase18_data_refresh.py` (append, backfill-ignore, restate-
+refuse, throttle, quota guard, day reset, fetch exception, quota notice, stale
+feed, NaN/Inf bar, disabled policy, frozen/multi-symbol refusal, weekend/holiday
+edges, sidecar round-trip and corruption, dashboard block and log line).
+
+### 20. A decision on the newest bar executed at its own decision price
+
+Severity: high (look-ahead). `DecisionState.execution_session` was pinned to the
+decision session whenever `_next_session` returned `None` — i.e. the decision
+session was the frame's last bar. On a frozen frame that case was only ever the
+final, never-settled decision, so the defect was latent: nothing could ever make
+the frame grow, so nothing could make that pin observable as a fill. Making the
+frame grow (finding 19) exposed it. A decision taken at the frontier would be
+settled by a *later* bar against the decision bar's open — a fill at a price that
+did not exist when the decision was made — and a refreshed run diverged from a run
+that had the whole frame from the start (different cash, fees, position and
+lifecycle for the same sessions).
+
+Fix: a frontier decision's `execution_session` is left unresolved (`None`) and it
+stays pending. When a newer session arrives, `_resolve_execution_sessions` pins it
+to that real successor and derives its evaluation session, exactly as a fresh run
+would have pinned it had the successor been present at decision time. A decision
+therefore never executes at its own decision bar. A state written by the older
+build is normalised on load: a still-pending decision whose execution session
+equals its decision session has the field cleared and re-resolved; an
+already-executed decision is left alone, because its fill is booked and the ledger
+cannot un-book it.
+
+Tests: `tests/test_phase18_data_refresh.py::TestFrontierDecisionIsNotLookAhead`,
+and the refresh-vs-straight determinism test
+(`test_refresh_is_deterministic_against_a_source_that_already_had_the_session`).
+One existing test's premise had to change:
+`tests/test_phase17_decision_delivery.py::test_settled_history_is_not_replayed_on_build`
+processed *every* session and then expected the final decision to be offered; that
+decision is a frontier decision with no T+1, so it is correctly withheld. The test
+now stops one session short, which leaves a genuinely pending tail to offer while
+keeping the assertion (`set(offered) == pending`) at full strength.
+
+### 21. A decision executed at the frontier was never evaluated
+
+Severity: medium (a decision lifecycle that silently stalls). `evaluation_session`
+is derived once, when a decision is executed, from the bars then available:
+`T+1+lag`. When the execution session was itself the newest bar, `T+1+lag` did not
+exist yet, so `_evaluation_session` returned `None` and the decision stayed
+`executed` forever — even after a refresh added the very bar it needed. On a frozen
+frame this was invisible (nothing could add the bar); once the frame grows it
+diverges from a straight run, which evaluated that decision. A refreshed run would
+report fewer evaluations, and a different `net_pnl` total, than the same run fed
+the whole frame.
+
+Fix: `_resolve_evaluation_sessions` re-derives the evaluation session of an
+`executed` decision whose `evaluation_session` is still unresolved, once the bar
+exists, and `_settle_due` calls it before it evaluates. With this, an incrementally
+grown run ends with the same decision lifecycle as a run that had every bar from
+the start.
+
+Tests: `tests/test_phase18_data_refresh.py::TestAppendNewSessions::test_growing_one_session_at_a_time_matches_a_whole_frame_run`
+(repeated one-bar refreshes match a whole-frame run on accounting *and* lifecycle),
+and the strengthened
+`::test_refresh_is_deterministic_against_a_source_that_already_had_the_session`.
+
+### 22. A refreshed run and a straight run agree, semantically
+
+Severity: informational (a property the refresh must hold, now pinned). With the
+frontier fixes, processing a frame in two parts with a refresh in between produces
+the same accounting and the same decision lifecycle as processing the whole frame
+at once. The comparison is on the deterministic semantic fields — cash, fees,
+positions, event count, `processed_sessions`, and each decision's state, execution
+session and evaluation session — not on event ids or timestamps, which are
+intentionally wall-clock and per-experiment.
+
+Tests: `tests/test_phase18_data_refresh.py::TestAppendNewSessions::test_refresh_is_deterministic_against_a_source_that_already_had_the_session`,
+`::test_growing_one_session_at_a_time_matches_a_whole_frame_run`
+and `::test_restart_after_refresh_sees_the_merged_sessions`.

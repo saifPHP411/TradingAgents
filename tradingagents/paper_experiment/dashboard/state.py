@@ -74,6 +74,7 @@ class ExperimentView:
         experiment = self.load()
         report = build_report(experiment).to_dict()
         raw = self._raw_state()
+        refresh = _refresh_view(self.root)
         return {
             "experiment_id": report["experiment_id"],
             "strategy_id": report["strategy_id"],
@@ -86,6 +87,7 @@ class ExperimentView:
             "performance": report["performance"],
             "costs": report["costs"],
             "data": report["data"],
+            "refresh": refresh,
             "baseline": report["baseline"],
             "readiness": report["readiness"],
             "limitations": report["limitations"],
@@ -121,6 +123,29 @@ class ExperimentView:
         if not snap_dir.exists():
             return []
         return sorted(p.name for p in snap_dir.glob("*.json"))
+
+
+def _refresh_view(root: Path) -> dict[str, Any]:
+    """The last refresh's status, read from the sidecar; never a live fetch.
+
+    Reports the newest data date and the refresh outcome so an operator can see,
+    from the dashboard alone, why the engine is or is not advancing. Read-only and
+    secret-free: the sidecar holds no credential.
+    """
+    from ..refresh import read_refresh_state
+
+    state = read_refresh_state(root)
+    return {
+        "last_status": state.last_status,
+        "last_attempt_at": state.last_attempt_at,
+        "last_success_at": state.last_success_at,
+        "source_last_bar": state.last_bar_date,
+        "last_new_session": state.last_new_session,
+        "last_new_sessions": state.last_new_sessions,
+        "fetches_today": state.fetches_today,
+        "day": state.day,
+        "last_error": state.last_error,
+    }
 
 
 def _resting_view(order: dict[str, Any]) -> dict[str, Any]:

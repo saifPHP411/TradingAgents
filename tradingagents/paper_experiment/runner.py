@@ -12,7 +12,17 @@ touches a broker, and this module adds no order path of its own.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from .experiment import PaperExperiment, SessionOutcome
+
+
+@dataclass
+class AdvanceResult:
+    """What one ``advance`` did: the refresh outcome plus the sessions processed."""
+
+    outcomes: list[SessionOutcome]
+    refresh: object | None = None
 
 
 def build_inference(config, *, stub: bool):
@@ -55,3 +65,29 @@ def process_pending(
             raise ValueError("sessions must not be negative")
         remaining = remaining[:sessions]
     return [experiment.process_session(session) for session in remaining]
+
+
+def advance(
+    experiment: PaperExperiment,
+    *,
+    sessions: int | None = None,
+    refresh_policy=None,
+    fetcher=None,
+    now=None,
+) -> AdvanceResult:
+    """Refresh the vendor data (best effort), then process up to ``sessions``.
+
+    This is the one place a run grows its session set. The refresh is attempted
+    *before* pending sessions are computed, so a new vendor bar becomes a session
+    the same call can process — which is what stops an auto-advance loop from
+    reporting "no unprocessed sessions remain" forever once the original fetch is
+    exhausted. A refresh failure never raises; it is returned as a status, and the
+    already-available sessions are processed regardless.
+    """
+    from .refresh import refresh_source
+
+    refresh_outcome = refresh_source(
+        experiment, policy=refresh_policy, fetcher=fetcher, now=now
+    )
+    outcomes = process_pending(experiment, sessions=sessions)
+    return AdvanceResult(outcomes=outcomes, refresh=refresh_outcome)
