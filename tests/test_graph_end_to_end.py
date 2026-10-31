@@ -148,6 +148,18 @@ def test_a_full_run_reaches_a_logged_decision(tmp_path, monkeypatch, offline, st
 
 
 @pytest.mark.unit
+def test_a_scripted_run_is_not_reported_as_genuine_inference(tmp_path, monkeypatch, offline):
+    """The decision-capture path labels a record ``llm_inference`` only when a real
+    model call completed. A scripted model never fires the observer, so the graph
+    reports no genuine inference and the capture fails closed to a fixture."""
+    graph = _graph(tmp_path, monkeypatch, ScriptedModel())
+
+    graph.propagate("NVDA", TRADE_DATE)
+
+    assert graph.inference_observed is False
+
+
+@pytest.mark.unit
 def test_an_interrupted_run_resumes_from_its_checkpoint(tmp_path, monkeypatch, offline):
     model = ScriptedModel(fail_at=12)            # past the analysts, before the decision
     graph = _graph(tmp_path, monkeypatch, model, checkpoint_enabled=True)

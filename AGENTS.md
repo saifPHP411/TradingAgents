@@ -1,0 +1,191 @@
+# AGENTS.md
+
+Repository-specific notes for future sessions.
+
+## Commands
+
+```bash
+pip install -e .          # install
+pytest -q                 # full suite; offline, no API key needed
+python -m ruff check .    # lint
+python -m pytest tests/test_backtest_engine.py -q   # one module
+python examples/simulated_run.py                    # end-to-end simulated run
+python -m tradingagents.baseline.run --out docs/baseline/official_baseline.json  # official baseline
+```
+
+`python -m tradingagents.baseline.fetch_data` is the only network entry point in
+the baseline package, and it is run once by a human to freeze
+`tradingagents/baseline/data/`. Never call it from a test or from a run. The
+download goes through `dataflows/vendors/yahoo/ohlcv.load_ohlcv_range`, because
+`tests/test_layering.py` allows only the data layer to import `yfinance`.
+
+`pytest` refuses network access via an autouse fixture in `tests/conftest.py`, so
+tests are hermetic. Do not add a test that needs a live vendor or an API key
+without marking it to skip when unavailable.
+
+`langchain_aws` is not installed in this environment, so
+`tests/test_bedrock_provider.py` skips. That is expected, not a failure.
+
+## Layout
+
+The analysis workflow (`graph/`, `agents/`, `llm_clients/`, `dataflows/`) is one
+system. The simulated trading layer (`signals/`, `portfolio/`, `risk/`,
+`execution/`, `backtesting/`, `performance/`, `telemetry/`, `trading_report/`) is
+another. They meet at `signals/contract.py:TradingSignal`. Do not move execution
+or accounting logic into the agent layer, and do not let a prompt decide a
+constraint that code can enforce.
+
+Two similar-sounding modules are deliberately distinct:
+
+- `tradingagents/backtest.py` — the decision-quality grid evaluator over the
+  agent graph. Its docstring says it must not grow a portfolio.
+- `tradingagents/backtesting/` — the portfolio, event-loop simulator.
+
+- `tradingagents/reporting.py` — the agent-written report tree.
+- `tradingagents/trading_report/` — reports for a simulated run (HTML and JSON).
+
+Do not merge either pair; they answer different questions. A package shadowing a
+module of the same name has already broken an import once here.
+
+`tradingagents/paper_experiment/` is the Phase 10 prospective layer. It owns no
+accounting of its own: it drives the existing `PaperSession` and records the
+history. Three of its artifacts are deliberately distinct — the hash-chained
+**journal** (`journal.json`) is the experiment's history, the **session state**
+(`session_state.json`) is the recovery format for the book, and the **report** is
+a read-only view. Do not treat a report as recovery. Its one timing rule is fixed:
+a decision is made from bars through session T, executed at T+1's open, and
+evaluated at T+1+lag; the config refuses `execute_on_next_open=False`, so a
+decision can never fill at the close it was made from. The default price source
+is still the frozen historical dataset, so by default the experiment reports
+itself as offline paper. Real vendor sources live in `paper_experiment/providers/`
+(Alpha Vantage daily bars, Finnhub quotes); they are opt-in, fetched once, and
+never the default. A vendor failure must stop the run rather than silently
+substituting the frozen dataset — the CLI enforces this. A current-market source
+now exists, so `current_market_source_available()` is `True`, but `READY FOR LIVE
+PAPER` additionally needs a source that can serve a session window; a quote-only
+source (Finnhub) is current but cannot, so it does not qualify. Do not call any of
+this a live paper run, and do not describe a report snapshot as durable recovery.
+
+`tradingagents/baseline/` is the reproducible *reference* baseline: one
+deterministic strategy, a frozen committed dataset, a versioned protocol, and an
+independent cross-check. It is not a baseline of the LLM strategy, which is
+non-deterministic and needs credentials; do not describe it as one. The frozen
+data under `tradingagents/baseline/data/` is the source of truth — a re-fetch is
+a new baseline version, not an update.
+
+`tradingagents/llm_evaluation/` records and replays LLM decisions offline.
+`point_in_time.py` in that package is the readiness audit: its dependency matrix
+is derived from the graph spec, the router's vendor map and the PIT registry, so
+do not hand-edit the matrix — change `dataflows/pit.py` and the tests will follow.
+A source's classification is one-way from its registry level; do not claim a
+`WINDOW_FILTERED` source is `PIT_VERIFIED` because it returned a historical date.
+
+`tradingagents/llm_evaluation/provider_audit.py` reports which LLM providers this
+environment can reach. It reads env-var *names* only and contacts nothing; do not
+make it read a key value or probe a provider. A free-tier claim in it must carry
+the official URL it was checked against — no URL, no claim. Readiness and
+point-in-time data are separate blockers; neither implies the other.
+
+`tradingagents/llm_evaluation/capture.py` is the only producer of a
+`DecisionRecord` from a real run. The `llm_inference` label is derived from
+`graph.inference_observed`, which an `InferenceObserver` on the *real* provider
+clients sets — never from a caller's argument. Do not add a way to set that label
+from a parameter, and do not let a scripted/stubbed model set the observer: a
+mock must stay `synthetic_fixture`, and `tests/test_llm_capture.py` asserts it.
+The capture invents no size or levels; sizing is the risk engine's.
+
+`tradingagents/llm_evaluation/smoke.py` is the only path that may make a real
+model call. It is opt-in, bounded to one request, gated on a credential before
+any request, and never runs in the test suite. Do not call it from a test, a
+run, or any automatic path. An injected `client_factory` is the test seam and
+must never be reported as a genuine observation. It sets `max_retries=0` on the
+client so a provider 5xx cannot multiply one request into three, and it reports a
+`failure_category` from a closed vocabulary rather than an error string alone.
+
+`tests/test_phase9_genuine_inference.py` is how the genuine-inference
+discriminator is proven without a credential: it drives the *real* provider
+client through an `httpx.MockTransport`, so the observer fires because the client
+dispatched a LangChain `on_llm_end` callback, not because a test said so. Keep
+that shape — an offline test that swaps in a stub proves nothing about the
+discriminator, because a stub is exactly what the discriminator must reject. A
+genuine `llm_inference` record still requires an actual provider response; no
+test may assert otherwise.
+
+`tradingagents/llm_evaluation/snapshot.py` is the reproducible price input a
+record anchors to. Its `content_hash` must be the *same* function the record
+carries (`replay.window_hash`), or `snapshot.matches_record(record)` proves
+nothing — do not give it a second hashing scheme. A snapshot refuses an empty
+window at construction; do not let a missing window become a snapshot. The smoke
+default session is the frozen dataset's last covered session, not today: today is
+past the data, and a window that does not end at the decision date is dropped.
+`experiment_ready` requires a genuine decision *and* a reproducible window, so a
+genuine inference with no window must not claim it.
+
+The offline suite must never make an external provider call. If you add a test
+that needs a credential, skip it when the credential is absent rather than
+faking a success.
+
+## Conventions
+
+- Never add a live trading path. `ExecutionMode` has only `BACKTEST` and `PAPER`,
+  and `resolve_mode` raises on live-sounding names. Tests assert this.
+- Undefined metrics are `None`, not `0.0`. A flat run has no Sharpe ratio.
+- `counts.executed` in the paper report counts *decisions settled at their
+  execution session*, and a HOLD is one. It is not a fill count; the `orders`
+  funnel is. Never read `executed` as `filled` — a run can legitimately report
+  `executed: 1, filled_orders: 0` when the tail decision is a HOLD. See
+  `tests/test_paper_experiment_counters.py`.
+- The paper experiment's inference seam takes `(symbol, session, window)`, and the
+  window is the session's point-in-time slice. A model asked for a directional
+  call with no data can only answer Hold, so never strip the window from the
+  request, and never spend a request on a session whose window cannot be anchored.
+  A non-finite window value blocks before any call. See
+  `tests/test_paper_inference_prompt.py`.
+- Every cash or position change goes through `Ledger.apply_fill`, so the
+  accounting rules stay in one place and the event log stays complete.
+- Rejections carry a named reason from a closed vocabulary, never prose only.
+- A point-in-time claim must cite the guard that implements it; see
+  `dataflows/pit.py`. Do not call a source PIT-safe without one.
+- Tests are written to catch a premise error, not to confirm the code. When a
+  test fails, first check whether the test's premise is right.
+- Every number that enters the ledger must be finite. NaN is the dangerous case,
+  because `x <= 0` and `x < 0` are both false for it, so a NaN passes the usual
+  positivity guards and then poisons cash and equity. Check `math.isfinite`
+  explicitly, never rely on a comparison.
+- An order may fill at most once. `ExecutionSimulator.submit` refuses an order
+  that is already terminal, because the ledger cannot tell a re-submission from a
+  second genuine order.
+- A strategy's `context.feed` is a view bounded at the session, not the whole
+  feed. Do not hand a strategy the raw feed; that re-opens look-ahead through
+  `feed.bar(symbol, future_date)`.
+- A paper experiment must be restart-safe *without* the caller re-supplying the
+  price source. A vendor source fetches once and persists its validated bars into
+  `session_state.json`, so `PaperExperiment.load(root)` rebuilds the same source
+  with no second fetch. The frozen dataset is not stored (2,515 sessions); it
+  reloads from disk and the recorded window is checked instead. A source that can
+  persist neither is refused, never silently swapped for the frozen dataset.
+- The broker decision bridge (`paper_experiment/paper_trading.py`) must re-read the
+  experiment on every decision; it must never cache a decision list at build time.
+  A worker is often built before any decision exists (the dashboard builds it on
+  START), and `auto-advance` records decisions from another writer, so a cached
+  list freezes the worker at "no decision is due" forever. Two guards keep it from
+  going wrong the other way: a build-time baseline suppresses decisions already
+  *settled* when the source was built (START must not replay history), and the
+  worker's durable `processed_decisions` set suppresses any decision it has already
+  ordered. See `tests/test_phase17_decision_delivery.py`.
+- `PaperTradingController.status()` must not build the worker. A status poll that
+  constructs the worker (and so the decision source) is what froze a live view; the
+  status path reads the persisted `worker_state.json` as `STOPPED` instead.
+
+## Known limitation
+
+An equity-relative position or exposure cap is re-checked at the fill price
+(`RiskEngine.review_fill`), so an up-gap cannot leave a position past its cap: the
+fill is reduced to the largest size that holds, and refused only when no positive
+size remains. Cash and long-only constraints hold through a gap, and a buy whose
+all-in cost (notional plus fee) exceeds the cash is reduced to the affordable
+notional rather than refused. The residual limitation is narrower: the re-check
+uses the *projected* fill price, which for a MARKET order is the price the
+simulator will use, so the two agree; an order type that filled at a price not
+derivable from the bar would need the re-check to reconcile after the fill. See
+`docs/PR1_INDEPENDENT_REVIEW.md`.

@@ -1,0 +1,678 @@
+{
+  "artifact_schema_version": "1.0.0",
+  "generated_at": "2026-10-28T08:26:09.584512+00:00",
+  "metadata": {
+    "package_version": "0.7.1",
+    "protocol_version": "1.0.0",
+    "python": "3.13.15",
+    "platform": "Linux-6.8.0-1055-gke-x86_64-with-glibc2.41"
+  },
+  "protocol": {
+    "version": "1.0.0",
+    "universe": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "TLT",
+      "GLD"
+    ],
+    "benchmark": "SPY",
+    "start": "2015-01-02",
+    "end": "2024-12-30",
+    "timeframe": "1 day",
+    "initial_cash": 100000.0,
+    "currency": "USD",
+    "position_size": 0.2,
+    "leverage": 1.0,
+    "holding_period_days": 40,
+    "costs": {
+      "commission_flat": 0.0,
+      "commission_per_unit": 0.0,
+      "commission_min": 0.0,
+      "commission_rate": 0.0005,
+      "half_spread_bps": 1.0,
+      "slippage_bps": 2.0,
+      "slippage_volume_factor": 0.0,
+      "max_slippage_bps": 500.0,
+      "maker_fee_bps": 0.0,
+      "taker_fee_bps": 0.0
+    },
+    "max_volume_participation": 0.05,
+    "risk_limits": {
+      "max_position_size": 0.25,
+      "max_portfolio_exposure": 0.95,
+      "max_open_positions": 5,
+      "max_daily_loss": null,
+      "max_drawdown": null,
+      "max_order_value": null,
+      "min_order_value": null,
+      "default_position_size": 0.05,
+      "long_only": true
+    },
+    "order_type": "MARKET",
+    "execute_on_next_open": true,
+    "use_stops": true,
+    "signal_timing": "close",
+    "rebalance_frequency": "daily",
+    "splits": {
+      "development": [
+        "2015-01-02",
+        "2018-12-31"
+      ],
+      "validation": [
+        "2019-01-01",
+        "2021-12-31"
+      ],
+      "test": [
+        "2022-01-01",
+        "2024-12-30"
+      ]
+    },
+    "walk_forward": {
+      "train_sessions": 504,
+      "validate_sessions": 252,
+      "test_sessions": 252
+    },
+    "seed": 20260101,
+    "dataset_checksums": {
+      "SPY": "302f5df85a306f701295a80050546f330d5f10205ff39e85427df958cf12e766",
+      "QQQ": "1236a60c6bfa298993223aff05bd91a1733b915e74f7e4e5b4ecebd15a0958f8",
+      "IWM": "6277aad9252a78208503d82364ad05f3145a9719e2382860b6ce33e47eef3b9e",
+      "TLT": "e5540dc4ad890b340816dd6bf88e7f26ce6246148a4ca7626b46a7e0bcf9c132",
+      "GLD": "b065ea9e171100235aac80c483b4da0a82a9bf92ae80d6c1fa0c9f0b3eca832f"
+    }
+  },
+  "strategy": {
+    "id": "sma_crossover_20_100",
+    "version": "1.0.0",
+    "kind": "deterministic_reference",
+    "description": "Long-only SMA(20) above SMA(100) trend filter, entered at position_size of equity on the next session's open, with a fixed holding-period exit and a 20% protective stop. Conventional parameters, chosen a priori; not tuned on this data.",
+    "fast": 20,
+    "slow": 100,
+    "stop_loss_pct": 0.2
+  },
+  "benchmark": {
+    "symbol": "SPY",
+    "kind": "buy_and_hold"
+  },
+  "results": {
+    "development": {
+      "label": "development",
+      "start": "2015-01-02",
+      "end": "2018-12-31",
+      "sessions": 1006,
+      "initial_capital": 100000.0,
+      "final_equity": 109320.11798504918,
+      "net_pnl": 9320.117985049175,
+      "total_return": 0.09320117985049176,
+      "annualized_return": 0.022572849625502878,
+      "cagr": 0.022558788053064438,
+      "max_drawdown": 0.15292467024505738,
+      "max_drawdown_start": "2015-07-17",
+      "max_drawdown_end": "2016-01-21",
+      "volatility": 0.07497928796509547,
+      "sharpe_ratio": 0.3356167263195564,
+      "sortino_ratio": 0.2895025930341039,
+      "calmar_ratio": 0.1476076396916896,
+      "num_trades": 88,
+      "winning_trades": 52,
+      "losing_trades": 36,
+      "win_rate": 0.5909090909090909,
+      "average_win": 714.6992087895698,
+      "average_loss": -810.3946893643904,
+      "profit_factor": 1.273877180012893,
+      "expectancy": 90.79715954476782,
+      "exposure": 0.6821414525787239,
+      "turnover": 34.54636855074325,
+      "total_fees": 1733.9771663429156,
+      "benchmark_return": 0.31755703606144353,
+      "excess_return": -0.22435585621095178,
+      "rejections": 0,
+      "unfilled": 0
+    },
+    "validation": {
+      "label": "validation",
+      "start": "2019-01-01",
+      "end": "2021-12-31",
+      "sessions": 757,
+      "initial_capital": 100000.0,
+      "final_equity": 146992.92126847268,
+      "net_pnl": 46992.92126847268,
+      "total_return": 0.4699292126847268,
+      "annualized_return": 0.13682026631152966,
+      "cagr": 0.1372466809546824,
+      "max_drawdown": 0.16033034087486925,
+      "max_drawdown_start": "2020-02-19",
+      "max_drawdown_end": "2020-03-18",
+      "volatility": 0.10091216639098852,
+      "sharpe_ratio": 1.3233361137369024,
+      "sortino_ratio": 1.158284362585569,
+      "calmar_ratio": 0.8533647815188756,
+      "num_trades": 73,
+      "winning_trades": 49,
+      "losing_trades": 24,
+      "win_rate": 0.6712328767123288,
+      "average_win": 1479.8418821683913,
+      "average_loss": -1018.4270973949133,
+      "profit_factor": 2.966676604038635,
+      "expectancy": 658.4931765585378,
+      "exposure": 0.7713873945653485,
+      "turnover": 29.18135997681907,
+      "total_fees": 1752.649686431853,
+      "benchmark_return": 0.996814441015587,
+      "excess_return": -0.5268852283308603,
+      "rejections": 0,
+      "unfilled": 0
+    },
+    "test": {
+      "label": "test",
+      "start": "2022-01-01",
+      "end": "2024-12-30",
+      "sessions": 752,
+      "initial_capital": 100000.0,
+      "final_equity": 112977.12095743929,
+      "net_pnl": 12977.120957439285,
+      "total_return": 0.12977120957439287,
+      "annualized_return": 0.04173548004287975,
+      "cagr": 0.041655613706556904,
+      "max_drawdown": 0.17345562863195857,
+      "max_drawdown_start": "2022-01-04",
+      "max_drawdown_end": "2022-12-28",
+      "volatility": 0.0917933781520811,
+      "sharpe_ratio": 0.4919583391117459,
+      "sortino_ratio": 0.45715029720799777,
+      "calmar_ratio": 0.24061185198800827,
+      "num_trades": 62,
+      "winning_trades": 41,
+      "losing_trades": 21,
+      "win_rate": 0.6612903225806451,
+      "average_win": 932.3331302194372,
+      "average_loss": -1127.5407597907058,
+      "profit_factor": 1.6143713022418966,
+      "expectancy": 234.63390940955006,
+      "exposure": 0.6584677270072169,
+      "turnover": 25.138623008405613,
+      "total_fees": 1205.3939522133674,
+      "benchmark_return": 0.28662207030477466,
+      "excess_return": -0.1568508607303818,
+      "rejections": 0,
+      "unfilled": 0
+    }
+  },
+  "independent_cross_check": {
+    "development": [
+      {
+        "metric": "total_return",
+        "reported": 0.09320117985049176,
+        "independent": 0.09320117985049176,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "net_pnl",
+        "reported": 9320.117985049175,
+        "independent": 9320.117985049175,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "max_drawdown",
+        "reported": 0.15292467024505738,
+        "independent": 0.15292467024505738,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "num_trades",
+        "reported": 88.0,
+        "independent": 88.0,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "winning_trades",
+        "reported": 52.0,
+        "independent": 52.0,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "losing_trades",
+        "reported": 36.0,
+        "independent": 36.0,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "win_rate",
+        "reported": 0.5909090909090909,
+        "independent": 0.5909090909090909,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "profit_factor",
+        "reported": 1.273877180012893,
+        "independent": 1.273877180012893,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "total_fees",
+        "reported": 1733.9771663429156,
+        "independent": 1733.9771663429156,
+        "agrees": true,
+        "note": ""
+      }
+    ],
+    "validation": [
+      {
+        "metric": "total_return",
+        "reported": 0.4699292126847268,
+        "independent": 0.4699292126847268,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "net_pnl",
+        "reported": 46992.92126847268,
+        "independent": 46992.92126847268,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "max_drawdown",
+        "reported": 0.16033034087486925,
+        "independent": 0.16033034087486925,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "num_trades",
+        "reported": 73.0,
+        "independent": 73.0,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "winning_trades",
+        "reported": 49.0,
+        "independent": 49.0,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "losing_trades",
+        "reported": 24.0,
+        "independent": 24.0,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "win_rate",
+        "reported": 0.6712328767123288,
+        "independent": 0.6712328767123288,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "profit_factor",
+        "reported": 2.966676604038635,
+        "independent": 2.966676604038635,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "total_fees",
+        "reported": 1752.649686431853,
+        "independent": 1752.6496864318538,
+        "agrees": true,
+        "note": ""
+      }
+    ],
+    "test": [
+      {
+        "metric": "total_return",
+        "reported": 0.12977120957439287,
+        "independent": 0.12977120957439287,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "net_pnl",
+        "reported": 12977.120957439285,
+        "independent": 12977.120957439285,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "max_drawdown",
+        "reported": 0.17345562863195857,
+        "independent": 0.17345562863195857,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "num_trades",
+        "reported": 62.0,
+        "independent": 62.0,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "winning_trades",
+        "reported": 41.0,
+        "independent": 41.0,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "losing_trades",
+        "reported": 21.0,
+        "independent": 21.0,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "win_rate",
+        "reported": 0.6612903225806451,
+        "independent": 0.6612903225806451,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "profit_factor",
+        "reported": 1.6143713022418966,
+        "independent": 1.6143713022418966,
+        "agrees": true,
+        "note": ""
+      },
+      {
+        "metric": "total_fees",
+        "reported": 1205.3939522133674,
+        "independent": 1205.3939522133667,
+        "agrees": true,
+        "note": ""
+      }
+    ]
+  },
+  "cross_check_passes": true,
+  "regime_analysis": {
+    "test": {
+      "trend": {
+        "bear": {
+          "sessions": 244,
+          "cumulative_return": -0.1552524899697284,
+          "mean_daily_return": -0.0006775739492318235
+        },
+        "bull": {
+          "sessions": 508,
+          "cumulative_return": 0.3374069720950197,
+          "mean_daily_return": 0.0005903692811921103
+        }
+      },
+      "volatility": {
+        "high_vol": {
+          "sessions": 366,
+          "cumulative_return": -0.0456546636632611,
+          "mean_daily_return": -0.00011207324141218111
+        },
+        "low_vol": {
+          "sessions": 386,
+          "cumulative_return": 0.18381802326506747,
+          "mean_daily_return": 0.00045491802484426267
+        }
+      }
+    },
+    "development": {
+      "trend": {
+        "bear": {
+          "sessions": 208,
+          "cumulative_return": -0.128796384692481,
+          "mean_daily_return": -0.0006448034162905436
+        },
+        "bull": {
+          "sessions": 798,
+          "cumulative_return": 0.25481708367866385,
+          "mean_daily_return": 0.0002938305115603735
+        }
+      },
+      "volatility": {
+        "high_vol": {
+          "sessions": 493,
+          "cumulative_return": -0.03843996570646002,
+          "mean_daily_return": -6.35982590503796e-05
+        },
+        "low_vol": {
+          "sessions": 513,
+          "cumulative_return": 0.13690371985319394,
+          "mean_daily_return": 0.0002567477180284252
+        }
+      }
+    }
+  },
+  "concentration": {
+    "net_pnl": 12977.120957439285,
+    "gross_profit": 38225.658338996924,
+    "top_1_share_of_gross_profit": 0.059650799761506196,
+    "top_3_share_of_gross_profit": 0.15708577440533078,
+    "top_5_share_of_gross_profit": 0.24814320419955926,
+    "pnl_by_symbol": {
+      "GLD": 7182.585165705275,
+      "QQQ": 3426.067174881613,
+      "SPY": 3434.1516833683077,
+      "TLT": -759.3418403602004,
+      "IWM": 1263.8401997971066
+    },
+    "best_symbol": "GLD",
+    "best_symbol_pnl": 7182.585165705275,
+    "largest_single_trade": 2280.191091331255
+  },
+  "cost_sensitivity": {
+    "baseline": {
+      "total_return": 0.12977120957439287,
+      "net_pnl": 12977.120957439285,
+      "total_fees": 1205.3939522133674,
+      "num_trades": 62
+    },
+    "double_cost": {
+      "total_return": 0.10764222227417747,
+      "net_pnl": 10764.222227417747,
+      "total_fees": 2386.7396340500213,
+      "num_trades": 62
+    },
+    "quadruple_cost": {
+      "total_return": 0.06463972122016422,
+      "net_pnl": 6463.972122016421,
+      "total_fees": 4679.108036326474,
+      "num_trades": 62
+    },
+    "zero_cost": {
+      "total_return": 0.15232857813413794,
+      "net_pnl": 15232.857813413793,
+      "total_fees": 0.0,
+      "num_trades": 62
+    }
+  },
+  "walk_forward": {
+    "folds": [
+      {
+        "index": 0,
+        "train": [
+          "2015-01-02",
+          "2016-12-30"
+        ],
+        "validate": [
+          "2017-01-03",
+          "2018-01-02"
+        ],
+        "test": [
+          "2018-01-03",
+          "2019-01-03"
+        ]
+      },
+      {
+        "index": 1,
+        "train": [
+          "2016-01-04",
+          "2018-01-02"
+        ],
+        "validate": [
+          "2018-01-03",
+          "2019-01-03"
+        ],
+        "test": [
+          "2019-01-04",
+          "2020-01-03"
+        ]
+      },
+      {
+        "index": 2,
+        "train": [
+          "2017-01-03",
+          "2019-01-03"
+        ],
+        "validate": [
+          "2019-01-04",
+          "2020-01-03"
+        ],
+        "test": [
+          "2020-01-06",
+          "2021-01-04"
+        ]
+      },
+      {
+        "index": 3,
+        "train": [
+          "2018-01-03",
+          "2020-01-03"
+        ],
+        "validate": [
+          "2020-01-06",
+          "2021-01-04"
+        ],
+        "test": [
+          "2021-01-05",
+          "2022-01-03"
+        ]
+      },
+      {
+        "index": 4,
+        "train": [
+          "2019-01-04",
+          "2021-01-04"
+        ],
+        "validate": [
+          "2021-01-05",
+          "2022-01-03"
+        ],
+        "test": [
+          "2022-01-04",
+          "2023-01-04"
+        ]
+      },
+      {
+        "index": 5,
+        "train": [
+          "2020-01-06",
+          "2022-01-03"
+        ],
+        "validate": [
+          "2022-01-04",
+          "2023-01-04"
+        ],
+        "test": [
+          "2023-01-05",
+          "2024-01-05"
+        ]
+      }
+    ],
+    "train_scores": {
+      "0": {
+        "sma_crossover_20_100": -0.04327794396787183
+      },
+      "1": {
+        "sma_crossover_20_100": 0.19440990215453538
+      },
+      "2": {
+        "sma_crossover_20_100": 0.07707472957637031
+      },
+      "3": {
+        "sma_crossover_20_100": 0.111423537376186
+      },
+      "4": {
+        "sma_crossover_20_100": 0.2901775505802575
+      },
+      "5": {
+        "sma_crossover_20_100": 0.31754767319347565
+      }
+    },
+    "validation_scores": {
+      "0": {
+        "sma_crossover_20_100": 0.06878699214717286
+      },
+      "1": {
+        "sma_crossover_20_100": -0.019032391691169905
+      },
+      "2": {
+        "sma_crossover_20_100": 0.1320863065708609
+      },
+      "3": {
+        "sma_crossover_20_100": 0.16742214936286823
+      },
+      "4": {
+        "sma_crossover_20_100": 0.05598124446719681
+      },
+      "5": {
+        "sma_crossover_20_100": -0.1076516912305844
+      }
+    },
+    "selected": {
+      "0": "sma_crossover_20_100",
+      "1": "sma_crossover_20_100",
+      "2": "sma_crossover_20_100",
+      "3": "sma_crossover_20_100",
+      "4": "sma_crossover_20_100",
+      "5": "sma_crossover_20_100"
+    },
+    "test_scores": {
+      "0": {
+        "sma_crossover_20_100": -0.019032391691169905
+      },
+      "1": {
+        "sma_crossover_20_100": 0.1320863065708609
+      },
+      "2": {
+        "sma_crossover_20_100": 0.16742214936286823
+      },
+      "3": {
+        "sma_crossover_20_100": 0.05598124446719681
+      },
+      "4": {
+        "sma_crossover_20_100": -0.1076516912305844
+      },
+      "5": {
+        "sma_crossover_20_100": 0.057264159361750645
+      }
+    },
+    "selected_test_scores": [
+      -0.019032391691169905,
+      0.1320863065708609,
+      0.16742214936286823,
+      0.05598124446719681,
+      -0.1076516912305844,
+      0.057264159361750645
+    ],
+    "best_in_sample_scores": [
+      -0.04327794396787183,
+      0.19440990215453538,
+      0.07707472957637031,
+      0.111423537376186,
+      0.2901775505802575,
+      0.31754767319347565
+    ],
+    "mean_test_score": 0.04767829614015371,
+    "mean_best_in_sample_score": 0.1578925748188255,
+    "overfitting_gap": 0.11021427867867178
+  }
+}

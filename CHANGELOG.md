@@ -6,6 +6,1012 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Changes that need action when upgrading are listed under "Upgrading from" in their release.
 
+## [Unreleased] — simulated trading system
+
+Adds a deterministic simulated trading system alongside the existing multi-agent
+analysis, so a decision can become a position with honest books kept about it.
+The agent workflow is unchanged and stays the analytical component; execution,
+sizing, constraints and accounting are separate code. There is no live trading
+path, and no configuration that produces one.
+
+### Added
+
+- **A running paper experiment can now grow its market data without a restart**
+  (`paper_experiment/refresh.py`, `runner.advance`). A vendor daily source is
+  fetched once and frozen, and a resume rebuilds that frozen source from the state
+  without re-fetching — so once every session of the original fetch had been
+  processed, `pending_sessions` was empty for good and the auto-advance loop
+  printed `[auto] no unprocessed sessions remain; nothing to advance` forever. A
+  `run` (and the dashboard's auto-advance tick) now *refreshes* a vendor daily
+  source before advancing: it asks the vendor for its current series and appends
+  any session strictly newer than the experiment's last. The refresh:
+  - merges into the **same** experiment, preserving `experiment_id`, `created_at`,
+    `processed_sessions`, `decisions` and the session book, and appending to the
+    journal rather than rewriting it;
+  - is **append-only and forward** — a backfilled older session is ignored, and a
+    session the run already processed is never re-added, so a duplicate can never
+    be filled twice;
+  - refuses a **restated** bar (`conflict`) rather than letting a vendor change a
+    number the ledger already booked;
+  - is **quota-aware** (a minimum interval and a per-UTC-day cap, defaulting to
+    one call an hour and 24 a day, so the free tier is not exhausted) and **never
+    fatal** — a quota notice, stale feed, network error or malformed body is
+    returned as a status and the already-available sessions are processed anyway;
+  - records its outcome in a closed vocabulary (`refresh.REFRESH_STATUSES`) and a
+    small sidecar (`data_refresh.json`), and surfaces it in the dashboard's
+    `refresh` block and a compact `[data]` auto-advance log line, so an idle
+    engine says *why* it is idle (last data date, newest session, last processed).
+- Alpaca **paper** trading worker (`paper_experiment/broker/trading.py`): a
+  deliberate, opt-in loop over the existing read-only Alpaca Paper adapter. It is
+  paper-only and adds no live path. `start()` runs preflight (broker connection,
+  account status, buying power, market data, risk config) and places no order; a
+  failed preflight leaves the worker `ERROR`, never `RUNNING`. `run_once()`
+  processes at most one decision and places at most one order, and refuses unless
+  `RUNNING`. Local risk checks (buying power, per-order notional cap, daily order
+  count, open-position count, optional symbol allow-list, long-only) run before
+  the broker. Each decision maps to a deterministic `client_order_id`, so a
+  duplicate decision is skipped and a known order is reconciled by id rather than
+  re-submitted. State is persisted to `<root>/worker_state.json` (versioned with
+  `schema_version`) and read back as `STOPPED`. `stop()` closes no position and
+  cancels no order. A missing, `NaN`, `inf`, zero or negative price — or a
+  price-source exception — refuses the order as `MarketDataError` rather than
+  fabricating a fill.
+- A strategy→worker decision bridge (`paper_experiment/paper_trading.py`): turns
+  an experiment's pending decisions into worker `TradingDecision`s, deterministically
+  ordered. A "Hold" decision yields nothing. The bridge **re-reads** the
+  experiment on every decision (through a caller-supplied `reload`), so a decision
+  produced *after* the worker was built is still discovered; it suppresses
+  decisions that were already settled when the source was built, so starting a
+  worker does not replay history; and it filters against the worker's durable
+  processed-decision set, so a decision is never offered twice.
+- Dashboard start/stop for the paper worker (`paper_experiment/dashboard/`): a
+  **Paper trading** tab with START/STOP, plus `/api/paper/status`,
+  `/api/paper/start` and `/api/paper/stop`. Off by default
+  (`--allow-paper-trading`); both control endpoints require the bearer token *and*
+  an `X-Paper-Confirm: yes` header, and the worker builds its own paper-only
+  broker, so a live endpoint cannot be configured in.
+- `paper-trade` CLI command (`paper_experiment/__main__.py`): one explicit paper
+  cycle, or `--dry-run` for preflight only. There is no flag that reaches a live
+  endpoint.
+
+### Changed
+
+- The default `PaperRiskLimits.max_order_notional` is now `25.0` (was `1000.0`),
+  sized to the ~50 USD paper account this path is used with, so the local
+  per-order cap is a real second layer rather than a nominal one. The target
+  `order_notional` (default `25.0`) must not exceed it; the existing configuration
+  check already enforces `order_notional <= max_order_notional`.
+- The Alpaca paper worker's **daily-order counter is now durable**
+  (`paper_experiment/broker/state.py`): the count and the UTC day it belongs to
+  are persisted in the broker's state file, so a restart on the same day keeps the
+  count and a new day starts fresh with no explicit reset. Only an order the
+  broker accepted is counted — a local refusal or a broker rejection does not
+  count, and a partial fill of one order is still one order. The fields are
+  additive and optional, so an older state file without them still loads.
+
+### Changed
+
+- The dashboard **START** button now runs the paper worker **continuously**
+  (`paper_experiment/broker/trading.py`): `start()` launches one background loop
+  that waits `poll_interval_seconds` and then calls `run_once()` once per interval
+  until `stop()`. Previously START only set the state to `RUNNING` and the cycle
+  needed an external call. The loop waits one interval *before* its first cycle,
+  so START still places no order and an immediate STOP prevents the first one.
+  `stop()` signals the loop and waits for the in-flight cycle to finish rather than
+  killing the thread; a second `start()` while the loop is live raises instead of
+  starting a second loop; an unexpected cycle failure sets `ERROR` and stops the
+  loop without crashing the process; a restart still loads as `STOPPED` and never
+  auto-starts. `GET /api/paper/status` now also reports `loop_running`,
+  `next_cycle_at`, `cycles_completed` and `poll_interval_seconds`. The dashboard
+  stops the loop gracefully on process shutdown. State gains an additive,
+  backward-compatible `cycles_completed` field.
+- `AlpacaPaperBroker` gained `refresh_account()` and `positions()`, and a
+  side-aware `_check_risk` (buying-power, per-order notional, open-position and
+  long-only constraints). `submit_order` accepts `side` and an explicit
+  `refresh`; the default preserves prior behaviour. `BrokerAccountState` now
+  persists positions.
+
+### Fixed
+
+- **A decision taken on the newest bar no longer executes at its own decision
+  price.** `DecisionState.execution_session` was pinned to the decision session
+  when `_next_session` returned `None` (the decision session was the frame's last
+  bar). On a frozen frame that case was only ever the final, never-settled
+  decision, so it was latent. Making the frame grow exposed it: a later bar would
+  settle the decision against the decision bar's open — a fill at a price that did
+  not exist when the decision was made, and a refreshed run diverging from a run
+  that had the whole frame from the start. `execution_session` is now left
+  unresolved (`None`) on the frontier and resolves to the real successor when a
+  newer session arrives (a refresh), so a decision never executes at its own
+  decision bar. A state written by the older build is normalised on load
+  (`_normalise_frontier_executions`): a still-pending decision whose execution
+  session equals its decision session has that field cleared and re-resolved; an
+  already-executed decision is left alone, because its fill is booked.
+- **The paper request now carries the computed indicator evidence, and its
+  records no longer claim the agent graph ran.** Rendering the raw window (above)
+  fixed the data-blind failure, but still left the model to recompute trend,
+  momentum and volatility from the bar table itself. Two changes:
+  - `paper_experiment/indicators.py` computes a deterministic indicator block from
+    the *same* point-in-time window — SMA20/50/200, EMA10/20, RSI(14),
+    MACD(12,26,9), Bollinger(20,2), ATR(14) and ATR as a fraction of close, volume
+    versus its 20-day average, 20-day realised volatility, 1/5/20-day returns and
+    the position within the 20-day high–low range — and the request renders it
+    alongside the bars. `PAPER_INFERENCE_PROMPT_VERSION` is `paper-inference-3`,
+    and the prompt asks for the factors *supporting* and *opposing* the call, so a
+    `Hold` must be reasoned. An indicator the window is too short for is rendered
+    `insufficient history (need N bars, have M)` and is never zero-filled or
+    extrapolated; a non-finite or missing OHLCV value raises and blocks the
+    decision before any request.
+  - Paper records inherited the graph's `prompt_version` (`tradingagents-default`)
+    and `graph_version` (`tradingagents-graph`), attesting to prompts and a
+    pipeline the single-call decision never used.
+    `paper_experiment/protocol.py` derives a paper protocol that keeps the
+    frozen universe, costs, limits, holding period and capital but names the real
+    seam (`graph_version = "paper-single-call"`). Covered by
+    `tests/test_paper_indicators.py` and `tests/test_paper_inference_prompt.py`.
+- **A backwards `process_session` call is now refused, not silently accepted.**
+  `process_session` is idempotent for a session already processed, but a call for
+  a session *earlier* than one already processed used to be accepted. It settled
+  the book against a past bar, which reorders the ledger's event log: the same set
+  of sessions processed in two orders produced two different cash, fee and
+  position results. It now raises `ExperimentError` and leaves the state
+  untouched. Forward progress across a gap is still allowed. Covered by
+  `tests/test_phase10_paper_experiment.py::TestDuplicateProcessing`.
+- **Decisions did not reach the Alpaca paper worker.** Three causes, all fixed
+  and each pinned by a test in `tests/test_phase17_decision_delivery.py`:
+  - `ExperimentDecisionSource` loaded the experiment's decisions once and cached
+    them, so a decision recorded after the worker was built was never seen. It now
+    re-reads the experiment on every decision through a caller-supplied `reload`
+    (the dashboard supplies one that reloads from disk), so an autonomous
+    `auto-advance` progressing the experiment cannot hide a decision from a running
+    worker. A build-time baseline of already-settled decisions means starting a
+    worker does not replay history, and a decision that was pending at build time —
+    or produced afterwards — is still delivered.
+  - `PaperTradingController.status()` built the worker (and therefore the decision
+    source) on a status poll, so a dashboard that polls status could freeze a live
+    view before any decision existed. `status()` is now build-free: it reports a
+    live worker if one exists, and otherwise reads the persisted worker state from
+    disk as `STOPPED`. The worker is built only on START.
+  - The worker remembered only the single most recent decision id, which is not
+    enough to tell after a restart whether an *earlier* decision was already
+    ordered. `WorkerState` now carries a durable `processed_decisions` set: the
+    worker adds a decision when it submits an order for it, reconciles an existing
+    one, or the broker definitively rejects it, and a resumed worker skips every id
+    in the set. The field is additive and optional, so an older state file still
+    loads.
+
+### Added (simulated trading system)
+
+- Persistent LIMIT orders (`execution/`, `backtesting/`): an order can rest
+  across sessions instead of being single-shot. `TimeInForce.DAY`/`GTC`, an
+  `expires_session` and a `limit_order_ttl_sessions` bound how long it may rest;
+  an expired order is cancelled with the new `EXPIRED` reason. A GTC limit the
+  bar did not reach stays `ACCEPTED` and is worked again, recording its
+  acceptance once (`Order.accepted_recorded`). Reachability uses the bar's
+  low/high when supplied, so a limit the session traded to (but did not close at)
+  fills. The backtester and the paper session both emit LIMIT orders from a
+  signal's `order_intent`, and the paper session advances resting orders with
+  `PaperSession.work_resting()`.
+- Signal order intent (`signals/`): `OrderIntent` (`MARKET`/`LIMIT`) and
+  `SignalTimeInForce` (`DAY`/`GTC`) on `TradingSignal`, with `limit_price` and
+  `expires_session`. A LIMIT intent needs a limit on the correct side of the
+  entry; a MARKET intent refuses one; only a LIMIT order may be GTC.
+- A validated signal contract (`signals/`): a decision becomes a `TradingSignal`
+  only if its action is BUY/HOLD/SELL, its confidence is in range, and its size
+  and stop/target are coherent. A HOLD cannot carry a size.
+- A portfolio ledger (`portfolio/`): cash, positions, average entry, market
+  value, equity, realized and unrealized P&L, fees and exposure, with an event
+  log (`ORDER_FILLED`, `POSITION_OPENED`, `FEE_CHARGED`, and the rest). Every
+  cash or position change goes through one method.
+- A deterministic risk engine (`risk/`): configurable limits on position size,
+  portfolio exposure, open positions, daily loss, drawdown and order value.
+  Long-only is enforced in code, not by prompt. A position cap bounds the
+  resulting position, not each order, so repeated buys cannot accumulate past it.
+- A simulated execution engine (`execution/`): MARKET and LIMIT orders with a
+  full lifecycle, named rejection reasons, and configurable costs — commission,
+  half-spread, slippage and volume-scaled impact. Costs land in the ledger.
+- A portfolio, event-loop backtester (`backtesting/`): market event, decision,
+  risk validation, order, fill, portfolio update, P&L. Orders fill at the next
+  session's open, bars are sliced strictly at each session, and stops fill at the
+  open on a gap rather than at the level.
+- Performance analytics (`performance/`): total and annualized return, CAGR,
+  realized and unrealized P&L, fees, trade counts, win rate, profit factor,
+  average win/loss, expectancy, max drawdown, Sharpe, Sortino, Calmar, exposure,
+  turnover, and benchmark comparison. An undefined metric is `None`, never zero.
+- Walk-forward evaluation (`backtesting/walkforward.py`): train, validation and
+  test windows, with fold ordering validated at construction.
+- LLM cost telemetry and budgets (`telemetry/`): per-call tokens, latency, retries
+  and estimated cost, a run cost ceiling, a call ceiling, and run metadata for
+  reproducibility.
+- Paper trading (`execution/paper.py`): the same pipeline driven by live quotes
+  from a caller-supplied source instead of historical bars.
+- Paper-session persistence and restart recovery (`execution/paper.py`,
+  `portfolio/ledger.py`): `Ledger.to_state`/`from_state` and
+  `PaperSession.state`/`save_state`/`restore` write and rebuild the *complete*
+  session — the whole book including its event log and dense `seq` counter, the
+  risk limits, the cost schedule, the simulator settings, the live resting orders
+  with their remaining size and weighted average fill price, the processed-signal
+  set and the day baseline. It is versioned (`PAPER_STATE_SCHEMA_VERSION`), and
+  `PaperSession.restore` raises `PaperStateError` for a malformed file, an unknown
+  version, or a state claiming a live mode. This is deliberately distinct from the
+  reporting snapshot (`snapshot`/`write_json`), which cannot rebuild a book.
+- Duplicate-signal refusal in a paper session: a `signal_id` already processed is
+  refused with a `DUPLICATE_SIGNAL` step and no order, so a re-driven decision
+  (crash recovery, a duplicated message) cannot create a second position or fee.
+- `PaperSession.cancel_resting` cancels a live resting order, recording exactly
+  one `ORDER_CANCELLED` event. The cancellation is durable: it survives a
+  save/restore, a cancelled order is not filled when its price is reached later,
+  and cancelling an already-terminal order is a no-op
+  (`tests/test_paper_recovery.py::TestCancellationAfterRestart`).
+- `Quote` accepts an optional intraday `low`/`high` range and validates it, so a
+  LIMIT order's reachability can use the session range in paper mode as it does
+  against a bar, and a malformed range is refused.
+- Reports (`trading_report/`): one document covering decisions, execution,
+  portfolio and performance, rendered to self-contained HTML and JSON.
+- Point-in-time guarantees per data source (`dataflows/pit.py`): each source is
+  classified `REQUEST_BOUNDED`, `WINDOW_FILTERED` or `NOT_PIT_SAFE`, with the
+  guard that implements it cited and checked by tests.
+- Documentation: `docs/ARCHITECTURE.md`, `docs/BACKTESTING.md`, `docs/RISK.md`,
+  `docs/EXECUTION.md`, `docs/PAPER_TRADING.md`, `docs/TRADING_SYSTEM_AUDIT.md`
+  and `docs/FINAL_DEVELOPMENT_REPORT.md`, plus `examples/simulated_run.py`.
+- An official strategy baseline (`tradingagents/baseline/`): a frozen, versioned
+  protocol (`BaselineProtocol`, `PROTOCOL_VERSION`), a committed dataset under
+  `tradingagents/baseline/data/` (fetched once by
+  `python -m tradingagents.baseline.fetch_data`, the only entry point in the
+  package that reaches the network, and it does so through the data layer), a
+  deterministic pre-registered reference strategy
+  (`SmaCrossover`, 20/100, fixed a priori), and a harness that runs it through the
+  existing backtester over a development/validation/test split and a rolling
+  walk-forward. It measures with the existing performance engine and recomputes
+  the headline metrics independently (`crosscheck.py`) before publishing. The
+  artifact (`docs/baseline/official_baseline.json`) records the protocol, the
+  data checksums, the strategy id and the seed, so a result always names the spec
+  that produced it. Documented in `docs/STRATEGY_BASELINE.md`. This is a
+  *reference* baseline: it does not measure the non-deterministic LLM strategy,
+  which needs credentials and cannot be replayed to one number.
+- A decision-replay evaluation of the LLM strategy (`llm_evaluation/`): the layer
+  the reference baseline above is missing. A `DecisionRecord` captures one agent
+  decision with the hash of the data window the model saw and the config hash it
+  ran under; `ReplayStrategy` feeds recorded decisions into the *existing*
+  `PortfolioBacktester` through the production `TradingSignal` contract, so a
+  replayed decision travels the same decision → risk → order → fill → ledger path
+  as any other strategy. The replay calls no model (`no_llm_calls()` replaces the
+  client factory with one that raises), refuses a window-hash mismatch, and
+  refuses a rating/action mismatch. `build_evaluation()` reports
+  `LLM BASELINE BLOCKED` with the exact missing prerequisite — a provider
+  credential or a captured record set — and never invents a number. It records the
+  news/sentiment/fundamentals gap explicitly: the frozen dataset is price-only, so
+  a replay is a restricted, lower-bound evaluation, not the full pipeline's
+  result. Three record sources (`llm_inference`, `operator_supplied`,
+  `synthetic_fixture`) are kept strictly apart so a fixture cannot be reported as
+  performance. Every record, record set and artifact is scanned for
+  credential-shaped values before it can be written; a hit raises
+  `CredentialLeakError` naming the field, never the secret. Artifacts are
+  versioned (`artifact_schema_version`) and two builds of the same records are
+  byte-identical except for the timestamp. Documented in
+  `docs/LLM_EVALUATION.md`. No live trading path is added.
+- A point-in-time readiness audit of the agent graph
+  (`llm_evaluation/point_in_time.py`): the agent-by-agent dependency matrix is
+  derived from the code — the graph spec (`graph/analyst_execution.py`), the
+  router's tool→vendor map (`dataflows/router.py`) and the PIT registry
+  (`dataflows/pit.py`) — so it cannot go stale without a test failing. Each source
+  gets a classification (`PIT_VERIFIED`, `PIT_PARTIALLY_VERIFIED`,
+  `PIT_UNVERIFIED`, `CURRENT_ONLY`, `UNAVAILABLE`) and the guard that implements
+  it, and `graph_readiness(scope)` returns a readiness verdict with named
+  blockers. `price_only` (the market analyst) is ready for a historical run — it
+  reads only request-bounded sources; `full` is not, because the news/sentiment
+  sources are window-filtered and the fundamentals/social sources are current-only.
+  The verdict, matrix and classifications are embedded in the evaluation
+  artifact's new `point_in_time`, `evaluation_scope` and `limitations` blocks, so
+  a restricted result cannot be read as a full-graph one. Documented in
+  `docs/LLM_POINT_IN_TIME_AUDIT.md`. No live trading path is added.
+- A provider-readiness audit (`llm_evaluation/provider_audit.py`): readiness is
+  derived from the client registries and the *names* of the env vars they declare,
+  so it reports which providers this environment can reach without reading a
+  credential value or contacting a provider. Each provider carries its transport,
+  credential requirement, env var, whether structured output is needed, and any
+  documented free API tier with the official URL it was checked against. The
+  report is embedded in the evaluation artifact as `provider_readiness`, and a
+  blocked evaluation now names the documented free-tier options. Documented in
+  `docs/LLM_PROVIDER_AUDIT.md`. No live trading path is added.
+- A real decision-capture path (`llm_evaluation/capture.py`): turns a completed
+  graph run into a validated `DecisionRecord`. It reads the rating, the
+  session-bounded price window (hashed, so a replay can prove it saw the same
+  bars), the config hash and the model/provider metadata, and refuses a rating
+  with no tradeable action rather than degrading it to Hold. It invents no size,
+  stop or limit. The `llm_inference` label is derived from the **graph**, not the
+  caller: the graph carries an `InferenceObserver`
+  (`llm_clients/observed.py`) on its real provider clients, so a scripted or
+  stubbed model can never be captured as genuine inference — a mock run yields a
+  `synthetic_fixture` record with a note saying why. Replay gained an optional
+  `expected_config_hash`, so a record captured under a different protocol is
+  refused rather than replayed as if it were this one.
+- A bounded, opt-in provider smoke test (`llm_evaluation/smoke.py`,
+  `python -m tradingagents.llm_evaluation.smoke`): the only path that may make a
+  real model call. It checks configuration before any request, names the exact
+  env var to set and stops if absent, makes **at most one** small request with a
+  timeout, validates the returned decision with the production rating parser, and
+  writes a record only when the decision and metadata are valid. It never places
+  an order and never touches execution or risk. Default provider is Groq (a
+  documented free tier with an OpenAI-compatible API; `openai/gpt-oss-20b` is a
+  documented production model). An injected client (the test seam) is reported as
+  a fixture, never a genuine observation, so a mocked test can never be counted
+  as real inference.
+- An `evaluation_mode` and `capture_status` block in the evaluation artifact, so
+  the report cannot conflate `REAL_INFERENCE_CAPTURE`, `REPLAY` and `MOCK_TEST`.
+  `capture_status` states, field by field, whether a provider is configured,
+  whether a genuine request succeeded, whether a record was captured, whether its
+  inputs are reproducible, whether they are point-in-time safe, and whether
+  historical evaluation is allowed — for the price-only scope only, since the
+  full graph's inputs remain not PIT-safe. Input reproducibility is reported
+  separately from point-in-time safety. No live trading path is added.
+- A `failure_category` on the smoke report (`llm_evaluation/smoke.py`): a failed
+  provider call is classified from a closed vocabulary (authentication failure,
+  model unavailable, rate limit, timeout, malformed response, provider error,
+  provider unreachable, configuration error, other) instead of only echoing an
+  error string. The smoke path also sets `max_retries=0`, so the SDK's default
+  three attempts on a 5xx cannot turn one opt-in request into three billable
+  ones.
+
+### Phase 9.5 — reproducible price input
+
+The first genuine Groq run (Phase 9) produced a real decision but recorded
+`bar_count: 0` and `data_snapshot_id: feed:unavailable`: the inference was real,
+its input was not reproducible. Two causes, both fixed.
+
+The smoke CLI never loaded a price feed, and its default session was *today*,
+which is past the frozen dataset's last session (2024-12-30). A record requires
+its window to end at the decision date, so a window ending 2024-12-30 for a
+decision dated today was dropped. The smoke path now loads the frozen dataset
+when no feed is injected, defaults the session to the dataset's last covered
+session, and snapshots the window it captures.
+
+Added:
+
+- A versioned, self-verifying price snapshot (`llm_evaluation/snapshot.py`,
+  `python -m tradingagents.llm_evaluation.snapshot`): `snapshot_id` is
+  `<symbol>-<start>..<end>-<hash12>`; `content_hash` is the same SHA-256 the
+  decision record carries (`replay.window_hash`), so
+  `snapshot.matches_record(record)` is a checkable claim. `load` recomputes the
+  hash and refuses a tampered or drifted file; an empty window is refused at
+  construction rather than recorded as `unavailable`. A committed snapshot lives
+  at `docs/baseline/SPY_price_snapshot.json`.
+- `window_reproducible` and `experiment_ready` on the smoke report.
+  `experiment_ready` requires a genuine decision **and** a reproducible window
+  that matches its snapshot — a genuine inference alone is not enough.
+- `snapshot_id` on `build_record`, so a record names a reloadable artifact
+  rather than a bare date range.
+
+Changed:
+
+- `prospective_paper_experiment_possible` now requires a reproducible window, not
+  only a captured record. The `feed:unavailable` record no longer satisfies it.
+- The smoke report no longer claims "one genuine model call" when an injected
+  (test) client was used.
+
+### Phase 12 — restart recovery of a vendor-backed paper experiment
+
+Phase 10 proved a restart is idempotent **when the caller hands the restored
+session the same price source**. That hid a real defect: a vendor source fetches
+once at construction, so a resume that rebuilt the source from scratch either
+re-fetched (a second, quota-consuming call — and a failure on the free tier) or
+silently resumed on different data. This phase persists the source so a restart
+recovers the *same* run.
+
+Added:
+
+- **Persisted source bars** (`sources.FramePriceSource.to_dict`/`from_dict`,
+  `SourceProvenance.from_dict`): a frame-backed source (the frozen dataset, a
+  static fixture, or a vendor daily source) writes its validated bars and
+  provenance into `session_state.json` under a `source.restore` block.
+  `PaperExperiment.load(root)` now rebuilds the source from that block, so a
+  **vendor** run resumes without a second API call and on the same bars. A stored
+  frame is re-validated on restore, so a corrupted state cannot poison the book.
+- **A versioned, explicit restore path**: `load(root, source=None)` reads the
+  persisted bars; passing a source explicitly still works. A source that cannot
+  be persisted (Finnhub's quote source, which carries no bar history) is refused
+  with a clear error rather than silently swapped for the frozen dataset.
+- **Phase 12 tests** (`tests/test_phase12_restart_source_persistence.py`): a
+  restart *without* an explicit source matches a straight run on accounting and
+  events; a vendor run restarts without refetching (asserted by counting the
+  mocked transport calls); multiple symbols survive; a corrupted or absent
+  restore block is refused; and a credential in the environment never reaches the
+  state file.
+- **Credential-gated live tests** (`tests/test_live_providers_integration.py`):
+  marked `integration` and skipped unless the relevant key is present, so the
+  default suite stays hermetic. They make the minimum real calls (one Alpha
+  Vantage, one Finnhub, one LLM inference) and never print a key.
+- **`docs/RAILWAY_DEPLOYMENT.md`**: what deploying the paper runner to Railway
+  requires — a worker/cron shape, the start-command override, the volume and the
+  `RAILWAY_RUN_UID=0` caveat, and why no Config-as-Code file is committed.
+
+Changed:
+
+- `docs/PAPER_EXPERIMENT.md`, `docs/MARKET_DATA_PROVIDERS.md`: state the resume
+  mechanism precisely — a frame-backed vendor run is resumed from its own stored
+  bars, and the refusal applies only to a source with no persistable bars.
+
+### Phase 3 (reliability) — read-only Alpaca paper connection verification
+
+Extends the Alpaca paper broker adapter from a mocked-only check to a **real,
+read-only** connection check, without adding any order path.
+
+**Added — `alpaca-diagnose` (alias of `broker-check`), a read-only paper
+diagnostic.** It reports, without any secret value, whether the paper credential
+env vars (`ALPACA_PAPER_API_KEY` / `ALPACA_PAPER_API_SECRET`) are present and
+whether the endpoint is the approved paper host. With `--connect` it performs one
+read-only `GET /v2/account` and reports the account id, status, currency, cash,
+equity, buying power and active restrictions. It places no order and changes
+nothing; there is no flag that submits one. It fails safe — non-zero exit, clear
+secret-free message, no live fallback — when a credential is missing,
+authentication fails, the request times out, or the response is not the expected
+object.
+
+**Added — richer, documented account fields.** `BrokerAccount` now reads the
+optional fields Alpaca documents on `GET /v2/account` (`account_number`,
+`portfolio_value`, `last_equity`, `long_market_value`, `short_market_value`,
+`multiplier`, `shorting_enabled`, `transfers_blocked`, `trade_suspended_by_user`,
+`daytrade_count`) and exposes a `restrictions()` list from a closed vocabulary. A
+missing optional field is reported as unknown (`None`), never a fabricated zero.
+
+**Added — a credential-gated live check.**
+`tests/test_live_providers_integration.py::TestAlpacaPaperLive` runs the real
+read-only paper account check when both paper credentials are present and skips
+otherwise, so the default suite needs no secret and CI stays hermetic.
+
+The adapter remains paper-only and separate: the endpoint is hard-validated to
+Alpaca's paper host (every live host is refused), live credential variable names
+are refused rather than used as a fallback, and the module never imports or writes
+the internal ledger or simulator. `ExecutionMode` still has only `BACKTEST` and
+`PAPER`. Tests: `tests/test_phase3_broker.py`.
+
+### Phase 3 (reliability) — restored currency, and an isolated Alpaca paper broker
+
+Two changes, both aimed at making the paper path more honest and safer. Neither
+adds a live path: `ExecutionMode` still has only `BACKTEST` and `PAPER`.
+
+**Fixed — a restored provenance kept claiming the current market after its bar
+went stale.** `SourceProvenance.is_current_market` was computed once at fetch time
+and trusted verbatim on restore, so a vendor snapshot persisted while its newest
+bar was fresh still reported `current market: True` weeks later — the stale date
+that showed up in a report. The freshness *rule* is now persisted
+(`SourceProvenance.max_stale_days`) and re-evaluated against the current date on
+restore, through the one shared helper (`bar_is_fresh`) a fresh fetch also uses. A
+source with no freshness rule (the frozen dataset, a fixture) keeps its recorded
+flag. Tests:
+`tests/test_phase12_restart_source_persistence.py::TestRestoredFreshnessIsReevaluated`.
+
+**Added — `tradingagents/paper_experiment/broker/`, an Alpaca *paper* broker
+adapter, isolated from the internal simulator.** Alpaca Paper has its own
+simulated account, so the adapter keeps its **own** account state and recovery
+file and never imports or writes the internal ledger or simulator — a broker fill
+cannot be double-counted. Paper-only is enforced structurally:
+`assert_paper_endpoint` refuses every live Alpaca host and any unapproved host;
+credentials come from `ALPACA_PAPER_API_KEY`/`ALPACA_PAPER_API_SECRET` only (live
+variable names are refused, not used as a fallback); construction performs no
+request; an order needs an explicit `allow_orders=True` after a read-only
+`connect()`. Each order carries a stable `client_order_id`; intent is persisted
+before the request; a lost response is reconciled by that id rather than
+re-submitted; and a fill is applied at most once across a restart (a persisted
+`applied_fills` set). A read-only `broker-check` CLI command reports
+configuration without printing a secret and places no order. Tests:
+`tests/test_phase3_broker.py`.
+
+### Phase 14 — paper monitoring dashboard (simulation-only)
+
+A small, phone-friendly dashboard for a paper experiment, added because the
+project had no web surface at all (the CLI was the only way to look at a run).
+It is a **monitoring and control surface for the simulation**, not a trading
+surface, and it keeps every existing simulation-only guard.
+
+- `tradingagents/paper_experiment/dashboard/` — a standard-library HTTP server
+  (no new dependency). `GET /` serves one self-contained HTML page (no external
+  assets), `GET /healthz` is an unauthenticated liveness probe, and
+  `GET /api/summary`, `/api/decisions`, `/api/journal`, `/api/control/status`
+  are read-only JSON views of the persisted experiment. `POST /api/run` advances
+  the simulation by N sessions.
+- Auth: every `/api` route requires `Authorization: Bearer <token>`, compared in
+  constant time. Binding a **non-loopback** host with no token is **refused at
+  startup**, so the surface is never served unauthenticated on a public
+  interface. The token comes from `TRADINGAGENTS_DASHBOARD_TOKEN` or `--token`,
+  and is never logged.
+- Control is **off by default** (`--allow-control` enables it), needs a bearer
+  token *and* an explicit `X-Control-Confirm: yes` header, is bounded per call,
+  and refuses a concurrent run so the state file stays single-writer.
+- `tradingagents/paper_experiment/runner.py` — one shared
+  `process_pending`/`pending_sessions` path, so the CLI's `run` and the
+  dashboard's control action process and persist sessions through the *same*
+  code. There is no second implementation to drift.
+- CLI: `serve` (`--host`, `--port`, `--token`, `--allow-control`), reading
+  `$PORT` when `--port` is omitted. `docker-compose.yml` gains an optional
+  `dashboard` service under a `dashboard` profile.
+- Safety boundary unchanged: no live broker execution, no order routing, no
+  credential, no `ExecutionMode.LIVE`, no weakened guard. There is no route that
+  places, modifies or cancels a broker order.
+
+Documented in `docs/RAILWAY_DEPLOYMENT.md` (a "Monitoring dashboard (optional)"
+section) and covered by `tests/test_phase13_dashboard.py`.
+
+### Fixed — `executed: 1` with `filled orders: 0` read as a lost order
+
+A live experiment reported `executed: 1`, `filled orders: 0`, `positions: 0` and
+`resting_orders: 0`, which read as if one order had vanished between the decision
+and the book. Nothing was lost. `counts.executed` counts *decisions carried to
+their execution session*, and a **HOLD is one** — the decision was taken, the
+session settled it, and no order was ever going to exist. The number was never a
+count of orders; the report simply had no way to say so.
+
+The report now carries an explicit order funnel, `orders`, so the two questions
+cannot be conflated:
+
+- `settled`, `submitted`, `filled`, `partially_filled`, `rejected`, `cancelled`,
+  `resting`, and `without_order` with `without_order_reasons`;
+- the identities `settled == submitted + without_order` and
+  `submitted == filled + partially_filled + rejected + cancelled + resting`;
+- a note stating that `counts.executed` is not a fill count.
+
+Each decision now persists `order_created` and `order_reason`, so the funnel is
+derived from the decision itself rather than re-parsed from prose. The dashboard
+shows "Settled (executed)", "Orders submitted" and "Without an order" as separate
+rows, and the report schema is `1.1.0`. Covered by
+`tests/test_paper_experiment_counters.py`; documented in `docs/PAPER_EXPERIMENT.md`
+("Reading the counters: settled is not filled").
+
+The execution path itself was already correct: a tradeable Buy decision produces
+a simulated fill with a position, cash movement and fees. A zero fill is a HOLD
+or a risk refusal, never a broken simulator.
+
+### Fixed — every paper decision was HOLD because the model was asked with no data
+
+A live experiment returned `Hold` on all 20 decisions and submitted no order. The
+counter fix above made the funnel legible, but it did not explain the HOLDs. The
+cause was upstream of the counters: the real-inference prompt asked for a
+directional rating while telling the model *"given no further data"*.
+
+```
+You are a portfolio manager. For SPY on 2026-06-08, given no further
+data, reply in exactly this format and nothing else:
+**Rating**: <one of Buy, Overweight, Hold, Underweight, Sell>
+```
+
+A directional question with no data has one safe answer, and 20 HOLD out of 20
+decisions followed by construction. The seam's signature was `(symbol, session)`,
+so the point-in-time window the experiment already built could not reach the
+prompt; the window was used only *after* the rating returned, to hash and anchor
+the record. The record therefore attested to a price window the model never saw,
+which is why the run looked like a strategy result rather than a wiring gap.
+
+The seam now takes the session's window and the request carries it:
+
+- `ProviderInference.__call__` accepts `window`; `InferenceFn` documents it;
+  `PaperExperiment._decide` passes `snapshot.to_frame()`, the same slice the
+  record is anchored to.
+- The request renders the trailing `WINDOW_BARS` (30) bars, oldest first, as
+  `date,open,high,low,close,volume`, and states that the history ends at the
+  decision session. `PAPER_INFERENCE_PROMPT_VERSION` is `paper-inference-2`.
+- A non-finite value in the window raises `InferenceUnavailable` and makes **no
+  request**; a session with no reproducible window is blocked *before* the call,
+  with `no reproducible price window …`, instead of being decided blind or
+  spending a paid request on a decision that would be refused anyway.
+
+No direction is forced, no threshold is lowered and no risk limit is changed: the
+model is given data and may still return Hold. Covered by
+`tests/test_paper_inference_prompt.py` (deterministic, no provider call);
+documented in `docs/PAPER_EXPERIMENT.md` ("Why a run returned Hold on every
+decision").
+
+### Fixed — `report`/`verify` failed in a shell with `No module named 'dotenv'`
+
+A login shell (`bash -lc`, `sh -lc`) sources Debian's `/etc/profile`, which
+*overwrites* `PATH` and so discards the `ENV PATH="/opt/venv/bin:$PATH"` the
+`Dockerfile` sets. `python` then resolved to the base image's interpreter, which
+has none of the project's dependencies, and any `python -m ...` command died
+with `ModuleNotFoundError` — most visibly `No module named 'dotenv'`. The
+dependency was never missing: `python-dotenv` is declared in `pyproject.toml`
+and installed in `/opt/venv`. The `Dockerfile` now writes
+`/etc/profile.d/10-venv-path.sh` to re-prepend the venv, which `/etc/profile`
+sources *after* it resets `PATH`, so the app and a manual `report`/`verify` use
+the same interpreter. Covered by `tests/test_docker_interpreter.py`; documented
+in `docs/RAILWAY_DEPLOYMENT.md`.
+
+### Fixed — the dashboard's control action recorded every decision as blocked
+
+A session advanced from the dashboard loaded the experiment with **no inference
+seam** (`ExperimentView.load` passed no `inference`), so `_decide` took its
+"no inference provider is configured" branch for every session. Every decision
+was recorded `blocked`, and — because a blocked session is still added to
+`processed_sessions` — the session could not be re-decided later. The dashboard
+advanced the engine, but the engine could not decide.
+
+- `runner.build_inference(config, stub=...)` is now the one place the seam is
+  built; the CLI's `run` and the dashboard's control action both call it, so they
+  decide through the same provider (the one named in the persisted config).
+- `ExperimentView.load(inference=...)` accepts a seam; a read passes none, a run
+  passes one.
+- A resumed CLI `run` now builds its seam from the **persisted** config rather
+  than the CLI's `--provider`/`--model` defaults, so a resume cannot silently
+  switch provider.
+
+### Added — `--auto-advance`, so one service can run and monitor
+
+`serve` never advanced the engine: it bound the HTTP server and waited for a
+manual Run. A Railway service started with a bare `serve` therefore showed an
+idle experiment (cash at its opening balance, no sessions, no orders) — which
+looked like wrong data but was an engine that had not been started.
+
+`serve`/`dashboard.server` now take `--auto-advance N` and `--auto-interval
+SECONDS` (env: `TRADINGAGENTS_AUTO_ADVANCE_SESSIONS` /
+`TRADINGAGENTS_AUTO_ADVANCE_INTERVAL`). A daemon thread advances N unprocessed
+sessions per interval through the same locked `run_sessions` the Run button uses,
+logging one line per tick. It requires `--allow-control` and is refused without
+it, so the default `serve` stays a pure monitor.
+
+Documented the single-writer constraint: state is a read-modify-write of one JSON
+file, so two processes on one directory lose data (verified: the second
+`os.replace` drops the first writer's session). Run one writer — either the
+auto-advancing dashboard, or a cron `run` with a monitor-only dashboard, never
+both at once. `docs/RAILWAY_DEPLOYMENT.md` and the CHANGELOG say so.
+
+### Fixed — the dashboard module entry point did not start the server
+
+`python -m tradingagents.paper_experiment.dashboard.server` — the start command
+a platform (Railway) would reach for — emitted a runpy `RuntimeWarning`
+("'...dashboard.server' found in sys.modules after import of package
+'...dashboard', but prior to execution") and then **exited without listening**:
+`dashboard/__init__.py` imported `.server` eagerly, so runpy found it already
+loaded, and `server.py` had no `__main__` guard, so the module ran and stopped.
+
+- `dashboard/__init__.py` now re-exports `Dashboard`/`serve` lazily (PEP 562), so
+  importing the package no longer pulls `.server` into `sys.modules` and the
+  runpy warning is gone. `from ...dashboard import Dashboard, serve` still works.
+- `dashboard/server.py` gains a `main()` entry point and an
+  `if __name__ == "__main__"` guard. `--root` falls back to
+  `TRADINGAGENTS_EXPERIMENT_ROOT`, `--host` to `TRADINGAGENTS_DASHBOARD_HOST`
+  (default loopback) and `--port` to `$PORT`, so the start command can be one
+  line. A missing root exits `2`; a non-loopback bind with no token is still
+  refused before the socket is opened.
+
+Verified by running the real module as a subprocess: it serves `/healthz` on
+`0.0.0.0:$PORT`, and its output carries no `RuntimeWarning`.
+
+### Phase 13 — pre-Railway deployment verification
+
+A verification pass, not a feature. Its job was to prove the deployable image
+and the deployment story, not to add capability. Nothing in the trading system
+changed: no live path, no new source, no accounting change.
+
+Verified empirically (against the built image, not asserted from reading code):
+
+- **The image builds and runs.** `docker build` succeeds on `python:3.13-slim`.
+  The Railway start-command override — `python -m tradingagents.paper_experiment
+  run --root /data/paper-experiment ...` — was exercised in the container with a
+  volume at `/data`; it processed sessions, wrote `journal.json`,
+  `session_state.json` and `snapshots/`, and a second invocation **resumed**.
+- **The volume caveat is real, not theoretical.** On the image's default non-root
+  user the first write to the mount failed with `PermissionError`; running with
+  `RAILWAY_RUN_UID=0` (as `docs/RAILWAY_DEPLOYMENT.md` instructs) fixed it. The
+  doc already required the variable; this confirms *why*.
+- **The image carries no secrets.** A scan of the built image found no `.env` and
+  no key literal; `.dockerignore` excludes `**/.env*`.
+- **Error classification is intact offline.** With no credential,
+  `--source alpha_vantage` / `--source finnhub` fail closed (exit `2`) with a
+  named reason and no silent fallback to the frozen dataset.
+
+Documented:
+
+- `docs/RAILWAY_DEPLOYMENT.md` gains a **Resource usage and API quotas** section
+  (Railway plan limits and the Alpha Vantage / Finnhub / Groq free-tier limits,
+  each cited) and a note that the start command *overrides* the image ENTRYPOINT
+  in exec form, with the shell-wrapped alternative for variable expansion.
+
+Not done, and why: the real-API checks (one Alpha Vantage daily fetch, one
+Finnhub quote, one genuine Groq inference) and the resulting end-to-end paper
+run were **not executed**, because no provider credential was present in the
+environment. The gated tests remain in `tests/test_live_providers_integration.py`
+and skip cleanly when a key is absent, so CI needs no secret. See the Phase 13
+report for the exact remaining blocker.
+
+### Fixed — Alpha Vantage sent no `apikey`; then rejected its own session order
+
+`AlphaVantageDailySource` read `ALPHA_VANTAGE_API_KEY`, refused a missing key,
+and passed the key to `fetch_json` — but only as a *redaction secret*. The
+outgoing query carried `function`, `symbol`, `outputsize` and `datatype` and
+**no `apikey`**. Alpha Vantage answers such a request with
+
+> "the parameter apikey is invalid or missing"
+
+no matter how valid the key is, so every `--source alpha_vantage` run failed with
+a message that looked like a bad key and was not. The credential is now sent as
+the `apikey` query parameter, assembled in one `build_request_params` helper so
+the parameter cannot be dropped from one call path while another keeps it.
+Credentials are also trimmed of surrounding whitespace, an all-whitespace key is
+refused like a missing one, and a vendor message that echoes the key back is
+redacted before it is raised. A regression test asserts that the key in the
+environment reaches the outgoing `apikey` parameter (with a fake key, never a
+real one).
+
+With the credential fixed, the next run failed with
+
+> "vendor_daily: SPY sessions are not in ascending order"
+
+`TIME_SERIES_DAILY` lists its bars **newest-first**, but the shared price-source
+validator requires **oldest-first**, and the parser handed the vendor's raw order
+straight to it. The parsed frame is now sorted by session label before
+validation. The sort is stable, so a genuine duplicate still reaches the
+validator's duplicate check rather than being merged away, and no OHLCV value is
+changed — each bar stays attached to its own date. The reorder is a sort, not a
+reversal. The old test fixture happened to build its body in ascending order, so
+it never exercised the vendor's real ordering; the new tests build the body
+newest-first and would fail without the fix.
+
+A new diagnostic reports a deployment's credential state without revealing the
+secret — `python -m tradingagents.paper_experiment diagnose --source
+alpha_vantage` prints whether the env var is present and non-blank and whether
+the request would carry `apikey`, with parameter *names* only and never the
+value, any part of it, or its length. `--root` is now optional and required only
+by the commands that act on an experiment directory.
+
+### Phase 11 — real market-data providers
+
+Adds real vendor price sources (`paper_experiment/providers/`) so a paper
+experiment can run on live market data, still with no live trading path. A
+provider fetches data, never an order; every provider declares its own
+provenance; and a vendor failure stops the run rather than silently substituting
+historical data.
+
+Added:
+
+- **Alpha Vantage daily OHLCV** (`providers/alpha_vantage.py`): the free
+  `TIME_SERIES_DAILY` function (`outputsize=compact`), fetched once and validated.
+  The premium `TIME_SERIES_DAILY_ADJUSTED` endpoint is deliberately not used, and
+  `outputsize=full` is refused unless the caller explicitly accepts a paid call.
+  A quota or bad-key notice that arrives inside an HTTP 200 body is classified
+  (`ProviderRateLimitedError` / `ProviderAuthError`) and never parsed as data; a
+  bar whose date is older than the staleness window raises
+  `ProviderStaleDataError`.
+- **Finnhub quotes** (`providers/finnhub.py`): the free `/quote` endpoint, which
+  returns a current-day quote only. Finnhub's historical candle endpoint is
+  premium, so this source is a `vendor_quote` that *refuses* every historical
+  request (`bars`/`window`/`sessions`/`covers` raise) and can never stand in for a
+  bar history.
+- **A shared, bounded, redacting HTTP layer** (`providers/base.py`): one timeout,
+  a credential scrubbed from any error, an injectable transport (so tests never
+  touch a socket), and a bounded retry. It never returns a partially parsed body
+  and never swallows a failure.
+- **Explicit source selection with a logged fallback** (`providers/selection.py`):
+  `select_source(requested, fallback=…)` switches only to a named fallback and
+  logs it; without one, a source failure raises. An experiment runs on exactly one
+  source's bars, so a snapshot never mixes two vendors, and the CLI refuses to
+  resume a vendor run on the frozen dataset.
+- **Source provenance** (`sources.SourceProvenance`): name, kind, current-market
+  flag, symbol, fetch time, last bar date, timezone, adjusted flag, dataset
+  window, snapshot id and content hash, recorded in the experiment state, the
+  journal's creation entry and the report's `data` block.
+- **A shared frame validator** (`sources._validate_frame`): every source's bars
+  pass through one place that refuses NaN, infinity, a non-positive price, a high
+  below low, an open/close outside the range, a duplicate or out-of-order session,
+  and a non-numeric column. `FramePriceSource` factors out the validation, session
+  set and point-in-time window shared by `StaticPriceSource` and the vendors.
+- CLI `--source`/`--fallback` and a `sources` command; `docs/MARKET_DATA_PROVIDERS.md`
+  stating, with citations, what each provider can and cannot provide on its free
+  plan.
+
+Changed:
+
+- `current_market_source_available()` now returns `True` (a current-market source
+  exists), but `READY FOR LIVE PAPER` additionally requires a source that can
+  serve a session window, so a quote-only source still cannot reach it. The
+  existing Phase 10 test was tightened rather than weakened to assert this.
+- The experiment's session timestamp is now source-overridable (a vendor's own
+  timezone), still a pure function of the session so signal ids stay stable.
+
+### Phase 10 — prospective paper experiment
+
+A resumable, prospective paper experiment (`paper_experiment/`) records an LLM
+strategy's decisions forward in time and evaluates them as later data arrives.
+It adds no live trading path and reuses the existing book, risk engine, simulator,
+ledger, snapshot, record and metrics rather than reimplementing any of them.
+
+Added:
+
+- A durable, append-only, **hash-chained journal** (`paper_experiment/journal.py`).
+  Every entry carries the previous entry's hash, so removing, reordering or
+  editing one breaks the chain and `ExperimentJournal.load`/`verify` raise instead
+  of trusting the file. Writes are atomic (temp file + `os.replace`), and an entry
+  with an `event_id` already present is not appended twice, so a re-run after a
+  restart cannot duplicate an event. Every payload is scanned for
+  credential-shaped values before it is written.
+- An **experiment cycle** (`paper_experiment/experiment.py`) that separates three
+  times on every decision: `decision_session` (T), `execution_session` (T+1's
+  open) and `evaluation_session` (T+1+lag). A decision made from T's close is
+  re-dated to T+1 before it reaches the paper session, so no fill can be read as
+  happening at the decision's own close. Settlement runs on every session while a
+  decision is only *taken* on a cadence session, so a decision is still executed
+  at its own T+1 open even when T+1 is not itself a decision session.
+- A **versioned experiment state** (`session_state.json`) that restores the paper
+  book, every decision's lifecycle and the processed-session set, so a restart
+  resumes without reprocessing a session or duplicating a fill. A decision's full
+  `DecisionRecord` is journalled, so execution rebuilds it exactly rather than
+  reconstructing it from prose.
+- **Price sources with explicit provenance** (`paper_experiment/sources.py`).
+  `FrozenPriceSource` reads the committed historical dataset point-in-time and
+  reports `is_current_market = False`; `StaticPriceSource` is a validated,
+  in-memory series for tests. `current_market_source_available()` returns `False`,
+  so the experiment cannot claim live readiness on frozen data. A malformed bar
+  (NaN, infinity, non-positive, high below low) is refused at construction.
+- A **config frozen before results** (`paper_experiment/config.py`), with a
+  content hash recorded on the journal. `execute_on_next_open` is forced `True`:
+  filling a decision at the close it was made from is look-ahead, so the
+  configuration is refused rather than defaulted.
+- An **honest report** (`paper_experiment/report.py`): sessions processed, decision
+  counts by state, cash/equity/positions, return and drawdown, the cost model and
+  its assumptions, the data source and its provenance, and every blocker. A metric
+  below `min_trades_for_metrics` is `None` (rendered `N/A`), never `0.0`, with a
+  `sample_limited` flag and the sample size shown.
+- A **CLI** (`python -m tradingagents.paper_experiment start|run|report|verify`)
+  and a **real-inference seam** (`paper_experiment/inference.py`) that makes one
+  bounded request per session with `max_retries=0`, checks the credential before
+  the call, and raises to a *blocked* decision when there is none.
+- `tests/test_phase10_paper_experiment.py` (68 tests): journal chaining and
+  tamper detection, restart-equals-no-restart, duplicate processing, blocked
+  decisions, fixture-vs-genuine labelling, look-ahead timing, malformed data,
+  multi-symbol recovery, and the CLI.
+
+Changed:
+
+- Nothing existing. The paper session, simulator, ledger, risk engine, snapshot,
+  record and metrics are consumed as-is.
+
+### Phase 9 — first genuine inference attempt (blocked)
+
+The capture path added above is exercised by the offline suite, but no genuine
+provider request had been made. Phase 9 attempted the first one and stopped at
+the credential gate: this environment holds no provider key (`GROQ_API_KEY` or
+any other) and no local OpenAI-compatible endpoint answers, so no request was
+made and no record was fabricated. The result is recorded as **PROVIDER BLOCKED**,
+not as a captured decision.
+
+The offline proof that the genuine-inference discriminator is real — not merely
+asserted — is `tests/test_phase9_genuine_inference.py`: it drives the **real**
+provider client through an `httpx.MockTransport`, so the observer fires because
+the client dispatched a LangChain `on_llm_end` callback, and it asserts a caller
+cannot force the `llm_inference` label, a missing credential blocks before any
+request, a provider failure yields no record, and replay makes zero provider
+calls. No live trading path is added.
+
+### Fixed
+
+- A non-finite price, quantity or fee is refused by the ledger. A NaN passed the
+  `price <= 0` and `fee < 0` guards (both are false for NaN) and was applied,
+  turning cash, equity and the exposure check into NaN for the rest of the run;
+  infinity passed the same guards. Both are now rejected before any state change.
+- A non-finite market price is rejected by the execution engine instead of
+  producing an order marked `FILLED` with a NaN fill price.
+- An order that has already reached a terminal state is not re-evaluated.
+  Submitting a filled order a second time filled it twice, because the ledger
+  cannot distinguish a re-submission from a second genuine order.
+- A strategy's context is bounded at its session, so `context.feed.bar(symbol,
+  tomorrow)` no longer returns tomorrow's bar. The look-ahead guarantee was a
+  property of `context.history` only, and one attribute deeper the feed answered
+  for any date.
+- A bar with a non-finite price is dropped when the feed is built rather than
+  raising mid-backtest on an arbitrary later session.
+- A paper-mode `Quote` refuses a non-finite price.
+- An equity-relative position cap is re-checked at the fill price. The engine
+  sized an order against the price the decision saw and filled it at the next
+  session's open, so an up-gap left a position worth more than the cap allowed: a
+  20% cap on a 100,000 book sized 200 units on a 100 close and filled them at a
+  200 open, a position worth 40% of equity. `RiskEngine.review_fill` now re-runs
+  the caps against the price the fill will actually get, and both the backtester
+  and the paper session call it immediately before submitting a buy. A fill that
+  would breach a cap is reduced to the largest size that holds, and refused only
+  when no positive size remains. The same defect existed in paper mode, where
+  spread and slippage move the fill off the quote, and is fixed there too.
+- A paper session's `SessionStep` reports the quantity that was filled, not the
+  quantity that was requested, so a reduced fill is not reported as a larger
+  position than the ledger holds.
+- An order sized to the available cash is reduced, not refused, when the fill
+  price or the fill fee pushes its all-in cost past the cash. The simulator
+  rejected the whole order with `INSUFFICIENT_CASH`, so a buy sized to the book
+  was lost entirely once a commission or an up-gap applied; the fill-time
+  re-check now caps the size to the fee-inclusive affordable notional
+  (`CostModel.affordable_notional`), and both the backtester and the paper
+  session pass it. A size that affords nothing is still refused.
+- A bar whose OHLC values are internally inconsistent (`high < low`, or an
+  open/close outside the range) is dropped when the feed is built rather than
+  raising mid-backtest. `Bar` validated the row, but `_normalize` did not, so a
+  vendor row with `high < low` survived construction and aborted a run on an
+  arbitrary later session while it held a position. The construction filter now
+  mirrors `Bar`'s own validator.
+- The report's mean exposure and turnover are measured rather than always zero.
+  `build_report` computed metrics with a direct `compute_metrics` call that
+  passed no exposure series and no traded notional, so a fully invested run
+  reported `exposure = 0` and `turnover = 0`; it now uses `metrics_from_result`.
+- The `maker_fee_bps` and `taker_fee_bps` cost fields are charged. They were
+  declared and documented but never read, so a schedule that set them collected
+  nothing; the execution path now charges `CostModel.fee_for_fill`, which adds
+  the maker rate for a resting LIMIT fill and the taker rate for a MARKET fill.
+- A price-source exception during `PaperSession.work_resting` no longer leaves the
+  resting queue half-advanced. The loop rebuilt `self.resting` only at the end, so
+  an exception for one symbol propagated out with an already-filled order still
+  queued (marked `FILLED`) and the book moved ahead of the queue. The loop is now
+  exception-safe: a failed read leaves that order resting, the remaining orders
+  are still worked, the book is never touched by a failed read, and the first
+  failure is re-raised after the loop so it is never swallowed.
+- A closed market no longer rejects a resting GTC order. `work_resting` passed the
+  quote's `is_open` to the simulator, so `is_open=False` produced a terminal
+  `MARKET_CLOSED` rejection for an order whose limit simply had not been reached;
+  a closed market is now a reason to wait, and the order stays live.
+- A partially filled resting GTC order keeps its remainder. `on_signal` queued an
+  order only when its status was exactly `ACCEPTED`, so a GTC limit that filled
+  part of its size was never queued and its remainder was silently lost; an
+  `ACCEPTED` or `PARTIALLY_FILLED` GTC order is now queued.
+- A resting buy is re-checked against the risk caps at its projected fill price
+  before it fills, so a gap to the limit cannot leave a position past its cap. The
+  size is reduced to the largest that holds, and the remainder is rejected with
+  `RISK_LIMIT` (recorded) only when no positive size remains.
+- `PaperSession.work_resting` records the fee each fill actually charged rather
+  than `0.0`, and rolls the day's opening equity from the quote's timestamp so a
+  session whose only activity is resting fills still has a current daily-loss
+  baseline.
+- A paper session's `resting_orders` snapshot reports each order's real status,
+  filled and remaining quantities, weighted average fill price, time in force and
+  expiry, so a snapshot cannot claim an order is `FILLED` when it is `ACCEPTED` or
+  `PARTIALLY_FILLED`. The snapshot also carries a `schema_version`, `current_time`,
+  `day` and `day_start_equity`.
+- `ExecutionSimulator.mode` is resolved to the `ExecutionMode` enum at
+  construction rather than stored as given, so a caller that passes the string
+  form (as a restored session does) still gets a value the rest of the code can
+  compare and serialise.
+- A paper `Quote` whose `low` is above its `high`, or whose range is non-finite,
+  is refused rather than used to decide a LIMIT order's reachability. A quote
+  source that answers with the wrong symbol for the request is refused rather than
+  filled against.
+- A price-source failure in `on_signal` no longer consumes the signal: the
+  `signal_id` is recorded as processed only once the quote is in hand, so a data
+  outage does not mark a decision that was never acted on, and the caller can
+  retry it.
+- `Ledger.from_state` validates the persisted book rather than trusting it, and
+  `Order` refuses an impossible lifecycle at construction. A hand-edited or
+  corrupted state file carrying a negative cash balance or holding, a non-finite
+  figure, a `seq` counter rolled back below the event log (which minted duplicate
+  sequence numbers on the resumed run), or a resting order marked `FILLED` with a
+  remainder — or `ACCEPTED` with a fill — used to resume with silently wrong
+  accounting. Every invariant the live ledger maintains is now re-checked, and
+  `PaperSession.restore` raises `PaperStateError` on a violation instead of
+  resuming from it.
+- A paper session shares one per-session liquidity budget across the orders it
+  works against a symbol. `work_resting` computed the volume allowance per order,
+  so two resting orders for one symbol each filled the whole bar — 800 units where
+  the backtester fills 400. The allowance is now computed once per symbol per
+  session and drawn down in queue order, so paper and backtest agree.
+- The paper session's clock only moves forward. `_roll_day` set the day from any
+  quote it was handed, so an out-of-order (earlier-dated) quote moved the day and
+  the daily-loss baseline backwards; a quote on a date earlier than the session
+  has already seen is now ignored for the day roll.
+
+### Notes
+
+- Prices are split-adjusted, so a backtest reflects price return only; dividends
+  are not credited as cash. Documented rather than hidden.
+- LLM calls are not deterministic, so a run's signals carry their own reasoning
+  and a content-derived id; the deterministic layers around them are reproducible
+  from the run configuration.
+- The fill-time cap re-check uses the *projected* fill price, which for a MARKET
+  order is the price the simulator will use, so the two agree. An order type that
+  filled at a price not derivable from the bar would need the re-check to reconcile
+  after the fill. Recorded in `docs/PR1_INDEPENDENT_REVIEW.md`.
+- Paper-session recovery restores the state that was last saved, and there is no
+  write-ahead log or automatic checkpoint: the caller decides when to call
+  `save_state`, and any step after it is lost on a crash. The recovery mechanism
+  proves a restored session continues with identical accounting and no duplicated
+  fills; it does not provide the durability policy. Documented in
+  `docs/PAPER_TRADING.md`.
+- The claim recovery supports is "deterministically recovers from a valid saved
+  state", not "crash-safe". A crash-safe claim would need a durable checkpoint,
+  which this release does not have. Recorded in `docs/ADVERSARIAL_AUDIT.md`.
+
+
 ## [0.7.1] — 2026-10-27
 
 Decisions are scored only on final closes and settle across long market holidays, a model's unpadded date no longer reads filings made after the run date, and fixes to portfolios, prices, SEC statements, reports, Azure and Claude settings.
