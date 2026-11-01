@@ -456,6 +456,95 @@ decision cannot rest on a self-contradicting observation.
 Tests: `tests/test_paper_recovery.py::TestMarketDataFailures::
 test_a_price_outside_its_own_range_is_refused`.
 
+### 21. A non-finite session figure in a recovery file disarmed the risk guards
+
+Severity: high. A corrupt state file could resume with the drawdown and daily-loss
+guards silently off.
+
+`PaperSession.restore` validated the ledger's figures and the resting orders, but
+it read `equity_peak`, `day_start_equity` and each step's `quantity` / `fees` /
+`equity` straight back with `float(...)` and no finiteness check. That mattered
+because the risk engine's whole-book guards are written `equity_peak > 0` /
+`day_start_equity > 0` before dividing, and `NaN > 0` is **false** — so a NaN peak
+made the guard *skip* rather than trip. Reproduced: a state with
+`equity_peak = NaN` restored cleanly, and a BUY that a `max_drawdown=0.01` limit
+should have refused was approved (`RiskVerdict.APPROVED`). An infinite peak made
+the drawdown read as zero. Neither is a state a session could have produced, and
+both are exactly the "silently wrong book" the recovery format exists to refuse.
+
+Fix: `restore` now requires `equity_peak`, `day_start_equity`, each step's
+`quantity` / `fees` / `equity` / `fill_price`, and the simulator's
+`max_volume_participation` to be finite, raising `PaperStateError` otherwise —
+the same rule already applied to the ledger. A valid state still restores.
+
+Tests: `tests/test_paper_recovery.py::TestNonFiniteRecoveryStateIsRefused`.
+
+### 22. A NaN participation rate silently removed the liquidity cap
+
+Severity: medium. A malformed rate made an order fill in full where the cap should
+have limited it.
+
+`ExecutionSimulator.__init__` validated `max_volume_participation` with
+`if rate < 0 or rate > 1`, which is false in *both* directions for NaN, so a NaN
+rate was accepted. Downstream the cap is `min(remaining, volume * rate)`, and
+`min(cap, NaN)` returns `cap` — so the participation cap vanished and the order
+filled its whole size. Reproduced by constructing the simulator with
+`max_volume_participation=float("nan")`: it was accepted and the cap was inert.
+
+Fix: the constructor requires a real, finite number in `[0, 1]`, refusing NaN and
+infinity by an explicit `math.isfinite` check rather than a comparison NaN slips
+through.
+
+Tests: `tests/test_paper_recovery.py::TestParticipationRateMustBeFinite`.
+
+### 23. A non-finite or non-positive quote volume disarmed the same cap
+
+Severity: medium. The same failure as #22, entered through the other door.
+
+`Quote.__post_init__` refused a non-finite price or range but accepted a
+`average_daily_volume` of NaN, infinity, zero or a negative number. A NaN volume
+has the same `min(cap, NaN) = cap` effect, so a malformed quote could remove the
+liquidity cap the caller believed was in force.
+
+Fix: a supplied `average_daily_volume` must be finite and positive; an absent
+volume (the default) is still allowed, because no volume means no cap.
+
+Tests: `tests/test_paper_recovery.py::TestQuoteVolumeMustBeFinite`.
+
+### 24. A quote source returning a non-`Quote` raised a raw `AttributeError`
+
+Severity: low. A named data error became an unnamed crash.
+
+`on_signal` and `work_resting` read `quote.symbol` / `quote.timestamp` directly, so
+a source that returned `None`, a dict, or a bare float let an `AttributeError`
+escape — a shape error reported as an attribute fault. The book and the live queue
+were preserved either way (the field access is before any mutation), but the
+failure was not a named refusal and did not match the module's vocabulary.
+
+Fix: both paths check `isinstance(quote, Quote)` and raise `PaperSessionError` with
+a named message. The signal is still marked processed only *after* the check, so a
+data outage remains retryable, and a resting order with a malformed quote stays
+live rather than being filled or cancelled.
+
+Tests: `tests/test_paper_recovery.py::TestAMalformedQuoteIsRefusedByName`.
+
+### 25. The engine's `save_state` was not atomic
+
+Severity: medium. A crash mid-write could destroy the last good checkpoint.
+
+`PaperExperiment._atomic_write` already wrote through a temp file and
+`os.replace`, but `PaperSession.save_state` — the engine's own recovery write —
+called `Path.write_text` in place. A crash or a full disk mid-write would leave a
+truncated recovery file where a good checkpoint had been, and the one file a
+restart depends on is exactly the one that must never be half-written.
+
+Fix: `PaperSession.save_state` now writes a temporary file in the target's
+directory, fsyncs it, and `os.replace`s it over the target, cleaning up the temp
+file on failure. A failed write leaves the previous checkpoint byte-for-byte
+intact and no temp file behind.
+
+Tests: `tests/test_paper_recovery.py::TestStateWriteIsAtomic`.
+
 ## Phase 4 — final release-candidate adversarial audit
 
 An independent pass over the whole simulated system, attacking accounting,
@@ -607,7 +696,8 @@ one claim:
 - **Safe:** "The system can deterministically recover from a valid saved state."
   A restart from a `save_state` file reproduces cash, positions, fees, P&L, the
   order lifecycle and the event log exactly, and refuses a corrupt file rather
-  than resuming with different accounting.
+  than resuming with different accounting. The write itself is atomic (a temp file
+  plus `os.replace`), so a crash mid-write leaves the previous checkpoint intact.
 - **Unsafe, and not claimed:** "The system is crash-safe." There is no durable
   checkpoint guarantee, so state written after the last `save_state` is lost on a
   hard crash. A crash-safe claim would need a write-ahead log or a supervisor,

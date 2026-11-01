@@ -148,6 +148,12 @@ Restoring from it would silently change the accounting. The state file is the
 recovery format, and it is versioned so a reader refuses a file it does not
 understand rather than misreading it.
 
+`save_state` writes **atomically** — through a temp file in the same directory and
+an `os.replace` over the target — so a crash or a full disk mid-write leaves the
+previous good checkpoint intact rather than a truncated file. The last checkpoint
+is exactly the file a restart depends on, so it is the one that must never be
+half-written.
+
 To survive a restart, save the state and restore it into a fresh session:
 
 ```python
@@ -181,6 +187,16 @@ order with a remainder, an `ACCEPTED` order with a fill). It never restores a
 book that would be silently wrong. A restored session is still `PAPER` and still
 cannot reach a venue.
 
+The "non-finite figure" rule covers the **session-level** figures, not only the
+ledger's: a non-finite `equity_peak`, `day_start_equity`, or step figure is
+refused, and so is a non-finite `max_volume_participation`. This matters because
+the risk engine's drawdown and daily-loss guards are written `equity_peak > 0` /
+`day_start_equity > 0` before dividing, and `NaN > 0` is false — so a NaN peak
+would have *silently skipped* the guard rather than tripping it, and the
+simulator's participation cap is `min(cap, volume * rate)`, which returns `cap`
+when the product is NaN. A corrupt state file could therefore resume with a
+disarmed guard; it is refused instead. A valid state still restores.
+
 A caller can cancel a restored order with `session.cancel_resting(order)`, and
 that cancellation is durable: it removes the order from the live queue, records
 exactly one terminal `ORDER_CANCELLED` event, survives a further save/restore,
@@ -211,8 +227,10 @@ log, no automatic checkpoint, no supervisor. That supports one claim:
 A quote is the only door market data enters, so the rules that keep a bad number
 out of the ledger live in `Quote.__post_init__`:
 
-- a **non-finite or non-positive** price, or a non-finite/non-positive `low` or
-  `high`, is refused;
+- a **non-finite or non-positive** price, or a non-finite/non-positive `low`,
+  `high`, or `average_daily_volume` (when supplied), is refused — the volume
+  matters because a NaN there makes `min(cap, volume * rate)` return `cap` and
+  silently removes the participation cap;
 - a **range that contradicts itself** (`low > high`) is refused, because a buy
   limit "reached" by a low above the high is not a market fact;
 - a **price outside its own range** is refused, the same invariant `Bar`
@@ -230,8 +248,10 @@ A price-source **exception** is not a market fact: it is caught per symbol, the
 order stays live, the book is unchanged, no event is faked, and the error is
 re-raised after the loop rather than swallowed. A **missing** quote (or a closed
 market) likewise leaves the order resting rather than cancelling it, and a source
-that answers with the **wrong symbol** is refused rather than filled against. A
-failed source does not consume the signal, so a data outage leaves the decision
+that answers with the **wrong symbol**, or with something that is not a `Quote` at
+all (`None`, a dict, a bare float), is refused with a named `PaperSessionError`
+rather than letting an `AttributeError` escape from a field access. A failed
+source does not consume the signal, so a data outage leaves the decision
 retryable.
 
 ## Duplicate processing

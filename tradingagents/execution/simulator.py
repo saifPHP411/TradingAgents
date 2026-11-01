@@ -78,6 +78,19 @@ class ExecutionSimulator:
         max_volume_participation: float = 0.0,
     ) -> None:
         assert_simulation_only(mode)
+        if (
+            not isinstance(max_volume_participation, (int, float))
+            or isinstance(max_volume_participation, bool)
+            or not math.isfinite(max_volume_participation)
+        ):
+            # A NaN passes a bare ``0 <= x <= 1`` test in neither direction and
+            # ``min(cap, volume * NaN)`` returns ``cap``, so a non-finite rate would
+            # silently *remove* the participation cap and let an order fill in full.
+            # Require a real finite number, not a comparison that NaN slips through.
+            raise ValueError(
+                "max_volume_participation must be a finite number between 0 and 1, "
+                f"got {max_volume_participation!r}"
+            )
         if max_volume_participation < 0 or max_volume_participation > 1:
             raise ValueError(
                 f"max_volume_participation must be between 0 and 1, got {max_volume_participation}"

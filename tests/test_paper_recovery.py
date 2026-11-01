@@ -1382,3 +1382,231 @@ class TestBacktestPaperParity:
         )
         # 10% of 4,000 units is 400 for the symbol, shared by both orders.
         assert session.ledger.position_quantity("AAPL") == pytest.approx(400.0)
+
+
+# ---------------------------------------------------------------------------
+# A non-finite figure in the recovery file must be refused, not restored
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNonFiniteRecoveryStateIsRefused:
+    """A non-finite figure is the one number a guard cannot catch by comparison.
+
+    ``x <= 0`` and ``x < 0`` are both false for NaN, so a NaN slips past a
+    positivity check; ``min(cap, NaN)`` returns ``cap``, so a NaN silently
+    *removes* a cap. Each of these is a state a session could not have produced,
+    and each would disarm a guard if it were restored, so ``restore`` must refuse
+    it. ``tests/test_paper_recovery.py::TestInconsistentStateIsRefused`` covers
+    the ledger's own figures; these cover the session-level ones and the
+    simulator setting that feed the risk engine and the liquidity cap.
+    """
+
+    def _state(self):
+        session = _session()
+        session.on_signal(_signal(size=0.2))
+        return session.state()
+
+    def _restore(self, state):
+        return PaperSession.restore(
+            state, quotes=dict_quote_source({"AAPL": 100.0}, timestamp=NOW)
+        )
+
+    def test_a_non_finite_equity_peak_is_refused(self):
+        for bad in (float("nan"), float("inf")):
+            state = self._state()
+            state["equity_peak"] = bad
+            with pytest.raises(PaperStateError):
+                self._restore(state)
+
+    def test_a_non_finite_day_start_equity_is_refused(self):
+        for bad in (float("nan"), float("inf")):
+            state = self._state()
+            state["day_start_equity"] = bad
+            with pytest.raises(PaperStateError):
+                self._restore(state)
+
+    def test_a_non_finite_step_figure_is_refused(self):
+        for field in ("quantity", "fees", "equity"):
+            state = self._state()
+            state["steps"][0][field] = float("nan")
+            with pytest.raises(PaperStateError):
+                self._restore(state)
+
+    def test_a_non_finite_step_fill_price_is_refused(self):
+        state = self._state()
+        state["steps"][0]["fill_price"] = float("inf")
+        with pytest.raises(PaperStateError):
+            self._restore(state)
+
+    def test_a_non_finite_participation_is_refused(self):
+        for bad in (float("nan"), float("inf")):
+            state = self._state()
+            state["simulator"]["max_volume_participation"] = bad
+            with pytest.raises(PaperStateError):
+                self._restore(state)
+
+    def test_a_valid_state_still_restores(self):
+        """The new checks must not reject a state the session actually produced."""
+        restored = self._restore(self._state())
+        assert restored.ledger.cash > 0
+        assert restored.equity_peak >= restored.ledger.equity
+
+    def test_a_non_finite_equity_peak_would_have_disarmed_the_drawdown_guard(self):
+        """Why the refusal matters: prove the guard is skipped, not merely that a
+        state is refused. This documents the failure mode the check prevents."""
+        from tradingagents.risk import RiskEngine, RiskLimits, RiskVerdict
+
+        signal = _signal(size=0.2)
+        limits = RiskLimits(max_drawdown=0.01, max_portfolio_exposure=None)
+        engine = RiskEngine(limits)
+        session = _session(limits=limits)
+        # A NaN peak makes ``equity_peak > 0`` false, so the drawdown check is
+        # skipped entirely and the order is approved despite a breached cap.
+        decision = engine.evaluate(
+            signal, session.ledger, price=100.0,
+            equity_peak=float("nan"), day_start_equity=session.day_start_equity,
+        )
+        assert decision.verdict is RiskVerdict.APPROVED
+
+
+# ---------------------------------------------------------------------------
+# The simulator must not accept a rate that would silently disarm its own cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestParticipationRateMustBeFinite:
+    def test_a_nan_participation_is_refused(self):
+        from tradingagents.portfolio.ledger import Ledger
+
+        with pytest.raises(ValueError):
+            ExecutionSimulator(
+                Ledger(initial_cash=1000.0), max_volume_participation=float("nan")
+            )
+
+    def test_an_infinite_participation_is_refused(self):
+        from tradingagents.portfolio.ledger import Ledger
+
+        with pytest.raises(ValueError):
+            ExecutionSimulator(
+                Ledger(initial_cash=1000.0), max_volume_participation=float("inf")
+            )
+
+    def test_an_out_of_range_participation_is_still_refused(self):
+        from tradingagents.portfolio.ledger import Ledger
+
+        for bad in (-0.1, 1.5):
+            with pytest.raises(ValueError):
+                ExecutionSimulator(Ledger(initial_cash=1000.0), max_volume_participation=bad)
+
+    def test_a_valid_participation_is_still_accepted(self):
+        from tradingagents.portfolio.ledger import Ledger
+
+        simulator = ExecutionSimulator(
+            Ledger(initial_cash=1000.0), max_volume_participation=0.25
+        )
+        assert simulator.max_volume_participation == 0.25
+
+
+# ---------------------------------------------------------------------------
+# A quote whose volume cannot cap a fill must be refused at the door
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestQuoteVolumeMustBeFinite:
+    def _quote(self, volume):
+        return Quote(symbol="AAPL", price=100.0, timestamp=NOW, average_daily_volume=volume)
+
+    def test_a_nan_volume_is_refused(self):
+        with pytest.raises(PaperSessionError):
+            self._quote(float("nan"))
+
+    def test_an_infinite_volume_is_refused(self):
+        with pytest.raises(PaperSessionError):
+            self._quote(float("inf"))
+
+    def test_a_non_positive_volume_is_refused(self):
+        for bad in (0.0, -1000.0):
+            with pytest.raises(PaperSessionError):
+                self._quote(bad)
+
+    def test_a_valid_volume_is_accepted(self):
+        assert self._quote(1_000_000.0).average_daily_volume == 1_000_000.0
+
+    def test_no_volume_is_still_allowed(self):
+        assert Quote(symbol="AAPL", price=100.0, timestamp=NOW).average_daily_volume is None
+
+
+# ---------------------------------------------------------------------------
+# A quote source that answers with something other than a Quote
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestAMalformedQuoteIsRefusedByName:
+    def test_a_none_return_is_a_named_refusal(self):
+        session = new_session(initial_cash=100_000.0, quotes=lambda symbol: None)
+        with pytest.raises(PaperSessionError):
+            session.on_signal(_signal(size=0.2))
+
+    def test_a_dict_return_is_a_named_refusal(self):
+        session = new_session(initial_cash=100_000.0, quotes=lambda symbol: {"price": 100.0})
+        with pytest.raises(PaperSessionError):
+            session.on_signal(_signal(size=0.2))
+
+    def test_a_malformed_quote_does_not_consume_the_signal(self):
+        """The refusal is a data problem, not a processed decision."""
+        session = new_session(initial_cash=100_000.0, quotes=lambda symbol: None)
+        with pytest.raises(PaperSessionError):
+            session.on_signal(_signal(size=0.2))
+        assert session.processed_signal_ids == set()
+        assert session.ledger.events == []
+
+    def test_a_malformed_quote_leaves_a_resting_order_live(self):
+        session = _session()
+        session.on_signal(_limit(size=0.5, limit_price=95.0))
+        assert len(session.resting) == 1
+        session.quotes = lambda symbol: None
+        session.work_resting()  # no exception, no fill
+        assert len(session.resting) == 1
+        assert session.ledger.position_quantity("AAPL") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# A crash mid-write must not destroy the last good checkpoint
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestStateWriteIsAtomic:
+    def test_a_failed_write_leaves_the_previous_state_intact(self, tmp_path, monkeypatch):
+        import os as _os
+
+        target = tmp_path / "session.state.json"
+        session = _session()
+        session.on_signal(_signal(size=0.2))
+        session.save_state(target)
+        good = target.read_text(encoding="utf-8")
+
+        def boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(_os, "replace", boom)
+        with pytest.raises(OSError):
+            session.save_state(target)
+        # The previous checkpoint is byte-for-byte unchanged, and no temp file is
+        # left behind.
+        assert target.read_text(encoding="utf-8") == good
+        assert not [p for p in tmp_path.iterdir() if p.name.startswith(".paper-state-")]
+
+    def test_the_atomic_write_still_round_trips(self, tmp_path):
+        target = tmp_path / "session.state.json"
+        session = _session()
+        session.on_signal(_signal(size=0.2))
+        session.save_state(target)
+        restored = PaperSession.restore(
+            {}, quotes=dict_quote_source({"AAPL": 100.0}, timestamp=NOW), path=target
+        )
+        assert restored.ledger.cash == pytest.approx(session.ledger.cash)

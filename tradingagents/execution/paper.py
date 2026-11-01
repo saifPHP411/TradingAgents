@@ -27,8 +27,11 @@ from a dict of prices and the same code path is exercised as in production.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
+import os
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -122,6 +125,18 @@ class Quote:
             if not math.isfinite(value) or value <= 0:
                 raise PaperSessionError(
                     f"quote {name} must be finite and positive when supplied, got {value}"
+                )
+        # A volume that is not a finite positive number cannot cap a fill. A NaN is
+        # the dangerous case: ``min(cap, volume * rate)`` returns ``cap`` when the
+        # product is NaN, so the participation cap would silently vanish and the
+        # order would fill in full. Refuse it at the door rather than let it disarm
+        # the cap downstream.
+        if self.average_daily_volume is not None:
+            volume = self.average_daily_volume
+            if not math.isfinite(volume) or volume <= 0:
+                raise PaperSessionError(
+                    f"quote average_daily_volume must be finite and positive when "
+                    f"supplied, got {volume}"
                 )
         if self.low is not None and self.high is not None:
             if self.low > self.high:
@@ -264,6 +279,17 @@ class PaperSession:
             return duplicate
         self._roll_day(now)
         quote = self.quotes(signal.symbol)
+        if not isinstance(quote, Quote):
+            # A source that returns something that is not a Quote (None, a dict, a
+            # bare float) is a malformed feed, not a price. Refuse with a named
+            # error rather than letting an AttributeError escape from the field
+            # access below — the same door every other bad observation is stopped
+            # at, and the signal stays retryable because it is marked processed
+            # only after this check.
+            raise PaperSessionError(
+                f"quote source returned {type(quote).__name__} for a "
+                f"{signal.symbol!r} request, not a Quote"
+            )
         if quote.symbol != signal.symbol:
             # A source that answered with the wrong symbol is a malformed feed, not
             # a price for this decision. Refuse rather than fill against it.
@@ -443,6 +469,14 @@ class PaperSession:
                 continue
             try:
                 quote = self.quotes(order.symbol)
+                if not isinstance(quote, Quote):
+                    # A source that answers with something other than a Quote is a
+                    # malformed feed. Treat it like a missing quote: the order stays
+                    # live and is not filled against a non-price.
+                    raise PaperSessionError(
+                        f"quote source returned {type(quote).__name__} for "
+                        f"{order.symbol!r}, not a Quote"
+                    )
             except (KeyError, LookupError, PaperSessionError):
                 # The symbol has no quote this cycle. The order stays live; the
                 # next work with a quote will advance it.
@@ -817,10 +851,29 @@ class PaperSession:
         }
 
     def save_state(self, path: str | Path) -> Path:
-        """Write the durable session state to ``path`` as JSON."""
+        """Write the durable session state to ``path``, atomically.
+
+        The write goes to a temporary file in the same directory and is then
+        ``os.replace``d over the target, so a crash mid-write leaves the previous
+        good checkpoint intact rather than a truncated file. A half-written
+        recovery file would be worse than no write at all: it would be read back
+        as a corrupt state, and the one file a restart depends on is exactly the
+        one that must never be left in a partially-written form.
+        """
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(self.state(), indent=2), encoding="utf-8")
+        payload = json.dumps(self.state(), indent=2)
+        fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".paper-state-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
         return target
 
     @classmethod
@@ -858,6 +911,37 @@ class PaperSession:
                 f"unsupported paper state schema_version {version!r}; "
                 f"this build reads version {PAPER_STATE_SCHEMA_VERSION}"
             )
+
+        def finite(value: object, what: str) -> float:
+            """A finite float, or raise. NaN and infinity are refused, not compared.
+
+            ``equity_peak`` and ``day_start_equity`` feed the drawdown and
+            daily-loss guards, and each guard is written ``x > 0`` before it
+            divides. That test is false for NaN, so a NaN baseline would *skip*
+            the guard rather than trip it; infinity would make the drawdown read
+            as zero. A step's ``equity`` and ``fees`` are read back into a report,
+            so a NaN there would poison a headline figure. None of these is a state
+            a session could have produced, so refuse it here rather than resume with
+            a disarmed guard.
+            """
+            try:
+                number = float(value)  # type: ignore[arg-type]
+            except (TypeError, ValueError) as exc:
+                raise PaperStateError(f"{what} is not a number: {value!r}") from exc
+            if not math.isfinite(number):
+                raise PaperStateError(f"{what} must be finite, got {number!r}")
+            return number
+
+        if state.get("equity_peak") is not None:
+            finite(state["equity_peak"], "equity_peak")
+        if state.get("day_start_equity") is not None:
+            finite(state["day_start_equity"], "day_start_equity")
+        for index, step in enumerate(state.get("steps", [])):
+            for field_name in ("quantity", "fees", "equity"):
+                finite(step.get(field_name), f"step {index} {field_name}")
+            if step.get("fill_price") is not None:
+                finite(step["fill_price"], f"step {index} fill_price")
+
         try:
             ledger = Ledger.from_state(state["ledger"])
             limits = RiskLimits(**state.get("risk_limits", {}))

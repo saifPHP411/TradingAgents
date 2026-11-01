@@ -236,15 +236,25 @@ its staleness window before it reaches the session
 ([MARKET_DATA_PROVIDERS.md](MARKET_DATA_PROVIDERS.md)).
 
 Quote *shape*, by contrast, is the engine's to refuse. A quote is validated at
-its single door: a non-finite or non-positive price or range, a range that
-contradicts itself (`low > high`), and a price outside its own range are all
-refused, and a naive timestamp is read as UTC rather than as the host's local
-time — so the session day cannot depend on the machine's timezone. `MarketContext`
-normalises a naive timestamp the same way. A price-source exception is caught per
-symbol, the order stays live and the book is unchanged, and the error is re-raised
-after the loop rather than swallowed; a missing quote or a closed market leaves the
-order resting; a source that answers with the wrong symbol is refused. See
+its single door: a non-finite or non-positive price, range, or
+`average_daily_volume` (when supplied), a range that contradicts itself
+(`low > high`), and a price outside its own range are all refused, and a naive
+timestamp is read as UTC rather than as the host's local time — so the session day
+cannot depend on the machine's timezone. `MarketContext` normalises a naive
+timestamp the same way. A price-source exception is caught per symbol, the order
+stays live and the book is unchanged, and the error is re-raised after the loop
+rather than swallowed; a missing quote or a closed market leaves the order resting;
+a source that answers with the wrong symbol, or with something that is not a
+`Quote` at all (`None`, a dict), is refused with a named `PaperSessionError` rather
+than letting an `AttributeError` escape. See
 [PAPER_TRADING.md](PAPER_TRADING.md#malformed-market-data-is-refused-at-the-door).
+
+The `max_volume_participation` rate and the `Quote.average_daily_volume` that
+feed the participation cap must be finite: a NaN slips past a bare
+`0 <= x <= 1` comparison and makes `min(cap, volume * NaN)` return `cap`, which
+would silently *remove* the cap and let an order fill in full. Both are required
+to be finite (the rate also in `[0, 1]`), so the cap cannot be disarmed by a
+malformed number.
 
 The prospective paper experiment ([PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md))
 supplies that durability policy for its own use: it saves state after every

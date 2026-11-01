@@ -361,6 +361,45 @@ path, and no configuration that produces one.
     in the set. The field is additive and optional, so an older state file still
     loads.
 
+### Fixed (paper reliability and recovery)
+
+- **A non-finite figure in a recovery file is now refused, not restored**
+  (`execution/paper.py`). `PaperSession.restore` validated the ledger and the
+  resting orders but accepted a non-finite `equity_peak`, `day_start_equity`, or
+  step figure. That mattered because the risk engine's drawdown and daily-loss
+  guards are written `equity_peak > 0` / `day_start_equity > 0` before dividing:
+  `NaN > 0` is false, so a NaN peak **silently skipped** the guard, and an
+  infinite peak made the drawdown read as zero. A hand-edited or corrupted state
+  file could therefore resume with a disarmed guard. `restore` now requires these
+  session-level figures — and the simulator's `max_volume_participation` — to be
+  finite, raising `PaperStateError` otherwise, exactly as it already did for the
+  ledger's own figures. A valid state still restores.
+- **A non-finite participation rate can no longer silently disarm the liquidity
+  cap** (`execution/simulator.py`). `ExecutionSimulator` accepted a NaN
+  `max_volume_participation` because the old `0 <= x <= 1` test is false in both
+  directions for NaN. Downstream, `min(cap, volume * NaN)` returns `cap`, so the
+  participation cap vanished and the order filled in full. The constructor now
+  requires a real finite number.
+- **A quote whose volume cannot cap a fill is refused at the door**
+  (`execution/paper.py`). `Quote` rejected a non-finite price or range but
+  accepted a non-finite or non-positive `average_daily_volume`, with the same
+  cap-disarming effect. It is now required to be finite and positive when
+  supplied (an absent volume is still allowed — no volume means no cap).
+- **A quote source that answers with something other than a `Quote` is a named
+  refusal** (`execution/paper.py`). `on_signal` and `work_resting` previously let
+  a raw `AttributeError` escape when a source returned `None`, a dict, or a bare
+  float. Both now raise `PaperSessionError`, so the failure is a named data error
+  and the signal stays retryable (it is marked processed only after the check).
+- **`PaperSession.save_state` now writes atomically** (`execution/paper.py`). The
+  engine's own `save_state` wrote the target file in place, so a crash mid-write
+  could leave a truncated recovery file where a good checkpoint had been. It now
+  writes a temporary file in the same directory and `os.replace`s it over the
+  target — the pattern `PaperExperiment._atomic_write` already used — so the last
+  good checkpoint survives a failed write. Covered by
+  `tests/test_paper_recovery.py::TestStateWriteIsAtomic`,
+  `::TestNonFiniteRecoveryStateIsRefused`, `::TestParticipationRateMustBeFinite`,
+  `::TestQuoteVolumeMustBeFinite` and `::TestAMalformedQuoteIsRefusedByName`.
+
 ### Added (simulated trading system)
 
 - Persistent LIMIT orders (`execution/`, `backtesting/`): an order can rest
