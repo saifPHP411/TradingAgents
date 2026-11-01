@@ -139,6 +139,14 @@ def _warnings(report: dict[str, Any], refresh: dict[str, Any]) -> list[str]:
     freshness = report.get("freshness") or {}
     if freshness.get("is_stale"):
         warnings.append(f"stale market data: {freshness.get('reason')}")
+    if freshness.get("market_status") == "data_source_unavailable" or (
+        freshness.get("source_status") == "failed"
+    ):
+        kind = freshness.get("source_failure_kind") or "unknown"
+        warnings.append(
+            f"market data source is failing ({kind}): the source could not serve new "
+            f"data, so the data is not current — {freshness.get('source_status_detail') or freshness.get('reason')}"
+        )
     cadence = report.get("cadence") or {}
     if cadence.get("max_decisions_reached"):
         warnings.append(
@@ -164,9 +172,10 @@ def _refresh_view(root: Path) -> dict[str, Any]:
     from the dashboard alone, why the engine is or is not advancing. Read-only and
     secret-free: the sidecar holds no credential.
     """
-    from ..refresh import read_refresh_state
+    from ..refresh import SOURCE_FAILURE_STATUSES, read_refresh_state
 
     state = read_refresh_state(root)
+    source_failed = state.last_status in SOURCE_FAILURE_STATUSES
     return {
         "last_status": state.last_status,
         "last_attempt_at": state.last_attempt_at,
@@ -177,6 +186,12 @@ def _refresh_view(root: Path) -> dict[str, Any]:
         "fetches_today": state.fetches_today,
         "day": state.day,
         "last_error": state.last_error,
+        # Source health, kept explicit so a bare "throttled" tick still shows the
+        # standing failure behind it rather than hiding it.
+        "source_status": "failed" if source_failed else "ok",
+        "failure_kind": state.last_failure_kind,
+        "last_skip": state.last_skip,
+        "last_skip_at": state.last_skip_at,
     }
 
 

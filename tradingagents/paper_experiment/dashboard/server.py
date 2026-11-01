@@ -813,7 +813,10 @@ async function refresh(){
 
     const f = s.freshness || {};
     const ageText = (f.data_age_days===null||f.data_age_days===undefined) ? "unknown" : (f.data_age_days+" day(s)");
-    const stCls = f.market_status==="stale" ? "b-bad" : f.market_status==="up_to_date" ? "b-ok" : "b-mut";
+    const stCls = (f.market_status==="stale"||f.market_status==="data_source_unavailable") ? "b-bad" : f.market_status==="up_to_date" ? "b-ok" : "b-mut";
+    const srcHealth = f.source_status==="failed"
+      ? `<div class="k" style="grid-column:1/3;color:var(--bad);font-size:12.5px;margin-top:6px">Data source health: FAILING (${f.source_failure_kind||"unknown"}) — ${f.source_status_detail||f.reason||""}</div>`
+      : "";
     $("market").innerHTML =
       `<div class="row" style="margin-bottom:8px"><span class="badge ${stCls}">${f.market_status||"—"}</span></div>` +
       kv({
@@ -822,10 +825,12 @@ async function refresh(){
         "Last processed session": f.last_processed_session||"—",
         "Data age": ageText,
         "Pending sessions": f.pending_sessions===undefined?"—":f.pending_sessions,
+        "Source health": f.source_status==="failed"?"FAILING":"ok",
         "Last refresh": f.last_refresh_at||"never",
         "Next refresh allowed": f.next_refresh_allowed_at||"now",
         "Fetches today": (f.fetches_today===undefined?"—":f.fetches_today)+" / "+(f.fetch_quota_per_day===undefined?"—":f.fetch_quota_per_day),
       }) +
+      srcHealth +
       `<div class="k" style="grid-column:1/3;color:var(--mut);font-size:12.5px;margin-top:6px">${f.reason||""}</div>` +
       `<div class="k" style="grid-column:1/3;color:var(--mut);font-size:11.5px;margin-top:4px">Daily-bar source: "latest available bar" is the newest daily session, not a live tick price.</div>`;
 

@@ -32,6 +32,10 @@ MARKET_STATUS_NO_DATA = "no_data"
 MARKET_STATUS_STALE = "stale"
 MARKET_STATUS_UP_TO_DATE = "up_to_date"
 MARKET_STATUS_PENDING = "pending_sessions"
+# The source could not serve new data at all (auth, missing credential, transport).
+# Distinct from "no newer bar": the data condition is unknown because the fetch
+# failed, and a decision must not be taken as if the data were merely unchanged.
+MARKET_STATUS_SOURCE_UNAVAILABLE = "data_source_unavailable"
 
 MARKET_STATUSES = (
     MARKET_STATUS_HISTORICAL,
@@ -39,6 +43,7 @@ MARKET_STATUSES = (
     MARKET_STATUS_STALE,
     MARKET_STATUS_UP_TO_DATE,
     MARKET_STATUS_PENDING,
+    MARKET_STATUS_SOURCE_UNAVAILABLE,
 )
 
 
@@ -69,6 +74,13 @@ class MarketFreshness:
     fetches_today: int
     fetch_quota_per_day: int
     reference_date: str
+    # Source health, kept separate from data freshness. ``source_status`` is
+    # "ok"/"failed"; ``source_failure_kind`` names the finer reason (auth,
+    # not_configured, rate_limited, transport, ...); ``source_status_detail`` is the
+    # last recorded error text. A failing source must never read as "no newer bar".
+    source_status: str = "ok"
+    source_failure_kind: str | None = None
+    source_status_detail: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -85,6 +97,9 @@ class MarketFreshness:
             "fetches_today": self.fetches_today,
             "fetch_quota_per_day": self.fetch_quota_per_day,
             "reference_date": self.reference_date,
+            "source_status": self.source_status,
+            "source_failure_kind": self.source_failure_kind,
+            "source_status_detail": self.source_status_detail,
         }
 
 
@@ -115,6 +130,14 @@ def market_freshness(experiment, *, policy=None, now: datetime | None = None) ->
     is_current_market = bool(getattr(experiment.source, "is_current_market", False))
     age = _age_days(latest_available, now.date())
 
+    # Source health is a *separate* axis from data freshness. A last attempt that
+    # failed to fetch (an auth rejection, a missing key, a transport error) means
+    # the data condition is unknown — the source could not be asked — so it must
+    # not be reported as "up to date" or "no newer bar".
+    from .refresh import SOURCE_FAILURE_STATUSES
+
+    source_failed = state.last_status in SOURCE_FAILURE_STATUSES
+
     next_allowed = None
     if state.last_attempt_at:
         try:
@@ -130,7 +153,17 @@ def market_freshness(experiment, *, policy=None, now: datetime | None = None) ->
             ).isoformat()
 
     # Decide the status in priority order, so the most important fact wins.
-    if not sessions:
+    # A failed source is reported first: the data condition is unknown, so neither
+    # "up to date" nor "pending" is an honest label for it.
+    if source_failed:
+        status = MARKET_STATUS_SOURCE_UNAVAILABLE
+        reason = (
+            f"the price source could not serve new data "
+            f"({state.last_failure_kind or 'unknown'}): "
+            f"{state.last_error or 'no detail recorded'}"
+        )
+        is_stale = False
+    elif not sessions:
         status, reason = MARKET_STATUS_NO_DATA, "the price source has no sessions"
         is_stale = False
     elif not is_current_market and max_stale is None:
@@ -174,4 +207,7 @@ def market_freshness(experiment, *, policy=None, now: datetime | None = None) ->
         fetches_today=state.fetches_today,
         fetch_quota_per_day=policy.max_fetches_per_day,
         reference_date=now.date().isoformat(),
+        source_status="failed" if source_failed else "ok",
+        source_failure_kind=state.last_failure_kind if source_failed else None,
+        source_status_detail=state.last_error if source_failed else None,
     )

@@ -345,13 +345,30 @@ processes the pending sessions. The refresh lives in
 - **Quota-aware and never fatal.** A fetch is throttled by a minimum interval and
   a per-UTC-day cap. A quota notice, a stale feed, a network error or a malformed
   body is returned as a status, not raised; the engine keeps running.
+- **Honest about a failure.** A fetch failure is named for what it is, and a
+  *skip* never hides it. A rejected credential is `auth_failed`, a missing one is
+  `not_configured`, a vendor rate limit and a transport error stay distinct, and a
+  finer `failure_kind` (`auth`, `not_configured`, `rate_limited`, `stale`,
+  `transport`, `malformed`, `unsupported`) is recorded alongside. A throttled or
+  quota-guarded tick is a *skip*: it records `last_skip` but leaves `last_status`
+  and `last_error` untouched, and it does **not** advance the throttle clock — so a
+  fixed credential is retried after the interval instead of the window resetting
+  forever. The `[data]` log line carries `last_outcome` and `last_error` on a skip,
+  so a bare `status=throttled` can never again be the only thing an operator sees.
 
 The outcome is a closed vocabulary (`refresh.REFRESH_STATUSES`): `appended`,
-`no_new_sessions`, `throttled`, `quota_guard`, `unavailable`, `conflict`,
-`not_refreshable`, `disabled`. The dashboard shows the last outcome (and the last
-data date) in its `refresh` block, and the auto-advance log line carries a compact
-`[data]` summary, so an idle engine says *why* it is idle. The bookkeeping lives
-in a small sidecar (`data_refresh.json`), so the recovery file is only ever grown.
+`no_new_sessions`, `throttled`, `quota_guard`, `unavailable`, `auth_failed`,
+`not_configured`, `conflict`, `not_refreshable`, `disabled`. The dashboard shows
+the last outcome (and the last data date) in its `refresh` block, and the
+auto-advance log line carries a compact `[data]` summary, so an idle engine says
+*why* it is idle. The bookkeeping lives in a small sidecar
+(`data_refresh.json`), so the recovery file is only ever grown.
+
+A source that could not be asked is also reported on its own axis, separate from
+data freshness: `market_freshness` returns `market_status = data_source_unavailable`
+with `source_status = "failed"`, `source_failure_kind` and `source_status_detail`,
+so a failing provider never reads as "no newer bar". The dashboard shows a
+"Source health" row and raises an operator warning for it.
 
 **Frontier decisions.** A decision taken on the newest bar has no T+1 yet, so its
 `execution_session` is unresolved (`None`) and it stays pending. When a newer

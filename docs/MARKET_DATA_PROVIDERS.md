@@ -100,7 +100,15 @@ python -m tradingagents.paper_experiment diagnose --source alpha_vantage
 
 It reports whether the env var is present and non-blank and whether the request
 would carry `apikey`, printing the parameter *names* only — never the value, any
-part of it, or its length.
+part of it, or its length. It also prints a three-way **credential status**:
+`MISSING` (unset or blank), `SET` (present, but not yet proven to work), or — with
+`--probe` — `INVALID` when the vendor rejects it. A plain `diagnose` makes no
+vendor call; `--probe` makes one read-only request per credential, which is the
+only way to tell a SET-but-rejected key from a working one:
+
+```bash
+python -m tradingagents.paper_experiment diagnose --source alpha_vantage --probe
+```
 
 ### Rate limit and quota
 
@@ -116,9 +124,13 @@ Alpha Vantage reports a quota or a bad key **inside an HTTP 200 body** (a
 `"Note"` / `"Information"` field), and a rejected call as `"Error Message"`. The
 provider classifies each:
 
+- an invalid/missing key notice → `ProviderAuthError` (both an
+  `"Information"`/`"Note"` notice and an `"Error Message"` body go through the
+  same classifier: the auth test is "the notice names the credential *and* calls
+  it invalid or missing", checked before the quota markers so a notice that
+  mentions "API key" only to explain a rate limit is not misread as auth);
 - a quota/limit notice → `ProviderRateLimitedError`;
-- an invalid/missing key notice → `ProviderAuthError`;
-- a rejected call → `ProviderUnsupportedError`.
+- any other rejected call → `ProviderUnsupportedError`.
 
 It never parses such a body as data. (This matches the existing
 `dataflows/vendors/alpha_vantage/common.py` classification.)

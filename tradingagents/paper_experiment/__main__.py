@@ -315,12 +315,51 @@ def _sources(args) -> int:
     return 0
 
 
+def _probe_source(source_name: str, env_name: str, value: str) -> tuple[str, str]:
+    """One real, read-only request to classify a credential. Never prints the key.
+
+    Returns ``(verdict, detail)`` where verdict is ``OK``, ``INVALID`` or
+    ``UNREACHABLE``. A rejection that names the credential is INVALID; a transport
+    failure is UNREACHABLE; anything else is reported with its message.
+    """
+    from .providers.base import (
+        ProviderAuthError,
+        ProviderNotConfiguredError,
+        ProviderRateLimitedError,
+    )
+
+    try:
+        if source_name == "alpha_vantage":
+            from .providers.alpha_vantage import AlphaVantageDailySource
+
+            AlphaVantageDailySource("SPY", api_key=value, max_stale_days=None)
+        elif source_name == "finnhub":
+            from .providers.finnhub import FinnhubQuoteSource
+
+            FinnhubQuoteSource("SPY", api_key=value)
+        else:
+            return "SKIPPED", "no probe is defined for this source"
+    except (ProviderAuthError, ProviderNotConfiguredError) as exc:
+        return "INVALID", f"the vendor rejected the credential: {exc}"
+    except ProviderRateLimitedError as exc:
+        # The key is accepted; the plan is out of quota. Not an auth failure.
+        return "OK", f"credential accepted, but the plan is throttled: {exc}"
+    except Exception as exc:  # noqa: BLE001 - a probe reports, it never raises
+        return "UNREACHABLE", f"{type(exc).__name__}: {exc}"
+    return "OK", f"{env_name} is set and the vendor accepted the request"
+
+
 def _diagnose(args) -> int:
     """Report, without revealing a secret, whether a provider credential is set.
 
     Answers the two questions a deploy needs: is the env var present, and would
     the outgoing request carry the ``apikey`` parameter? It never prints the key,
     any part of it, or its length — only presence and the parameter *name*.
+
+    ``--probe`` additionally makes one real, read-only request per credential, so a
+    key that is SET but REJECTED (the failure that reads "the parameter apikey is
+    invalid or missing" in a deploy log) is reported as INVALID rather than left as
+    an ambiguous "present". Without ``--probe`` no vendor call is made.
     """
     from .providers.alpha_vantage import (
         API_BASE_URL as AV_URL,
@@ -330,6 +369,7 @@ def _diagnose(args) -> int:
     from .providers.finnhub import API_KEY_ENV as FH_ENV
 
     requested = args.source or "frozen"
+    probe = bool(getattr(args, "probe", False))
     print(f"requested source: {requested}")
     print(f"known sources: {', '.join(KNOWN_SOURCES)}")
 
@@ -340,8 +380,12 @@ def _diagnose(args) -> int:
 
     value = os.environ.get(env_name, "")
     present = bool(value.strip())
+    # A three-way verdict: MISSING (unset/blank), INVALID (set but the vendor
+    # rejects it), or SET (present; only a probe can promote it to a working key).
+    verdict = "MISSING" if not present else "SET"
     print(f"credential env var: {env_name}")
     print(f"env var present and non-blank: {present}")
+    print(f"credential status: {verdict}")
     if not present:
         print(
             f"the request would fail before it is sent: {env_name} is unset or blank, "
@@ -359,6 +403,18 @@ def _diagnose(args) -> int:
         print(f"request parameter names: {', '.join(sorted(params))}")
     else:
         print("request carries token parameter: True (Finnhub uses 'token')")
+
+    if probe:
+        outcome, detail = _probe_source(requested, env_name, value)
+        print(f"live probe: {outcome}")
+        print(f"  {detail}")
+        if outcome == "INVALID":
+            print(
+                "  the credential is present but the vendor rejected it: replace "
+                f"{env_name} with a valid key"
+            )
+    else:
+        print("live probe: skipped (pass --probe to make one read-only request)")
     return 0
 
 
@@ -656,6 +712,15 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "paper-trade only: run preflight and report, without processing a "
             "decision or placing an order."
+        ),
+    )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help=(
+            "diagnose only: make one real, read-only request per credential to tell "
+            "a SET-but-rejected key (INVALID) from a working one. Off by default, so "
+            "a plain diagnose spends no vendor call."
         ),
     )
     args = parser.parse_args(argv)

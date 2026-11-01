@@ -118,6 +118,26 @@ def _build(
     )
 
 
+def _failure_hint(exc: BaseException) -> str:
+    """An actionable next step for a source-build failure, or an empty string.
+
+    A SET-but-rejected key and a missing key are the two failures an operator most
+    often sees in a deploy log, and both are fixable by acting on the credential.
+    Naming the fix in the error is the difference between "the run stopped" and
+    "the run stopped and here is what to change".
+    """
+    from .base import ProviderAuthError, ProviderNotConfiguredError
+
+    if isinstance(exc, ProviderAuthError):
+        return (
+            "; the credential is present but the vendor rejected it — replace the "
+            "key (for Alpha Vantage, ALPHA_VANTAGE_API_KEY) or name a --fallback source"
+        )
+    if isinstance(exc, ProviderNotConfiguredError):
+        return "; the credential is missing — set the key or name a --fallback source"
+    return ""
+
+
 def select_source(
     requested: str,
     *,
@@ -162,7 +182,8 @@ def select_source(
         if fallback is None:
             raise SourceSelectionError(
                 f"the price source {requested!r} could not be built ({exc}), and no "
-                "fallback was named; refusing to change the data source silently"
+                f"fallback was named; refusing to change the data source silently"
+                f"{_failure_hint(exc)}"
             ) from exc
         logger.warning(
             "price source %r unavailable (%s); switching explicitly to the named "

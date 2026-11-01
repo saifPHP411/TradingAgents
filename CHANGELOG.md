@@ -162,6 +162,41 @@ path, and no configuration that produces one.
 
 ### Fixed
 
+- **A rejected market-data credential is now reported as an authentication
+  failure, and a throttled tick no longer hides it.** A Railway deploy running on
+  Alpha Vantage failed to start with ``the price source 'alpha_vantage' could not
+  be built (Alpha Vantage rejected the request for 'SPY': the parameter apikey is
+  invalid or missing. ...), and no fallback was named``, while the status line read
+  ``status=throttled new=0 fetches_today=0/24``. Three defects combined to make the
+  real cause invisible:
+  - **The vendor's rejection was misclassified.** Alpha Vantage answers a rejected
+    or absent credential inside an HTTP 200 body. The provider routed an
+    ``Error Message`` body to ``ProviderUnsupportedError`` (an "unsupported
+    symbol" style fault) instead of ``ProviderAuthError``. It now runs the body
+    through the same classifier as an ``Information``/``Note`` notice, and the
+    classifier names an auth failure when the notice both names the credential and
+    calls it invalid or missing — checked *before* the quota markers, because the
+    quota notice also mentions "API key" and would otherwise be misread as auth.
+  - **A skip overwrote the last real outcome.** A throttled or quota-guarded tick
+    wrote its own status into the refresh sidecar, so the standing auth failure
+    disappeared and the dashboard showed a bare ``throttled``. A skip is now
+    recorded separately (``last_skip`` / ``last_skip_at``), leaves ``last_status``
+    and ``last_error`` intact, and the ``[data]`` summary line carries
+    ``last_outcome`` and ``last_error`` so the real cause survives.
+  - **The throttle deadlocked the retry.** A skipped tick advanced
+    ``last_attempt_at``, so the throttle window reset on every tick and the fetch
+    was never retried — a fixed credential would never be picked up. A skip no
+    longer advances the clock, so the retry resumes after the interval.
+  The refresh vocabulary gains ``auth_failed`` and ``not_configured`` and a finer
+  ``failure_kind`` (``auth``, ``not_configured``, ``rate_limited``, ``stale``,
+  ``transport``, ``malformed``, ``unsupported``); the freshness view gains
+  ``data_source_unavailable`` with ``source_status`` / ``source_failure_kind`` /
+  ``source_status_detail``, so a failing source never reads as "no newer bar"; the
+  dashboard shows a "Source health" row and an operator warning; and ``diagnose``
+  reports SET / MISSING / INVALID and can confirm a rejection with an opt-in
+  ``--probe``. No credential ever reaches a log, a status line or a report. Covered
+  by `tests/test_phase21_data_source_failure.py`.
+
 - **A quote no longer lets a malformed observation or a host's timezone into the
   ledger.** Two gaps in `Quote`'s validation, both found by the Phase 3
   reliability re-audit and both reachable through the only door market data

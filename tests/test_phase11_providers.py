@@ -385,10 +385,15 @@ class TestAlphaVantage:
         assert captured["params"]["apikey"] == "test-key-not-real"
 
     def test_the_credential_is_scrubbed_from_a_vendor_rejection(self):
-        """A vendor that echoes the key back in an error body must not leak it."""
+        """A vendor that echoes the key back in an error body must not leak it.
+
+        A rejection whose text names the credential is an *auth* failure, so the
+        scrubbing rule is asserted on ``ProviderAuthError`` (the credential is still
+        redacted; only the class is more specific than it was).
+        """
         secret = "LEAKY-KEY-NOT-REAL"
         body = json.dumps({"Error Message": f"Invalid API call for apikey {secret}"})
-        with pytest.raises(ProviderUnsupportedError) as excinfo:
+        with pytest.raises(ProviderAuthError) as excinfo:
             AlphaVantageDailySource(
                 "IBM", api_key=secret, transport=_transport(body), today=TODAY
             )

@@ -61,6 +61,8 @@ STATUS_QUOTA_GUARD = "quota_guard"
 STATUS_APPENDED = "appended"
 STATUS_NO_NEW_SESSIONS = "no_new_sessions"
 STATUS_UNAVAILABLE = "unavailable"
+STATUS_AUTH_FAILED = "auth_failed"
+STATUS_NOT_CONFIGURED = "not_configured"
 STATUS_CONFLICT = "conflict"
 # Recorded in the sidecar by `start`, not returned by a refresh: the initial vendor
 # fetch, which counts against the daily quota just as a refresh does.
@@ -75,14 +77,50 @@ REFRESH_STATUSES = frozenset(
         STATUS_APPENDED,
         STATUS_NO_NEW_SESSIONS,
         STATUS_UNAVAILABLE,
+        STATUS_AUTH_FAILED,
+        STATUS_NOT_CONFIGURED,
         STATUS_CONFLICT,
         STATUS_INITIAL_FETCH,
     }
 )
 
-# The source kinds a refresh can extend: a vendor's historical daily bars. A
-# frozen dataset or a test fixture has no vendor to ask; a quote-only source has
-# no bar history to append to.
+# A skip is a tick that decided *not* to spend a vendor call. It is transient and
+# must never overwrite the last real outcome: an operator who fixed a key would
+# otherwise see a bare "throttled" forever and never learn the fetch still fails.
+SKIP_STATUSES = frozenset({STATUS_THROTTLED, STATUS_QUOTA_GUARD})
+
+# The outcomes that mean "the source could not serve new data". This is the
+# umbrella the dashboard and freshness view report as DATA_SOURCE_UNAVAILABLE, so a
+# failing provider is never confused with "no newer bar exists".
+SOURCE_FAILURE_STATUSES = frozenset(
+    {STATUS_UNAVAILABLE, STATUS_AUTH_FAILED, STATUS_NOT_CONFIGURED}
+)
+
+# The finer reason behind a failure, so an authentication fault, a missing key, a
+# vendor rate limit and a transport error are never collapsed into one label.
+FAILURE_KIND_AUTH = "auth"
+FAILURE_KIND_NOT_CONFIGURED = "not_configured"
+FAILURE_KIND_RATE_LIMITED = "rate_limited"
+FAILURE_KIND_STALE = "stale"
+FAILURE_KIND_TRANSPORT = "transport"
+FAILURE_KIND_MALFORMED = "malformed"
+FAILURE_KIND_UNSUPPORTED = "unsupported"
+
+FAILURE_KINDS = frozenset(
+    {
+        FAILURE_KIND_AUTH,
+        FAILURE_KIND_NOT_CONFIGURED,
+        FAILURE_KIND_RATE_LIMITED,
+        FAILURE_KIND_STALE,
+        FAILURE_KIND_TRANSPORT,
+        FAILURE_KIND_MALFORMED,
+        FAILURE_KIND_UNSUPPORTED,
+    }
+)
+
+# The source kind a refresh can extend: a vendor's historical daily bars. A frozen
+# dataset or a test fixture has no vendor to ask; a quote-only source has no bar
+# history to append to.
 REFRESHABLE_KINDS = ("vendor_daily",)
 
 
@@ -113,6 +151,13 @@ class RefreshState:
     last_new_session: str | None = None
     last_new_sessions: int = 0
     last_error: str | None = None
+    # The finer reason behind the last failure (see FAILURE_KINDS). Kept distinct
+    # from last_status so an operator sees "auth" and not just "unavailable".
+    last_failure_kind: str | None = None
+    # The last tick that *skipped* a fetch (throttled/quota). Recorded separately so
+    # a skip never overwrites the last real outcome above.
+    last_skip: str | None = None
+    last_skip_at: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -126,6 +171,9 @@ class RefreshState:
             "last_new_session": self.last_new_session,
             "last_new_sessions": self.last_new_sessions,
             "last_error": self.last_error,
+            "last_failure_kind": self.last_failure_kind,
+            "last_skip": self.last_skip,
+            "last_skip_at": self.last_skip_at,
         }
 
     @classmethod
@@ -162,11 +210,17 @@ class RefreshOutcome:
     message: str | None = None
     fetches_today: int = 0
     max_fetches_per_day: int = 0
+    failure_kind: str | None = None
+    source_status: str = "ok"
     state: RefreshState = field(default_factory=RefreshState)
 
     def summary_line(self) -> str:
-        """One compact, secret-free line: last data date, newest session, status."""
-        return (
+        """One compact, secret-free line: last data date, newest session, status.
+
+        When this tick skipped a fetch, the line carries the *last real outcome*
+        too, so a bare ``status=throttled`` can never hide a standing failure.
+        """
+        line = (
             f"[data] source_last_bar={self.last_bar_date or '?'} "
             f"last_new_session={self.last_new_session or 'none'} "
             f"last_processed={self.last_processed_session or 'none'} "
@@ -174,6 +228,14 @@ class RefreshOutcome:
             f"new={len(self.new_sessions)} "
             f"fetches_today={self.fetches_today}/{self.max_fetches_per_day}"
         )
+        if self.status in SKIP_STATUSES and self.state.last_status:
+            line += (
+                f" last_outcome={self.state.last_status}"
+                f" last_error={self.state.last_error or 'none'}"
+            )
+        elif self.failure_kind:
+            line += f" failure_kind={self.failure_kind}"
+        return line
 
     def to_dict(self) -> dict:
         """A JSON-safe form, for a dashboard response or the persisted last run."""
@@ -186,6 +248,13 @@ class RefreshOutcome:
             "message": self.message,
             "fetches_today": self.fetches_today,
             "max_fetches_per_day": self.max_fetches_per_day,
+            "failure_kind": self.failure_kind,
+            "source_status": self.source_status,
+            # The last *real* outcome, so a dashboard reading a skip still sees the
+            # standing failure behind it.
+            "last_outcome": self.state.last_status,
+            "last_error": self.state.last_error,
+            "last_failure_kind": self.state.last_failure_kind,
             "summary": self.summary_line(),
         }
 
@@ -317,6 +386,44 @@ def _rebuild_source(experiment, symbol: str, merged: pd.DataFrame) -> PriceSourc
     return rebuilt
 
 
+def _failure_kind(exc: BaseException) -> str:
+    """Map a fetch failure to the finer reason the operator needs.
+
+    Authentication, a missing credential, a vendor rate limit, a stale feed and a
+    transport error are deliberately distinct: collapsing them is exactly the bug
+    this classification exists to prevent.
+    """
+    from .providers.base import (
+        ProviderAuthError,
+        ProviderNotConfiguredError,
+        ProviderRateLimitedError,
+        ProviderStaleDataError,
+        ProviderUnsupportedError,
+    )
+
+    if isinstance(exc, ProviderAuthError):
+        return FAILURE_KIND_AUTH
+    if isinstance(exc, ProviderNotConfiguredError):
+        return FAILURE_KIND_NOT_CONFIGURED
+    if isinstance(exc, ProviderRateLimitedError):
+        return FAILURE_KIND_RATE_LIMITED
+    if isinstance(exc, ProviderStaleDataError):
+        return FAILURE_KIND_STALE
+    if isinstance(exc, ProviderUnsupportedError):
+        return FAILURE_KIND_UNSUPPORTED
+    # A transport failure (timeout, DNS, connection reset) or a malformed body.
+    return FAILURE_KIND_TRANSPORT
+
+
+def _status_for_failure(kind: str) -> str:
+    """The refresh status a failure kind maps to (a closed vocabulary)."""
+    if kind == FAILURE_KIND_AUTH:
+        return STATUS_AUTH_FAILED
+    if kind == FAILURE_KIND_NOT_CONFIGURED:
+        return STATUS_NOT_CONFIGURED
+    return STATUS_UNAVAILABLE
+
+
 def refresh_source(
     experiment,
     *,
@@ -338,12 +445,24 @@ def refresh_source(
     state = RefreshState.load(state_file)
     last_processed = _latest_processed(experiment)
 
-    def finish(status: str, *, attempted: bool, **kwargs) -> RefreshOutcome:
-        state.last_status = status
-        state.last_attempt_at = now.isoformat()
-        if attempted:
-            state.day = now.date().isoformat()
-            state.fetches_today += 1
+    def finish(status: str, *, attempted: bool, skip: bool = False, **kwargs) -> RefreshOutcome:
+        if skip:
+            # A skip decided *not* to fetch, so it must not advance the throttle
+            # clock, count against the quota, or overwrite the last real outcome.
+            # Otherwise the throttle is self-perpetuating and a fixed credential
+            # would never be retried.
+            state.last_skip = status
+            state.last_skip_at = now.isoformat()
+        else:
+            state.last_status = status
+            state.last_attempt_at = now.isoformat()
+            if attempted:
+                state.day = now.date().isoformat()
+                state.fetches_today += 1
+        failure_kind = kwargs.pop("failure_kind", None)
+        # The effective source health: a skip reports the last real outcome's
+        # health, so a throttled tick still shows the standing auth failure.
+        effective = state.last_status if skip else status
         outcome = RefreshOutcome(
             status=status,
             attempted=attempted,
@@ -351,6 +470,8 @@ def refresh_source(
             last_bar_date=state.last_bar_date,
             fetches_today=state.fetches_today,
             max_fetches_per_day=policy.max_fetches_per_day,
+            failure_kind=failure_kind or (state.last_failure_kind if skip else None),
+            source_status="failed" if effective in SOURCE_FAILURE_STATUSES else "ok",
             state=state,
             **kwargs,
         )
@@ -387,7 +508,7 @@ def refresh_source(
         state.fetches_today = 0
 
     if state.fetches_today >= policy.max_fetches_per_day:
-        return finish(STATUS_QUOTA_GUARD, attempted=False)
+        return finish(STATUS_QUOTA_GUARD, attempted=False, skip=True)
 
     if state.last_attempt_at:
         try:
@@ -395,30 +516,52 @@ def refresh_source(
         except ValueError:
             elapsed = policy.min_interval_seconds
         if elapsed < policy.min_interval_seconds:
-            return finish(STATUS_THROTTLED, attempted=False)
+            return finish(STATUS_THROTTLED, attempted=False, skip=True)
 
     try:
         fresh = (fetcher or _default_fetcher)(experiment, today=now.date())
     except Exception as exc:  # noqa: BLE001 - a fetch failure must not stop the engine
-        state.last_error = f"{type(exc).__name__}: {exc}"
-        return finish(STATUS_UNAVAILABLE, attempted=True, message=state.last_error)
+        reason = f"{type(exc).__name__}: {exc}"
+        state.last_error = reason
+        failure_kind = _failure_kind(exc)
+        state.last_failure_kind = failure_kind
+        return finish(
+            _status_for_failure(failure_kind),
+            attempted=True,
+            message=reason,
+            failure_kind=failure_kind,
+        )
 
     try:
         fresh_frame = fresh.frame(symbol)
     except PriceSourceError as exc:
         state.last_error = str(exc)
-        return finish(STATUS_UNAVAILABLE, attempted=True, message=state.last_error)
+        failure_kind = _failure_kind(exc)
+        state.last_failure_kind = failure_kind
+        return finish(
+            _status_for_failure(failure_kind),
+            attempted=True,
+            message=state.last_error,
+            failure_kind=failure_kind,
+        )
 
     old_frame = experiment.source.frame(symbol)
     merged, new_labels, conflict = _merge_frames(old_frame, fresh_frame)
     if conflict:
         state.last_error = conflict
-        return finish(STATUS_CONFLICT, attempted=True, message=conflict)
+        state.last_failure_kind = FAILURE_KIND_MALFORMED
+        return finish(
+            STATUS_CONFLICT,
+            attempted=True,
+            message=conflict,
+            failure_kind=FAILURE_KIND_MALFORMED,
+        )
     if not new_labels:
         state.last_bar_date = str(merged.index[-1])[:10]
         state.last_new_sessions = 0
         state.last_success_at = now.isoformat()
         state.last_error = None
+        state.last_failure_kind = None
         return finish(STATUS_NO_NEW_SESSIONS, attempted=True)
 
     # Validate the merged frame before it becomes the experiment's data.
@@ -426,7 +569,13 @@ def refresh_source(
         validated = _validate_frame(merged, symbol, getattr(experiment.source, "kind", "vendor_daily"))
     except PriceSourceError as exc:
         state.last_error = str(exc)
-        return finish(STATUS_UNAVAILABLE, attempted=True, message=state.last_error)
+        state.last_failure_kind = FAILURE_KIND_MALFORMED
+        return finish(
+            STATUS_UNAVAILABLE,
+            attempted=True,
+            message=state.last_error,
+            failure_kind=FAILURE_KIND_MALFORMED,
+        )
 
     experiment.source = _rebuild_source(experiment, symbol, validated)
     experiment.save_state()
@@ -436,6 +585,7 @@ def refresh_source(
     state.last_new_sessions = len(new_labels)
     state.last_success_at = now.isoformat()
     state.last_error = None
+    state.last_failure_kind = None
     return finish(STATUS_APPENDED, attempted=True, new_sessions=new_labels)
 
 

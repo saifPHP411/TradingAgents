@@ -104,9 +104,23 @@ def _classify_notice(notice: str, *, secret: str) -> None:
 
     Classification reads the *raw* notice, so redaction cannot hide a marker; the
     message that is raised carries the redacted text.
+
+    Order matters: a credential rejection is checked **before** the quota markers,
+    because Alpha Vantage's invalid-key notice can also mention "premium" or a
+    request limit, and misreading an authentication failure as a rate limit hides
+    the one fact the operator needs (a missing or invalid key) behind a status that
+    looks self-resolving.
     """
     low = notice.lower()
     message = _redact(notice, secret)
+    # An authentication rejection names the credential *and* says it is bad. The
+    # qualifier matters: Alpha Vantage's quota notice also mentions "API key"
+    # ("We have detected your API key ... rate limit"), so matching on the
+    # credential name alone would misread a rate limit as an auth failure.
+    credential_named = "api key" in low or "apikey" in low
+    credential_rejected = "invalid" in low or "missing" in low
+    if credential_named and credential_rejected:
+        raise ProviderAuthError(f"Alpha Vantage rejected the credential: {message}")
     if any(
         marker in low
         for marker in (
@@ -119,8 +133,6 @@ def _classify_notice(notice: str, *, secret: str) -> None:
         )
     ):
         raise ProviderRateLimitedError(f"Alpha Vantage quota/limit reached: {message}")
-    if "api key" in low or "apikey" in low:
-        raise ProviderAuthError(f"Alpha Vantage rejected the credential: {message}")
     raise ProviderUnsupportedError(f"Alpha Vantage could not serve the request: {message}")
 
 
@@ -200,10 +212,12 @@ class AlphaVantageDailySource(FramePriceSource):
             _classify_notice(str(notice), secret=key)
         rejection = payload.get("Error Message")
         if rejection:
-            raise ProviderUnsupportedError(
-                f"Alpha Vantage rejected the request for {self.symbol!r}: "
-                f"{_redact(str(rejection), key)}"
-            )
+            # An "Error Message" is usually a malformed request, but Alpha Vantage
+            # also answers a rejected/absent credential with one (e.g. "the
+            # parameter apikey is invalid or missing"). Classify it with the same
+            # rules as a notice, so an authentication failure is reported as one
+            # and never as a generic "unsupported" error the operator cannot act on.
+            _classify_notice(str(rejection), secret=key)
 
         series = payload.get("Time Series (Daily)")
         if not isinstance(series, dict) or not series:
