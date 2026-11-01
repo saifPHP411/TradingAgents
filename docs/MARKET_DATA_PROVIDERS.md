@@ -210,8 +210,17 @@ not one. `AlpacaSnapshotMarketData` (`--paper-market-data alpaca_snapshot`) read
 `GET /v2/stocks/snapshots` and uses the latest trade price, then the latest quote
 midpoint, then the minute-bar close — never a daily open. A missing, malformed,
 NaN, infinite or zero price raises, so the worker places no order rather than
-sizing from a fabricated number. `bar_open` remains the default, so an operator
-opts in explicitly.
+sizing from a fabricated number. A snapshot is also **age-checked**: a price whose
+own timestamp is older than `--paper-snapshot-max-age-seconds` (default 300s), or
+dated in the future beyond a small clock-skew tolerance, is refused with the reason
+recorded (`stale`, `malformed`, `no_data`). `bar_open` remains the default, so an
+operator opts in explicitly, and there is no silent fallback from
+`alpaca_snapshot` to `bar_open`.
+
+Both entrypoints — the `serve` subcommand and the module form — select this seam
+through one shared resolver, so a provider chosen on the command line means the
+same source, the same environment variable and the same freshness default however
+the process is started.
 
 ## Finnhub — a current-day quote, not a bar history
 

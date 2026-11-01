@@ -32,6 +32,8 @@ from typing import Any
 
 from ..broker import (
     BANNER,
+    DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+    PROVIDER_BAR_OPEN,
     STATUS_STOPPED,
     AlpacaPaperBroker,
     PaperTradingConfig,
@@ -65,6 +67,8 @@ class PaperTradingController:
         worker_factory: Callable[..., PaperTradingWorker] | None = None,
         market_data_factory: Callable[[tuple[str, ...]], Any] | None = None,
         whole_shares: bool = True,
+        market_data_provider: str = PROVIDER_BAR_OPEN,
+        market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     ) -> None:
         self.root = Path(root)
         self.enabled = enabled
@@ -79,6 +83,11 @@ class PaperTradingController:
         # default (the experiment's latest bar open), so existing behaviour is
         # unchanged unless an operator opts into a snapshot source explicitly.
         self._market_data_factory = market_data_factory
+        # The *configured* provider, recorded so a read-only status view can name
+        # it without building a worker. ``market_data_factory`` is the seam itself;
+        # this is the label, and the two are set together by the entrypoints.
+        self.market_data_provider = market_data_provider
+        self.market_data_max_age_seconds = market_data_max_age_seconds
         self._worker: PaperTradingWorker | None = None
         self._lock = threading.Lock()
 
@@ -99,6 +108,8 @@ class PaperTradingController:
             order_notional=self.order_notional,
             whole_shares=self.whole_shares,
             state_path=self.root / "worker_state.json",
+            market_data_provider=self.market_data_provider,
+            market_data_max_age_seconds=self.market_data_max_age_seconds,
         )
 
     def _reload_experiment(self):
@@ -124,6 +135,8 @@ class PaperTradingController:
             order_notional=self.order_notional,
             whole_shares=self.whole_shares,
             state_path=self.root / "worker_state.json",
+            market_data_provider=self.market_data_provider,
+            market_data_max_age_seconds=self.market_data_max_age_seconds,
         )
         source = experiment.source
         sessions = source.sessions()

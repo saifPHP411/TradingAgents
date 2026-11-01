@@ -583,7 +583,10 @@ python -m tradingagents.paper_experiment serve --root runs/exp1 \
 ### Which price the worker sizes against
 
 The worker sizes an order from a *current* price. Two seams are available, and the
-default is the historical one, so nothing changes unless you opt in:
+default is the historical one, so nothing changes unless you opt in. The choice is
+`--paper-market-data` or `$TRADINGAGENTS_PAPER_MARKET_DATA`; an explicit flag wins
+over the environment, and the same resolution backs both the `serve` subcommand and
+the module form, so the two entrypoints cannot diverge:
 
 - `--paper-market-data bar_open` (default) — the latest daily bar's **open**. This
   is a historical price, fine for an offline demonstration, but it is not a current
@@ -595,6 +598,13 @@ default is the historical one, so nothing changes unless you opt in:
   infinite or zero price makes the worker place **no** order rather than size from
   a fabricated number.
 
+A snapshot is also **age-checked**: if its own timestamp is older than
+`--paper-snapshot-max-age-seconds` (default 300, or
+`$TRADINGAGENTS_PAPER_SNAPSHOT_MAX_AGE_SECONDS`), or dated in the future beyond a
+small clock-skew tolerance, the worker refuses to size and reports the reason
+(`stale`, `malformed`, `no_data`) rather than trading a stale number. There is no
+silent fallback from `alpaca_snapshot` to `bar_open`.
+
 This changes only the price seam; the decision source and the strategy are
 untouched.
 
@@ -604,7 +614,8 @@ By default the worker sizes to **whole shares**, which keeps a tiny account's
 behaviour obvious. With a $25 notional and a high-priced symbol such as SPY
 (~$580) whole shares floor to **zero**, and the worker refuses the order with a
 message naming the fix rather than sending an empty order. To trade a high-priced
-symbol at a small size, opt in to fractional shares:
+symbol at a small size, opt in to fractional shares with
+`--paper-fractional-shares` or `$TRADINGAGENTS_PAPER_FRACTIONAL_SHARES`:
 
 ```bash
 python -m tradingagents.paper_experiment serve --root runs/exp1 \

@@ -16,6 +16,29 @@ path, and no configuration that produces one.
 
 ### Added
 
+- **The documented `serve` entrypoint now actually wires the current-price seam**
+  (`paper_experiment/market_data_wiring.py`, `paper_experiment/__main__.py`,
+  `dashboard/server.py`). The audit finding: `serve` did not accept
+  `--paper-market-data` / `--paper-fractional-shares`, so a service started the
+  documented way silently fell back to the historical `SourceMarketData`
+  (a past daily-bar open) and `AlpacaSnapshotMarketData` was reachable only from
+  the undocumented module form. Both entrypoints now resolve the provider, the
+  freshness limit and the whole-shares setting through one shared module
+  (`market_data_wiring`), with an explicit flag winning over
+  `$TRADINGAGENTS_PAPER_MARKET_DATA` / `$TRADINGAGENTS_PAPER_SNAPSHOT_MAX_AGE_SECONDS`
+  / `$TRADINGAGENTS_PAPER_FRACTIONAL_SHARES`. A bad value is a clean non-zero exit,
+  never a silent fallback to a different price. Covered by
+  `tests/test_phase26_serve_market_data_wiring.py`.
+
+- **The snapshot price is age-checked** (`broker/trading.py`). A price whose own
+  timestamp is older than `--paper-snapshot-max-age-seconds` (default 300s), or
+  dated in the future beyond a small clock-skew tolerance, is refused and the
+  reason recorded (`stale`, `malformed`, `no_data`) rather than sizing an order
+  from a stale number. The chosen provider, its kind, the freshness status and the
+  last snapshot price/time are surfaced on `/api/paper/status`, the dashboard's
+  **Market data** card, and each `CycleResult` (`reference_price`,
+  `market_data_provider`, `market_data_status`).
+
 - **A readiness verdict can no longer contradict the source-health view**
   (`paper_experiment/report.py`). The report's `readiness.status` could read
   `READY FOR LIVE PAPER` while `freshness.market_status` was

@@ -17,7 +17,7 @@ Every test drives a mocked transport; no test reaches the network.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -39,6 +39,11 @@ from tradingagents.paper_experiment.providers.base import HttpResponse
 
 SYMBOL = "SPY"
 
+# A fixed "now" so a snapshot's age is deterministic. The body's timestamps are
+# built relative to it, so a price-selection test never fails for freshness and a
+# freshness test can move the stamp without touching the price.
+NOW = datetime(2026, 10, 30, 20, 0, 0, tzinfo=UTC)
+
 
 def _transport(body, *, status_code: int = 200, recorder: list | None = None):
     def send(*, url, params, headers, timeout):
@@ -50,18 +55,23 @@ def _transport(body, *, status_code: int = 200, recorder: list | None = None):
     return send
 
 
+def _stamp(offset_seconds: float = 0.0) -> str:
+    return (NOW + timedelta(seconds=offset_seconds)).isoformat().replace("+00:00", "Z")
+
+
 def _snapshot_body(symbol: str = SYMBOL, **fields):
-    snapshot = {"latestTrade": {"p": 580.25, "t": "2026-10-30T20:00:00Z"}}
+    snapshot = {"latestTrade": {"p": 580.25, "t": _stamp()}}
     snapshot.update(fields)
     return {symbol: snapshot}
 
 
-def _market_data(body, *, symbols=(SYMBOL,), **kwargs):
+def _market_data(body, *, symbols=(SYMBOL,), now=NOW, **kwargs):
     return AlpacaSnapshotMarketData(
         symbols,
         api_key="test-key-not-real",
         api_secret="test-secret-not-real",
         transport=_transport(body),
+        clock=lambda: now,
         **kwargs,
     )
 
@@ -78,20 +88,24 @@ class TestCurrentPrice:
         assert md.price(SYMBOL) == pytest.approx(580.25)
 
     def test_a_quote_midpoint_is_used_when_there_is_no_trade(self):
-        body = _snapshot_body(latestTrade=None, latestQuote={"bp": 100.0, "ap": 102.0})
+        body = _snapshot_body(
+            latestTrade=None, latestQuote={"bp": 100.0, "ap": 102.0, "t": _stamp()}
+        )
         md = _market_data(body)
         assert md.price(SYMBOL) == pytest.approx(101.0)
 
     def test_the_minute_bar_close_is_the_last_resort(self):
-        body = _snapshot_body(latestTrade=None, latestQuote=None,
-                              minuteBar={"c": 55.5, "o": 54.0})
+        body = _snapshot_body(
+            latestTrade=None, latestQuote=None,
+            minuteBar={"c": 55.5, "o": 54.0, "t": _stamp()},
+        )
         md = _market_data(body)
         assert md.price(SYMBOL) == pytest.approx(55.5)
 
     def test_a_daily_bar_open_is_never_used_as_a_current_price(self):
         """The precise defect this seam fixes: an open is not a current price."""
         body = _snapshot_body(latestTrade=None, latestQuote=None, minuteBar=None,
-                              dailyBar={"o": 500.0, "c": 580.0})
+                              dailyBar={"o": 500.0, "c": 580.0, "t": _stamp()})
         md = _market_data(body)
         with pytest.raises(MarketDataError):
             md.price(SYMBOL)
@@ -160,6 +174,7 @@ class TestRequestShape:
         AlpacaSnapshotMarketData(
             (SYMBOL,), api_key="k", api_secret="s",
             transport=_transport(_snapshot_body(), recorder=recorder),
+            clock=lambda: NOW,
         ).price(SYMBOL)
         assert recorder[0]["url"] == f"{DATA_BASE_URL}/v2/stocks/snapshots"
         assert recorder[0]["params"]["feed"] == "iex"
@@ -170,6 +185,7 @@ class TestRequestShape:
         AlpacaSnapshotMarketData(
             (SYMBOL,), api_key="k", api_secret="s",
             transport=_transport(_snapshot_body(), recorder=recorder),
+            clock=lambda: NOW,
         ).price(SYMBOL)
         assert recorder[0]["headers"]["APCA-API-KEY-ID"] == "k"
         assert "k" not in json.dumps(recorder[0]["params"])

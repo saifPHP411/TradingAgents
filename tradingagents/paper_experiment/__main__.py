@@ -39,10 +39,23 @@ import os
 import sys
 from pathlib import Path
 
-from .broker import BrokerError
+from .broker import (
+    DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+    MARKET_DATA_CHOICES,
+    BrokerError,
+)
 from .config import ExperimentConfig
 from .experiment import ExperimentError, PaperExperiment
 from .journal import JournalError
+from .market_data_wiring import (
+    FRACTIONAL_SHARES_ENV,
+    MARKET_DATA_ENV,
+    SNAPSHOT_MAX_AGE_ENV,
+    MarketDataWiringError,
+    describe_provider,
+    market_data_factory_for,
+    resolve_settings,
+)
 from .providers import (
     KNOWN_SOURCES,
     ProviderError,
@@ -272,6 +285,35 @@ def _report(args) -> int:
     return 0
 
 
+def _paper_market_data_settings(args) -> tuple[str, float | None, bool]:
+    """Resolve the paper worker's market-data settings from the CLI/environment.
+
+    Returns ``(provider, max_age_seconds, whole_shares)``. Each CLI flag is passed
+    as ``None`` when it was not given, so the environment is consulted only then
+    and an explicit flag always wins. A bad value raises :class:`RunnerError`
+    rather than falling back, so a typo in a provider name or a freshness value can
+    never silently change which price a paper order is sized from.
+    """
+    try:
+        return resolve_settings(
+            provider=getattr(args, "paper_market_data", None),
+            max_age=getattr(args, "paper_snapshot_max_age_seconds", None),
+            fractional=getattr(args, "paper_fractional_shares", None),
+        )
+    except MarketDataWiringError as exc:
+        raise RunnerError(str(exc)) from exc
+
+
+def _announce_paper_market_data(provider: str, max_age: float | None) -> None:
+    """Print the effective price seam to stderr, so a start log names it."""
+    suffix = (
+        f"; snapshot max age {max_age:.0f}s"
+        if provider == "alpaca_snapshot" and max_age is not None
+        else ""
+    )
+    print(f"paper market data: {describe_provider(provider)}{suffix}", file=sys.stderr)
+
+
 def _serve(args) -> int:
     """Run the local dashboard. Simulation-only monitoring and control.
 
@@ -282,10 +324,17 @@ def _serve(args) -> int:
     ``--allow-paper-trading`` additionally enables the START/STOP control for the
     Alpaca **paper** worker. It is off by default, so the dashboard cannot place a
     paper order unless the operator opts in, and it never enables live trading.
+
+    ``--paper-market-data`` selects the price seam the worker sizes from, and is
+    passed through as the same factory the module-form server uses, so the two
+    entrypoints cannot diverge. ``bar_open`` keeps the historical default;
+    ``alpaca_snapshot`` reads a current price and never falls back to a bar open.
     """
     from .dashboard import DashboardAuthError, serve
 
     root = _root(args)
+    provider, max_age, whole_shares = _paper_market_data_settings(args)
+    _announce_paper_market_data(provider, max_age)
     # Honour a platform-provided port (Railway sets $PORT) when --port is omitted.
     port = args.port if args.port is not None else int(os.environ.get("PORT", "8000"))
     try:
@@ -300,6 +349,10 @@ def _serve(args) -> int:
             auto_interval=getattr(args, "auto_interval", 60.0) or 60.0,
             allow_paper_trading=getattr(args, "allow_paper_trading", False),
             paper_order_notional=getattr(args, "paper_order_notional", 25.0) or 25.0,
+            market_data_factory=market_data_factory_for(provider, max_age_seconds=max_age),
+            paper_whole_shares=whole_shares,
+            paper_market_data_provider=provider,
+            paper_market_data_max_age_seconds=max_age,
         )
     except DashboardAuthError as exc:
         raise RunnerError(str(exc)) from exc
@@ -440,22 +493,42 @@ def _paper_trade(args) -> int:
     places an order only if the decision source yields a tradeable decision *and*
     every local risk check passes.
 
-    ``--dry-run`` performs preflight and reports what would happen without placing
-    an order. There is no flag that reaches a live endpoint: the broker's gate
-    refuses every live host, and the endpoint is not configurable here.
+    ``--paper-market-data`` selects the price seam, exactly as ``serve`` does, so
+    the CLI and the deployed dashboard cannot diverge: ``bar_open`` is the
+    historical default and ``alpaca_snapshot`` reads a current price that is
+    refused when stale. ``--dry-run`` performs preflight and reports what would
+    happen without placing an order. There is no flag that reaches a live
+    endpoint: the broker's gate refuses every live host, and the endpoint is not
+    configurable here.
     """
     from .dashboard.paper_control import PaperTradingController
 
     root = _root(args)
+    provider, max_age, whole_shares = _paper_market_data_settings(args)
+    _announce_paper_market_data(provider, max_age)
     controller = PaperTradingController(
         root,
         enabled=True,
         order_notional=getattr(args, "paper_order_notional", 25.0) or 25.0,
+        market_data_factory=market_data_factory_for(provider, max_age_seconds=max_age),
+        whole_shares=whole_shares,
+        market_data_provider=provider,
+        market_data_max_age_seconds=max_age,
     )
     if getattr(args, "dry_run", False):
         worker = controller._ensure_worker()  # noqa: SLF001 - the CLI owns the worker
         result = worker.preflight()
-        print(json.dumps({"preflight": result, "placed_order": False}, indent=2, default=str))
+        print(
+            json.dumps(
+                {
+                    "preflight": result,
+                    "placed_order": False,
+                    "market_data_provider": provider,
+                },
+                indent=2,
+                default=str,
+            )
+        )
         return 0
 
     started = controller.start()
@@ -554,7 +627,7 @@ def _broker_check(args) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m tradingagents.paper_experiment",
         description=(
@@ -681,6 +754,41 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--paper-market-data",
+        choices=MARKET_DATA_CHOICES,
+        default=None,
+        help=(
+            "serve / paper-trade: how the paper worker reads a current price "
+            f"(default: ${MARKET_DATA_ENV}, else bar_open, the experiment's latest "
+            "bar open). 'alpaca_snapshot' reads a genuinely current price from "
+            "Alpaca market data (feed=iex) and requires ALPACA_PAPER_API_KEY / "
+            "ALPACA_PAPER_API_SECRET. There is no silent fallback: if the snapshot "
+            "cannot be read or is stale, no order is placed."
+        ),
+    )
+    parser.add_argument(
+        "--paper-snapshot-max-age-seconds",
+        type=float,
+        default=None,
+        help=(
+            "serve / paper-trade: the maximum age of a snapshot price before it is "
+            f"refused, in seconds (default: ${SNAPSHOT_MAX_AGE_ENV}, else "
+            f"{DEFAULT_MAX_SNAPSHOT_AGE_SECONDS:.0f}). Only used by alpaca_snapshot."
+        ),
+    )
+    parser.add_argument(
+        "--paper-fractional-shares",
+        action="store_true",
+        default=None,
+        help=(
+            "serve / paper-trade: allow a fractional quantity (default: "
+            f"${FRACTIONAL_SHARES_ENV}, else whole shares only). Needed for a "
+            "high-priced symbol such as SPY under a small notional, where whole "
+            "shares would floor to zero. The $25 notional cap and long-only rule are "
+            "unchanged."
+        ),
+    )
+    parser.add_argument(
         "--auto-advance",
         type=int,
         default=int(os.environ.get("TRADINGAGENTS_AUTO_ADVANCE_SESSIONS", "0") or 0),
@@ -723,6 +831,11 @@ def main(argv: list[str] | None = None) -> int:
             "a plain diagnose spends no vendor call."
         ),
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     handlers = {

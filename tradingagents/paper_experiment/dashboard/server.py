@@ -32,7 +32,22 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from ..broker import BANNER, BrokerError
+from ..broker import (
+    BANNER,
+    DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+    MARKET_DATA_CHOICES,
+    PROVIDER_BAR_OPEN,
+    BrokerError,
+)
+from ..market_data_wiring import (
+    FRACTIONAL_SHARES_ENV,
+    MARKET_DATA_ENV,
+    SNAPSHOT_MAX_AGE_ENV,
+    MarketDataWiringError,
+    describe_provider,
+    market_data_factory_for,
+    resolve_settings,
+)
 from .auth import DashboardAuthError, check_bearer, require_bindable, resolve_token
 from .paper_control import PaperTradingController, PaperTradingDisabled
 from .state import DashboardStateError, ExperimentView
@@ -71,6 +86,8 @@ class Dashboard:
         broker_factory=None,
         market_data_factory=None,
         paper_whole_shares: bool = True,
+        paper_market_data_provider: str = PROVIDER_BAR_OPEN,
+        paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
         refresh_policy=None,
         refresh_fetcher=None,
     ) -> None:
@@ -92,6 +109,8 @@ class Dashboard:
             broker_factory=broker_factory,
             market_data_factory=market_data_factory,
             whole_shares=paper_whole_shares,
+            market_data_provider=paper_market_data_provider,
+            market_data_max_age_seconds=paper_market_data_max_age_seconds,
         )
 
     def view(self) -> ExperimentView:
@@ -325,24 +344,19 @@ def make_handler(dashboard: Dashboard):
 
 
 
-def _market_data_factory_for(choice: str):
+def _market_data_factory_for(choice: str, *, max_age_seconds: float | None = None):
     """The market-data factory the CLI's ``--paper-market-data`` selects.
 
-    ``bar_open`` returns ``None``, which keeps the controller's historical default
-    (the experiment's latest bar open). ``alpaca_snapshot`` returns a factory that
-    builds a current-price source from Alpaca market data. A factory that cannot be
-    built raises when the worker is constructed, so a missing credential is
-    reported rather than silently replaced by a stale price.
+    Delegates to :func:`~..market_data_wiring.market_data_factory_for`, so this
+    entrypoint and the ``serve`` subcommand select the identical seam. ``bar_open``
+    returns ``None``, which keeps the controller's historical default (the
+    experiment's latest bar open). ``alpaca_snapshot`` returns a factory that
+    builds a current-price source from Alpaca market data, with the configured
+    freshness limit. A factory that cannot be built raises when the worker is
+    constructed, so a missing credential is reported rather than silently replaced
+    by a stale price.
     """
-    if choice != "alpaca_snapshot":
-        return None
-
-    def factory(symbols):
-        from ..broker import AlpacaSnapshotMarketData
-
-        return AlpacaSnapshotMarketData(symbols)
-
-    return factory
+    return market_data_factory_for(choice, max_age_seconds=max_age_seconds)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -410,25 +424,39 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--paper-market-data",
-        choices=("bar_open", "alpaca_snapshot"),
-        default=os.environ.get("TRADINGAGENTS_PAPER_MARKET_DATA", "bar_open") or "bar_open",
+        choices=MARKET_DATA_CHOICES,
+        default=None,
         help=(
-            "how the paper worker reads a current price (default: bar_open, the "
-            "experiment's latest bar open). 'alpaca_snapshot' reads a genuinely "
-            "current price from Alpaca market data (feed=iex) and requires "
-            "ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET. This changes only the "
-            "price seam, never the decision source or the strategy."
+            "how the paper worker reads a current price (default: "
+            f"${MARKET_DATA_ENV}, else bar_open, the experiment's latest bar open). "
+            "'alpaca_snapshot' reads a genuinely current price from Alpaca market "
+            "data (feed=iex) and requires ALPACA_PAPER_API_KEY / "
+            "ALPACA_PAPER_API_SECRET. This changes only the price seam, never the "
+            "decision source or the strategy."
+        ),
+    )
+    parser.add_argument(
+        "--paper-snapshot-max-age-seconds",
+        type=float,
+        default=None,
+        help=(
+            "the maximum age of a snapshot price before it is refused, in seconds "
+            f"(default: ${SNAPSHOT_MAX_AGE_ENV}, else "
+            f"{DEFAULT_MAX_SNAPSHOT_AGE_SECONDS:.0f}). A stale snapshot raises and no "
+            "order is sized from it."
         ),
     )
     parser.add_argument(
         "--paper-fractional-shares",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
-            "allow the paper worker to size a fractional quantity (default: whole "
-            "shares only). Needed for a high-priced symbol such as SPY under a small "
-            "notional, where whole shares would floor to zero. The account must "
-            "support fractional trading, or the broker will reject the order; the "
-            "$25 notional cap and long-only rule are unchanged."
+            "allow the paper worker to size a fractional quantity (default: "
+            f"${FRACTIONAL_SHARES_ENV}, else whole shares only). Needed for a "
+            "high-priced symbol such as SPY under a small notional, where whole "
+            "shares would floor to zero. The account must support fractional "
+            "trading, or the broker will reject the order; the $25 notional cap and "
+            "long-only rule are unchanged."
         ),
     )
     parser.add_argument(
@@ -461,6 +489,23 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"an experiment directory is required: pass --root or set {ROOT_ENV}")
     port = args.port if args.port is not None else int(os.environ.get("PORT", "8000"))
     try:
+        provider, max_age, whole_shares = resolve_settings(
+            provider=args.paper_market_data,
+            max_age=args.paper_snapshot_max_age_seconds,
+            fractional=args.paper_fractional_shares,
+        )
+    except MarketDataWiringError as exc:
+        parser.error(str(exc))
+    print(
+        f"paper market data: {describe_provider(provider)}"
+        + (
+            f"; snapshot max age {max_age:.0f}s"
+            if provider == "alpaca_snapshot" and max_age is not None
+            else ""
+        ),
+        file=sys.stderr,
+    )
+    try:
         serve(
             args.root,
             host=args.host,
@@ -472,8 +517,10 @@ def main(argv: list[str] | None = None) -> int:
             auto_interval=args.auto_interval,
             allow_paper_trading=args.allow_paper_trading,
             paper_order_notional=args.paper_order_notional,
-            market_data_factory=_market_data_factory_for(args.paper_market_data),
-            paper_whole_shares=not args.paper_fractional_shares,
+            market_data_factory=_market_data_factory_for(provider, max_age_seconds=max_age),
+            paper_whole_shares=whole_shares,
+            paper_market_data_provider=provider,
+            paper_market_data_max_age_seconds=max_age,
         )
     except DashboardAuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -497,6 +544,8 @@ def serve(
     broker_factory=None,
     market_data_factory=None,
     paper_whole_shares: bool = True,
+    paper_market_data_provider: str = PROVIDER_BAR_OPEN,
+    paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
 ) -> None:
     """Run the dashboard until interrupted.
 
@@ -526,6 +575,8 @@ def serve(
         broker_factory=broker_factory,
         market_data_factory=market_data_factory,
         paper_whole_shares=paper_whole_shares,
+        paper_market_data_provider=paper_market_data_provider,
+        paper_market_data_max_age_seconds=paper_market_data_max_age_seconds,
     )
     httpd = ThreadingHTTPServer((host, port), make_handler(dashboard))
     httpd.daemon_threads = True
@@ -760,6 +811,8 @@ INDEX_HTML = """<!doctype html>
       </div>
       <p class="muted" id="pnote" style="margin-bottom:0"></p>
     </div>
+    <div class="card"><h2>Market data</h2><div id="pmarket" class="kv"></div>
+      <p class="muted" id="pmarkethint" style="margin-bottom:0"></p></div>
     <div class="card"><h2>Account</h2><div id="paccount" class="kv"></div></div>
     <div class="card"><h2>Positions</h2><div id="ppositions"></div></div>
     <div class="card"><h2>Orders</h2><div id="porders"></div></div>
@@ -991,6 +1044,22 @@ async function refreshPaper(){
     $("pnote").textContent = p.enabled
       ? `Mode ${p.mode} · endpoint ${p.endpoint} · paper-only ${p.paper_endpoint_only?"yes":"NO"}`
       : (p.reason || "paper trading is disabled on this dashboard");
+    const md = p.market_data_provider || p.market_data_provider_configured || "unknown";
+    const isCurrent = p.market_data_kind === "current";
+    const age = (p.last_snapshot_age_seconds===null || p.last_snapshot_age_seconds===undefined)
+      ? "—" : (p.last_snapshot_age_seconds.toFixed(1)+"s");
+    $("pmarket").innerHTML = kv({
+      "Provider": md + (isCurrent ? " (CURRENT price)" : (p.market_data_kind ? " (historical)" : "")),
+      "Kind": p.market_data_kind || "—",
+      "Freshness status": p.market_data_status || "not started",
+      "Snapshot price": p.last_snapshot_price!==null && p.last_snapshot_price!==undefined ? money(p.last_snapshot_price) : "—",
+      "Snapshot time": p.last_snapshot_at || "—",
+      "Snapshot age": age,
+      "Max snapshot age": p.max_snapshot_age_seconds!==null && p.max_snapshot_age_seconds!==undefined ? (p.max_snapshot_age_seconds+"s") : "—",
+    });
+    $("pmarkethint").textContent = isCurrent
+      ? "Sizing uses a current Alpaca snapshot, refused when stale."
+      : "Sizing uses the experiment's historical daily-bar open — a past session price, not a live quote.";
     $("pstart").disabled = !p.enabled || p.status==="RUNNING" || p.status==="STARTING";
     $("pstop").disabled = !p.enabled || p.status==="STOPPED" || p.status==="STOPPING";
     const a = p.account || {};

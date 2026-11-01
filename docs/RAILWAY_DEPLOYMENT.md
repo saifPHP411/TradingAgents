@@ -202,6 +202,44 @@ python -m tradingagents.paper_experiment.dashboard.server --allow-control
 > `TRADINGAGENTS_EXPERIMENT_ROOT` exits `2` with a clear message rather than
 > listening on nothing.
 
+### Which price the paper worker sizes from
+
+The paper worker sizes each order from a *reference price*. That price comes from
+one of two seams, chosen by `--paper-market-data` (or
+`$TRADINGAGENTS_PAPER_MARKET_DATA`); the flag wins over the environment:
+
+- `bar_open` (the default) — the **historical** daily-bar open of the experiment's
+  latest session. This is a past-session price, not a live quote. It is fine for
+  exercising the plumbing, but it is not a current price.
+- `alpaca_snapshot` — a **genuinely current** price read from Alpaca market data
+  (`GET /v2/stocks/snapshots`, `feed=iex`). It needs `ALPACA_PAPER_API_KEY` and
+  `ALPACA_PAPER_API_SECRET`. A snapshot older than
+  `--paper-snapshot-max-age-seconds` (default 300s, or
+  `$TRADINGAGENTS_PAPER_SNAPSHOT_MAX_AGE_SECONDS`) is **refused**: the worker
+  raises and sizes no order rather than trading a stale number. There is no silent
+  fallback from `alpaca_snapshot` to `bar_open`.
+
+Both the `serve` subcommand and the module form select the seam the same way, from
+the same code, so the two entrypoints cannot diverge. The chosen provider is
+printed to stderr at startup and shown on the dashboard's **Market data** card.
+
+```bash
+# A paper service that sizes from a current Alpaca price, SPY, fractional shares
+# allowed (SPY ~580 makes whole shares floor to zero under a $25 cap):
+ALPACA_PAPER_API_KEY=<key> ALPACA_PAPER_API_SECRET=<secret> \
+TRADINGAGENTS_DASHBOARD_TOKEN=<a-long-random-string> \
+python -m tradingagents.paper_experiment serve \
+  --root /data/paper-experiment --host 0.0.0.0 --port "$PORT" \
+  --allow-control --auto-advance 3 \
+  --paper-market-data alpaca_snapshot --paper-fractional-shares
+```
+
+`--paper-fractional-shares` (or `$TRADINGAGENTS_PAPER_FRACTIONAL_SHARES`) lets the
+worker size a fractional quantity. Without it, whole shares only, and a high-priced
+symbol under a small notional floors to zero and the order is refused with a clear
+message. The account must support fractional trading or the broker rejects the
+order; the $25 notional cap and the long-only rule are unchanged either way.
+
 ### One writer per experiment directory
 
 State is a read-modify-write of one JSON file (`session_state.json`) plus an
@@ -246,12 +284,13 @@ Safety properties, all enforced in code and covered by tests:
   CLI and a cron run cannot diverge *in code*; they must still not run at once.
 
 Railway settings for this service, when you use one: start command
-`python -m tradingagents.paper_experiment serve --root /data/paper-experiment --host 0.0.0.0 --port $PORT --allow-control --auto-advance 3`
+`python -m tradingagents.paper_experiment serve --root /data/paper-experiment --host 0.0.0.0 --port $PORT --allow-control --auto-advance 3 --paper-market-data alpaca_snapshot --paper-fractional-shares`
 (or the module form above, which reads the root and host from service
-variables), the same `/data` volume mounted, and `TRADINGAGENTS_DASHBOARD_TOKEN`
-set as a service variable. Give it a **public domain** in Railway's networking
-settings so the phone can reach it; without the token the server refuses to start
-on that bind.
+variables), the same `/data` volume mounted, `TRADINGAGENTS_DASHBOARD_TOKEN` and
+the `ALPACA_PAPER_API_KEY` / `ALPACA_PAPER_API_SECRET` pair set as service
+variables (needed for `alpaca_snapshot`). Give it a **public domain** in
+Railway's networking settings so the phone can reach it; without the token the
+server refuses to start on that bind.
 
 ## Persistent volume and where state lives
 

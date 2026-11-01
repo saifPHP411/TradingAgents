@@ -99,6 +99,85 @@ WORKER_STATUSES = (
 BANNER = "ALPACA PAPER — NOT LIVE"
 """Shown wherever the worker's state is surfaced, so no view can imply live trading."""
 
+# -- market-data freshness -------------------------------------------------------
+
+DEFAULT_MAX_SNAPSHOT_AGE_SECONDS = 300.0
+"""How old a snapshot price may be before it is refused. Conservative: five
+minutes. A *current* price that is older than this is not a current price, and
+sizing an order from it would be sizing from a stale number."""
+
+DEFAULT_SNAPSHOT_FUTURE_TOLERANCE_SECONDS = 5.0
+"""How far ahead of the local clock a snapshot timestamp may be before it is
+refused as future-dated. A small tolerance absorbs clock skew between this host
+and the vendor; anything beyond it is a timestamp we cannot trust."""
+
+MARKET_DATA_KIND_HISTORICAL = "historical"
+MARKET_DATA_KIND_CURRENT = "current"
+MARKET_DATA_KIND_TEST = "test"
+
+MARKET_DATA_STATUS_OK = "ok"
+MARKET_DATA_STATUS_NO_DATA = "no_data"
+MARKET_DATA_STATUS_STALE = "stale"
+MARKET_DATA_STATUS_FUTURE = "future"
+MARKET_DATA_STATUS_MALFORMED = "malformed"
+MARKET_DATA_STATUS_ERROR = "error"
+MARKET_DATA_STATUS_NOT_STARTED = "not_started"
+
+MARKET_DATA_STATUSES = (
+    MARKET_DATA_STATUS_OK,
+    MARKET_DATA_STATUS_NO_DATA,
+    MARKET_DATA_STATUS_STALE,
+    MARKET_DATA_STATUS_FUTURE,
+    MARKET_DATA_STATUS_MALFORMED,
+    MARKET_DATA_STATUS_ERROR,
+    MARKET_DATA_STATUS_NOT_STARTED,
+)
+
+PROVIDER_BAR_OPEN = "bar_open"
+PROVIDER_ALPACA_SNAPSHOT = "alpaca_snapshot"
+PROVIDER_STATIC = "static"
+PROVIDER_UNKNOWN = "unknown"
+
+MARKET_DATA_CHOICES = (PROVIDER_BAR_OPEN, PROVIDER_ALPACA_SNAPSHOT)
+"""The price seams an operator may select. ``bar_open`` is the historical default;
+``alpaca_snapshot`` is the current-price opt-in."""
+
+
+@dataclass(frozen=True)
+class SnapshotObservation:
+    """One usable current price, with the timestamp of the *same* field.
+
+    ``field`` names which part of the snapshot the price came from
+    (``latestTrade``/``latestQuote``/``minuteBar``) and ``as_of`` is that field's
+    own timestamp, so a freshness check can never compare a price from one field
+    against a timestamp from another.
+    """
+
+    price: float
+    as_of: str | None
+    field: str
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    """Parse an ISO-8601 stamp to an aware UTC datetime, or ``None``.
+
+    A trailing ``Z`` is accepted (the vendor's format) and a naive value is read
+    as UTC rather than as the host's local time, so the age of a snapshot cannot
+    depend on the machine's timezone.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
 
 class WorkerError(RuntimeError):
     """The worker was driven in a way it cannot support."""
@@ -190,7 +269,13 @@ class DecisionSource(Protocol):
 
 
 class MarketData(Protocol):
-    """Supplies a current price for a symbol, and reports whether it is usable."""
+    """Supplies a current price for a symbol, and reports whether it is usable.
+
+    ``provider_name``/``kind``/``describe`` let the dashboard and the cycle result
+    name the *actual* seam in use, so a historical bar open is never displayed as a
+    live price. They are optional (a duck-typed test double need not implement
+    them); :func:`market_data_identity` reads them defensively.
+    """
 
     def price(self, symbol: str) -> float:  # pragma: no cover - protocol
         ...
@@ -199,11 +284,34 @@ class MarketData(Protocol):
         ...
 
 
+def market_data_identity(market_data: Any) -> dict[str, Any]:
+    """The secret-free identity of a market-data seam, for a status view.
+
+    Reads ``provider_name``/``kind``/``describe`` when a seam offers them and
+    falls back to the class name, so a seam that predates this protocol is still
+    labelled rather than mislabelled.
+    """
+    provider = getattr(market_data, "provider_name", None)
+    kind = getattr(market_data, "kind", None)
+    describe = getattr(market_data, "describe", None)
+    identity = {
+        "market_data_provider": provider if isinstance(provider, str) else PROVIDER_UNKNOWN,
+        "market_data_kind": kind if isinstance(kind, str) else None,
+    }
+    if callable(describe):
+        with contextlib.suppress(Exception):  # a status view must never raise
+            identity.update(describe())
+    return identity
+
+
 @dataclass
 class StaticMarketData:
     """A fixed price map, for tests and offline demonstration."""
 
     prices: dict[str, float] = field(default_factory=dict)
+
+    provider_name: str = PROVIDER_STATIC
+    kind: str = MARKET_DATA_KIND_TEST
 
     def available(self) -> bool:
         return bool(self.prices)
@@ -216,6 +324,9 @@ class StaticMarketData:
             raise MarketDataError(f"a usable price is required for {symbol!r}, got {value!r}")
         return float(value)
 
+    def describe(self) -> dict[str, Any]:
+        return {"market_data_detail": "a fixed price map (tests/demo), not a market price"}
+
 
 @dataclass
 class SourceMarketData:
@@ -227,10 +338,16 @@ class SourceMarketData:
     is the honest meaning of "current market data" for a daily-bar experiment. A
     live intraday quote provider can implement the same ``price``/``available``
     seam instead.
+
+    This is **historical** data: the price is a past session's bar open, not a live
+    quote. ``kind`` says so, so no view can present it as a current price.
     """
 
     source: Any
     session: str
+
+    provider_name: str = PROVIDER_BAR_OPEN
+    kind: str = MARKET_DATA_KIND_HISTORICAL
 
     def available(self) -> bool:
         try:
@@ -250,6 +367,16 @@ class SourceMarketData:
             raise MarketDataError(f"the bar for {symbol!r} carries no usable price: {price!r}")
         return price
 
+    def describe(self) -> dict[str, Any]:
+        return {
+            "market_data_detail": (
+                "the historical daily-bar open for the experiment's latest session; "
+                "this is a past session price, not a live quote"
+            ),
+            "historical_session": self.session,
+            "is_current_price": False,
+        }
+
 
 class AlpacaSnapshotMarketData:
     """A *current* price from Alpaca's market-data snapshot endpoint.
@@ -268,9 +395,20 @@ class AlpacaSnapshotMarketData:
     If no current price is available, :meth:`price` raises and the worker places no
     order rather than sizing from a stale or fabricated number.
 
+    **Freshness.** A current price is only useful if it is current, so the
+    timestamp of the *same* field the price came from is validated: a snapshot
+    older than ``max_age_seconds`` (default :data:`DEFAULT_MAX_SNAPSHOT_AGE_SECONDS`,
+    300s), a missing or unparseable timestamp, or a timestamp materially in the
+    future is refused with :class:`MarketDataError`. The worker then places **no**
+    order. There is no fallback to a historical daily bar: this seam never reads
+    one, so selecting it can never silently degrade to a stale price.
+
     Host and credentials are the market-data host and the paper credentials; this
     class never touches the trading endpoint and never places an order.
     """
+
+    provider_name = PROVIDER_ALPACA_SNAPSHOT
+    kind = MARKET_DATA_KIND_CURRENT
 
     def __init__(
         self,
@@ -281,6 +419,9 @@ class AlpacaSnapshotMarketData:
         base_url: str | None = None,
         transport=None,
         timeout: float | None = None,
+        max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+        future_tolerance_seconds: float = DEFAULT_SNAPSHOT_FUTURE_TOLERANCE_SECONDS,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         from ..providers.alpaca_iex import (
             API_KEY_ENV,
@@ -304,52 +445,158 @@ class AlpacaSnapshotMarketData:
                 f"no Alpaca market-data credentials: set {API_KEY_ENV} and "
                 f"{API_SECRET_ENV} so a current price can be read"
             )
+        if max_age_seconds is not None and not (max_age_seconds > 0):
+            raise MarketDataError(
+                f"max_age_seconds must be positive or None, got {max_age_seconds!r}"
+            )
+        self.max_age_seconds = max_age_seconds
+        self.future_tolerance_seconds = future_tolerance_seconds
         self._key = key
         self._secret = secret
         self._timeout = timeout or REQUEST_TIMEOUT
         self._transport = transport
         self._headers = _auth_headers(key, secret)
         self._classify_status = _classify_status
+        self._clock = clock or (lambda: datetime.now(UTC))
+        # The most recent observation this seam has successfully read, so a status
+        # view can report the last price, its timestamp and its age. Never carries a
+        # credential.
+        self.last_observation: SnapshotObservation | None = None
+        self.last_observed_at: str | None = None
+        self.last_status: str = MARKET_DATA_STATUS_NOT_STARTED
+        self.last_status_detail: str | None = None
+
+    # -- identity ---------------------------------------------------------
+
+    def describe(self) -> dict[str, Any]:
+        """The secret-free identity and last-observation view for a dashboard."""
+        observation = self.last_observation
+        return {
+            "market_data_detail": (
+                "a current price from Alpaca market data (feed=iex); validated for "
+                "freshness before any order is sized"
+            ),
+            "is_current_price": True,
+            "max_snapshot_age_seconds": self.max_age_seconds,
+            "last_snapshot_at": observation.as_of if observation else None,
+            "last_snapshot_price": observation.price if observation else None,
+            "last_snapshot_field": observation.field if observation else None,
+            "last_snapshot_age_seconds": self.last_snapshot_age_seconds(),
+            "last_snapshot_observed_at": self.last_observed_at,
+            "market_data_status": self.last_status,
+            "market_data_status_detail": self.last_status_detail,
+        }
+
+    def last_snapshot_age_seconds(self) -> float | None:
+        """The age, in seconds, of the last observed snapshot; ``None`` if unknown."""
+        observation = self.last_observation
+        if observation is None or observation.as_of is None:
+            return None
+        parsed = _parse_utc(observation.as_of)
+        if parsed is None:
+            return None
+        return (self._clock() - parsed).total_seconds()
 
     def available(self) -> bool:
-        """Whether a current price can be read for every configured symbol."""
+        """Whether a *fresh* current price can be read for every configured symbol."""
         if not self.symbols:
             return False
         try:
             snapshots = self._fetch()
         except Exception:  # noqa: BLE001 - an unreachable source is "not available"
+            self._record_status(MARKET_DATA_STATUS_ERROR, "the snapshot request failed")
             return False
-        return all(self._price_from(snapshots.get(s)) is not None for s in self.symbols)
+        if not isinstance(snapshots, dict):
+            self._record_status(MARKET_DATA_STATUS_MALFORMED, "the response was not an object")
+            return False
+        for symbol in self.symbols:
+            try:
+                self._observation_from(snapshots.get(symbol))
+            except MarketDataError as exc:
+                self._record_status(_status_for(exc), str(exc))
+                return False
+        self._record_status(MARKET_DATA_STATUS_OK, None)
+        return True
 
     def price(self, symbol: str) -> float:
-        """The current price for ``symbol``, or raise :class:`MarketDataError`."""
+        """The current, fresh price for ``symbol``, or raise :class:`MarketDataError`."""
         symbol = symbol.upper()
         try:
             snapshots = self._fetch()
-        except MarketDataError:
+        except MarketDataError as exc:
+            self._record_status(_status_for(exc), str(exc))
             raise
         except Exception as exc:  # noqa: BLE001 - a source failure is surfaced
-            raise MarketDataError(
-                f"the Alpaca snapshot request failed for {symbol!r}: "
-                f"{type(exc).__name__}"
-            ) from None
+            detail = f"the Alpaca snapshot request failed for {symbol!r}: {type(exc).__name__}"
+            self._record_status(MARKET_DATA_STATUS_ERROR, detail)
+            raise MarketDataError(detail) from None
         if not isinstance(snapshots, dict):
-            raise MarketDataError("Alpaca's snapshot response was not an object")
+            detail = "Alpaca's snapshot response was not an object"
+            self._record_status(MARKET_DATA_STATUS_MALFORMED, detail)
+            raise MarketDataError(detail)
         snapshot = snapshots.get(symbol)
         if snapshot is None:
-            raise MarketDataError(
+            detail = (
                 f"Alpaca returned no snapshot for {symbol!r}; no current price is "
                 "available, so no order can be sized"
             )
-        price = self._price_from(snapshot)
-        if price is None:
-            raise MarketDataError(
-                f"Alpaca's snapshot for {symbol!r} carried no usable current price "
-                "(no latest trade, quote, or minute bar)"
-            )
-        return price
+            self._record_status(MARKET_DATA_STATUS_NO_DATA, detail)
+            raise MarketDataError(detail)
+        try:
+            observation = self._observation_from(snapshot)
+        except MarketDataError as exc:
+            # A malformed, missing, stale or future-dated price is recorded so a
+            # status view can name *why* no order was sized.
+            self._record_status(_status_for(exc), str(exc))
+            raise
+        self.last_observation = observation
+        self.last_observed_at = self._clock().isoformat()
+        self._record_status(MARKET_DATA_STATUS_OK, None)
+        return observation.price
 
     # -- internals --------------------------------------------------------
+
+    def _record_status(self, status: str, detail: str | None) -> None:
+        self.last_status = status
+        self.last_status_detail = detail
+
+    def _observation_from(self, snapshot: Any) -> SnapshotObservation:
+        """A fresh, usable observation from a snapshot, or raise ``MarketDataError``."""
+        observation = self._price_from(snapshot)
+        if observation is None:
+            raise MarketDataError(
+                "Alpaca's snapshot carried no usable current price (no latest "
+                "trade, quote, or minute bar)"
+            )
+        self._assert_fresh(observation)
+        return observation
+
+    def _assert_fresh(self, observation: SnapshotObservation) -> None:
+        """Refuse a snapshot whose timestamp is missing, stale, or future-dated."""
+        if observation.as_of is None:
+            raise MarketDataError(
+                f"the snapshot's {observation.field} carries no timestamp, so its "
+                "age cannot be verified; refusing to size an order from an "
+                "unverifiable price"
+            )
+        parsed = _parse_utc(observation.as_of)
+        if parsed is None:
+            raise MarketDataError(
+                f"the snapshot's {observation.field} timestamp {observation.as_of!r} "
+                "is malformed; refusing to size an order from an unverifiable price"
+            )
+        age = (self._clock() - parsed).total_seconds()
+        if age < -abs(self.future_tolerance_seconds):
+            raise MarketDataError(
+                f"the snapshot's {observation.field} timestamp is {-age:.1f}s in the "
+                "future, beyond the allowed clock skew; refusing a future-dated price"
+            )
+        if self.max_age_seconds is not None and age > self.max_age_seconds:
+            raise MarketDataError(
+                f"the snapshot is stale: the {observation.field} is {age:.1f}s old, "
+                f"beyond the {self.max_age_seconds:.0f}s maximum; refusing to size an "
+                "order from a stale price"
+            )
 
     def _fetch(self) -> dict:
         from ..providers.base import fetch_json
@@ -365,14 +612,16 @@ class AlpacaSnapshotMarketData:
         )
 
     @staticmethod
-    def _price_from(snapshot: Any) -> float | None:
-        """The most current usable price in a snapshot, or ``None``.
+    def _price_from(snapshot: Any) -> SnapshotObservation | None:
+        """The most current usable price *and its own timestamp*, or ``None``.
 
         Preference order is deliberate: the latest *trade* is the most recent real
         transaction; a quote midpoint is next; the minute-bar close is last. A daily
         bar's open is never used, because it is not a current price. Every candidate
         must be finite and positive, so a NaN cannot pass a comparison and poison a
-        later sizing step.
+        later sizing step. The returned observation pairs the price with the
+        timestamp of the *same* field, so freshness is judged against the field the
+        price actually came from.
         """
         if not isinstance(snapshot, dict):
             return None
@@ -380,19 +629,42 @@ class AlpacaSnapshotMarketData:
         if isinstance(trade, dict):
             price = _positive_finite(trade.get("p"))
             if price is not None:
-                return price
+                return SnapshotObservation(price, _stamp(trade.get("t")), "latestTrade")
         quote = snapshot.get("latestQuote") or {}
         if isinstance(quote, dict):
             bid = _positive_finite(quote.get("bp"))
             ask = _positive_finite(quote.get("ap"))
             if bid is not None and ask is not None:
-                return (bid + ask) / 2.0
+                return SnapshotObservation((bid + ask) / 2.0, _stamp(quote.get("t")), "latestQuote")
         minute = snapshot.get("minuteBar") or {}
         if isinstance(minute, dict):
             price = _positive_finite(minute.get("c"))
             if price is not None:
-                return price
+                return SnapshotObservation(price, _stamp(minute.get("t")), "minuteBar")
         return None
+
+
+def _stamp(value: Any) -> str | None:
+    """A timestamp as its original string, or ``None`` when absent/blank."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _status_for(exc: MarketDataError) -> str:
+    """The closed-vocabulary status that best names a refusal reason."""
+    text = str(exc)
+    if "stale" in text:
+        return MARKET_DATA_STATUS_STALE
+    if "future" in text:
+        return MARKET_DATA_STATUS_FUTURE
+    if "timestamp" in text:
+        return MARKET_DATA_STATUS_MALFORMED
+    if "no usable current price" in text:
+        return MARKET_DATA_STATUS_NO_DATA
+    if "no snapshot" in text:
+        return MARKET_DATA_STATUS_NO_DATA
+    return MARKET_DATA_STATUS_ERROR
 
 
 def _positive_finite(value: Any) -> float | None:
@@ -458,6 +730,19 @@ class PaperTradingConfig:
     limits: PaperRiskLimits = field(default_factory=PaperRiskLimits)
     state_path: str | os.PathLike | None = None
     poll_interval_seconds: float = 60.0
+    market_data_provider: str = PROVIDER_BAR_OPEN
+    """Which price seam this worker is configured to use — ``bar_open`` (historical,
+    the default) or ``alpaca_snapshot`` (a current price).
+
+    Recorded on the config so a read-only status view can name the *configured*
+    provider without building a worker, and so the cycle result and the dashboard
+    can never disagree about which seam is in use. It is a label of the wiring, not
+    a switch: the seam itself is passed in as ``market_data``.
+    """
+    market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS
+    """The maximum age of a snapshot price, in seconds, when the snapshot seam is
+    used. ``None`` disables the age check (not recommended). Ignored by
+    ``bar_open``, which is historical by construction."""
 
     def __post_init__(self) -> None:
         if not (self.order_notional > 0):
@@ -469,6 +754,15 @@ class PaperTradingConfig:
             )
         if self.poll_interval_seconds <= 0:
             raise WorkerError("poll_interval_seconds must be positive")
+        if self.market_data_provider not in MARKET_DATA_CHOICES:
+            raise WorkerError(
+                f"unknown market_data_provider {self.market_data_provider!r}; expected "
+                f"one of {', '.join(MARKET_DATA_CHOICES)}"
+            )
+        if self.market_data_max_age_seconds is not None and not (
+            self.market_data_max_age_seconds > 0
+        ):
+            raise WorkerError("market_data_max_age_seconds must be positive or None")
         # The endpoint is validated at configuration time, so a live host is
         # refused before a broker is ever constructed.
         assert_paper_endpoint(self.base_url)
@@ -631,7 +925,13 @@ class WorkerStateStore:
 
 @dataclass
 class CycleResult:
-    """What one :meth:`PaperTradingWorker.run_once` produced."""
+    """What one :meth:`PaperTradingWorker.run_once` produced.
+
+    ``reference_price`` is the exact price the order was sized from, and
+    ``market_data_*`` names the seam that produced it, so the dashboard, the CLI
+    and any journal entry can report the actual price used rather than a guess.
+    None of these fields carries a credential.
+    """
 
     ran: bool
     decision_id: str | None = None
@@ -639,6 +939,10 @@ class CycleResult:
     order: BrokerOrder | None = None
     skipped_reason: str | None = None
     error: str | None = None
+    reference_price: float | None = None
+    market_data_provider: str | None = None
+    market_data_kind: str | None = None
+    market_data_status: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -648,6 +952,10 @@ class CycleResult:
             "order": self.order.to_dict() if self.order is not None else None,
             "skipped_reason": self.skipped_reason,
             "error": self.error,
+            "reference_price": self.reference_price,
+            "market_data_provider": self.market_data_provider,
+            "market_data_kind": self.market_data_kind,
+            "market_data_status": self.market_data_status,
         }
 
 
@@ -658,6 +966,7 @@ def worker_status_view(
     loop_running: bool = False,
     next_cycle_at: str | None = None,
     last_cycle: CycleResult | None = None,
+    market_data_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The secret-free status of a paper worker, from its state and config alone.
 
@@ -666,7 +975,18 @@ def worker_status_view(
     constructing the decision source or touching the broker). Every field is
     derived from data, so a build cannot freeze a live view: the decision source is
     never involved, which is the whole point.
+
+    ``market_data_identity`` is the effective seam's self-description when a worker
+    exists; with no worker it is ``None`` and the *configured* provider from
+    ``config`` is reported instead, so the view always names a provider and never
+    implies a current price it cannot prove.
     """
+    identity = dict(market_data_identity or {})
+    configured_provider = config.market_data_provider
+    # Prefer the live seam's own identity; fall back to the configured provider, so
+    # a stopped worker still reports which seam it *would* use.
+    identity.setdefault("market_data_provider", configured_provider)
+    identity.setdefault("market_data_kind", None)
     return {
         "banner": BANNER,
         "mode": "ALPACA_PAPER",
@@ -675,6 +995,9 @@ def worker_status_view(
         "strategy_id": state.strategy_id,
         "endpoint": config.base_url,
         "paper_endpoint_only": config.base_url == PAPER_BASE_URL,
+        "market_data_provider_configured": configured_provider,
+        "market_data_max_age_seconds": config.market_data_max_age_seconds,
+        **identity,
         "last_processed_decision_id": state.last_processed_decision_id,
         "last_error": state.last_error,
         "last_cycle_at": state.last_cycle_at,
@@ -695,6 +1018,7 @@ def worker_status_view(
             "max_daily_orders": config.limits.max_daily_orders,
             "allow_short": config.limits.allow_short,
             "order_notional": config.order_notional,
+            "whole_shares": config.whole_shares,
         },
     }
 
@@ -782,6 +1106,7 @@ class PaperTradingWorker:
             loop_running=self.loop_running,
             next_cycle_at=self._next_cycle_at,
             last_cycle=self.last_cycle,
+            market_data_identity=market_data_identity(self.market_data),
         )
 
     # -- lifecycle --------------------------------------------------------
@@ -817,8 +1142,22 @@ class PaperTradingWorker:
         )
 
         if not self.market_data.available():
-            raise PreflightError("market_data", "the market-data source reports no data")
-        checks.append({"check": "market_data", "ok": True, "detail": "available"})
+            identity = market_data_identity(self.market_data)
+            provider = identity.get("market_data_provider") or "the market-data source"
+            detail = identity.get("market_data_status_detail")
+            raise PreflightError(
+                "market_data",
+                f"{provider} reports no usable current price"
+                + (f" ({detail})" if detail else ""),
+            )
+        checks.append(
+            {
+                "check": "market_data",
+                "ok": True,
+                "detail": market_data_identity(self.market_data).get("market_data_provider")
+                or "available",
+            }
+        )
 
         # Constructing the limits already validated them; re-check the relationship
         # between the order size and the cap so a misconfiguration cannot start.
@@ -1043,6 +1382,7 @@ class PaperTradingWorker:
                 decision_id=decision.decision_id,
                 error=str(exc),
                 skipped_reason="market data was unavailable",
+                **self._market_data_fields(),
             )
             self.last_cycle = result
             return result
@@ -1057,6 +1397,8 @@ class PaperTradingWorker:
                 decision_id=decision.decision_id,
                 error=str(exc),
                 skipped_reason="the order could not be sized",
+                reference_price=reference_price,
+                **self._market_data_fields(),
             )
             self.last_cycle = result
             return result
@@ -1087,6 +1429,8 @@ class PaperTradingWorker:
                 client_order_id=client_order_id,
                 error=str(exc),
                 skipped_reason="the order was refused",
+                reference_price=reference_price,
+                **self._market_data_fields(),
             )
             self.last_cycle = result
             return result
@@ -1099,11 +1443,28 @@ class PaperTradingWorker:
             decision_id=decision.decision_id,
             client_order_id=client_order_id,
             order=order,
+            reference_price=reference_price,
+            **self._market_data_fields(),
         )
         self.last_cycle = result
         return result
 
     # -- helpers ----------------------------------------------------------
+
+    def _market_data_fields(self) -> dict[str, Any]:
+        """The seam's identity for a cycle result, read defensively.
+
+        A cycle result must name the actual price provider even when the cycle
+        failed, so an operator can tell a historical bar open from a current
+        snapshot without reading the code. A seam that does not describe itself is
+        labelled ``unknown`` rather than mislabelled.
+        """
+        identity = market_data_identity(self.market_data)
+        return {
+            "market_data_provider": identity.get("market_data_provider"),
+            "market_data_kind": identity.get("market_data_kind"),
+            "market_data_status": identity.get("market_data_status"),
+        }
 
     def _size(self, decision: TradingDecision, reference_price: float) -> float:
         """Convert a decision into a share quantity, sized from the current price.
