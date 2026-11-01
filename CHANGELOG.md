@@ -16,6 +16,38 @@ path, and no configuration that produces one.
 
 ### Added
 
+- **A paper run now tells the truth about which model answered and whether its
+  data is current** (`paper_experiment/inference.py`, `freshness.py`).
+  - **Provider fallback with honest provenance.** The paper seam made one call to
+    one configured provider; a missing credential or a provider error blocked the
+    decision. It now tries the primary and, only if the primary cannot answer
+    (missing credential, a raised error, or an unreadable response), a *named*
+    fallback (`--fallback-provider` / `--fallback-model`, or
+    `TRADINGAGENTS_FALLBACK_PROVIDER` / `TRADINGAGENTS_FALLBACK_MODEL`). The switch
+    is one-directional, recorded on the decision, and never produces a second
+    decision: the first readable rating is returned, and if every provider fails
+    the session is blocked rather than invented. Each decision now records the
+    provider and model that **actually answered** (`DecisionState.provider` /
+    `.model`) alongside `prompt_version` and `graph_version`, so a fallback is
+    visible on the record instead of the record claiming the configured provider.
+    The fallback is deliberately excluded from `config_hash()`, so adding one does
+    not change an experiment's identity and an existing state file still verifies.
+  - **An explicit freshness view** (`freshness.market_freshness`, closed vocabulary
+    `MARKET_STATUSES`). A daily vendor source has a newest *session*, not a live
+    price; between sessions there is legitimately nothing new. The report and the
+    dashboard now name the condition — `historical`, `no_data`, `stale`,
+    `up_to_date`, `pending_sessions` — with `data_age_days`, the latest available
+    and last processed sessions, the last refresh, the next allowed refresh and the
+    day's fetch count. The status names the *data* condition rather than claiming
+    an exchange clock, and the view fetches nothing: it is derived from recorded
+    facts only.
+  - **The dashboard surfaces it.** A "Market data" card shows the freshness status,
+    age and refresh window; a "Warnings" card lists stale data, a reached decision
+    cap and the last refresh error; the counts card names the decision cadence and
+    the no-decision reason; and each decision shows the answering provider/model,
+    prompt and graph version, and snapshot. All new API fields are additive and
+    JSON-safe, and the UI reads them defensively, so an older backend still renders.
+
 - **A running paper experiment can now grow its market data without a restart**
   (`paper_experiment/refresh.py`, `runner.advance`). A vendor daily source is
   fetched once and frozen, and a resume rebuilds that frozen source from the state

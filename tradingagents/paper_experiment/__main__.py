@@ -185,6 +185,8 @@ def _start(args) -> int:
         symbols=(args.symbol,) if args.symbol else ("SPY",),
         provider=args.provider,
         model=args.model,
+        fallback_provider=getattr(args, "fallback_provider", None),
+        fallback_model=getattr(args, "fallback_model", None),
     )
     selection = _resolve_source(args, config)
     experiment = PaperExperiment(
@@ -526,6 +528,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--symbol", default=None, help="symbol (default SPY)")
     parser.add_argument("--provider", default="groq")
     parser.add_argument("--model", default="openai/gpt-oss-20b")
+    parser.add_argument(
+        "--fallback-provider",
+        default=os.environ.get("TRADINGAGENTS_FALLBACK_PROVIDER") or None,
+        help=(
+            "an optional second LLM provider, tried only when the primary cannot "
+            "answer (missing credential, error, or unreadable response). Recorded "
+            "per decision. Default: $TRADINGAGENTS_FALLBACK_PROVIDER, else none."
+        ),
+    )
+    parser.add_argument(
+        "--fallback-model",
+        default=os.environ.get("TRADINGAGENTS_FALLBACK_MODEL") or None,
+        help="model for --fallback-provider (default: same as --model)",
+    )
     parser.add_argument(
         "--source",
         default="frozen",

@@ -41,7 +41,12 @@ def build_inference(config, *, stub: bool):
         return StubInference()
     from .inference import ProviderInference
 
-    return ProviderInference(provider=config.provider, model=config.model)
+    return ProviderInference(
+        provider=config.provider,
+        model=config.model,
+        fallback_provider=getattr(config, "fallback_provider", None),
+        fallback_model=getattr(config, "fallback_model", None),
+    )
 
 
 def pending_sessions(experiment: PaperExperiment) -> list[str]:

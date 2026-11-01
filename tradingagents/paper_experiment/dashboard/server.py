@@ -671,8 +671,12 @@ INDEX_HTML = """<!doctype html>
 <main>
   <section id="overview" class="on">
     <div class="card"><h2>Readiness</h2><div id="readiness"></div></div>
+    <div id="warncard" class="card" style="display:none">
+      <h2>Warnings</h2><ul class="clean" id="warnings"></ul>
+    </div>
     <div class="card"><h2>Counts</h2><div id="counts" class="kv"></div></div>
     <div class="card"><h2>Performance</h2><div id="perf" class="kv"></div></div>
+    <div class="card"><h2>Market data</h2><div id="market" class="kv"></div></div>
     <div class="card"><h2>Data source</h2><div id="data" class="kv"></div></div>
   </section>
 
@@ -807,6 +811,34 @@ async function refresh(){
       "Last processed": s.last_session_processed||"—",
     }) + `<div class="k" style="grid-column:1/3;color:var(--mut);font-size:12.5px;margin-top:6px">${s.data.note}</div>`;
 
+    const f = s.freshness || {};
+    const ageText = (f.data_age_days===null||f.data_age_days===undefined) ? "unknown" : (f.data_age_days+" day(s)");
+    const stCls = f.market_status==="stale" ? "b-bad" : f.market_status==="up_to_date" ? "b-ok" : "b-mut";
+    $("market").innerHTML =
+      `<div class="row" style="margin-bottom:8px"><span class="badge ${stCls}">${f.market_status||"—"}</span></div>` +
+      kv({
+        "Latest available bar": f.latest_available_session||"—",
+        "Last source bar": f.last_source_bar||"—",
+        "Last processed session": f.last_processed_session||"—",
+        "Data age": ageText,
+        "Pending sessions": f.pending_sessions===undefined?"—":f.pending_sessions,
+        "Last refresh": f.last_refresh_at||"never",
+        "Next refresh allowed": f.next_refresh_allowed_at||"now",
+        "Fetches today": (f.fetches_today===undefined?"—":f.fetches_today)+" / "+(f.fetch_quota_per_day===undefined?"—":f.fetch_quota_per_day),
+      }) +
+      `<div class="k" style="grid-column:1/3;color:var(--mut);font-size:12.5px;margin-top:6px">${f.reason||""}</div>` +
+      `<div class="k" style="grid-column:1/3;color:var(--mut);font-size:11.5px;margin-top:4px">Daily-bar source: "latest available bar" is the newest daily session, not a live tick price.</div>`;
+
+    const warn = s.warnings || [];
+    $("warncard").style.display = warn.length ? "block" : "none";
+    $("warnings").innerHTML = warn.map(w=>`<li style="color:var(--warn)">${w}</li>`).join("");
+
+    const c = s.cadence || {};
+    const cadDetail = c.max_decisions_reached ? `max_decisions ${c.max_decisions} reached`
+      : c.next_decision_session ? `next decision session ${c.next_decision_session}`
+      : "no further decision session in the data";
+    $("counts").innerHTML += `<div class="k" style="grid-column:1/3;color:var(--mut);font-size:12.5px;margin-top:8px">Decision cadence: every ${c.decision_frequency_sessions||"?"} session(s) · ${cadDetail}${c.decisions_taken!==undefined?` · ${c.decisions_taken}/${c.max_decisions} taken`:""}</div>`;
+
     $("bookkv").innerHTML = kv({
       "Initial cash": money(s.book.initial_cash),
       "Cash": money(s.book.cash),
@@ -846,6 +878,8 @@ async function refreshDecisions(){
       <div class="mono">src ${x.source} · exec ${x.execution_session||"—"} · ${x.order_status||"—"}
       · filled ${x.filled_quantity}${x.average_fill_price?" @ "+money(x.average_fill_price):""}
       · fees ${money(x.fees)}</div>
+      <div class="mono">ai ${x.provider||"—"}/${x.model||"—"} · prompt ${x.prompt_version||"—"} · ${x.graph_version||"—"}
+      · snapshot ${x.snapshot_id||"—"}</div>
       ${x.blocked_reason?`<div class="mono" style="color:var(--bad)">${x.blocked_reason}</div>`:""}
       ${x.evaluation?`<div class="mono">net ${money(x.evaluation.net_pnl)}</div>`:""}
     </li>`).join("") : '<li class="muted">No decisions yet.</li>';

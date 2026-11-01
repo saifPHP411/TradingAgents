@@ -40,6 +40,7 @@ from .experiment import (
     STATE_UNEVALUABLE,
     PaperExperiment,
 )
+from .freshness import market_freshness
 
 REPORT_SCHEMA_VERSION = "1.1.0"
 
@@ -89,6 +90,16 @@ class ExperimentReport:
             lines.append(
                 f"  cadence: every {cadence['decision_frequency_sessions']} session(s); "
                 f"{detail}"
+            )
+        fresh = p.get("freshness")
+        if fresh:
+            age = (
+                "unknown" if fresh["data_age_days"] is None
+                else f"{fresh['data_age_days']} day(s)"
+            )
+            lines.append(
+                f"  market: {fresh['market_status']} — {fresh['reason']} "
+                f"(latest available {fresh['latest_available_session']}, data age {age})"
             )
         for blocker in p["readiness"]["blockers"]:
             lines.append(f"  blocker: {blocker}")
@@ -144,6 +155,7 @@ def build_report(experiment: PaperExperiment) -> ExperimentReport:
             "filled_orders": len(filled),
         },
         "cadence": experiment.decision_cadence(),
+        "freshness": market_freshness(experiment).to_dict(),
         "orders": orders,
         "book": book,
         "performance": performance,

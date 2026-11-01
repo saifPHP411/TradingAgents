@@ -185,6 +185,14 @@ class DecisionState:
     fees: float = 0.0
     evaluation: dict | None = None
     blocked_reason: str | None = None
+    # Provenance of the call that produced this decision. ``provider``/``model``
+    # name what actually answered (a fallback included), and are ``None`` for a
+    # blocked decision that never reached a provider. ``prompt_version`` and
+    # ``graph_version`` pin the request shape and the seam.
+    provider: str | None = None
+    model: str | None = None
+    prompt_version: str | None = None
+    graph_version: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -206,6 +214,10 @@ class DecisionState:
             "fees": self.fees,
             "evaluation": self.evaluation,
             "blocked_reason": self.blocked_reason,
+            "provider": self.provider,
+            "model": self.model,
+            "prompt_version": self.prompt_version,
+            "graph_version": self.graph_version,
         }
 
     @classmethod
@@ -672,6 +684,11 @@ class PaperExperiment:
 
         genuine = bool(getattr(self.inference, "genuine", False))
         source = SOURCE_LLM_INFERENCE if genuine else SOURCE_SYNTHETIC_FIXTURE
+        # Name the provider that actually answered, not the one configured. A
+        # fallback that produced this decision must be visible on the record.
+        answered_provider = getattr(self.inference, "last_provider", None) or self.config.provider
+        answered_model = getattr(self.inference, "last_model", None) or self.config.model
+        fallback_reason = getattr(self.inference, "last_fallback_reason", None)
         frame = snapshot.to_frame() if snapshot is not None else None
         try:
             record, window_reproducible = build_record(
@@ -682,8 +699,8 @@ class PaperExperiment:
                 frame=frame,
                 protocol=PAPER_PROTOCOL,
                 source=source,
-                provider=self.config.provider,
-                model_name=self.config.model,
+                provider=answered_provider,
+                model_name=answered_model,
                 reasoning_excerpt=reasoning,
                 snapshot_id=snapshot.snapshot_id if snapshot else None,
                 captured_at=self._session_timestamp(session).isoformat(),
@@ -726,6 +743,10 @@ class PaperExperiment:
             source=source,
             snapshot_id=snapshot.snapshot_id,
             data_window_hash=record.data_window_hash,
+            provider=record.model_provider,
+            model=record.model_name,
+            prompt_version=record.prompt_version,
+            graph_version=record.graph_version,
         )
         self.decisions[decision_id] = state
         # The whole record is journalled, so the decision is durable and a later
@@ -741,6 +762,9 @@ class PaperExperiment:
                 "source": source,
                 "is_genuine": source == SOURCE_LLM_INFERENCE,
                 "snapshot_id": snapshot.snapshot_id,
+                "provider": record.model_provider,
+                "model": record.model_name,
+                "fallback_reason": fallback_reason,
                 "record": record.to_dict(),
             },
             event_id=f"{self.experiment_id}:decision:{decision_id}",

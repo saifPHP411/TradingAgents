@@ -88,6 +88,9 @@ class ExperimentView:
             "costs": report["costs"],
             "data": report["data"],
             "refresh": refresh,
+            "freshness": report.get("freshness"),
+            "cadence": report.get("cadence"),
+            "warnings": _warnings(report, refresh),
             "baseline": report["baseline"],
             "readiness": report["readiness"],
             "limitations": report["limitations"],
@@ -123,6 +126,35 @@ class ExperimentView:
         if not snap_dir.exists():
             return []
         return sorted(p.name for p in snap_dir.glob("*.json"))
+
+
+def _warnings(report: dict[str, Any], refresh: dict[str, Any]) -> list[str]:
+    """Operator-facing warnings derived from the report, never fabricated.
+
+    These are conditions that are correct but need a human's attention — a stale
+    source, a reached decision cap, an idle engine. Each is a plain sentence, so
+    the dashboard can show them without interpreting a status code.
+    """
+    warnings: list[str] = []
+    freshness = report.get("freshness") or {}
+    if freshness.get("is_stale"):
+        warnings.append(f"stale market data: {freshness.get('reason')}")
+    cadence = report.get("cadence") or {}
+    if cadence.get("max_decisions_reached"):
+        warnings.append(
+            f"max_decisions ({cadence.get('max_decisions')}) reached; "
+            "no further decisions will be taken"
+        )
+    elif cadence.get("max_decisions") and cadence.get("decisions_taken") is not None:
+        remaining = int(cadence["max_decisions"]) - int(cadence["decisions_taken"])
+        if 0 < remaining <= 10:
+            warnings.append(
+                f"decision cap nearly reached: {remaining} of "
+                f"{cadence['max_decisions']} decisions remaining"
+            )
+    if refresh.get("last_error"):
+        warnings.append(f"last refresh error: {refresh['last_error']}")
+    return warnings
 
 
 def _refresh_view(root: Path) -> dict[str, Any]:

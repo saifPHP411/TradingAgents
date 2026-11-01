@@ -148,6 +148,18 @@ class ProviderInference:
     The credential is checked before the call; the client is built with
     ``max_retries=0`` so one session is one request. A response with no readable
     rating raises :class:`InferenceUnavailable` rather than guessing one.
+
+    An optional **fallback provider** is tried only when the primary cannot
+    answer — a missing credential, or a call that raised or returned no readable
+    rating. The switch is one-directional (primary then fallback, never back) and
+    is recorded on ``last_fallback_reason``, so a record can name the provider
+    that *actually* answered rather than the one that was configured. A fallback
+    is never silent and never produces a second decision for the same session: the
+    first readable rating is returned, and if every provider fails the session is
+    blocked, not decided.
+
+    Neither implementation prints, logs or stores a credential.
+    :class:`ProviderInference` reads the variable *name* only.
     """
 
     genuine = True
@@ -159,56 +171,81 @@ class ProviderInference:
         model: str,
         timeout: float = 30.0,
         client_factory=None,
+        fallback_provider: str | None = None,
+        fallback_model: str | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
         self.timeout = timeout
         self._client_factory = client_factory
+        self.fallback_provider = fallback_provider
+        self.fallback_model = fallback_model
+        # The provider and model that answered the most recent call, so a record
+        # names what happened rather than what was requested. ``None`` until a
+        # call succeeds.
+        self.last_provider: str | None = None
+        self.last_model: str | None = None
+        self.last_fallback_reason: str | None = None
 
-    def _credential_present(self) -> tuple[bool, str]:
-        env_name = get_api_key_env(self.provider)
+    def _credential_present(self, provider: str) -> tuple[bool, str]:
+        env_name = get_api_key_env(provider)
         if env_name is None:
             return False, ""
         value = os.environ.get(env_name)
         return bool(value and value.strip()), env_name
 
-    def __call__(self, *, symbol: str, session: str, window=None) -> tuple[str, str]:
-        present, env_name = self._credential_present()
-        if not present:
-            raise InferenceUnavailable(
-                f"no credential for provider {self.provider!r}: set the {env_name} "
-                "environment variable to produce a genuine decision"
-            )
+    def _call(self, provider: str, model: str, prompt: str) -> tuple[str, str]:
         from tradingagents.llm_clients import factory
         from tradingagents.llm_evaluation.capture import observed_decision
 
-        prompt = _PROMPT.format(
-            symbol=symbol,
-            session=session,
-            indicators=_render_indicators(window),
-            window=_render_window(window),
-        )
         make_client = self._client_factory or factory.create_llm_client
-        try:
-            client = make_client(
-                provider=self.provider, model=self.model, timeout=self.timeout, max_retries=0
-            )
-            llm = client.get_llm()
-            response = llm.invoke(prompt)
-        except Exception as exc:  # a provider failure becomes a blocked decision
-            raise InferenceUnavailable(
-                f"provider call failed: {type(exc).__name__}: {exc}"
-            ) from exc
-
+        client = make_client(
+            provider=provider, model=model, timeout=self.timeout, max_retries=0
+        )
+        llm = client.get_llm()
+        response = llm.invoke(prompt)
         text = getattr(response, "content", response)
         if isinstance(text, list):
             text = "".join(
                 block.get("text", "") if isinstance(block, dict) else str(block)
                 for block in text
             )
-        try:
-            return observed_decision(text)
-        except Exception as exc:  # noqa: BLE001 - an unreadable response is not a decision
-            raise InferenceUnavailable(
-                f"the provider response had no readable rating: {exc}"
-            ) from exc
+        return observed_decision(text)
+
+    def _attempts(self) -> list[tuple[str, str]]:
+        """The providers to try, in order: the primary, then the named fallback."""
+        attempts = [(self.provider, self.model)]
+        if self.fallback_provider:
+            attempts.append((self.fallback_provider, self.fallback_model or self.model))
+        return attempts
+
+    def __call__(self, *, symbol: str, session: str, window=None) -> tuple[str, str]:
+        # Build the prompt first: a malformed window is refused before any request,
+        # so no provider is asked to decide on evidence that is not real.
+        prompt = _PROMPT.format(
+            symbol=symbol,
+            session=session,
+            indicators=_render_indicators(window),
+            window=_render_window(window),
+        )
+        errors: list[str] = []
+        for index, (provider, model) in enumerate(self._attempts()):
+            present, env_name = self._credential_present(provider)
+            if not present:
+                errors.append(
+                    f"{provider}: no credential "
+                    f"(set {env_name})" if env_name else f"{provider}: no credential"
+                )
+                continue
+            try:
+                rating, reasoning = self._call(provider, model, prompt)
+            except Exception as exc:  # a provider failure becomes a blocked decision
+                errors.append(f"{provider}/{model}: {type(exc).__name__}: {exc}")
+                continue
+            self.last_provider = provider
+            self.last_model = model
+            self.last_fallback_reason = errors[-1] if index > 0 and errors else None
+            return rating, reasoning
+
+        detail = "; ".join(errors) if errors else "no provider is configured"
+        raise InferenceUnavailable(f"no provider produced a decision ({detail})")

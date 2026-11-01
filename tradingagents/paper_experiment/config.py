@@ -41,6 +41,15 @@ class ExperimentConfig:
     symbols: tuple[str, ...] = ("SPY",)
     provider: str = "groq"
     model: str = "openai/gpt-oss-20b"
+    fallback_provider: str | None = None
+    """An optional second LLM provider, tried only when the primary cannot answer.
+
+    Resilience, not strategy: the primary still defines the experiment's intent, so
+    the fallback is excluded from ``config_hash`` and the *actual* answering
+    provider is recorded on each decision instead. ``None`` means no fallback — a
+    primary failure blocks the decision rather than silently switching models.
+    """
+    fallback_model: str | None = None
     decision_frequency_sessions: int = 5
     max_decisions: int = 120
     execute_on_next_open: bool = True
@@ -120,7 +129,14 @@ class ExperimentConfig:
         return cls(**base)
 
     def config_hash(self) -> str:
-        """A stable hash of everything that shapes the experiment's behaviour."""
+        """A stable hash of everything that shapes the experiment's behaviour.
+
+        ``fallback_provider``/``fallback_model`` are deliberately **excluded**: they
+        are resilience, not strategy. The primary provider still defines the
+        experiment's intent, and each decision records the provider that actually
+        answered, so an experiment's identity does not change when an operator adds
+        a fallback.
+        """
         payload = {
             "strategy_id": self.strategy_id,
             "symbols": list(self.symbols),
@@ -148,6 +164,8 @@ class ExperimentConfig:
             "symbols": list(self.symbols),
             "provider": self.provider,
             "model": self.model,
+            "fallback_provider": self.fallback_provider,
+            "fallback_model": self.fallback_model,
             "decision_frequency_sessions": self.decision_frequency_sessions,
             "max_decisions": self.max_decisions,
             "execute_on_next_open": self.execute_on_next_open,

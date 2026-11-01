@@ -262,6 +262,52 @@ missing prerequisite.
 The experiment does not prompt for a key and does not read one from anywhere but
 the environment. A blocked run exits cleanly.
 
+### The fallback provider, and why the record names the model that answered
+
+A single provider is a single point of failure: one missing credential or one
+provider outage blocks every decision. The seam can be given an optional second
+provider (`--fallback-provider`, or `TRADINGAGENTS_FALLBACK_PROVIDER`), tried
+**only** when the primary cannot answer — a missing credential, a raised error, or
+a response with no readable rating. The switch is:
+
+- **one-directional** — primary, then fallback, never back;
+- **recorded** — each decision carries the provider and model that *actually*
+  answered (`provider`, `model`), plus `prompt_version` and `graph_version`, so a
+  fallback is visible on the record rather than the record claiming the configured
+  provider;
+- **never a second decision** — the first readable rating is returned, and if
+  every provider fails the session is **blocked**, not invented;
+- **outside the experiment's identity** — the fallback is excluded from
+  `config_hash()`, so adding one does not change the experiment or invalidate an
+  existing state file.
+
+There is no fallback by default. A run with one provider configured blocks on a
+failure exactly as before.
+
+## Reading a paper run's market currency
+
+A daily vendor source is not a live price feed. It has a newest *session*, and
+between sessions there is legitimately nothing new to process. That is not a
+fault, and the report must not present it as one — nor may a source whose newest
+bar has gone stale read as current. `freshness.market_freshness` builds an
+explicit, honest view from facts already recorded (it fetches nothing). Its status
+is a closed vocabulary (`MARKET_STATUSES`):
+
+- `historical` — the source is a frozen/reproducible dataset, not the current
+  market;
+- `no_data` — the source carries no sessions at all;
+- `stale` — a freshness rule exists and the newest bar is older than it;
+- `up_to_date` — the newest available session has been processed;
+- `pending_sessions` — newer sessions are available but not yet processed.
+
+It also reports `data_age_days` (measured against a supplied reference date, never
+a hidden clock), the latest available and last processed sessions, the last
+refresh, the next allowed refresh and the day's fetch count. The report's console
+summary and the dashboard's "Market data" card both show it, and the dashboard
+lists stale data, a reached decision cap and the last refresh error as warnings.
+The status names the *data* condition; it does not claim to know an exchange
+clock.
+
 ## Stopping without losing state
 
 State is written atomically after every session. Stop the process at any point;
