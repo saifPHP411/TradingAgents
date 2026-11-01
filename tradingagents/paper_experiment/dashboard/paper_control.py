@@ -63,13 +63,22 @@ class PaperTradingController:
         stub: bool = False,
         broker_factory: Callable[[], AlpacaPaperBroker] | None = None,
         worker_factory: Callable[..., PaperTradingWorker] | None = None,
+        market_data_factory: Callable[[tuple[str, ...]], Any] | None = None,
+        whole_shares: bool = True,
     ) -> None:
         self.root = Path(root)
         self.enabled = enabled
         self.order_notional = order_notional
         self.stub = stub
+        # Whole shares by default; fractional is an explicit opt-in for a
+        # high-priced symbol under a small notional (e.g. SPY at ~580 under $25).
+        self.whole_shares = whole_shares
         self._broker_factory = broker_factory
         self._worker_factory = worker_factory or PaperTradingWorker
+        # How the worker reads a *current* price. ``None`` keeps the historical
+        # default (the experiment's latest bar open), so existing behaviour is
+        # unchanged unless an operator opts into a snapshot source explicitly.
+        self._market_data_factory = market_data_factory
         self._worker: PaperTradingWorker | None = None
         self._lock = threading.Lock()
 
@@ -88,6 +97,7 @@ class PaperTradingController:
         return PaperTradingConfig(
             strategy_id=experiment.config.strategy_id,
             order_notional=self.order_notional,
+            whole_shares=self.whole_shares,
             state_path=self.root / "worker_state.json",
         )
 
@@ -112,13 +122,12 @@ class PaperTradingController:
         config = PaperTradingConfig(
             strategy_id=experiment.config.strategy_id,
             order_notional=self.order_notional,
+            whole_shares=self.whole_shares,
             state_path=self.root / "worker_state.json",
         )
         source = experiment.source
         sessions = source.sessions()
-        market = (
-            SourceMarketData(source, sessions[-1]) if sessions else StaticMarketData({})
-        )
+        market = self._build_market_data(experiment, source, sessions)
         # The source re-reads the experiment state from disk on every decision, so a
         # decision produced *after* this worker was built — by an autonomous
         # auto-advance progressing the experiment, for example — is still discovered.
@@ -142,6 +151,21 @@ class PaperTradingController:
         worker = self._worker_factory(**kwargs)
         holder["worker"] = worker
         return worker
+
+    def _build_market_data(self, experiment, source, sessions):
+        """The worker's current-price seam.
+
+        With no factory configured the behaviour is the historical default: the
+        experiment's latest bar open. A factory lets an operator opt into a
+        *current* price (Alpaca's snapshot) without changing the decision source or
+        the strategy. A factory that raises leaves the worker without a price
+        source, which is reported rather than papered over.
+        """
+        if self._market_data_factory is None:
+            return (
+                SourceMarketData(source, sessions[-1]) if sessions else StaticMarketData({})
+            )
+        return self._market_data_factory(tuple(experiment.config.symbols))
 
     def _ensure_worker(self) -> PaperTradingWorker:
         if self._worker is None:

@@ -16,6 +16,7 @@ quoted with its source; where a fact could not be verified it is marked as such.
 | `frozen` (default) | `FrozenPriceSource` | `frozen` | no | yes (historical, reproducible) |
 | `static` | `StaticPriceSource` | `static` | no | tests only |
 | `alpha_vantage` | `AlphaVantageDailySource` | `vendor_daily` | only if the newest bar is recent | yes (daily OHLCV) |
+| `alpaca_iex` | `AlpacaIexDailySource` | `vendor_daily` | only if the newest bar is recent | yes (daily OHLCV) |
 | `finnhub` | `FinnhubQuoteSource` | `vendor_quote` | yes | **no** (a single current-day quote) |
 
 A provider is **opt-in**: nothing is fetched unless `--source` names it. A vendor
@@ -143,6 +144,74 @@ calendar days) of the fetch date; otherwise the fetch raises
 is within that window. Staleness can be disabled explicitly
 (`max_stale_days=None`), in which case the source reports `is_current_market =
 False`, because "unknown recency" is not "current".
+
+## Alpaca — daily OHLCV, and the market-data half of the paper account
+
+`AlpacaIexDailySource` (`--source alpaca_iex`) draws bars from Alpaca's
+**market-data** API. It exists so a paper run's data and its account can come from
+one vendor. It is deliberately separate from `AlpacaPaperBroker`, and the
+separation is enforced rather than documented:
+
+- **Data and orders use different hosts.** Market data comes from
+  `https://data.alpaca.markets`; orders go to
+  `https://paper-api.alpaca.markets`. `assert_data_host` refuses every host that
+  is not the market-data host — including the paper *trading* host and every live
+  host — **before a credential is read**. A market-data request therefore cannot be
+  pointed at order routing, even by a configuration mistake.
+
+### The endpoint, and why the IEX feed
+
+The source calls `GET /v2/stocks/bars` with `timeframe=1Day`, `adjustment=raw`
+and `feed=iex`. Alpaca's Basic plan may read the **IEX** feed only; the default
+feed is SIP, which the Basic plan cannot read and which would answer HTTP 403. The
+feed is therefore fixed to `iex` rather than left to a default. The response shape
+is `{"bars": {"<SYMBOL>": [ ... ]}, "next_page_token": ...}`, and each bar carries
+`t`, `o`, `h`, `l`, `c`, `v` (`n` and `vw` are ignored).
+
+### The credential is sent as headers
+
+Alpaca authenticates by the `APCA-API-KEY-ID` / `APCA-API-SECRET-KEY` headers,
+using the same paper credentials the broker uses (`ALPACA_PAPER_API_KEY` /
+`ALPACA_PAPER_API_SECRET`). The credential is **never** placed in the query
+string, so it cannot appear in a URL or a log. A missing credential raises
+`ProviderNotConfiguredError`; the provider reads its own environment variables and
+this module never touches a key.
+
+### Status codes are classified
+
+A non-200 response is given its specific meaning: **401** is
+`ProviderAuthError` (a missing or invalid credential), **403** is
+`ProviderUnsupportedError` (most often a feed the plan cannot read), and **429**
+is `ProviderRateLimitedError`. Classification runs *after* credential redaction,
+so a secret in a vendor's error body cannot leak through the raised message.
+
+### A bad response is refused, never served as data
+
+An empty bar list, a symbol the vendor does not know, a missing `bars` object, a
+bar missing its timestamp, a non-finite price, a high below its low, and a
+**repeated session label** are each refused. The repeated-session case matters: a
+plain dictionary assignment would keep only the last copy and hide a vendor
+anomaly that could restate a bar the run already used, so a duplicate is detected
+and raised. The frame is then validated through the same shared validator the
+frozen dataset uses, and the newest bar is checked against `max_stale_days`
+exactly as Alpha Vantage's is.
+
+### A refresh rebuilds the same vendor
+
+A refresh rebuilds the source from the vendor named in its provenance, so an
+Alpaca experiment is refreshed from Alpaca and an Alpha Vantage experiment from
+Alpha Vantage. There is no cross-provider fallback: a source whose vendor cannot
+be determined is refused rather than refreshed from a different vendor.
+
+### The current-price seam is not a bar open
+
+The worker sizes an order from a *current* price, and a daily bar's **open** is
+not one. `AlpacaSnapshotMarketData` (`--paper-market-data alpaca_snapshot`) reads
+`GET /v2/stocks/snapshots` and uses the latest trade price, then the latest quote
+midpoint, then the minute-bar close — never a daily open. A missing, malformed,
+NaN, infinite or zero price raises, so the worker places no order rather than
+sizing from a fabricated number. `bar_open` remains the default, so an operator
+opts in explicitly.
 
 ## Finnhub — a current-day quote, not a bar history
 

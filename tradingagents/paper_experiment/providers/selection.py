@@ -31,7 +31,7 @@ from .base import ProviderError
 logger = logging.getLogger(__name__)
 
 # Selectable source names, so a typo is refused rather than silently defaulted.
-KNOWN_SOURCES = ("frozen", "static", "alpha_vantage", "finnhub")
+KNOWN_SOURCES = ("frozen", "static", "alpha_vantage", "alpaca_iex", "finnhub")
 
 
 class SourceSelectionError(ProviderError):
@@ -96,6 +96,21 @@ def _build(
         return AlphaVantageDailySource(
             symbols[0],
             api_key=keys.get(API_KEY_ENV),
+            today=today,
+            **kwargs,
+        )
+    if spec == "alpaca_iex":
+        from .alpaca_iex import API_KEY_ENV, API_SECRET_ENV, AlpacaIexDailySource
+
+        if len(symbols) != 1:
+            raise SourceSelectionError(
+                "the Alpaca IEX daily source fetches one symbol per source; "
+                f"got {len(symbols)}"
+            )
+        return AlpacaIexDailySource(
+            symbols[0],
+            api_key=keys.get(API_KEY_ENV),
+            api_secret=keys.get(API_SECRET_ENV),
             today=today,
             **kwargs,
         )

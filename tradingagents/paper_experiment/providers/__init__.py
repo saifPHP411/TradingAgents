@@ -23,6 +23,7 @@ data.
 
 from __future__ import annotations
 
+from .alpaca_iex import AlpacaIexDailySource
 from .alpha_vantage import AlphaVantageDailySource
 from .base import (
     ProviderAuthError,
@@ -64,6 +65,7 @@ def provider_registry() -> dict[str, type]:
         "frozen": FrozenPriceSource,
         "static": StaticPriceSource,
         "alpha_vantage": AlphaVantageDailySource,
+        "alpaca_iex": AlpacaIexDailySource,
         "finnhub": FinnhubQuoteSource,
     }
 
@@ -71,6 +73,7 @@ def provider_registry() -> dict[str, type]:
 __all__ = [
     "KNOWN_SOURCES",
     "AlphaVantageDailySource",
+    "AlpacaIexDailySource",
     "FinnhubQuoteSource",
     "ProviderAuthError",
     "ProviderError",

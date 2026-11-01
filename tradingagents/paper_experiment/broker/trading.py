@@ -251,6 +251,161 @@ class SourceMarketData:
         return price
 
 
+class AlpacaSnapshotMarketData:
+    """A *current* price from Alpaca's market-data snapshot endpoint.
+
+    This is the modern-price seam the paper worker trades against, and it is
+    deliberately separate from the experiment's historical/reproducible dataset:
+
+    - the dataset answers "what was the price at session T", point-in-time, for a
+      reproducible decision;
+    - this answers "what is the price now", for sizing an order against the current
+      market.
+
+    A daily bar's **open** is not a current price, so this seam never reads one:
+    the price is the latest trade price (falling back to the latest quote midpoint,
+    then the minute-bar close), each of which is a genuinely current observation.
+    If no current price is available, :meth:`price` raises and the worker places no
+    order rather than sizing from a stale or fabricated number.
+
+    Host and credentials are the market-data host and the paper credentials; this
+    class never touches the trading endpoint and never places an order.
+    """
+
+    def __init__(
+        self,
+        symbols,
+        *,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        base_url: str | None = None,
+        transport=None,
+        timeout: float | None = None,
+    ) -> None:
+        from ..providers.alpaca_iex import (
+            API_KEY_ENV,
+            API_SECRET_ENV,
+            DATA_BASE_URL,
+            REQUEST_TIMEOUT,
+            _auth_headers,
+            _classify_status,
+            assert_data_host,
+        )
+
+        self.symbols = tuple(s.upper() for s in symbols)
+        self._base_url = assert_data_host(base_url or DATA_BASE_URL)
+        key = (api_key if api_key is not None else os.environ.get(API_KEY_ENV, "")) or ""
+        secret = (
+            api_secret if api_secret is not None else os.environ.get(API_SECRET_ENV, "")
+        ) or ""
+        key, secret = key.strip(), secret.strip()
+        if not key or not secret:
+            raise MarketDataError(
+                f"no Alpaca market-data credentials: set {API_KEY_ENV} and "
+                f"{API_SECRET_ENV} so a current price can be read"
+            )
+        self._key = key
+        self._secret = secret
+        self._timeout = timeout or REQUEST_TIMEOUT
+        self._transport = transport
+        self._headers = _auth_headers(key, secret)
+        self._classify_status = _classify_status
+
+    def available(self) -> bool:
+        """Whether a current price can be read for every configured symbol."""
+        if not self.symbols:
+            return False
+        try:
+            snapshots = self._fetch()
+        except Exception:  # noqa: BLE001 - an unreachable source is "not available"
+            return False
+        return all(self._price_from(snapshots.get(s)) is not None for s in self.symbols)
+
+    def price(self, symbol: str) -> float:
+        """The current price for ``symbol``, or raise :class:`MarketDataError`."""
+        symbol = symbol.upper()
+        try:
+            snapshots = self._fetch()
+        except MarketDataError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a source failure is surfaced
+            raise MarketDataError(
+                f"the Alpaca snapshot request failed for {symbol!r}: "
+                f"{type(exc).__name__}"
+            ) from None
+        if not isinstance(snapshots, dict):
+            raise MarketDataError("Alpaca's snapshot response was not an object")
+        snapshot = snapshots.get(symbol)
+        if snapshot is None:
+            raise MarketDataError(
+                f"Alpaca returned no snapshot for {symbol!r}; no current price is "
+                "available, so no order can be sized"
+            )
+        price = self._price_from(snapshot)
+        if price is None:
+            raise MarketDataError(
+                f"Alpaca's snapshot for {symbol!r} carried no usable current price "
+                "(no latest trade, quote, or minute bar)"
+            )
+        return price
+
+    # -- internals --------------------------------------------------------
+
+    def _fetch(self) -> dict:
+        from ..providers.base import fetch_json
+
+        return fetch_json(
+            url=f"{self._base_url}/v2/stocks/snapshots",
+            params={"symbols": ",".join(self.symbols), "feed": "iex"},
+            timeout=self._timeout,
+            secrets=(self._key, self._secret),
+            headers=self._headers,
+            transport=self._transport,
+            classify_status=self._classify_status,
+        )
+
+    @staticmethod
+    def _price_from(snapshot: Any) -> float | None:
+        """The most current usable price in a snapshot, or ``None``.
+
+        Preference order is deliberate: the latest *trade* is the most recent real
+        transaction; a quote midpoint is next; the minute-bar close is last. A daily
+        bar's open is never used, because it is not a current price. Every candidate
+        must be finite and positive, so a NaN cannot pass a comparison and poison a
+        later sizing step.
+        """
+        if not isinstance(snapshot, dict):
+            return None
+        trade = snapshot.get("latestTrade") or {}
+        if isinstance(trade, dict):
+            price = _positive_finite(trade.get("p"))
+            if price is not None:
+                return price
+        quote = snapshot.get("latestQuote") or {}
+        if isinstance(quote, dict):
+            bid = _positive_finite(quote.get("bp"))
+            ask = _positive_finite(quote.get("ap"))
+            if bid is not None and ask is not None:
+                return (bid + ask) / 2.0
+        minute = snapshot.get("minuteBar") or {}
+        if isinstance(minute, dict):
+            price = _positive_finite(minute.get("c"))
+            if price is not None:
+                return price
+        return None
+
+
+def _positive_finite(value: Any) -> float | None:
+    """``value`` as a finite, positive float, or ``None`` for anything else."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
 @dataclass
 class ListDecisionSource:
     """Yields a fixed, ordered list of decisions, one per call, then ``None``.
@@ -290,8 +445,15 @@ class PaperTradingConfig:
     """Target cash per order. Deliberately small, so a 50 USD paper account is not
     drained by one order."""
     whole_shares: bool = True
-    """When ``True``, size to whole shares (Alpaca supports fractional, but whole
-    shares keep a tiny account's behaviour obvious)."""
+    """When ``True`` (the default), size to whole shares.
+
+    Alpaca supports fractional shares, but whole shares keep a tiny account's
+    behaviour obvious. Set ``False`` to allow a fractional quantity, which is what
+    lets a high-priced symbol such as SPY fit inside a small notional. This is a
+    deliberate, per-worker opt-in: it is never enabled silently for every account,
+    and a broker that does not support fractional shares will reject the order
+    rather than receive a fabricated zero quantity (see :meth:`PaperTradingWorker._size`).
+    """
     base_url: str = PAPER_BASE_URL
     limits: PaperRiskLimits = field(default_factory=PaperRiskLimits)
     state_path: str | os.PathLike | None = None
@@ -944,13 +1106,36 @@ class PaperTradingWorker:
     # -- helpers ----------------------------------------------------------
 
     def _size(self, decision: TradingDecision, reference_price: float) -> float:
-        """Convert a decision into a share quantity, sized from the current price."""
+        """Convert a decision into a share quantity, sized from the current price.
+
+        With ``whole_shares`` (the default) the quantity is floored to an integer.
+        A high-priced symbol under a small notional can then floor to zero — for
+        example a 25 USD notional at a 580 USD price. That is refused with an
+        explicit message naming the fix (enable fractional shares, or raise the
+        notional), never sent to the broker as a zero-quantity order.
+
+        With fractional shares enabled the quantity is floored to six decimals (never
+        rounded up), so ``quantity * reference_price`` can never exceed the requested
+        notional — and therefore can never trip the ``max_order_notional`` cap by a
+        rounding artefact. It is still refused if it floors to zero, so an order is
+        never empty.
+        """
         if decision.quantity is not None:
             return float(decision.quantity)
         assert decision.notional is not None  # __post_init__ guarantees one
         raw = decision.notional / reference_price
-        quantity = math.floor(raw) if self.config.whole_shares else round(raw, 6)
+        if self.config.whole_shares:
+            quantity = math.floor(raw)
+        else:
+            quantity = math.floor(raw * 1_000_000) / 1_000_000
         if quantity <= 0:
+            if self.config.whole_shares:
+                raise WorkerError(
+                    f"the notional {decision.notional} buys no whole shares at price "
+                    f"{reference_price} (it would floor to 0); enable fractional "
+                    "shares (whole_shares=False) for a high-priced symbol such as "
+                    "SPY, or raise the order notional"
+                )
             raise WorkerError(
                 f"the notional {decision.notional} buys no shares at price "
                 f"{reference_price}; the order would be empty"

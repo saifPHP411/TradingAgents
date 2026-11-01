@@ -96,12 +96,20 @@ def fetch_json(
     headers: Mapping | None = None,
     transport: Transport | None = None,
     max_retries: int = 0,
+    classify_status: Callable[[int, str], None] | None = None,
 ) -> dict:
     """One bounded JSON GET, with the credential scrubbed from any failure.
 
     Raises :class:`ProviderError` on a transport failure, a non-2xx status, or a
     body that is not a JSON object. It never returns a partially parsed body and
     never swallows the failure.
+
+    ``classify_status`` is an optional seam a provider uses to give a vendor a
+    *specific* error for a non-200 status it can interpret (a 401 as an
+    authentication failure, a 403 as a forbidden request). It receives the status
+    code and the redacted body and may raise a :class:`ProviderError` subclass; if
+    it returns, the generic non-2xx error below is raised as before. It is called
+    **after** redaction, so a credential in the body cannot leak through it.
     """
     send = transport or _default_transport
     attempt = 0
@@ -119,6 +127,8 @@ def fetch_json(
 
         if response.status_code != 200:
             body = _redact((response.text or "")[:200], secrets)
+            if classify_status is not None:
+                classify_status(response.status_code, body)
             raise ProviderError(
                 f"the provider answered HTTP {response.status_code}: {body}"
             )

@@ -69,6 +69,8 @@ class Dashboard:
         allow_paper_trading: bool = False,
         paper_order_notional: float = 25.0,
         broker_factory=None,
+        market_data_factory=None,
+        paper_whole_shares: bool = True,
         refresh_policy=None,
         refresh_fetcher=None,
     ) -> None:
@@ -88,6 +90,8 @@ class Dashboard:
             order_notional=paper_order_notional,
             stub=stub,
             broker_factory=broker_factory,
+            market_data_factory=market_data_factory,
+            whole_shares=paper_whole_shares,
         )
 
     def view(self) -> ExperimentView:
@@ -320,6 +324,27 @@ def make_handler(dashboard: Dashboard):
     return Handler
 
 
+
+def _market_data_factory_for(choice: str):
+    """The market-data factory the CLI's ``--paper-market-data`` selects.
+
+    ``bar_open`` returns ``None``, which keeps the controller's historical default
+    (the experiment's latest bar open). ``alpaca_snapshot`` returns a factory that
+    builds a current-price source from Alpaca market data. A factory that cannot be
+    built raises when the worker is constructed, so a missing credential is
+    reported rather than silently replaced by a stale price.
+    """
+    if choice != "alpaca_snapshot":
+        return None
+
+    def factory(symbols):
+        from ..broker import AlpacaSnapshotMarketData
+
+        return AlpacaSnapshotMarketData(symbols)
+
+    return factory
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the dashboard as ``python -m ...dashboard.server``.
 
@@ -384,6 +409,29 @@ def main(argv: list[str] | None = None) -> int:
         help="target cash per paper order (default: $TRADINGAGENTS_PAPER_ORDER_NOTIONAL, else 25)",
     )
     parser.add_argument(
+        "--paper-market-data",
+        choices=("bar_open", "alpaca_snapshot"),
+        default=os.environ.get("TRADINGAGENTS_PAPER_MARKET_DATA", "bar_open") or "bar_open",
+        help=(
+            "how the paper worker reads a current price (default: bar_open, the "
+            "experiment's latest bar open). 'alpaca_snapshot' reads a genuinely "
+            "current price from Alpaca market data (feed=iex) and requires "
+            "ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET. This changes only the "
+            "price seam, never the decision source or the strategy."
+        ),
+    )
+    parser.add_argument(
+        "--paper-fractional-shares",
+        action="store_true",
+        help=(
+            "allow the paper worker to size a fractional quantity (default: whole "
+            "shares only). Needed for a high-priced symbol such as SPY under a small "
+            "notional, where whole shares would floor to zero. The account must "
+            "support fractional trading, or the broker will reject the order; the "
+            "$25 notional cap and long-only rule are unchanged."
+        ),
+    )
+    parser.add_argument(
         "--stub",
         action="store_true",
         help=(
@@ -424,6 +472,8 @@ def main(argv: list[str] | None = None) -> int:
             auto_interval=args.auto_interval,
             allow_paper_trading=args.allow_paper_trading,
             paper_order_notional=args.paper_order_notional,
+            market_data_factory=_market_data_factory_for(args.paper_market_data),
+            paper_whole_shares=not args.paper_fractional_shares,
         )
     except DashboardAuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -445,6 +495,8 @@ def serve(
     allow_paper_trading: bool = False,
     paper_order_notional: float = 25.0,
     broker_factory=None,
+    market_data_factory=None,
+    paper_whole_shares: bool = True,
 ) -> None:
     """Run the dashboard until interrupted.
 
@@ -472,6 +524,8 @@ def serve(
         allow_paper_trading=allow_paper_trading,
         paper_order_notional=paper_order_notional,
         broker_factory=broker_factory,
+        market_data_factory=market_data_factory,
+        paper_whole_shares=paper_whole_shares,
     )
     httpd = ThreadingHTTPServer((host, port), make_handler(dashboard))
     httpd.daemon_threads = True

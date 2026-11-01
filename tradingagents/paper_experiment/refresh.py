@@ -289,19 +289,51 @@ def _latest_processed(experiment) -> str | None:
 def _default_fetcher(experiment, *, today: date | None = None) -> PriceSource:
     """Rebuild the vendor daily source the experiment was started on.
 
-    Only the Alpha Vantage daily source is refreshable today, and it reads its own
-    credential from the environment (this module never touches a key). A source
-    whose provenance does not name a symbol cannot be refreshed.
+    The provider is chosen from the source's own provenance, so a refresh rebuilds
+    the *same* vendor the run started on: an Alpaca experiment is refreshed from
+    Alpaca, an Alpha Vantage experiment from Alpha Vantage. There is no
+    cross-provider fallback — a source this module cannot rebuild is refused rather
+    than refreshed from a different vendor. Each provider reads its own credential
+    from the environment; this module never touches a key.
     """
-    from .providers.alpha_vantage import AlphaVantageDailySource
-
     source = experiment.source
     symbol = _source_symbol(source)
     if not symbol:
         raise PriceSourceError(
             f"the source {source.name!r} does not record a symbol, so it cannot be refreshed"
         )
-    return AlphaVantageDailySource(symbol, name=source.name, today=today)
+    provider = _provider_for(source)
+    if provider == "alpaca_iex":
+        from .providers.alpaca_iex import AlpacaIexDailySource
+
+        return AlpacaIexDailySource(symbol, name=source.name, today=today)
+    if provider == "alpha_vantage":
+        from .providers.alpha_vantage import AlphaVantageDailySource
+
+        return AlphaVantageDailySource(symbol, name=source.name, today=today)
+    raise PriceSourceError(
+        f"the source {source.name!r} (kind {getattr(source, 'kind', 'unknown')!r}) is "
+        "not a refreshable vendor daily source; refusing to refresh it from a "
+        "different provider"
+    )
+
+
+def _provider_for(source: PriceSource) -> str | None:
+    """The vendor a source came from, from its provenance name.
+
+    The single reading of "which vendor is this", so a refresh cannot rebuild a
+    source from the wrong provider. ``None`` means the vendor is unknown, and a
+    refresh is refused rather than guessed.
+    """
+    name = (getattr(source, "name", "") or "").lower()
+    provenance = getattr(source, "provenance", None)
+    provenance_name = (getattr(provenance, "name", "") or "").lower()
+    haystack = f"{name} {provenance_name}"
+    if "alpaca" in haystack:
+        return "alpaca_iex"
+    if "alpha_vantage" in haystack or "alphavantage" in haystack:
+        return "alpha_vantage"
+    return None
 
 
 def _merge_frames(

@@ -409,6 +409,18 @@ def _readiness(experiment: PaperExperiment, genuine: list, counts: dict) -> dict
     """The honest readiness verdict, with every blocker named."""
     blockers: list[str] = []
     kind = getattr(experiment.source, "kind", "unknown")
+    # The source's *health* is a separate axis from its currency. A last refresh
+    # that could not reach the vendor (auth rejection, missing key, transport, a
+    # feed gone stale) means the data condition is unknown, so readiness must not
+    # claim "READY FOR LIVE PAPER" while the freshness view reports the source as
+    # unavailable. Read the same sidecar the freshness view reads, so the two
+    # cannot disagree.
+    source_unavailable = _source_unavailable(experiment)
+    if source_unavailable:
+        blockers.append(
+            "the price source could not serve new data (data_source_unavailable); "
+            "the data condition is unknown, so live paper readiness cannot be claimed"
+        )
     if not experiment.source.is_current_market:
         blockers.append(
             "the price source is historical, not the current market; this is not a "
@@ -438,16 +450,40 @@ def _readiness(experiment: PaperExperiment, genuine: list, counts: dict) -> dict
         )
 
     # "Ready for live paper" needs a genuine inference *and* a current-market source
-    # that can actually serve a session window. A quote-only source is current but
-    # cannot drive a multi-session run, so it does not qualify.
+    # that can actually serve a session window, *and* a source that is currently
+    # reachable. A quote-only source is current but cannot drive a multi-session
+    # run, so it does not qualify; an unavailable source is unknown, so it does not
+    # qualify either.
     can_drive_sessions = kind not in ("vendor_quote",)
-    if genuine and experiment.source.is_current_market and can_drive_sessions:
+    if (
+        genuine
+        and experiment.source.is_current_market
+        and can_drive_sessions
+        and not source_unavailable
+    ):
         status = "READY FOR LIVE PAPER"
     elif genuine:
         status = "OFFLINE PAPER (reproducible, not live)"
     else:
         status = "BLOCKED"
     return {"status": status, "blockers": blockers}
+
+
+def _source_unavailable(experiment: PaperExperiment) -> bool:
+    """Whether the last refresh could not reach the source at all.
+
+    The single reading of the refresh sidecar the freshness view also uses, so
+    ``readiness`` and ``freshness`` can never disagree about whether the source is
+    reachable. A skip (throttled/quota) is not a failure and is not counted here:
+    it means the source was not asked, not that it failed.
+    """
+    from .refresh import SOURCE_FAILURE_STATUSES, read_refresh_state
+
+    try:
+        state = read_refresh_state(experiment.root)
+    except Exception:  # noqa: BLE001 - a missing/unreadable sidecar is not a failure
+        return False
+    return state.last_status in SOURCE_FAILURE_STATUSES
 
 
 def _limitations(experiment: PaperExperiment, genuine: list, performance: dict) -> list[str]:

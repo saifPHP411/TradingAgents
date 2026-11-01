@@ -16,6 +16,63 @@ path, and no configuration that produces one.
 
 ### Added
 
+- **A readiness verdict can no longer contradict the source-health view**
+  (`paper_experiment/report.py`). The report's `readiness.status` could read
+  `READY FOR LIVE PAPER` while `freshness.market_status` was
+  `data_source_unavailable` or `source_status` was `failed` — the same run both
+  claimed to be ready and named a dead price source. `_readiness` now takes the
+  freshness view and, when the source is unavailable or failed, adds a
+  `data_source_unavailable` blocker and refuses to return `READY FOR LIVE PAPER`;
+  a `no_new_sessions` refresh outcome is explicitly **not** a blocker, because a
+  daily vendor source legitimately has nothing new between sessions. Covered by
+  `tests/test_phase22_readiness_source_health.py`.
+
+- **Alpaca market data as a price source, separate from the Alpaca paper broker**
+  (`paper_experiment/providers/alpaca_iex.py`). A paper run can now be started on
+  Alpaca's own daily bars, so the *data* and the *account* come from one vendor
+  without either being able to reach the other's host.
+  - **`AlpacaIexDailySource`** (`--source alpaca_iex`) reads
+    `GET https://data.alpaca.markets/v2/stocks/bars` with `timeframe=1Day` and
+    `feed=iex` (the only feed the Basic plan may read; a SIP default would 403).
+    The market-data host is the *only* host it will talk to: the paper *trading*
+    host and every live host are refused by `assert_data_host` before a credential
+    is read, so a market-data request can never be pointed at order routing.
+    Authentication uses the paper credentials (`ALPACA_PAPER_API_KEY` /
+    `ALPACA_PAPER_API_SECRET`) in headers, never in a URL; a missing credential is
+    `not_configured`, a 401 is an authentication failure, a 403 is an unsupported
+    request. A response that is empty, malformed, non-finite, out of order, or
+    repeats a session is refused rather than served as data, and the newest bar is
+    checked against `max_stale_days` exactly as Alpha Vantage's is.
+  - **A refresh rebuilds the *same* vendor** (`refresh._default_fetcher`): an
+    Alpaca experiment is refreshed from Alpaca, an Alpha Vantage experiment from
+    Alpha Vantage, and a source whose vendor cannot be determined is refused
+    rather than refreshed from a different provider.
+  - **`AlpacaSnapshotMarketData`** (`broker/trading.py`,
+    `--paper-market-data alpaca_snapshot`) is the worker's *current* price seam,
+    read from `GET .../v2/stocks/snapshots`. The previous default was the latest
+    daily bar's **open**, which is not a current price; this reads the latest trade
+    (then the quote midpoint, then the minute-bar close) and never a daily open.
+    A missing, malformed, NaN, infinite or zero price raises, so the worker places
+    **no** order rather than sizing from a fabricated number. `bar_open` remains
+    the default, so nothing changes unless an operator opts in.
+  - `providers.base.fetch_json` gains an optional `classify_status` seam, called
+    *after* credential redaction, so a vendor's 401/403/429 can be given its
+    specific meaning without a credential leaking through the message.
+    Covered by `tests/test_phase23_alpaca_iex_source.py` and
+    `tests/test_phase24_alpaca_snapshot_market_data.py`.
+
+- **Fractional share sizing, as an explicit opt-in** (`broker/trading.py`). With
+  whole shares (the default) a $25 notional at SPY's ~$580 price floored to
+  **zero** and raised `WorkerError: the notional ... buys no shares`, so a
+  high-priced symbol could not be paper-traded at a small size. `whole_shares=False`
+  (`--paper-fractional-shares`) floors the quantity to six decimals — never rounds
+  up, so `quantity * price` cannot exceed the requested notional and cannot trip
+  the `max_order_notional` cap by a rounding artefact. The default stays whole
+  shares, and a symbol that floors to zero is still refused with a message naming
+  the fix rather than sent to the broker as a zero-quantity order. The $25 cap and
+  the long-only rule are unchanged. Covered by
+  `tests/test_phase25_fractional_shares.py`.
+
 - **A paper run now tells the truth about which model answered and whether its
   data is current** (`paper_experiment/inference.py`, `freshness.py`).
   - **Provider fallback with honest provenance.** The paper seam made one call to

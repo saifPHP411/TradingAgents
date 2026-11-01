@@ -393,6 +393,13 @@ pinned by
   exists. `READY FOR LIVE PAPER` needs a genuine inference *and* a current-market
   source that can serve a session window; a historical source never qualifies, and
   a quote-only source is current but cannot drive a multi-session run.
+- **A failing source is a blocker, not a footnote.** When the freshness view says
+  `market_status = data_source_unavailable` or `source_status = failed`, the
+  readiness status cannot read `READY FOR LIVE PAPER`; it is `BLOCKED` with a
+  `data_source_unavailable` blocker. A run must not claim to be ready while it is
+  also reporting that its price source is dead. Conversely, a refresh outcome of
+  `no_new_sessions` is **not** a blocker: a daily vendor source legitimately has
+  nothing new between sessions, and that is not a fault.
 
 ## Where files live and how they are protected
 
@@ -412,13 +419,15 @@ one. `verify` recomputes the chain and reports `JOURNAL INVALID` on tampering.
 
 Run the report and read `readiness`:
 
-- `BLOCKED` — no genuine inference yet, or the source is not the current market.
+- `BLOCKED` — no genuine inference yet, or the source is not the current market,
+  or the source is unavailable/failed (`data_source_unavailable`).
 - `OFFLINE PAPER (reproducible, not live)` — genuine inferences exist, but the
   source is historical. This is the expected state for the frozen dataset and for
   a vendor's daily bars, which are historical.
 - `READY FOR LIVE PAPER` — genuine inferences on a current-market source that can
-  serve a session window. A quote-only source (Finnhub) is current but cannot, so
-  it does not reach this state on its own.
+  serve a session window, *and* a healthy source. A quote-only source (Finnhub) is
+  current but cannot serve a session window, so it does not reach this state on its
+  own; neither does a source whose last refresh failed.
 
 The report's `limitations` list and `readiness.blockers` are the authoritative
 statement of what the experiment does not prove. A paper result is not evidence
@@ -570,6 +579,43 @@ completed. On process shutdown the dashboard stops the loop gracefully.
 python -m tradingagents.paper_experiment serve --root runs/exp1 \
   --allow-paper-trading --token "$TRADINGAGENTS_DASHBOARD_TOKEN"
 ```
+
+### Which price the worker sizes against
+
+The worker sizes an order from a *current* price. Two seams are available, and the
+default is the historical one, so nothing changes unless you opt in:
+
+- `--paper-market-data bar_open` (default) — the latest daily bar's **open**. This
+  is a historical price, fine for an offline demonstration, but it is not a current
+  market price.
+- `--paper-market-data alpaca_snapshot` — a genuinely current price from Alpaca
+  market data (feed `iex`), read from the latest trade (then the quote midpoint,
+  then the minute-bar close), never a daily open. It requires
+  `ALPACA_PAPER_API_KEY` / `ALPACA_PAPER_API_SECRET`. A missing, malformed, NaN,
+  infinite or zero price makes the worker place **no** order rather than size from
+  a fabricated number.
+
+This changes only the price seam; the decision source and the strategy are
+untouched.
+
+### Whole shares, or fractional
+
+By default the worker sizes to **whole shares**, which keeps a tiny account's
+behaviour obvious. With a $25 notional and a high-priced symbol such as SPY
+(~$580) whole shares floor to **zero**, and the worker refuses the order with a
+message naming the fix rather than sending an empty order. To trade a high-priced
+symbol at a small size, opt in to fractional shares:
+
+```bash
+python -m tradingagents.paper_experiment serve --root runs/exp1 \
+  --allow-paper-trading --paper-fractional-shares \
+  --token "$TRADINGAGENTS_DASHBOARD_TOKEN"
+```
+
+The fractional quantity is floored to six decimals — never rounded up — so it
+cannot exceed the requested notional or trip the `max_order_notional` cap by a
+rounding artefact. The $25 cap and the long-only rule are unchanged, and the
+account must support fractional trading or the broker will reject the order.
 
 `ExecutionMode` remains `BACKTEST` and `PAPER` only. There is no live broker, no
 order routing, no credential in any artifact, and no flag that reaches a live
