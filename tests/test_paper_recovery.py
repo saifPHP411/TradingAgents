@@ -701,6 +701,45 @@ class TestMarketDataFailures:
         with pytest.raises(PaperSessionError):
             Quote(symbol="AAPL", price=100.0, timestamp=NOW, low=float("nan"))
 
+    def test_a_price_outside_its_own_range_is_refused(self):
+        """The reference price must lie in the session's own range, as a Bar does.
+
+        A price above its own high (or below its low) is a malformed observation:
+        a LIMIT reachability test would then rest on numbers that contradict each
+        other. Refuse it rather than fill against it.
+        """
+        with pytest.raises(PaperSessionError):
+            Quote(symbol="AAPL", price=200.0, timestamp=NOW, low=90.0, high=110.0)
+        with pytest.raises(PaperSessionError):
+            Quote(symbol="AAPL", price=50.0, timestamp=NOW, low=90.0, high=110.0)
+
+    def test_a_price_on_the_edge_of_its_range_is_accepted(self):
+        for price in (90.0, 110.0):
+            assert Quote(
+                symbol="AAPL", price=price, timestamp=NOW, low=90.0, high=110.0
+            ).price == price
+
+    def test_a_naive_timestamp_is_read_as_utc_not_local_time(self):
+        """A naive quote stamp must not make the session day depend on the host.
+
+        The session derives its day and its expiry checks from the timestamp's UTC
+        date. Interpreting a naive value in the host's local time would make the
+        same data produce a different session day on a UTC host than on a New York
+        one — a silent determinism bug. The quote normalises it to UTC at the door.
+        """
+        naive = datetime(2026, 1, 5, 23, 30)  # 23:30 local NY is 04:30 UTC the next day
+        quote = Quote(symbol="AAPL", price=100.0, timestamp=naive)
+        assert quote.timestamp.tzinfo is UTC
+        assert quote.timestamp == datetime(2026, 1, 5, 23, 30, tzinfo=UTC)
+
+        session = new_session(
+            initial_cash=100_000.0,
+            quotes=lambda symbol: Quote(symbol=symbol, price=100.0, timestamp=naive),
+        )
+        session.on_signal(_signal(at=datetime(2026, 1, 5, 23, 30, tzinfo=UTC)))
+        # The day is the UTC date of the stamp, whatever the host's timezone is.
+        assert session.day == "2026-01-05"
+
     def test_a_missing_quote_leaves_the_order_resting_not_cancelled(self):
         session = self._resting_session()
         session.quotes = dict_quote_source({"MSFT": 100.0}, timestamp=NOW)

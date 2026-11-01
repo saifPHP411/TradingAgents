@@ -162,6 +162,23 @@ path, and no configuration that produces one.
 
 ### Fixed
 
+- **A quote no longer lets a malformed observation or a host's timezone into the
+  ledger.** Two gaps in `Quote`'s validation, both found by the Phase 3
+  reliability re-audit and both reachable through the only door market data
+  enters:
+  - A **naive timestamp was interpreted in the host's local timezone** by the
+    session's `astimezone(UTC)` day and expiry checks, so the same quote produced
+    a different session day on a UTC host than on a New York one (reproduced:
+    `2026-01-05 23:30` gave day `2026-01-05` under `TZ=UTC` and `2026-01-06`
+    under `TZ=America/New_York`). The simulator's own `_as_utc` already read a
+    naive value as UTC, so the session and the fill disagreed on the same stamp.
+    `Quote` now reads a naive timestamp as UTC, and `MarketContext` normalises the
+    same way, so a paper run and a backtest agree regardless of the host. No
+    accounting changes for an aware stamp.
+  - A **price outside its own range** (`price=200` with `low=90, high=110`) was
+    accepted, so a buy limit could be judged "reached" against a low the price
+    itself contradicted — the invariant `Bar` already enforces was missing here.
+    `Quote` now refuses it.
 - **A decision taken on the newest bar no longer executes at its own decision
   price.** `DecisionState.execution_session` was pinned to the decision session
   when `_next_session` returned `None` (the decision session was the frame's last

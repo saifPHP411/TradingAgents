@@ -24,6 +24,7 @@ accounting cannot diverge between "pretend" and "real" fills.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
@@ -135,6 +136,11 @@ class MarketContext:
     ) -> None:
         self.symbol = symbol
         self.price = price
+        # Read a naive timestamp as UTC, matching ``Quote``, so a caller that
+        # builds a context directly (a backtest) and one that goes through a quote
+        # agree on the session day regardless of the host's timezone.
+        if isinstance(timestamp, datetime) and timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
         self.timestamp = timestamp
         self.is_open = is_open
         self.average_daily_volume = average_daily_volume

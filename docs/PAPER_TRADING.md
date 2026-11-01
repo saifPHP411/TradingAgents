@@ -206,6 +206,34 @@ log, no automatic checkpoint, no supervisor. That supports one claim:
   price to fill at, and a vendor source is expected to refuse a bar outside its
   staleness window before it ever reaches the session.
 
+### Malformed market data is refused at the door
+
+A quote is the only door market data enters, so the rules that keep a bad number
+out of the ledger live in `Quote.__post_init__`:
+
+- a **non-finite or non-positive** price, or a non-finite/non-positive `low` or
+  `high`, is refused;
+- a **range that contradicts itself** (`low > high`) is refused, because a buy
+  limit "reached" by a low above the high is not a market fact;
+- a **price outside its own range** is refused, the same invariant `Bar`
+  enforces — otherwise a limit fill would rest on numbers that cannot all be
+  true;
+- a **naive timestamp is read as UTC**, not as the host's local time. The session
+  derives its day and its expiry checks from the timestamp's UTC date, so
+  interpreting a naive value locally would make the accounting depend on the
+  machine's timezone — the same data producing a different session day on a UTC
+  host than on a New York one. `MarketContext` normalises the same way, so a
+  backtest that builds a context directly and a paper run that goes through a
+  quote agree.
+
+A price-source **exception** is not a market fact: it is caught per symbol, the
+order stays live, the book is unchanged, no event is faked, and the error is
+re-raised after the loop rather than swallowed. A **missing** quote (or a closed
+market) likewise leaves the order resting rather than cancelling it, and a source
+that answers with the **wrong symbol** is refused rather than filled against. A
+failed source does not consume the signal, so a data outage leaves the decision
+retryable.
+
 ## Duplicate processing
 
 A signal's `signal_id` is a deterministic digest of its decision, so replaying

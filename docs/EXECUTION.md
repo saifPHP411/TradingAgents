@@ -235,6 +235,17 @@ the day or reset the daily-loss baseline. A vendor source refuses a bar outside
 its staleness window before it reaches the session
 ([MARKET_DATA_PROVIDERS.md](MARKET_DATA_PROVIDERS.md)).
 
+Quote *shape*, by contrast, is the engine's to refuse. A quote is validated at
+its single door: a non-finite or non-positive price or range, a range that
+contradicts itself (`low > high`), and a price outside its own range are all
+refused, and a naive timestamp is read as UTC rather than as the host's local
+time — so the session day cannot depend on the machine's timezone. `MarketContext`
+normalises a naive timestamp the same way. A price-source exception is caught per
+symbol, the order stays live and the book is unchanged, and the error is re-raised
+after the loop rather than swallowed; a missing quote or a closed market leaves the
+order resting; a source that answers with the wrong symbol is refused. See
+[PAPER_TRADING.md](PAPER_TRADING.md#malformed-market-data-is-refused-at-the-door).
+
 The prospective paper experiment ([PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md))
 supplies that durability policy for its own use: it saves state after every
 session, keeps an append-only hash-chained journal, and records the execution

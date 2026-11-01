@@ -108,6 +108,14 @@ class Quote:
     def __post_init__(self) -> None:
         if not math.isfinite(self.price) or self.price <= 0:
             raise PaperSessionError(f"quote price must be finite and positive, got {self.price}")
+        # A naive timestamp is read as UTC, not as the host's local time. The
+        # session derives its day and its expiry checks from the timestamp's UTC
+        # date, so a naive value interpreted in local time would make the
+        # accounting depend on the machine's timezone — the same data producing a
+        # different session day on a UTC host than on a New York one. Normalising
+        # here, at the only door a quote enters, keeps a run deterministic.
+        if self.timestamp.tzinfo is None:
+            object.__setattr__(self, "timestamp", self.timestamp.replace(tzinfo=UTC))
         for name, value in (("low", self.low), ("high", self.high)):
             if value is None:
                 continue
@@ -115,13 +123,24 @@ class Quote:
                 raise PaperSessionError(
                     f"quote {name} must be finite and positive when supplied, got {value}"
                 )
-        if self.low is not None and self.high is not None and self.low > self.high:
-            # A malformed range would make a LIMIT order's reachability test
-            # meaningless — a buy limit "reached" by a low above the high is not a
-            # market fact. Refuse it rather than fill against it.
-            raise PaperSessionError(
-                f"quote range is inconsistent: low {self.low} is above high {self.high}"
-            )
+        if self.low is not None and self.high is not None:
+            if self.low > self.high:
+                # A malformed range would make a LIMIT order's reachability test
+                # meaningless — a buy limit "reached" by a low above the high is not
+                # a market fact. Refuse it rather than fill against it.
+                raise PaperSessionError(
+                    f"quote range is inconsistent: low {self.low} is above high {self.high}"
+                )
+            if not (self.low - 1e-9 <= self.price <= self.high + 1e-9):
+                # The reference price must lie inside its own session range, the
+                # same invariant ``Bar`` enforces. A price outside it is a
+                # malformed observation: a buy limit would be judged "reached"
+                # against a low the price itself contradicts, so the fill would
+                # rest on data that cannot all be true.
+                raise PaperSessionError(
+                    f"quote price {self.price} is outside its own range "
+                    f"[{self.low}, {self.high}]"
+                )
 
     def as_market(self) -> MarketContext:
         return MarketContext(

@@ -599,3 +599,35 @@ class TestFillsAreTraceableToTheirOrder:
         fills = [e for e in ledger.events if e.type is EventType.ORDER_FILLED]
         assert fills
         assert fills[0].detail["order_id"] == "ord-123"
+
+
+@pytest.mark.unit
+class TestAMarketContextStampIsReadAsUtc:
+    """A naive timestamp must not make the fill's recorded instant host-dependent.
+
+    The context's timestamp reaches the ledger's event log. A naive value read in
+    the host's local time would stamp the same fill differently on two machines,
+    so it is normalised to UTC at construction.
+    """
+
+    def test_a_naive_stamp_is_normalised_to_utc(self):
+        naive = datetime(2026, 1, 5, 23, 30)
+        market = MarketContext(symbol="AAPL", price=100.0, timestamp=naive)
+        assert market.timestamp.tzinfo is UTC
+        assert market.timestamp == datetime(2026, 1, 5, 23, 30, tzinfo=UTC)
+
+    def test_an_aware_stamp_is_kept_as_its_instant(self):
+        aware = datetime(2026, 1, 5, 18, 30, tzinfo=UTC)
+        market = MarketContext(symbol="AAPL", price=100.0, timestamp=aware)
+        assert market.timestamp == aware
+
+    def test_a_fill_from_a_naive_stamp_is_stamped_in_utc(self):
+        sim, ledger = _sim()
+        order = _order()
+        sim.submit(order, market=MarketContext(
+            symbol="AAPL", price=100.0, timestamp=datetime(2026, 1, 5, 23, 30)
+        ))
+        fills = [e for e in ledger.events if e.type is EventType.ORDER_FILLED]
+        assert fills
+        assert fills[0].timestamp == datetime(2026, 1, 5, 23, 30, tzinfo=UTC)
+

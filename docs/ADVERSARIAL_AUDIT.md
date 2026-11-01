@@ -418,6 +418,44 @@ another symbol's order live.
 
 Tests: `tests/test_paper_recovery.py::TestCancellationAfterRestart`.
 
+### 19. A naive quote timestamp made the session day depend on the host timezone
+
+Severity: medium. A silent determinism bug in the recovery path.
+
+`Quote` accepted a naive (timezone-unaware) timestamp, and the session derives its
+day and its expiry checks from `timestamp.astimezone(UTC).date()`. For a naive
+value, `astimezone` interprets it in the **host's local timezone**, so the same
+quote produced a different session day on a UTC host than on a New York one — the
+day clock, the daily-loss baseline and the `expires_session` comparison could all
+shift with the machine's `TZ`. Reproduced by constructing a quote stamped
+`2026-01-05 23:30` and observing day `2026-01-05` under `TZ=UTC` and `2026-01-06`
+under `TZ=America/New_York`. The simulator's own `_as_utc` already read a naive
+value as UTC, so the session and the fill disagreed on the same stamp.
+
+Fix: `Quote.__post_init__` reads a naive timestamp as UTC, and `MarketContext`
+normalises the same way, so a paper run through a quote and a backtest through a
+context agree regardless of the host. No accounting changes for an aware stamp.
+
+Tests: `tests/test_paper_recovery.py::TestMarketDataFailures::
+test_a_naive_timestamp_is_read_as_utc_not_local_time`,
+`tests/test_execution_simulator.py::TestAMarketContextStampIsReadAsUtc`.
+
+### 20. A quote price outside its own range was accepted
+
+Severity: low. A malformed observation could pass the LIMIT reachability test.
+
+`Quote` checked `low > high` and refused a non-finite range, but it did not check
+that the reference `price` lay inside `[low, high]` — the invariant `Bar` already
+enforces. A quote of `price=200, low=90, high=110` was accepted, and a buy limit
+at 95 would then be judged "reached" against a low of 90 that the price itself
+contradicted: a modelled fill resting on numbers that cannot all be true.
+
+Fix: `Quote.__post_init__` refuses a price outside its own range, so the fill
+decision cannot rest on a self-contradicting observation.
+
+Tests: `tests/test_paper_recovery.py::TestMarketDataFailures::
+test_a_price_outside_its_own_range_is_refused`.
+
 ## Phase 4 — final release-candidate adversarial audit
 
 An independent pass over the whole simulated system, attacking accounting,
