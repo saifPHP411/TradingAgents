@@ -138,6 +138,43 @@ PROVIDER_ALPACA_SNAPSHOT = "alpaca_snapshot"
 PROVIDER_STATIC = "static"
 PROVIDER_UNKNOWN = "unknown"
 
+# -- why no order was placed -----------------------------------------------------
+
+# A closed vocabulary for "the worker ran but placed no order". A bare "no decision
+# is due" cannot tell a cadence gap from a disarmed strategy, so every no-order
+# cycle names the actual gate. Codes are stable (a UI or an alert can match on
+# them); the human `detail` alongside is free text.
+NO_TRADE_NONE = None
+NO_TRADE_NO_DECISION_DUE = "NO_DECISION_DUE"
+NO_TRADE_NO_SIGNAL = "NO_SIGNAL"
+NO_TRADE_HISTORY_EXHAUSTED = "HISTORY_EXHAUSTED"
+NO_TRADE_MAX_DECISIONS_REACHED = "MAX_DECISIONS_REACHED"
+NO_TRADE_INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+NO_TRADE_MARKET_DATA_UNAVAILABLE = "MARKET_DATA_UNAVAILABLE"
+NO_TRADE_SIZE_TOO_SMALL = "SIZE_TOO_SMALL"
+NO_TRADE_RISK_REJECTED = "RISK_REJECTED"
+NO_TRADE_BROKER_REJECTED = "BROKER_REJECTED"
+NO_TRADE_ALREADY_PROCESSED = "ALREADY_PROCESSED"
+NO_TRADE_ORDER_EXISTS = "ORDER_EXISTS"
+NO_TRADE_EXIT_REFUSED = "EXIT_REFUSED"
+
+NO_TRADE_REASONS = (
+    NO_TRADE_NO_DECISION_DUE,
+    NO_TRADE_NO_SIGNAL,
+    NO_TRADE_HISTORY_EXHAUSTED,
+    NO_TRADE_MAX_DECISIONS_REACHED,
+    NO_TRADE_INSUFFICIENT_DATA,
+    NO_TRADE_MARKET_DATA_UNAVAILABLE,
+    NO_TRADE_SIZE_TOO_SMALL,
+    NO_TRADE_RISK_REJECTED,
+    NO_TRADE_BROKER_REJECTED,
+    NO_TRADE_ALREADY_PROCESSED,
+    NO_TRADE_ORDER_EXISTS,
+    NO_TRADE_EXIT_REFUSED,
+)
+"""The closed vocabulary of reasons a RUNNING worker placed no order. A reason is
+``None`` only when the cycle actually placed an order."""
+
 MARKET_DATA_CHOICES = (PROVIDER_BAR_OPEN, PROVIDER_ALPACA_SNAPSHOT)
 """The price seams an operator may select. ``bar_open`` is the historical default;
 ``alpaca_snapshot`` is the current-price opt-in."""
@@ -344,7 +381,17 @@ class StaticMarketData:
         return float(value)
 
     def describe(self) -> dict[str, Any]:
-        return {"market_data_detail": "a fixed price map (tests/demo), not a market price"}
+        return {
+            "market_data_detail": "a fixed price map (tests/demo), not a market price",
+            # The snapshot seam records a status as it reads; this seam has no read
+            # to record, so it derives one from availability. Without this the
+            # engine view read ``market_data_status`` as absent and reported the
+            # market data as unavailable even while the worker priced an order
+            # from it.
+            "market_data_status": (
+                MARKET_DATA_STATUS_OK if self.available() else MARKET_DATA_STATUS_NO_DATA
+            ),
+        }
 
 
 @dataclass
@@ -394,6 +441,12 @@ class SourceMarketData:
             ),
             "historical_session": self.session,
             "is_current_price": False,
+            # Derived from availability, because this seam has no read to record a
+            # status on. Absent, the engine view read the market data as
+            # unavailable while the worker was pricing orders from it.
+            "market_data_status": (
+                MARKET_DATA_STATUS_OK if self.available() else MARKET_DATA_STATUS_NO_DATA
+            ),
         }
 
 
@@ -997,6 +1050,12 @@ class WorkerState:
     """Why the most recent evaluation produced no order — the decision source's own
     skip reason, or ``None`` when the last evaluation yielded a decision. Recorded
     so a RUNNING-but-idle worker is explainable rather than silent. Additive."""
+    last_no_trade_code: str | None = None
+    """The stable code (from :data:`NO_TRADE_REASONS`) behind the most recent
+    no-order cycle, paired with ``last_no_decision_reason`` as its human detail.
+    ``None`` when the last cycle placed an order. Additive and optional: an older
+    state file reads back as ``None``, which a view reports as unknown rather than
+    as "no problem"."""
     exits: dict[str, dict] = field(default_factory=dict)
     """Positions the exit policy has already acted on, keyed by symbol, with the
     reason and time. The durable "do not exit this position twice" memory. Additive
@@ -1043,6 +1102,7 @@ class WorkerState:
             "last_account_at": self.last_account_at,
             "last_strategy_evaluation_at": self.last_strategy_evaluation_at,
             "last_no_decision_reason": self.last_no_decision_reason,
+            "last_no_trade_code": self.last_no_trade_code,
             "exits": {k: dict(v) for k, v in sorted(self.exits.items())},
             "stops": {k: dict(v) for k, v in sorted(self.stops.items())},
             "cycles_completed": self.cycles_completed,
@@ -1085,6 +1145,7 @@ class WorkerState:
             last_account_at=payload.get("last_account_at"),
             last_strategy_evaluation_at=payload.get("last_strategy_evaluation_at"),
             last_no_decision_reason=payload.get("last_no_decision_reason"),
+            last_no_trade_code=payload.get("last_no_trade_code"),
             exits={k: dict(v) for k, v in (payload.get("exits") or {}).items()},
             stops={k: dict(v) for k, v in (payload.get("stops") or {}).items()},
             cycles_completed=_as_int(payload.get("cycles_completed"), 0),
@@ -1137,6 +1198,10 @@ class CycleResult:
     market_data_provider: str | None = None
     market_data_kind: str | None = None
     market_data_status: str | None = None
+    reason_code: str | None = None
+    """Why no order was placed, from :data:`NO_TRADE_REASONS`. ``None`` when the
+    cycle placed an order (or had nothing to report), so a UI can key off a stable
+    code rather than parsing ``skipped_reason`` prose."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1150,6 +1215,7 @@ class CycleResult:
             "market_data_provider": self.market_data_provider,
             "market_data_kind": self.market_data_kind,
             "market_data_status": self.market_data_status,
+            "reason_code": self.reason_code,
         }
 
 
@@ -1197,6 +1263,7 @@ def worker_status_view(
         "last_cycle_at": state.last_cycle_at,
         "last_strategy_evaluation_at": state.last_strategy_evaluation_at,
         "last_no_decision_reason": state.last_no_decision_reason,
+        "last_no_trade_code": state.last_no_trade_code,
         "started_at": state.started_at,
         "stopped_at": state.stopped_at,
         "loop_running": loop_running,
@@ -1568,15 +1635,18 @@ class PaperTradingWorker:
         self.state.last_strategy_evaluation_at = self.state.last_cycle_at
         if decision is None:
             self.state.last_no_decision_reason = self._no_decision_reason()
+            self.state.last_no_trade_code = self._no_trade_code()
             self._sync_observability()
             self._save()
             result = CycleResult(
                 ran=False,
                 skipped_reason=self.state.last_no_decision_reason or "no decision is due",
+                reason_code=self.state.last_no_trade_code,
             )
             self.last_cycle = result
             return result
         self.state.last_no_decision_reason = None
+        self.state.last_no_trade_code = None
 
         if self._is_processed(decision.decision_id):
             self._save()
@@ -1584,6 +1654,7 @@ class PaperTradingWorker:
                 ran=False,
                 decision_id=decision.decision_id,
                 skipped_reason="the decision has already been processed",
+                reason_code=NO_TRADE_ALREADY_PROCESSED,
             )
             self.last_cycle = result
             return result
@@ -1600,6 +1671,7 @@ class PaperTradingWorker:
                 client_order_id=client_order_id,
                 order=order,
                 skipped_reason="the order for this decision already exists",
+                reason_code=NO_TRADE_ORDER_EXISTS,
             )
             self.last_cycle = result
             return result
@@ -1614,6 +1686,7 @@ class PaperTradingWorker:
                 decision_id=decision.decision_id,
                 error=str(exc),
                 skipped_reason="market data was unavailable",
+                reason_code=NO_TRADE_MARKET_DATA_UNAVAILABLE,
                 **self._market_data_fields(),
             )
             self.last_cycle = result
@@ -1623,12 +1696,15 @@ class PaperTradingWorker:
             quantity = self._size(decision, reference_price)
         except WorkerError as exc:
             self.state.last_error = f"WorkerError: {exc}"
+            self.state.last_no_decision_reason = str(exc)
+            self.state.last_no_trade_code = NO_TRADE_SIZE_TOO_SMALL
             self._save()
             result = CycleResult(
                 ran=False,
                 decision_id=decision.decision_id,
                 error=str(exc),
                 skipped_reason="the order could not be sized",
+                reason_code=NO_TRADE_SIZE_TOO_SMALL,
                 reference_price=reference_price,
                 **self._market_data_fields(),
             )
@@ -1654,6 +1730,16 @@ class PaperTradingWorker:
             # for the next decision, but this one is not re-attempted on every
             # subsequent cycle, exactly as a one-shot source would not re-yield it.
             self._mark_processed(decision.decision_id)
+            # A local risk refusal and a broker rejection are different causes and
+            # are named apart, so a dashboard can tell "our own limits stopped it"
+            # from "the broker refused it".
+            code = (
+                NO_TRADE_RISK_REJECTED
+                if isinstance(exc, PaperRiskRejected)
+                else NO_TRADE_BROKER_REJECTED
+            )
+            self.state.last_no_decision_reason = str(exc)
+            self.state.last_no_trade_code = code
             self._save()
             result = CycleResult(
                 ran=False,
@@ -1661,6 +1747,7 @@ class PaperTradingWorker:
                 client_order_id=client_order_id,
                 error=str(exc),
                 skipped_reason="the order was refused",
+                reason_code=code,
                 reference_price=reference_price,
                 **self._market_data_fields(),
             )
@@ -1669,6 +1756,8 @@ class PaperTradingWorker:
 
         self._mark_processed(decision.decision_id)
         self.state.last_error = None
+        self.state.last_no_decision_reason = None
+        self.state.last_no_trade_code = None
         self._record_order(order)
         self._record_exit_levels(decision, order)
         result = CycleResult(
@@ -1756,6 +1845,7 @@ class PaperTradingWorker:
                     ran=False,
                     error=str(exc),
                     skipped_reason=f"an exit for {symbol} could not be priced",
+                    reason_code=NO_TRADE_MARKET_DATA_UNAVAILABLE,
                     **self._market_data_fields(),
                 )
             reason = _exit_reason(price, stop_loss, take_profit)
@@ -1794,12 +1884,15 @@ class PaperTradingWorker:
                 )
             except (PaperRiskRejected, BrokerRejectedError, BrokerError) as exc:
                 self.state.last_error = f"{type(exc).__name__}: {exc}"
+                self.state.last_no_decision_reason = str(exc)
+                self.state.last_no_trade_code = NO_TRADE_EXIT_REFUSED
                 self._save()
                 return CycleResult(
                     ran=False,
                     client_order_id=exit_id,
                     error=str(exc),
                     skipped_reason=f"the exit for {symbol} was refused",
+                    reason_code=NO_TRADE_EXIT_REFUSED,
                     reference_price=price,
                     **self._market_data_fields(),
                 )
@@ -1968,6 +2061,19 @@ class PaperTradingWorker:
         if isinstance(reason, str) and reason:
             return reason
         return "no decision is due"
+
+    def _no_trade_code(self) -> str:
+        """The stable code behind :meth:`_no_decision_reason`.
+
+        A source that names its own code (the experiment source does) is trusted;
+        otherwise the generic :data:`NO_TRADE_NO_DECISION_DUE` is recorded, so the
+        state always carries a code from the closed vocabulary and a dashboard never
+        has to parse prose to decide what is blocking.
+        """
+        code = getattr(self.decision_source, "skip_code", None)
+        if isinstance(code, str) and code:
+            return code
+        return NO_TRADE_NO_DECISION_DUE
 
     @classmethod
     def load(cls, path: str | os.PathLike) -> WorkerState:

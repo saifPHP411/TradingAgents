@@ -1156,7 +1156,7 @@ function renderOverview(s){
       ? `<div class="k full" style="color:var(--bad);margin-top:8px">Data source health: FAILING (${esc(f.source_failure_kind||"unknown")}) — ${esc(f.source_status_detail||f.reason||"")}</div>`
       : "") +
     full(f.reason||"") +
-    full('Daily-bar source: "latest available bar" is the newest daily session, not a live tick price.');
+    full('This is the historical experiment dataset — the newest daily session is a past bar, not a live tick. It is separate from the price the paper worker sizes from; see "Paper price source".');
 
   $("data").innerHTML = kv({
     "Source": s.data.source_name,
@@ -1243,7 +1243,18 @@ function renderEngine(e){
     return `<div class="step ${klass}"><div class="mark">${ok?"✓":(i+1)}</div><div class="body">
       <div class="title">${esc(t)}</div><div class="meta">${esc(meta)}</div></div></div>`;
   }).join("");
-  $("eng-reason").textContent = e.no_trade_reason ? ("No order: " + e.no_trade_reason) : "";
+  $("eng-reason").innerHTML = (()=>{
+    const b = e.blocker;
+    if (b) {
+      const cls = b.operator_action_required ? "b-bad" : "b-warn";
+      return `<span class="badge ${cls}">${esc(b.code)}</span> ` +
+        (b.detail ? esc(b.detail) : "") +
+        (b.operator_action_required ? " <strong>— operator action may be required.</strong>" : "");
+    }
+    if (e.no_trade_reason) return "No order: " + esc(e.no_trade_reason);
+    if (st.order_submitted) return "The last cycle placed an order.";
+    return "";
+  })();
   $("eng-cycle").textContent = "last cycle " + rel(ts.last_cycle_at);
 
   const md = e.market_data || {};
@@ -1257,8 +1268,8 @@ function renderEngine(e){
     "Max age": md.max_age_seconds===null||md.max_age_seconds===undefined?"—":(md.max_age_seconds+"s"),
   }) + full(md.status_detail||"");
   $("eng-markethint").textContent = md.kind === "current"
-    ? "Sizing uses a current Alpaca snapshot, refused when stale."
-    : "Sizing uses the experiment's historical daily-bar open — a past session price, not a live quote.";
+    ? "Paper price source: a current Alpaca market-data snapshot (feed=iex), refused when stale. This is the only price the paper worker sizes from."
+    : "Paper price source: the experiment's historical daily-bar open for its latest session — a past-session price, not a live quote. This is the only price the paper worker sizes from; the dashboard's Dataset panel describes the same historical series.";
 
   const rl = LAST.risk || {};
   $("eng-risk").innerHTML = kv({

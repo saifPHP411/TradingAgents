@@ -887,3 +887,64 @@ intentionally wall-clock and per-experiment.
 Tests: `tests/test_phase18_data_refresh.py::TestAppendNewSessions::test_refresh_is_deterministic_against_a_source_that_already_had_the_session`,
 `::test_growing_one_session_at_a_time_matches_a_whole_frame_run`
 and `::test_restart_after_refresh_sees_the_merged_sessions`.
+
+## Phase 21: an idle paper worker must be explainable, not merely quiet
+
+Severity: high (the reported symptom — a dashboard that showed `RUNNING / ACCOUNT
+ACTIVE / ALPACA PAPER` while no analysis, decision or trade was observable). The
+audit traced the whole paper path against a mocked broker transport and found the
+symptom had two distinct causes, one real and one presentational.
+
+### 23. The engine view called the market data *unavailable* while it was pricing orders
+
+Severity: high (a false negative that made a working engine look broken). The
+engine view derived `states.market_data_available` from `market_data_status ==
+"ok"`. Only the Alpaca *snapshot* seam records a status as it reads; the historical
+bar-open seam (the default) and the static seam recorded none, so the status was
+`None` and the page reported the market data as down — even in the same cycle the
+worker priced an order from that seam.
+
+Fix: `SourceMarketData.describe` and `StaticMarketData.describe` now derive a
+`market_data_status` from `available()` (`ok`/`no_data`), and `engine_view` treats
+an absent status as *unknown* — resolving it from evidence the worker already has
+(a `reference_price` on the last cycle, or a submitted order) rather than reading
+"no status" as "broken". An explicit non-ok status is still the only thing that
+reports the seam unavailable.
+
+Tests: `tests/test_paper_execution_chain.py::TestEngineViewIsHonest::test_market_data_is_not_reported_down_while_an_order_prices`.
+
+### 24. "No decision is due" hid *why*, including a fully-consumed history
+
+Severity: medium (the reported symptom's presentational cause). A RUNNING worker
+that placed no order reported only "no decision is due". That single string could
+not distinguish a cadence gap from a reached decision cap from a dataset whose
+every session had already been processed — the last of which means the engine is
+correct and simply has no new bars to trade, and which is the most likely state of
+a demo dataset run to its end.
+
+Fix: a closed no-trade vocabulary (`NO_TRADE_REASONS`), carried on `CycleResult`
+and persisted on `WorkerState`, named by the experiment source
+(`ExperimentDecisionSource.skip_code`, which reports `HISTORY_EXHAUSTED` for a
+consumed history), and surfaced by the engine view as a single `blocker`
+(`{code, detail, operator_action_required}`). `blocker` is `None` for a stopped
+worker (off, not blocked) and `AWAITING_FIRST_EVALUATION` before the first cycle.
+
+Tests: `tests/test_paper_execution_chain.py::TestNoTradeReasonsAreNamed` and
+`::TestEngineViewIsHonest::test_the_blocker_names_the_history_gate`.
+
+### 25. The dashboard described one price seam two ways
+
+Severity: low (contradictory operator text). The overview's "Market data" card said
+the source was a "latest available bar"; the engine tab said sizing used a
+"current Alpaca snapshot". They describe the *same* seam, so one of them was
+misleading. Both now name one authoritative **paper price source**, and the
+Dataset panel states explicitly that it describes the historical experiment series,
+separate from the price the worker sizes from.
+
+### What this phase does not claim
+
+The execution chain is proven against a mocked broker transport, not a live Alpaca
+account: the tests assert the worker's own observable record (order submitted,
+fill recorded, position read back, exit placed once), which is what the dashboard
+renders. The paper path remains simulation-only; `ExecutionMode` still has no
+`LIVE`, and no test reaches the network.

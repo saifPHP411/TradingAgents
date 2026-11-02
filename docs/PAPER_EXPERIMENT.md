@@ -634,3 +634,35 @@ account must support fractional trading or the broker will reject the order.
 `ExecutionMode` remains `BACKTEST` and `PAPER` only. There is no live broker, no
 order routing, no credential in any artifact, and no flag that reaches a live
 endpoint.
+
+### Why the worker placed no order (a stable code, not a shrug)
+
+A worker can be `RUNNING`, with the account `ACTIVE` and the paper endpoint
+confirmed, and still place no order for a long time — because it is waiting on a
+cadence, because the strategy decided HOLD, because the loaded history is fully
+consumed, or because something is genuinely wrong. A single "RUNNING" badge cannot
+tell those apart, so every no-order cycle now records a code from a closed
+vocabulary (`NO_TRADE_REASONS` in `paper_experiment/broker/trading.py`):
+`NO_DECISION_DUE`, `HISTORY_EXHAUSTED`, `MAX_DECISIONS_REACHED`, `NO_SIGNAL`,
+`INSUFFICIENT_DATA`, `MARKET_DATA_UNAVAILABLE`, `SIZE_TOO_SMALL`, `RISK_REJECTED`,
+`BROKER_REJECTED`, `ALREADY_PROCESSED`, `ORDER_EXISTS`, `EXIT_REFUSED`.
+
+The code rides on the cycle result (`CycleResult.reason_code`) and the persisted
+worker state (`WorkerState.last_no_trade_code`), with the human detail in
+`last_no_decision_reason`. The experiment decision source names its own code
+(`ExperimentDecisionSource.skip_code`), so a fully-consumed history reports
+`HISTORY_EXHAUSTED` — naming that new market data is required — instead of the
+generic "no decision is due". This is the difference between "the engine is idle
+because it is out of bars" and "the engine is idle because it is broken".
+
+The dashboard's engine view turns the code into a single `blocker`
+(`{code, detail, operator_action_required}`) naming the *first* gate that stopped a
+trade, and reports `market_data_available` from the seam's own status. The
+historical and static seams derive that status from availability, so the page
+never claims the market data is down while the worker is pricing orders from it.
+The view reads persisted state only: no broker, no network, no credential.
+
+The execution chain these states describe — market data → evaluation → decision →
+risk → order → fill → position → exit — is exercised end to end, against real
+worker code and a mocked broker transport, by
+`tests/test_paper_execution_chain.py`.

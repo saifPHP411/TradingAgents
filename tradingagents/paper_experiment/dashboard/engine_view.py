@@ -25,10 +25,26 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..broker.trading import MARKET_DATA_STATUS_OK
+
 # A submitted order is one the broker acknowledged; a filled order is one that
 # actually traded. Kept apart on purpose: a submitted-but-unfilled order is not a
 # trade, and the dashboard must never report it as one.
 _TERMINAL_WITHOUT_FILL = ("canceled", "expired", "rejected")
+
+
+def _has_priced(status: dict[str, Any]) -> bool:
+    """Whether the worker has actually priced something, from its own record.
+
+    Evidence that the price seam worked: a cycle that reached a price (a
+    ``reference_price`` on the last cycle) or an order that was submitted (which
+    required a price). Used only to resolve a seam that reports no status of its
+    own — never to override an explicit non-ok status.
+    """
+    last_cycle = status.get("last_cycle")
+    if isinstance(last_cycle, dict) and last_cycle.get("reference_price") is not None:
+        return True
+    return any(o.get("client_order_id") for o in _orders(status))
 
 
 def _orders(status: dict[str, Any]) -> list[dict[str, Any]]:
@@ -59,6 +75,61 @@ def _as_number(value: Any) -> float:
         return 0.0
 
 
+def _blocker(
+    *,
+    worker_status: Any,
+    loop_running: bool,
+    market_data_available: bool,
+    market_status: Any,
+    last_eval: Any,
+    no_trade_code: Any,
+    no_trade_reason: Any,
+) -> dict[str, Any] | None:
+    """The single thing preventing a trade right now, or ``None`` when nothing is.
+
+    Ordered by what stops the pipeline earliest, so the answer is the *first* gate
+    rather than every gate at once. Returns ``None`` when the worker is not running
+    (a stopped worker is not "blocked"; it is off), when no cycle has run yet (no
+    evidence either way), or when the last cycle placed an order. Otherwise it names
+    a stable ``code``, a human ``detail``, and whether the operator must act.
+    """
+    if worker_status != "RUNNING" or not loop_running:
+        return None
+    if last_eval is None:
+        # The loop is up but has not reached its first evaluation yet — honest
+        # "not yet", not a fabricated blocker.
+        return {
+            "code": "AWAITING_FIRST_EVALUATION",
+            "detail": "the loop is running but has not evaluated the strategy yet",
+            "operator_action_required": False,
+        }
+    if no_trade_code is None and no_trade_reason is None:
+        # The last evaluation produced an order; nothing is blocking.
+        return None
+    if not market_data_available:
+        return {
+            "code": "MARKET_DATA_UNAVAILABLE",
+            "detail": no_trade_reason
+            or f"the price seam reported {market_status or 'no status'}",
+            "operator_action_required": True,
+        }
+    if no_trade_code == "MARKET_DATA_UNAVAILABLE":
+        return {
+            "code": "MARKET_DATA_UNAVAILABLE",
+            "detail": no_trade_reason or "the price source could not price the symbol",
+            "operator_action_required": True,
+        }
+    return {
+        "code": no_trade_code or "NO_DECISION_DUE",
+        "detail": no_trade_reason,
+        # A cadence gap clears itself; a size or credential problem needs the
+        # operator. Anything else is reported as needing attention rather than
+        # assumed benign.
+        "operator_action_required": no_trade_code
+        not in ("NO_DECISION_DUE", "ALREADY_PROCESSED", "ORDER_EXISTS"),
+    }
+
+
 def engine_view(status: dict[str, Any]) -> dict[str, Any]:
     """The separated engine states and their timestamps, from a worker status.
 
@@ -76,6 +147,16 @@ def engine_view(status: dict[str, Any]) -> dict[str, Any]:
     last_eval = status.get("last_strategy_evaluation_at")
     last_decision = status.get("last_processed_decision_id")
     no_trade_reason = status.get("last_no_decision_reason")
+    no_trade_code = status.get("last_no_trade_code")
+
+    # A seam that does not report a status is not proof the market data is broken:
+    # the historical/test seams price an order without recording one. Treat "no
+    # status" as unknown, and only an explicit non-ok status as unavailable, so the
+    # engine page never claims the market data is down while the worker is pricing
+    # orders from it.
+    market_data_available = market_status == MARKET_DATA_STATUS_OK or (
+        market_status is None and _has_priced(status)
+    )
 
     # "Decision generated" means a decision is currently in hand or was acted on.
     # With none, the *reason* there is none is surfaced so the state is explained,
@@ -98,7 +179,7 @@ def engine_view(status: dict[str, Any]) -> dict[str, Any]:
         },
         "states": {
             "worker_running": worker_status == "RUNNING" and loop_running,
-            "market_data_available": market_status == "ok",
+            "market_data_available": market_data_available,
             "strategy_evaluating": bool(last_eval),
             "decision_generated": bool(decision_generated),
             "order_submitted": bool(submitted),
@@ -142,6 +223,16 @@ def engine_view(status: dict[str, Any]) -> dict[str, Any]:
         },
         "last_error": status.get("last_error"),
         "no_trade_reason": no_trade_reason,
+        "no_trade_code": no_trade_code,
+        "blocker": _blocker(
+            worker_status=worker_status,
+            loop_running=loop_running,
+            market_data_available=market_data_available,
+            market_status=market_status,
+            last_eval=last_eval,
+            no_trade_code=no_trade_code,
+            no_trade_reason=no_trade_reason,
+        ),
         "counts": {
             "orders": len(orders),
             "submitted": len(submitted),

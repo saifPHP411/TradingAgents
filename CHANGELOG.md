@@ -270,6 +270,39 @@ path, and no configuration that produces one.
   `refresh`; the default preserves prior behaviour. `BrokerAccountState` now
   persists positions.
 
+### Changed
+
+- **The paper engine now says *why* it placed no order, as a stable code.** A
+  RUNNING worker that traded nothing used to report only "no decision is due",
+  which cannot tell a decision-cadence gap from a disarmed strategy from an
+  exhausted dataset. `CycleResult` and the persisted worker state gain a
+  `reason_code`/`last_no_trade_code` from a closed vocabulary
+  (`NO_TRADE_REASONS` in `paper_experiment/broker/trading.py`):
+  `NO_DECISION_DUE`, `HISTORY_EXHAUSTED`, `MAX_DECISIONS_REACHED`, `NO_SIGNAL`,
+  `INSUFFICIENT_DATA`, `MARKET_DATA_UNAVAILABLE`, `SIZE_TOO_SMALL`,
+  `RISK_REJECTED`, `BROKER_REJECTED`, `ALREADY_PROCESSED`, `ORDER_EXISTS` and
+  `EXIT_REFUSED`. The experiment decision source names its own code
+  (`ExperimentDecisionSource.skip_code`), so a fully-consumed history reports
+  `HISTORY_EXHAUSTED` — naming that new market data is required — rather than a
+  generic "no decision". The fields are additive and optional: an older state file
+  reads back as `None`, which a view reports as unknown rather than as "fine".
+- **The engine view reports the blocker, and no longer calls the market data down
+  while it is pricing orders** (`paper_experiment/dashboard/engine_view.py`). The
+  historical and static price seams did not record a `market_data_status`, so the
+  engine page read the market data as *unavailable* even while the worker priced
+  an order from it; they now derive a status from availability. The view adds a
+  `blocker` (`{code, detail, operator_action_required}`) naming the single first
+  gate that stopped a trade — `None` when the worker is stopped or a cycle placed
+  an order, and `AWAITING_FIRST_EVALUATION` before the first cycle — and exposes
+  `no_trade_code`. It is derived only from persisted state; it touches no broker
+  and no network.
+- The dashboard's price-source text is now a single, consistent statement. The
+  overview's "Market data" card and the engine tab's "Price seam" card previously
+  described the same seam in two different ways ("latest available bar" vs a
+  current snapshot); both now name one authoritative **paper price source**, and
+  the Dataset panel says explicitly that it describes the historical experiment
+  series, separate from the price the worker sizes from.
+
 ### Fixed
 
 - **A truncated paper recovery file is refused, not silently defaulted**

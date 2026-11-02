@@ -355,6 +355,47 @@ once per interval until **STOP**, which signals the loop and waits for the
 in-flight cycle to finish. It is opt-in (`--allow-paper-trading`) and paper-only; see
 [PAPER_EXPERIMENT.md](PAPER_EXPERIMENT.md#the-paper-trading-worker-explicit-opt-in-paper-only).
 
+## Why the engine placed no order
+
+A RUNNING worker that trades nothing is the hardest state to trust: "RUNNING" and
+"no order" look identical whether the engine is broken, waiting, or merely out of
+bars. So every cycle that placed no order records *why*, as a stable code from a
+closed vocabulary (`NO_TRADE_REASONS` in `paper_experiment/broker/trading.py`):
+
+| Code | Meaning |
+| --- | --- |
+| `NO_DECISION_DUE` | the next decision session has not arrived yet |
+| `HISTORY_EXHAUSTED` | every available session is processed; new data is needed |
+| `MAX_DECISIONS_REACHED` | the configured decision cap is reached |
+| `NO_SIGNAL` | the strategy decided HOLD (or an actionless rating) |
+| `INSUFFICIENT_DATA` | the strategy had too little history to decide |
+| `MARKET_DATA_UNAVAILABLE` | the price source could not price the symbol |
+| `SIZE_TOO_SMALL` | the notional floors to zero shares at this price |
+| `RISK_REJECTED` | a local risk limit refused the order |
+| `BROKER_REJECTED` | the broker refused the order |
+| `ALREADY_PROCESSED` | this decision was already acted on |
+| `ORDER_EXISTS` | the worker already knows this client order id |
+| `EXIT_REFUSED` | a stop/target exit was refused |
+
+The code is carried on the cycle result (`CycleResult.reason_code`) and persisted
+(`WorkerState.last_no_trade_code`), with the human detail alongside
+(`last_no_decision_reason`). The experiment decision source names its own code
+(`ExperimentDecisionSource.skip_code`), so a fully-consumed history reports
+`HISTORY_EXHAUSTED` — which says new market data is required — rather than a
+generic "no decision is due".
+
+The dashboard's engine view (`paper_experiment/dashboard/engine_view.py`) turns
+that into a single `blocker` — `{code, detail, operator_action_required}` — naming
+the *first* gate that stopped a trade. It is `None` when the worker is stopped (a
+stopped worker is off, not blocked) or when a cycle placed an order, and
+`AWAITING_FIRST_EVALUATION` before the first cycle. The view is derived only from
+persisted state: it touches no broker and no network.
+
+The same view reports `market_data_available` from the seam's own status. The
+historical and static seams derive a status from availability, so the page never
+claims the market data is down while the worker is pricing orders from it — an
+explicit non-ok status is the only thing that reports it unavailable.
+
 ## Running a session forward over time
 
 This module is one decision at a time. To record an LLM strategy's decisions

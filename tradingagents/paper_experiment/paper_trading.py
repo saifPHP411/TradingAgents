@@ -32,6 +32,11 @@ from tradingagents.llm_evaluation.replay import signal_from_record
 from tradingagents.signals import SignalAction
 
 from .broker import TradingDecision
+from .broker.trading import (
+    NO_TRADE_HISTORY_EXHAUSTED,
+    NO_TRADE_MAX_DECISIONS_REACHED,
+    NO_TRADE_NO_DECISION_DUE,
+)
 from .experiment import STATE_BLOCKED, STATE_PENDING, DecisionState, PaperExperiment
 
 # A signal action that maps to a broker side. HOLD (and any actionless rating) is
@@ -108,6 +113,12 @@ class ExperimentDecisionSource:
     worker so a RUNNING-but-idle cycle reports the real gate rather than a generic
     "no decision is due". Not part of construction: it is an observation of the last
     call, never an input."""
+    skip_code: str | None = field(default=None, init=False)
+    """The stable code (from ``NO_TRADE_REASONS``) behind :attr:`skip_reason`.
+
+    ``None`` after a call that produced a decision. Lets the worker persist a code
+    the dashboard can match on, rather than re-parsing the prose in
+    :attr:`skip_reason`."""
 
     def __post_init__(self) -> None:
         self._baseline = {
@@ -204,9 +215,10 @@ class ExperimentDecisionSource:
         experiment = self._current()
         candidates = self._candidates(experiment)
         if not candidates:
-            self.skip_reason = self._explain_no_decision(experiment)
+            self.skip_reason, self.skip_code = self._explain_no_decision(experiment)
             return None
         self.skip_reason = None
+        self.skip_code = None
         state = candidates[0]
         self._yielded.add(state.decision_id)
         side = self._side_for(experiment, state)
@@ -227,34 +239,61 @@ class ExperimentDecisionSource:
             strategy_name=experiment.config.strategy_id,
         )
 
-    def _explain_no_decision(self, experiment: PaperExperiment) -> str:
-        """Why no decision was offered, from the experiment's own recorded state.
+    def _explain_no_decision(
+        self, experiment: PaperExperiment
+    ) -> tuple[str, str]:
+        """Why no decision was offered, as ``(detail, code)``.
 
-        Names the actual gate — the cadence, the decision cap, an un-covered
-        execution session, or a settled backlog — rather than a generic message, so
-        a RUNNING-but-idle worker is explainable. Reads only persisted state.
+        Names the actual gate — the cadence, the decision cap, or a fully-consumed
+        history — rather than a generic message, so a RUNNING-but-idle worker is
+        explainable. The code is from the worker's ``NO_TRADE_REASONS`` vocabulary,
+        so the dashboard matches on it instead of the prose. Reads only persisted
+        state.
         """
         try:
             cadence = experiment.decision_cadence()
         except Exception:  # noqa: BLE001 - an unreadable cadence must not crash a cycle
             cadence = {}
         if cadence.get("max_decisions_reached"):
-            return f"max_decisions ({cadence.get('max_decisions')}) reached"
+            return (
+                f"max_decisions ({cadence.get('max_decisions')}) reached",
+                NO_TRADE_MAX_DECISIONS_REACHED,
+            )
         next_due = cadence.get("next_decision_session")
-        last_session = None
         try:
             processed = sorted(experiment.processed_sessions)
             last_session = processed[-1] if processed else None
         except Exception:  # noqa: BLE001
             last_session = None
+
+        # Every session the source offers has been processed and no later decision
+        # session remains: the experiment's *history* is exhausted, so there is
+        # nothing to trade against until new data arrives. This is the case that
+        # previously reported only "no due, tradeable decision is available", which
+        # hid whether the engine was broken or merely out of bars. Distinguishing it
+        # is the whole point of this phase.
+        if next_due is None and last_session is not None:
+            return (
+                f"the experiment has processed every available session "
+                f"(through {last_session}) and no decision is pending; "
+                "new market data is required before the next decision",
+                NO_TRADE_HISTORY_EXHAUSTED,
+            )
         if next_due and last_session:
             return (
                 f"no decision is due yet: the next decision session is {next_due} "
-                f"and the experiment has advanced to {last_session}"
+                f"and the experiment has advanced to {last_session}",
+                NO_TRADE_NO_DECISION_DUE,
             )
         if next_due:
-            return f"no decision is due yet: the next decision session is {next_due}"
-        return "no due, tradeable decision is available"
+            return (
+                f"no decision is due yet: the next decision session is {next_due}",
+                NO_TRADE_NO_DECISION_DUE,
+            )
+        return (
+            "no due, tradeable decision is available",
+            NO_TRADE_NO_DECISION_DUE,
+        )
 
     def reset(self) -> None:
         """Forget which decisions were yielded, so a fresh pass re-reads them.
