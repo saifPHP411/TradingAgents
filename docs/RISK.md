@@ -18,6 +18,7 @@ All of these live in `RiskLimits` and are configuration, not code:
 | `max_drawdown` | Most peak-to-trough decline tolerated | disabled |
 | `max_order_value` | Largest single order notional | disabled |
 | `min_order_value` | Smallest single order notional | disabled |
+| `max_risk_per_trade` | Most equity one trade may put at risk, `quantity x (entry - stop)` | disabled |
 | `default_position_size` | Fraction used when a signal requests no size | 0.05 |
 | `long_only` | Whether shorts are forbidden | True |
 
@@ -49,8 +50,19 @@ Sizing happens in this order, and each step can only reduce the size:
 2. Cap at `max_position_size` of current equity.
 3. Cap at the remaining exposure headroom under `max_portfolio_exposure`.
 4. Cap at available cash.
-5. Cap at `max_order_value`, if set.
-6. Refuse if the result is below `min_order_value`, if set.
+5. Cap at `max_risk_per_trade`, if set and the signal carries a stop.
+6. Cap at `max_order_value`, if set.
+7. Refuse if the result is below `min_order_value`, if set.
+
+The risk cap in step 5 is `max_risk_per_trade / (entry - stop)` units, i.e. the
+largest position whose loss at the stop is within the budget. It is applied as a
+minimum over the notional the earlier steps produced, so it can only reduce a
+size. It needs a stop strictly below the entry: with no stop, or a stop at or
+above the entry, there is no positive per-unit risk, so the cap is not applied and
+the decision records that in its notes rather than inventing a stop. A risk budget
+that shrinks the order below `min_order_value` is refused with the reason
+`MAX_RISK_PER_TRADE`. There is no short-side geometry to handle: the engine has no
+SHORT action, so a SELL only reduces a holding and is never sized by this cap.
 
 The cap is applied to the *resulting position*, not to each order. That
 distinction was a real bug: bounding each order let repeated buys accumulate past

@@ -75,6 +75,19 @@ class TestRiskLimits:
         )
         assert limits.max_position_size is None
 
+    def test_risk_per_trade_defaults_to_disabled(self):
+        """Backward compatibility: an unset cap must not change any existing run."""
+        assert RiskLimits().max_risk_per_trade is None
+
+    def test_a_positive_risk_per_trade_is_accepted(self):
+        assert RiskLimits(max_risk_per_trade=250.0).max_risk_per_trade == 250.0
+
+    @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
+    def test_an_invalid_risk_per_trade_is_rejected(self, bad):
+        """Zero, negative, NaN and infinite budgets are all refused at construction."""
+        with pytest.raises(ValidationError):
+            RiskLimits(max_risk_per_trade=bad)
+
 
 # ---------------------------------------------------------------------------
 # Non-actionable and invalid input
@@ -176,6 +189,127 @@ class TestSizing:
         engine = RiskEngine()
         decision = engine.evaluate(_signal(SignalAction.SELL, size=0.4), ledger, price=110.0)
         assert decision.quantity == pytest.approx(4.0)
+
+
+# ---------------------------------------------------------------------------
+# Risk-based sizing (max_risk_per_trade)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRiskPerTradeSizing:
+    """The optional per-trade risk cap: a ceiling, and only a ceiling.
+
+    The cap bounds the loss at the stop, ``quantity x (entry - stop)``. It is
+    checked last, as a minimum over the notional every other cap already produced,
+    so enabling it can only ever reduce a size. With no usable stop there is no
+    per-unit risk to measure, so the cap is left off and the decision says so
+    rather than inventing a stop.
+    """
+
+    def _engine(self, **limits):
+        # default_position_size must stay <= max_position_size, so pin it low.
+        limits.setdefault("default_position_size", 0.001)
+        limits.setdefault("max_portfolio_exposure", None)
+        return RiskEngine(RiskLimits(**limits))
+
+    def test_disabled_by_default_leaves_sizing_unchanged(self):
+        """The whole point of None: an existing run's sizes do not move."""
+        without = self._engine(max_position_size=0.2).evaluate(
+            _signal(size=0.1, stop_loss=90.0), _ledger(100_000.0), price=100.0
+        )
+        assert without.approved
+        assert without.quantity == pytest.approx(100.0)
+
+    def test_the_risk_cap_binds_and_reduces_the_size(self):
+        # 200 risk / 10 per-unit risk = 20 units, versus 100 from the size request.
+        decision = self._engine(max_position_size=0.2, max_risk_per_trade=200.0).evaluate(
+            _signal(size=0.1, stop_loss=90.0), _ledger(100_000.0), price=100.0
+        )
+        assert decision.approved
+        assert decision.quantity == pytest.approx(20.0)
+        assert any("max_risk_per_trade" in note for note in decision.notes)
+
+    def test_the_risk_cap_never_increases_the_size(self):
+        """A budget larger than the trade's own risk must not grow the order."""
+        decision = self._engine(max_position_size=0.2, max_risk_per_trade=1_000_000.0).evaluate(
+            _signal(size=0.1, stop_loss=95.0), _ledger(100_000.0), price=100.0
+        )
+        assert decision.quantity == pytest.approx(100.0)
+
+    def test_the_position_cap_binds_before_the_risk_cap(self):
+        # The 1% position cap gives 10 units; a generous risk budget is irrelevant.
+        decision = self._engine(max_position_size=0.01, max_risk_per_trade=10_000.0).evaluate(
+            _signal(size=0.5, stop_loss=90.0), _ledger(100_000.0), price=100.0
+        )
+        assert decision.quantity == pytest.approx(10.0)
+
+    def test_the_notional_cap_binds_before_the_risk_cap(self):
+        decision = self._engine(
+            max_position_size=0.2, max_order_value=500.0, max_risk_per_trade=10_000.0
+        ).evaluate(_signal(size=0.1, stop_loss=90.0), _ledger(100_000.0), price=100.0)
+        assert decision.quantity == pytest.approx(5.0)
+
+    def test_buying_power_binds_before_the_risk_cap(self):
+        """Cash, not equity, is the binding constraint once the book is invested."""
+        ledger = _ledger(10_000.0)
+        ledger.apply_fill(symbol="MSFT", quantity=90, price=100.0, fee=0.0, timestamp=T0)
+        ledger.mark("MSFT", 100.0)  # cash 1,000; equity 10,000
+        decision = self._engine(
+            max_position_size=1.0, default_position_size=1.0, max_risk_per_trade=10_000.0
+        ).evaluate(_signal(size=1.0, stop_loss=90.0), ledger, price=100.0)
+        assert decision.quantity == pytest.approx(10.0)
+        assert any("cash" in note for note in decision.notes)
+
+    def test_a_missing_stop_leaves_sizing_unchanged_and_says_so(self):
+        decision = self._engine(max_position_size=0.2, max_risk_per_trade=200.0).evaluate(
+            _signal(size=0.1, stop_loss=None), _ledger(100_000.0), price=100.0
+        )
+        assert decision.approved
+        assert decision.quantity == pytest.approx(100.0)
+        assert any("no usable stop" in note for note in decision.notes)
+
+    def test_a_stop_at_or_above_the_entry_yields_no_risk_cap(self):
+        """A zero or negative per-unit risk is not a cap; it is not applied."""
+        decision = self._engine(max_position_size=0.2, max_risk_per_trade=200.0).evaluate(
+            _signal(size=0.1, stop_loss=100.0), _ledger(100_000.0), price=100.0
+        )
+        assert decision.approved
+        assert decision.quantity == pytest.approx(100.0)
+        assert any("not below the entry" in note for note in decision.notes)
+
+    def test_a_risk_budget_below_the_minimum_order_is_refused_with_a_named_reason(self):
+        decision = self._engine(
+            max_position_size=0.2, max_risk_per_trade=1.0, min_order_value=500.0
+        ).evaluate(_signal(size=0.1, stop_loss=90.0), _ledger(100_000.0), price=100.0)
+        assert decision.verdict is RiskVerdict.REJECTED
+        assert RiskReason.MAX_RISK_PER_TRADE in decision.reasons
+
+    def test_the_cap_produces_a_fractional_size_when_fractional_shares_are_allowed(self):
+        """The engine sizes in fractional units; whole-share rounding is downstream."""
+        # 205 risk / 10 per-unit = 20.5 units.
+        decision = self._engine(max_position_size=0.2, max_risk_per_trade=205.0).evaluate(
+            _signal(size=0.1, stop_loss=90.0), _ledger(100_000.0), price=100.0
+        )
+        assert decision.quantity == pytest.approx(20.5)
+
+    def test_the_cap_is_the_minimum_of_risk_and_the_size_request(self):
+        """When the risk budget is the looser bound, the size request still wins."""
+        # 50 risk / 10 = 5 units from risk; 10% of 100,000 = 100 units from size.
+        tight = self._engine(max_position_size=0.2, max_risk_per_trade=50.0).evaluate(
+            _signal(size=0.1, stop_loss=90.0), _ledger(100_000.0), price=100.0
+        )
+        assert tight.quantity == pytest.approx(5.0)
+
+    def test_a_sell_is_never_sized_by_the_risk_cap(self):
+        """A SELL reduces a holding; it opens no risk, so the cap does not touch it."""
+        ledger = _ledger()
+        ledger.apply_fill(symbol="AAPL", quantity=100, price=100.0, fee=0.0, timestamp=T0)
+        decision = self._engine(max_position_size=0.2, max_risk_per_trade=1.0).evaluate(
+            _signal(SignalAction.SELL, stop_loss=90.0), ledger, price=110.0
+        )
+        assert decision.approved
+        assert decision.quantity == pytest.approx(100.0)
 
 
 # ---------------------------------------------------------------------------
@@ -633,3 +767,44 @@ class TestFillTimeRecheck:
         assert after.equity == before.equity
         assert after.total_fees == before.total_fees
         assert ledger.events == []
+
+    def test_the_risk_cap_is_rechecked_at_the_fill_price(self):
+        """A gap up raises the per-unit risk, so the same budget buys fewer units."""
+        # Budget 200, stop 90: at a fill of 100 the risk is 10/unit -> 20 units;
+        # at a fill of 120 the risk is 30/unit -> 6.6667 units.
+        engine = self._engine(max_position_size=0.2, max_risk_per_trade=200.0)
+        decision = engine.review_fill(
+            symbol="AAPL", action=SignalAction.BUY, quantity=100,
+            ledger=_ledger(100_000.0), fill_price=120.0, stop_loss=90.0,
+        )
+        assert decision.approved
+        assert decision.quantity == pytest.approx(200.0 / 30.0 * 120.0 / 120.0)
+        assert RiskReason.MAX_RISK_PER_TRADE in decision.reasons
+
+    def test_the_recheck_leaves_a_size_inside_the_risk_budget_alone(self):
+        engine = self._engine(max_position_size=0.2, max_risk_per_trade=10_000.0)
+        decision = engine.review_fill(
+            symbol="AAPL", action=SignalAction.BUY, quantity=50,
+            ledger=_ledger(100_000.0), fill_price=100.0, stop_loss=90.0,
+        )
+        assert decision.approved
+        assert decision.quantity == pytest.approx(50.0)
+
+    def test_the_recheck_without_a_stop_is_unchanged(self):
+        """A caller that passes no stop keeps the previous behaviour exactly."""
+        engine = self._engine(max_position_size=0.2, max_risk_per_trade=200.0)
+        decision = engine.review_fill(
+            symbol="AAPL", action=SignalAction.BUY, quantity=100,
+            ledger=_ledger(100_000.0), fill_price=100.0,
+        )
+        assert decision.approved
+        assert decision.quantity == pytest.approx(100.0)
+
+    def test_a_stop_at_or_above_the_fill_yields_no_risk_reduction(self):
+        engine = self._engine(max_position_size=0.2, max_risk_per_trade=200.0)
+        decision = engine.review_fill(
+            symbol="AAPL", action=SignalAction.BUY, quantity=100,
+            ledger=_ledger(100_000.0), fill_price=100.0, stop_loss=100.0,
+        )
+        assert decision.approved
+        assert decision.quantity == pytest.approx(100.0)

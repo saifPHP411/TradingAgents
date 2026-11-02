@@ -59,6 +59,7 @@ class RiskReason(StrEnum):
     MAX_ORDER_VALUE = "MAX_ORDER_VALUE"
     MAX_POSITION_SIZE = "MAX_POSITION_SIZE"
     MAX_PORTFOLIO_EXPOSURE = "MAX_PORTFOLIO_EXPOSURE"
+    MAX_RISK_PER_TRADE = "MAX_RISK_PER_TRADE"
     MAX_OPEN_POSITIONS = "MAX_OPEN_POSITIONS"
     MAX_DAILY_LOSS = "MAX_DAILY_LOSS"
     MAX_DRAWDOWN = "MAX_DRAWDOWN"
@@ -114,6 +115,18 @@ class RiskLimits(BaseModel):
     )
     min_order_value: float | None = Field(
         default=None, ge=0.0, description="Smallest single order notional. None disables it."
+    )
+    max_risk_per_trade: float | None = Field(
+        default=None,
+        gt=0.0,
+        description=(
+            "Most equity that one trade may put at risk, in account currency: "
+            "quantity x (entry - stop). None (the default) disables the check and "
+            "leaves sizing exactly as it was. It is a *ceiling*, so enabling it can "
+            "only reduce a size, never increase one. A per-unit risk needs a stop, "
+            "so when the signal carries no usable stop the cap is not applied and "
+            "the decision records that it could not be."
+        ),
     )
     default_position_size: float = Field(
         default=0.05,
@@ -367,9 +380,66 @@ class RiskEngine:
             )
             value = cash
 
+        risk_bound = False
+        risk_headroom = self._risk_headroom_value(signal, price, decision)
+        if risk_headroom is not None and risk_headroom < value:
+            risk_bound = True
+            decision.notes.append(
+                f"size reduced to keep the risk of {signal.symbol} at or under "
+                f"max_risk_per_trade {self.limits.max_risk_per_trade:,.2f}"
+            )
+            value = risk_headroom
+
         self._check_new_position_count(decision, ledger, signal.symbol)
 
-        return self._apply_value_limits(value, price, decision)
+        return self._apply_value_limits(
+            value,
+            price,
+            decision,
+            min_value_reason=(
+                RiskReason.MAX_RISK_PER_TRADE if risk_bound else RiskReason.MIN_ORDER_VALUE
+            ),
+        )
+
+    def _risk_headroom_value(
+        self, signal: TradingSignal, price: float, decision: RiskDecision
+    ) -> float | None:
+        """Value that keeps ``quantity x (entry - stop)`` within ``max_risk_per_trade``.
+
+        Returns ``None`` when the cap is disabled (the default) or cannot be
+        applied. Returning ``None`` rather than a number is what makes the cap a
+        ceiling and nothing more: a disabled or inapplicable cap must never reduce
+        or reject a trade the existing policy already allowed.
+
+        With no usable stop there is no per-unit risk to measure, so the cap is
+        left off and the decision records that it could not be applied rather than
+        inventing a stop. An invalid stop geometry (a stop at or above the entry)
+        is treated the same way: a "risk" of zero or less would produce a
+        meaningless, unbounded quantity, so no cap is derived from it. The
+        existing policy still governs the trade in both cases.
+
+        The engine has no SHORT action — a SELL only ever reduces a holding — so
+        the risk of a new position is only ever a long's, and there is no mirror
+        geometry to handle here.
+        """
+        cap = self.limits.max_risk_per_trade
+        if cap is None:
+            return None
+        stop = signal.stop_loss
+        if stop is None or not math.isfinite(stop):
+            decision.notes.append(
+                "max_risk_per_trade not applied: the signal carries no usable stop to "
+                "measure per-unit risk against"
+            )
+            return None
+        risk_per_unit = price - stop
+        if risk_per_unit <= 0:
+            decision.notes.append(
+                f"max_risk_per_trade not applied: the stop {stop:g} is not below the entry "
+                f"{price:g}, so there is no positive per-unit risk to cap"
+            )
+            return None
+        return cap / risk_per_unit * price
 
     def _position_headroom_value(
         self, ledger: Ledger, equity: float, held_value: float, decision: RiskDecision
@@ -446,11 +516,23 @@ class RiskEngine:
                 f"the book already holds {len(open_positions)} positions, at the {cap} limit"
             )
 
-    def _apply_value_limits(self, target_value: float, price: float, decision: RiskDecision) -> float:
+    def _apply_value_limits(
+        self,
+        target_value: float,
+        price: float,
+        decision: RiskDecision,
+        *,
+        min_value_reason: RiskReason = RiskReason.MIN_ORDER_VALUE,
+    ) -> float:
         """Convert a target notional to units, enforcing the order-value band.
 
         The band is applied to the notional, then the notional is converted, so a
         min/max order value is respected exactly rather than approximately.
+
+        ``min_value_reason`` names why a sub-minimum value was refused. It is
+        ``MIN_ORDER_VALUE`` by default; when the risk cap is what shrank the order
+        below the floor, the caller passes ``MAX_RISK_PER_TRADE`` so the rejection
+        says the risk budget was the cause rather than a bare order-value band.
         """
         limits = self.limits
         value = target_value
@@ -460,7 +542,7 @@ class RiskEngine:
             )
             value = limits.max_order_value
         if limits.min_order_value is not None and 0 < value < limits.min_order_value:
-            decision.reasons.append(RiskReason.MIN_ORDER_VALUE)
+            decision.reasons.append(min_value_reason)
             decision.notes.append(
                 f"order value {value:,.2f} is below min_order_value {limits.min_order_value:,.2f}"
             )
@@ -549,6 +631,7 @@ class RiskEngine:
         ledger: Ledger,
         fill_price: float,
         max_notional: float | None = None,
+        stop_loss: float | None = None,
     ) -> RiskDecision:
         """Re-check the position and exposure caps at the price a fill will get.
 
@@ -576,6 +659,13 @@ class RiskEngine:
         A SELL needs no cap re-check: it reduces the position and the exposure, so
         a gap can only make it smaller. Its holding constraint is the ledger's,
         and is enforced where the fill is applied.
+
+        ``stop_loss`` is the signal's stop, when the caller still has it. It lets
+        the ``max_risk_per_trade`` cap be re-checked against the fill price the
+        way every other cap is: the decision measured the risk from the decision
+        price, and a gap can move it. A caller that does not pass a stop simply
+        leaves the risk cap where it was at decision time, exactly as before this
+        option existed; the other caps are still re-checked.
         """
         decision = RiskDecision(verdict=RiskVerdict.APPROVED, symbol=symbol, action=action)
 
@@ -657,6 +747,19 @@ class RiskEngine:
 
         if limits.max_order_value is not None:
             cap_quantity(limits.max_order_value, RiskReason.MAX_ORDER_VALUE)
+
+        # The per-trade risk cap, re-checked at the fill price when the caller
+        # supplied the stop. Only a positive per-unit risk is meaningful; a stop
+        # at or above the fill has no risk to cap, so it is left alone here just
+        # as at sizing time. Disabled (the default) this does nothing.
+        if limits.max_risk_per_trade is not None and stop_loss is not None \
+                and math.isfinite(stop_loss):
+            risk_per_unit = fill_price - stop_loss
+            if risk_per_unit > 0:
+                cap_quantity(
+                    limits.max_risk_per_trade / risk_per_unit * fill_price,
+                    RiskReason.MAX_RISK_PER_TRADE,
+                )
 
         # The cash still available at fill time, as a notional the caller has
         # already made fee-aware. A size was checked against cash when the order
