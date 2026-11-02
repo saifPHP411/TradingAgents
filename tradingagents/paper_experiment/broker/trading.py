@@ -390,18 +390,24 @@ class AlpacaSnapshotMarketData:
       market.
 
     A daily bar's **open** is not a current price, so this seam never reads one:
-    the price is the latest trade price (falling back to the latest quote midpoint,
-    then the minute-bar close), each of which is a genuinely current observation.
-    If no current price is available, :meth:`price` raises and the worker places no
-    order rather than sizing from a stale or fabricated number.
+    the price is the **newest** of the latest trade, the latest quote midpoint and
+    the minute-bar close, compared by their own timestamps, each of which is a
+    genuinely current observation. A fresher quote therefore wins over an older
+    trade, which matters on the IEX feed where a symbol can go minutes without
+    printing a trade while its quote keeps updating. If no current price is
+    available, :meth:`price` raises and the worker places no order rather than
+    sizing from a stale or fabricated number.
 
     **Freshness.** A current price is only useful if it is current, so the
-    timestamp of the *same* field the price came from is validated: a snapshot
-    older than ``max_age_seconds`` (default :data:`DEFAULT_MAX_SNAPSHOT_AGE_SECONDS`,
-    300s), a missing or unparseable timestamp, or a timestamp materially in the
-    future is refused with :class:`MarketDataError`. The worker then places **no**
-    order. There is no fallback to a historical daily bar: this seam never reads
-    one, so selecting it can never silently degrade to a stale price.
+    timestamp of the *same* field the price came from is validated: the newest
+    field being older than ``max_age_seconds`` (default
+    :data:`DEFAULT_MAX_SNAPSHOT_AGE_SECONDS`, 300s), a missing or unparseable
+    timestamp, or a timestamp materially in the future is refused with
+    :class:`MarketDataError`. Selecting the newest field does not weaken this
+    check: when every current field is stale the price is still refused. The
+    worker then places **no** order. There is no fallback to a historical daily
+    bar: this seam never reads one, so selecting it can never silently degrade to
+    a stale price.
 
     Host and credentials are the market-data host and the paper credentials; this
     class never touches the trading endpoint and never places an order.
@@ -613,35 +619,30 @@ class AlpacaSnapshotMarketData:
 
     @staticmethod
     def _price_from(snapshot: Any) -> SnapshotObservation | None:
-        """The most current usable price *and its own timestamp*, or ``None``.
+        """The newest usable current price *and its own timestamp*, or ``None``.
 
-        Preference order is deliberate: the latest *trade* is the most recent real
-        transaction; a quote midpoint is next; the minute-bar close is last. A daily
-        bar's open is never used, because it is not a current price. Every candidate
-        must be finite and positive, so a NaN cannot pass a comparison and poison a
-        later sizing step. The returned observation pairs the price with the
-        timestamp of the *same* field, so freshness is judged against the field the
-        price actually came from.
+        The fields are compared by the timestamp each one carries, not by a fixed
+        preference order: the price wanted here is the newest observation of the
+        *current* market, so a fresher quote is chosen over an older trade. That
+        matters because a symbol can go minutes without printing on the IEX feed
+        while its quote keeps updating, and a trade-first order would then refuse
+        a perfectly fresh market.
+
+        ``dailyBar`` and ``prevDailyBar`` are never candidates: a daily bar is not
+        a current price. Every candidate must be finite and positive, so a NaN
+        cannot pass a comparison and poison a later sizing step.
+
+        An exact tie on the timestamp is settled by
+        :data:`_SNAPSHOT_FIELD_PREFERENCE` (trade, then quote, then minute bar),
+        so the choice stays deterministic. A field whose timestamp is missing or
+        unparseable cannot outrank a field with a usable timestamp; it is returned
+        only when *no* candidate has a usable timestamp, so the freshness check
+        can still name precisely why the price is unusable. Ranking is by
+        timestamp alone — a stale or future-dated newest field is still selected
+        and then refused by the freshness check, never quietly replaced by an
+        older field.
         """
-        if not isinstance(snapshot, dict):
-            return None
-        trade = snapshot.get("latestTrade") or {}
-        if isinstance(trade, dict):
-            price = _positive_finite(trade.get("p"))
-            if price is not None:
-                return SnapshotObservation(price, _stamp(trade.get("t")), "latestTrade")
-        quote = snapshot.get("latestQuote") or {}
-        if isinstance(quote, dict):
-            bid = _positive_finite(quote.get("bp"))
-            ask = _positive_finite(quote.get("ap"))
-            if bid is not None and ask is not None:
-                return SnapshotObservation((bid + ask) / 2.0, _stamp(quote.get("t")), "latestQuote")
-        minute = snapshot.get("minuteBar") or {}
-        if isinstance(minute, dict):
-            price = _positive_finite(minute.get("c"))
-            if price is not None:
-                return SnapshotObservation(price, _stamp(minute.get("t")), "minuteBar")
-        return None
+        return _select_snapshot_observation(_snapshot_candidates(snapshot))
 
 
 def _stamp(value: Any) -> str | None:
@@ -676,6 +677,78 @@ def _positive_finite(value: Any) -> float | None:
     if not math.isfinite(number) or number <= 0:
         return None
     return number
+
+
+_SNAPSHOT_FIELD_PREFERENCE: tuple[str, ...] = ("latestTrade", "latestQuote", "minuteBar")
+"""How an exact timestamp tie between snapshot fields is broken.
+
+The newest observation wins; this order only settles an exact tie, so the choice
+stays deterministic. It is *not* the selection rule — a fresher quote beats an
+older trade. ``dailyBar``/``prevDailyBar`` are deliberately absent: a daily bar is
+not a current price and is never a candidate.
+"""
+
+
+def _snapshot_candidates(snapshot: Any) -> list[SnapshotObservation]:
+    """Every usable current observation in a snapshot, in preference order.
+
+    A candidate exists only when its price is finite and positive: for a quote that
+    means both the bid and the ask are valid, so the midpoint is well-defined. Each
+    candidate carries the timestamp of its *own* field, never another field's.
+    ``dailyBar``/``prevDailyBar`` are never read.
+    """
+    if not isinstance(snapshot, dict):
+        return []
+    candidates: list[SnapshotObservation] = []
+
+    trade = snapshot.get("latestTrade") or {}
+    if isinstance(trade, dict):
+        price = _positive_finite(trade.get("p"))
+        if price is not None:
+            candidates.append(SnapshotObservation(price, _stamp(trade.get("t")), "latestTrade"))
+
+    quote = snapshot.get("latestQuote") or {}
+    if isinstance(quote, dict):
+        bid = _positive_finite(quote.get("bp"))
+        ask = _positive_finite(quote.get("ap"))
+        if bid is not None and ask is not None:
+            candidates.append(
+                SnapshotObservation((bid + ask) / 2.0, _stamp(quote.get("t")), "latestQuote")
+            )
+
+    minute = snapshot.get("minuteBar") or {}
+    if isinstance(minute, dict):
+        price = _positive_finite(minute.get("c"))
+        if price is not None:
+            candidates.append(SnapshotObservation(price, _stamp(minute.get("t")), "minuteBar"))
+
+    return candidates
+
+
+def _select_snapshot_observation(
+    candidates: list[SnapshotObservation],
+) -> SnapshotObservation | None:
+    """The newest verifiable observation, or the best unverifiable one, or ``None``.
+
+    A candidate with a usable timestamp always outranks one without, whatever the
+    preference order: an unverifiable field cannot be shown to be current, so it
+    must not displace a field that can. Among usable timestamps the newest wins,
+    and an exact tie is broken by :data:`_SNAPSHOT_FIELD_PREFERENCE`. When no
+    candidate has a usable timestamp, the first in preference order is returned so
+    the freshness check can name the exact field and reason it refused.
+    """
+    if not candidates:
+        return None
+    rank = {field: index for index, field in enumerate(_SNAPSHOT_FIELD_PREFERENCE)}
+
+    def sort_key(observation: SnapshotObservation) -> tuple[int, float, int]:
+        parsed = _parse_utc(observation.as_of) if observation.as_of is not None else None
+        if parsed is None:
+            # Unverifiable: ranked below every verifiable candidate.
+            return (0, 0.0, -rank.get(observation.field, len(rank)))
+        return (1, parsed.timestamp(), -rank.get(observation.field, len(rank)))
+
+    return max(candidates, key=sort_key)
 
 
 @dataclass

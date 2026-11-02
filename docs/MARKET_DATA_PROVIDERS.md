@@ -207,13 +207,21 @@ be determined is refused rather than refreshed from a different vendor.
 
 The worker sizes an order from a *current* price, and a daily bar's **open** is
 not one. `AlpacaSnapshotMarketData` (`--paper-market-data alpaca_snapshot`) reads
-`GET /v2/stocks/snapshots` and uses the latest trade price, then the latest quote
-midpoint, then the minute-bar close — never a daily open. A missing, malformed,
+`GET /v2/stocks/snapshots` and uses the **newest** of the latest trade, the latest
+quote midpoint, and the minute-bar close — never a daily open. The three fields
+are compared by the timestamp each one carries, not by a fixed preference order:
+on the IEX feed a symbol can go minutes without printing a trade while its quote
+keeps updating, so a trade-first rule would refuse a perfectly fresh market. An
+exact tie on the timestamp is broken by trade, then quote, then minute bar, so the
+choice stays deterministic; a field whose timestamp is missing or unparseable
+cannot outrank a field with a usable timestamp. A missing, malformed,
 NaN, infinite or zero price raises, so the worker places no order rather than
-sizing from a fabricated number. A snapshot is also **age-checked**: a price whose
-own timestamp is older than `--paper-snapshot-max-age-seconds` (default 300s), or
-dated in the future beyond a small clock-skew tolerance, is refused with the reason
-recorded (`stale`, `malformed`, `no_data`). `bar_open` remains the default, so an
+sizing from a fabricated number. A snapshot is also **age-checked**: the newest
+field's own timestamp being older than `--paper-snapshot-max-age-seconds` (default
+300s), or dated in the future beyond a small clock-skew tolerance, is refused with
+the reason recorded (`stale`, `malformed`, `no_data`). Selecting the newest field
+does not weaken that check: when *every* current field is stale the order is still
+refused. `bar_open` remains the default, so an
 operator opts in explicitly, and there is no silent fallback from
 `alpaca_snapshot` to `bar_open`.
 

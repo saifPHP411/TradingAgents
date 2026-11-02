@@ -592,8 +592,11 @@ the module form, so the two entrypoints cannot diverge:
   is a historical price, fine for an offline demonstration, but it is not a current
   market price.
 - `--paper-market-data alpaca_snapshot` — a genuinely current price from Alpaca
-  market data (feed `iex`), read from the latest trade (then the quote midpoint,
-  then the minute-bar close), never a daily open. It requires
+  market data (feed `iex`), read from the **newest** of the latest trade, the quote
+  midpoint and the minute-bar close, never a daily open. The fields are compared by
+  their own timestamps (a stale trade does not mask a fresh quote; an exact tie
+  prefers the trade), and the newest field must still pass the age check below. It
+  requires
   `ALPACA_PAPER_API_KEY` / `ALPACA_PAPER_API_SECRET`. A missing, malformed, NaN,
   infinite or zero price makes the worker place **no** order rather than size from
   a fabricated number.

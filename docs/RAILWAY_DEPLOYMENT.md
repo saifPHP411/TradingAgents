@@ -213,7 +213,10 @@ one of two seams, chosen by `--paper-market-data` (or
   exercising the plumbing, but it is not a current price.
 - `alpaca_snapshot` — a **genuinely current** price read from Alpaca market data
   (`GET /v2/stocks/snapshots`, `feed=iex`). It needs `ALPACA_PAPER_API_KEY` and
-  `ALPACA_PAPER_API_SECRET`. A snapshot older than
+  `ALPACA_PAPER_API_SECRET`. The price is the **newest** of the latest trade, the
+  latest quote midpoint and the minute-bar close, compared by their own timestamps,
+  so a symbol that has stopped printing trades on the IEX feed is not mistaken for
+  a stale market. A snapshot whose newest field is older than
   `--paper-snapshot-max-age-seconds` (default 300s, or
   `$TRADINGAGENTS_PAPER_SNAPSHOT_MAX_AGE_SECONDS`) is **refused**: the worker
   raises and sizes no order rather than trading a stale number. There is no silent

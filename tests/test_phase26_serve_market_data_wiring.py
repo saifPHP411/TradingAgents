@@ -38,10 +38,12 @@ from tradingagents.paper_experiment import ExperimentConfig, PaperExperiment
 from tradingagents.paper_experiment.broker import (
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     AlpacaSnapshotMarketData,
+    BrokerAccount,
     MarketDataError,
     PaperRiskLimits,
     PaperTradingConfig,
     PaperTradingWorker,
+    PreflightError,
     SourceMarketData,
     StaticMarketData,
     TradingDecision,
@@ -601,6 +603,75 @@ class TestSnapshotFailuresNeverOrder:
 
 
 # ---------------------------------------------------------------------------
+# 7d. Preflight accepts a fresh field even when a peer field is stale
+# ---------------------------------------------------------------------------
+
+
+class _PreflightBroker:
+    """A broker that only answers the read-only preflight calls."""
+
+    def connect(self):
+        return BrokerAccount(
+            account_id="paper-acct-1",
+            status="ACTIVE",
+            cash=1000.0,
+            equity=1000.0,
+            buying_power=1000.0,
+            currency="USD",
+            trading_blocked=False,
+            account_blocked=False,
+        )
+
+    def positions(self, refresh=False):
+        return {}
+
+    def submit_order(self, **kwargs):  # pragma: no cover - must never be reached
+        raise AssertionError("preflight must not submit an order")
+
+
+def _preflight_worker(tmp_path, market_data):
+    return PaperTradingWorker(
+        config=PaperTradingConfig(
+            order_notional=25.0,
+            limits=PaperRiskLimits(),
+            state_path=tmp_path / "worker_state.json",
+            market_data_provider="alpaca_snapshot",
+        ),
+        decision_source=_OneDecision(),
+        market_data=market_data,
+        broker_factory=lambda: _PreflightBroker(),
+    )
+
+
+@pytest.mark.unit
+class TestPreflightAcceptsAFreshField:
+    def test_a_fresh_quote_passes_preflight_despite_a_stale_trade(self, tmp_path):
+        body = {
+            SYMBOL: {
+                "latestTrade": {"p": SPY_PRICE, "t": _stamp(-400)},
+                "latestQuote": {"bp": 99.0, "ap": 101.0, "t": _stamp(-1)},
+            }
+        }
+        worker = _preflight_worker(tmp_path, _snapshot_market_data(body))
+        result = worker.preflight()
+        assert {"check": "market_data", "ok": True, "detail": "alpaca_snapshot"} in result["checks"]
+
+    def test_all_fields_stale_fails_preflight(self, tmp_path):
+        body = {
+            SYMBOL: {
+                "latestTrade": {"p": SPY_PRICE, "t": _stamp(-400)},
+                "latestQuote": {"bp": 99.0, "ap": 101.0, "t": _stamp(-500)},
+                "minuteBar": {"c": 123.0, "t": _stamp(-600)},
+            }
+        }
+        worker = _preflight_worker(tmp_path, _snapshot_market_data(body))
+        with pytest.raises(PreflightError) as excinfo:
+            worker.preflight()
+        assert excinfo.value.check == "market_data"
+        assert "stale" in excinfo.value.detail
+
+
+# ---------------------------------------------------------------------------
 # 7. Freshness semantics on the seam itself
 # ---------------------------------------------------------------------------
 
@@ -654,12 +725,16 @@ class TestSnapshotFreshness:
         assert md.price(SYMBOL) == pytest.approx(100.0)
         assert md.last_observation.field == "latestQuote"
 
-    def test_a_stale_preferred_field_is_refused_not_skipped(self):
-        """A stale trade is refused rather than silently skipped to a fresh quote.
+    def test_a_stale_trade_no_longer_blocks_a_fresh_quote(self):
+        """Replaces the old ``test_a_stale_preferred_field_is_refused_not_skipped``.
 
-        The preference order is about *which* price is the current one, not a
-        freshness escape hatch: if the current price is stale, the order is
-        refused, and a lower-preference field is not quietly substituted.
+        That test asserted a stale ``latestTrade`` was refused outright, without
+        ever considering a fresher ``latestQuote``. That rule is gone: the newest
+        verifiable observation is now selected and *then* freshness is enforced.
+        The security property it protected — a stale price is never used — is
+        retained by
+        ``TestNewestObservationSelection::test_all_fields_stale_is_still_refused``
+        and ``::test_the_freshest_field_is_still_subject_to_the_freshness_limit``.
         """
         body = {
             SYMBOL: {
@@ -668,13 +743,188 @@ class TestSnapshotFreshness:
             }
         }
         md = _snapshot_market_data(body, max_age_seconds=300.0)
-        with pytest.raises(MarketDataError, match="stale"):
-            md.price(SYMBOL)
+        assert md.price(SYMBOL) == pytest.approx(100.0)
+        assert md.last_observation.field == "latestQuote"
 
     def test_available_reports_false_for_a_stale_snapshot(self):
         md = _snapshot_market_data(_snapshot_body(stamp=_stamp(-400)))
         assert md.available() is False
         assert md.last_status == "stale"
+
+
+# ---------------------------------------------------------------------------
+# 7b. Selection is by newest verifiable timestamp, not field order
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNewestObservationSelection:
+    """The newest verifiable current observation wins; freshness is then enforced.
+
+    A symbol can go minutes without printing on the IEX feed while its quote keeps
+    updating, so a trade-first order would refuse a perfectly fresh market. These
+    tests pin that a stale trade no longer masks a fresh quote or bar, that an
+    unverifiable field cannot outrank a verifiable one, that ties stay
+    deterministic, and that the freshness limit itself is unchanged.
+    """
+
+    def test_a_stale_trade_yields_to_a_fresh_quote(self):
+        body = {
+            SYMBOL: {
+                "latestTrade": {"p": SPY_PRICE, "t": _stamp(-400)},
+                "latestQuote": {"bp": 99.0, "ap": 101.0, "t": _stamp(-1)},
+            }
+        }
+        md = _snapshot_market_data(body)
+        assert md.price(SYMBOL) == pytest.approx(100.0)
+        assert md.last_observation.field == "latestQuote"
+        assert md.last_status == "ok"
+
+    def test_a_stale_trade_yields_to_a_fresh_minute_bar(self):
+        body = {
+            SYMBOL: {
+                "latestTrade": {"p": SPY_PRICE, "t": _stamp(-400)},
+                "minuteBar": {"c": 123.0, "t": _stamp(-5)},
+            }
+        }
+        md = _snapshot_market_data(body)
+        assert md.price(SYMBOL) == pytest.approx(123.0)
+        assert md.last_observation.field == "minuteBar"
+
+    def test_the_newer_of_a_quote_and_a_bar_is_chosen(self):
+        newer_bar = {
+            SYMBOL: {
+                "latestQuote": {"bp": 99.0, "ap": 101.0, "t": _stamp(-30)},
+                "minuteBar": {"c": 123.0, "t": _stamp(-1)},
+            }
+        }
+        md = _snapshot_market_data(newer_bar)
+        assert md.price(SYMBOL) == pytest.approx(123.0)
+        assert md.last_observation.field == "minuteBar"
+
+        newer_quote = {
+            SYMBOL: {
+                "latestQuote": {"bp": 99.0, "ap": 101.0, "t": _stamp(-1)},
+                "minuteBar": {"c": 123.0, "t": _stamp(-30)},
+            }
+        }
+        md = _snapshot_market_data(newer_quote)
+        assert md.price(SYMBOL) == pytest.approx(100.0)
+        assert md.last_observation.field == "latestQuote"
+
+    def test_all_fields_stale_is_still_refused(self):
+        """The safety property: a genuinely stale market still yields no price."""
+        body = {
+            SYMBOL: {
+                "latestTrade": {"p": SPY_PRICE, "t": _stamp(-400)},
+                "latestQuote": {"bp": 99.0, "ap": 101.0, "t": _stamp(-500)},
+                "minuteBar": {"c": 123.0, "t": _stamp(-600)},
+            }
+        }
+        md = _snapshot_market_data(body)
+        with pytest.raises(MarketDataError, match="stale"):
+            md.price(SYMBOL)
+        assert md.last_status == "stale"
+
+    def test_a_fresh_trade_beats_a_stale_quote(self):
+        body = {
+            SYMBOL: {
+                "latestTrade": {"p": SPY_PRICE, "t": _stamp(-1)},
+                "latestQuote": {"bp": 1.0, "ap": 1.2, "t": _stamp(-9999)},
+            }
+        }
+        md = _snapshot_market_data(body)
+        assert md.price(SYMBOL) == pytest.approx(SPY_PRICE)
+        assert md.last_observation.field == "latestTrade"
+
+    def test_an_exact_tie_prefers_the_trade(self):
+        body = {
+            SYMBOL: {
+                "latestTrade": {"p": 111.0, "t": _stamp(-10)},
+                "latestQuote": {"bp": 200.0, "ap": 202.0, "t": _stamp(-10)},
+            }
+        }
+        md = _snapshot_market_data(body)
+        assert md.price(SYMBOL) == pytest.approx(111.0)
+        assert md.last_observation.field == "latestTrade"
+
+    @pytest.mark.parametrize("bad_stamp", ["not-a-time", None, "", "   "])
+    def test_an_unverifiable_trade_cannot_outrank_a_fresh_quote(self, bad_stamp):
+        body = {
+            SYMBOL: {
+                "latestTrade": {"p": SPY_PRICE, "t": bad_stamp},
+                "latestQuote": {"bp": 99.0, "ap": 101.0, "t": _stamp(-1)},
+            }
+        }
+        md = _snapshot_market_data(body)
+        assert md.price(SYMBOL) == pytest.approx(100.0)
+        assert md.last_observation.field == "latestQuote"
+
+    def test_no_verifiable_candidate_is_refused(self):
+        body = {
+            SYMBOL: {
+                "latestTrade": {"p": SPY_PRICE},
+                "latestQuote": {"bp": 99.0, "ap": 101.0},
+            }
+        }
+        md = _snapshot_market_data(body)
+        with pytest.raises(MarketDataError, match="no timestamp"):
+            md.price(SYMBOL)
+
+    def test_a_daily_bar_is_never_a_candidate(self):
+        body = {SYMBOL: {"dailyBar": {"o": 500.0, "c": 580.0, "t": _stamp(-1)}}}
+        md = _snapshot_market_data(body)
+        with pytest.raises(MarketDataError, match="no usable current price"):
+            md.price(SYMBOL)
+
+    def test_the_freshest_field_is_still_subject_to_the_freshness_limit(self):
+        """Selection never weakens the check: the newest field must still be fresh."""
+        body = {
+            SYMBOL: {
+                "latestTrade": {"p": SPY_PRICE, "t": _stamp(-400)},
+                "latestQuote": {"bp": 99.0, "ap": 101.0, "t": _stamp(-350)},
+            }
+        }
+        md = _snapshot_market_data(body)
+        with pytest.raises(MarketDataError, match="stale"):
+            md.price(SYMBOL)
+
+    def test_a_future_dated_newest_field_is_refused_not_downgraded(self):
+        """A future newest field is refused; it is not skipped for an older one."""
+        body = {
+            SYMBOL: {
+                "latestTrade": {"p": SPY_PRICE, "t": _stamp(-400)},
+                "latestQuote": {"bp": 99.0, "ap": 101.0, "t": _stamp(600)},
+            }
+        }
+        md = _snapshot_market_data(body)
+        with pytest.raises(MarketDataError, match="future"):
+            md.price(SYMBOL)
+
+    def test_a_malformed_quote_price_still_falls_through_to_a_fresh_bar(self):
+        body = {
+            SYMBOL: {
+                "latestQuote": {"bp": 0, "ap": 101.0, "t": _stamp(-1)},
+                "minuteBar": {"c": 123.0, "t": _stamp(-5)},
+            }
+        }
+        md = _snapshot_market_data(body)
+        assert md.price(SYMBOL) == pytest.approx(123.0)
+        assert md.last_observation.field == "minuteBar"
+
+    def test_selection_is_deterministic_across_repeated_reads(self):
+        body = {
+            SYMBOL: {
+                "latestTrade": {"p": SPY_PRICE, "t": _stamp(-400)},
+                "latestQuote": {"bp": 99.0, "ap": 101.0, "t": _stamp(-1)},
+                "minuteBar": {"c": 123.0, "t": _stamp(-5)},
+            }
+        }
+        reads = [_snapshot_market_data(body) for _ in range(3)]
+        prices = [md.price(SYMBOL) for md in reads]
+        fields = [md.last_observation.field for md in reads]
+        assert prices == [100.0, 100.0, 100.0]
+        assert fields == ["latestQuote", "latestQuote", "latestQuote"]
 
 
 # ---------------------------------------------------------------------------

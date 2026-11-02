@@ -272,6 +272,23 @@ path, and no configuration that produces one.
 
 ### Fixed
 
+- **A stale `latestTrade` no longer masks a fresh quote or minute bar.**
+  `AlpacaSnapshotMarketData` used to pick the price by a fixed field order —
+  latest trade, then quote midpoint, then minute-bar close — and only *then*
+  check freshness. On the IEX feed a symbol can go minutes without printing a
+  trade while its quote keeps updating, so the seam refused a perfectly fresh
+  market with ``the snapshot is stale: the latestTrade is Ns old``. It now selects
+  the **newest** of the three current fields by their own timestamps and applies
+  the unchanged freshness check to that field: a fresh quote is used when the
+  trade is old, an exact timestamp tie prefers the trade (then the quote, then the
+  bar) so the choice stays deterministic, and a field with a missing or
+  unparseable timestamp cannot outrank a field with a usable one. The 300s
+  freshness limit, the future-skew tolerance, the `feed=iex` request, and the
+  refusal when *every* current field is stale are all unchanged — a genuinely
+  closed or quiet market still yields no price. Covered by
+  `tests/test_phase26_serve_market_data_wiring.py::TestNewestObservationSelection`
+  and `::TestPreflightAcceptsAFreshField`.
+
 - **A rejected market-data credential is now reported as an authentication
   failure, and a throttled tick no longer hides it.** A Railway deploy running on
   Alpha Vantage failed to start with ``the price source 'alpha_vantage' could not
