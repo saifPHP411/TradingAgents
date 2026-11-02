@@ -272,6 +272,20 @@ path, and no configuration that produces one.
 
 ### Fixed
 
+- **A truncated paper recovery file is refused, not silently defaulted**
+  (`execution/paper.py`). `PaperSession.restore` read a missing key as an empty
+  default, which was silent data loss for two keys in particular: a missing
+  `resting` dropped every live order, and a missing `processed_signal_ids` read
+  the duplicate guard as empty, so re-driving the same signal placed a *second*
+  order instead of being refused as a duplicate. `save_state` always writes every
+  key, so an absent key now means the file is truncated or hand-edited, not that
+  it predates a schema change; `restore` requires `ledger`, `resting`,
+  `processed_signal_ids`, `mode`, `simulator`, `risk_limits`, `costs` and `steps`
+  and refuses the file when any is missing. A present-but-empty list is a real
+  state and still restores, and a wrongly-typed field (a string where a list is
+  expected, which would otherwise be iterated character by character) is refused.
+  Covered by `tests/test_paper_recovery.py::TestATruncatedStateFileIsRefused`.
+
 - **A stale `latestTrade` no longer masks a fresh quote or minute bar.**
   `AlpacaSnapshotMarketData` used to pick the price by a fixed field order —
   latest trade, then quote midpoint, then minute-bar close — and only *then*

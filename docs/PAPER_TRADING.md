@@ -197,6 +197,21 @@ simulator's participation cap is `min(cap, volume * rate)`, which returns `cap`
 when the product is NaN. A corrupt state file could therefore resume with a
 disarmed guard; it is refused instead. A valid state still restores.
 
+A **truncated** recovery file is refused, not defaulted. `save_state` always
+writes every key, so an absent key means the file was truncated or hand-edited,
+not that it predates a schema change — there is one schema version and it is
+written whole. `restore` therefore requires `ledger`, `resting`,
+`processed_signal_ids`, `mode`, `simulator`, `risk_limits`, `costs` and `steps`
+to be present, and refuses the file if any is missing. This closes a silent
+data-loss hole: defaulting a missing `resting` dropped live orders, and
+defaulting a missing `processed_signal_ids` read the duplicate guard as empty, so
+re-driving the same signal placed a *second* order instead of being refused. A
+key that is present but an explicitly empty list is a real state ("no live
+orders", "nothing processed yet") and still restores. The same check refuses a
+field of the wrong type — a string where a list is expected would otherwise be
+iterated character by character.
+(`tests/test_paper_recovery.py::TestATruncatedStateFileIsRefused`.)
+
 A caller can cancel a restored order with `session.cancel_resting(order)`, and
 that cancellation is durable: it removes the order from the live queue, records
 exactly one terminal `ORDER_CANCELLED` event, survives a further save/restore,

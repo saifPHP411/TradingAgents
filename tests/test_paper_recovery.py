@@ -1610,3 +1610,95 @@ class TestStateWriteIsAtomic:
             {}, quotes=dict_quote_source({"AAPL": 100.0}, timestamp=NOW), path=target
         )
         assert restored.ledger.cash == pytest.approx(session.ledger.cash)
+
+
+# ---------------------------------------------------------------------------
+# A truncated recovery file is refused, never silently defaulted
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestATruncatedStateFileIsRefused:
+    """A missing key is refused rather than defaulted to a lossy value.
+
+    ``save_state`` writes every key, so an *absent* key means a truncated or
+    hand-edited file. Defaulting one would be silent data loss: a missing
+    ``resting`` drops live orders, and a missing ``processed_signal_ids`` disarms
+    the duplicate guard and lets a re-driven signal place a second order. These
+    tests fail if a future change makes ``restore`` tolerate the absence again.
+    """
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "ledger",
+            "resting",
+            "processed_signal_ids",
+            "mode",
+            "simulator",
+            "risk_limits",
+            "costs",
+            "steps",
+        ],
+    )
+    def test_a_missing_required_key_is_refused(self, key):
+        state = _session().state()
+        del state[key]
+        with pytest.raises(PaperStateError, match="missing required key"):
+            PaperSession.restore(state, quotes=dict_quote_source({"AAPL": 100.0}))
+
+    def test_a_missing_resting_key_would_otherwise_drop_live_orders(self):
+        # The defect this guards: with the key absent, restore used to read the
+        # orders as an empty queue and the live order vanished with no error.
+        session = _session()
+        session.on_signal(_limit())
+        assert len(session.resting) == 1
+        state = session.state()
+        del state["resting"]
+        with pytest.raises(PaperStateError):
+            PaperSession.restore(state, quotes=dict_quote_source({"AAPL": 100.0}))
+
+    def test_a_missing_processed_set_would_otherwise_allow_a_second_order(self):
+        # The defect this guards: with the processed set absent, restore used to
+        # read it as empty, so re-driving the same signal placed a second order
+        # instead of being refused as a duplicate.
+        session = _session()
+        session.on_signal(_limit())
+        state = session.state()
+        del state["processed_signal_ids"]
+        with pytest.raises(PaperStateError):
+            PaperSession.restore(state, quotes=dict_quote_source({"AAPL": 100.0}))
+
+    def test_an_explicitly_empty_resting_list_is_still_accepted(self):
+        # Present-but-empty means "no live orders" and is a real state, not a
+        # truncated file, so it must keep restoring.
+        state = _session().state()
+        assert state["resting"] == []
+        restored = PaperSession.restore(
+            state, quotes=dict_quote_source({"AAPL": 100.0}, timestamp=NOW)
+        )
+        assert restored.resting == []
+
+    @pytest.mark.parametrize("key", ["resting", "steps", "processed_signal_ids"])
+    def test_a_wrongly_typed_list_field_is_refused(self, key):
+        # A string is iterable, so it would previously be read character by
+        # character instead of refused.
+        state = _session().state()
+        state[key] = "not-a-list"
+        with pytest.raises(PaperStateError, match="must be a list"):
+            PaperSession.restore(state, quotes=dict_quote_source({"AAPL": 100.0}))
+
+    def test_a_non_mapping_ledger_is_refused(self):
+        state = _session().state()
+        state["ledger"] = "not-a-mapping"
+        with pytest.raises(PaperStateError, match="ledger must be a mapping"):
+            PaperSession.restore(state, quotes=dict_quote_source({"AAPL": 100.0}))
+
+    def test_a_complete_state_still_round_trips_after_the_stricter_check(self):
+        # The stricter check must not reject a file save_state itself wrote.
+        session = _session()
+        session.on_signal(_limit())
+        restored = PaperSession.restore(
+            session.state(), quotes=dict_quote_source({"AAPL": 100.0}, timestamp=NOW)
+        )
+        assert _accounting(restored) == _accounting(session)

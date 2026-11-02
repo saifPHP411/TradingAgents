@@ -913,6 +913,47 @@ class PaperSession:
                 f"this build reads version {PAPER_STATE_SCHEMA_VERSION}"
             )
 
+        # A recovery file is written whole by ``save_state``, so a key that is
+        # *absent* is a truncated or hand-edited file, not a legacy one — there is
+        # only one schema version and it always writes every key. Refuse it rather
+        # than default the missing part: a missing ``resting`` would silently drop
+        # live orders, and a missing ``processed_signal_ids`` would disarm the
+        # duplicate guard and let a re-driven signal place a second order. A
+        # present-but-empty list is fine and means the same thing it always did.
+        required = (
+            "ledger",
+            "resting",
+            "processed_signal_ids",
+            "mode",
+            "simulator",
+            "risk_limits",
+            "costs",
+            "steps",
+        )
+        missing = [key for key in required if key not in state]
+        if missing:
+            raise PaperStateError(
+                f"paper state is missing required key(s) {sorted(missing)}; a "
+                "recovery file written by save_state always carries them, so this "
+                "file is truncated or not a recovery file"
+            )
+
+        def _typed_list(value: object, what: str) -> list:
+            """A real ``list``, or raise. A string is iterable but is not a list."""
+            if not isinstance(value, list):
+                raise PaperStateError(
+                    f"{what} must be a list, got {type(value).__name__}"
+                )
+            return value
+
+        _typed_list(state["resting"], "resting")
+        _typed_list(state["steps"], "steps")
+        _typed_list(state["processed_signal_ids"], "processed_signal_ids")
+        if not isinstance(state["ledger"], dict):
+            raise PaperStateError(
+                f"ledger must be a mapping, got {type(state['ledger']).__name__}"
+            )
+
         def finite(value: object, what: str) -> float:
             """A finite float, or raise. NaN and infinity are refused, not compared.
 

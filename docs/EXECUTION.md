@@ -202,6 +202,14 @@ raises `PaperStateError` for a malformed file or a state claiming a live mode,
 rather than restoring a book that would be silently wrong. A restored session is
 still `PAPER`: recovery adds no path to a venue.
 
+A recovery file is treated as all-or-nothing: `save_state` writes every key, so
+`restore` requires all of them and refuses a file that is missing any (a
+truncated or hand-edited file) instead of defaulting the missing part. Defaulting
+a missing `resting` would drop live orders; defaulting a missing
+`processed_signal_ids` would disarm the duplicate guard and let a re-driven signal
+place a second order. A present-but-empty list is a real state and still restores,
+and a field of the wrong type is refused.
+
 The accounting is restored exactly, not recomputed: a resumed run's cash,
 positions, average entries, realised P&L and fees equal the original's, and its
 event sequence continues rather than restarting. `tests/test_paper_recovery.py`
