@@ -177,6 +177,26 @@ faking a success.
   constructs the worker (and so the decision source) is what froze a live view; the
   status path reads the persisted `worker_state.json` as `STOPPED` instead.
 
+## Paper-trading observability
+
+- The paper worker records *why* it placed no order as a stable code from a closed
+  vocabulary (`NO_TRADE_REASONS` in `paper_experiment/broker/trading.py`), carried
+  on `CycleResult.reason_code` and persisted as `WorkerState.last_no_trade_code`.
+  The experiment decision source names its own code (`ExperimentDecisionSource.skip_code`),
+  so a fully-consumed history reports `HISTORY_EXHAUSTED` (new data required) rather
+  than a generic "no decision". Add a new code to the vocabulary, never a prose-only
+  reason.
+- `engine_view()` derives a single `blocker` (`{code, detail, operator_action_required}`)
+  from persisted state only. It is `None` for a stopped worker (off, not blocked)
+  and `AWAITING_FIRST_EVALUATION` before the first cycle. It must not touch the
+  broker or the network.
+- A price seam must describe itself: the historical/static seams derive
+  `market_data_status` from `available()` so the view never reports the market data
+  down while the worker is pricing an order from it. An absent status is *unknown*,
+  resolved from worker evidence, never read as "broken".
+- The engine view is read at RUNNING time in tests: a stopped worker has no blocker,
+  so assert the blocker before `stop()`.
+
 ## Known limitation
 
 An equity-relative position or exposure cap is re-checked at the fill price
