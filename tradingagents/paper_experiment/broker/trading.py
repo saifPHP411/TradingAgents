@@ -217,6 +217,17 @@ class TradingDecision:
     quantity: float | None = None
     rationale: str = ""
     limit_price: float | None = None
+    stop_loss: float | None = None
+    """The strategy's proposed stop-loss, when it proposed one. Recorded with the
+    position so the exit policy can act on it. ``None`` means the strategy proposed
+    none — it is never fabricated, so a position without a recorded stop is simply
+    not watched for a stop exit."""
+    take_profit: float | None = None
+    """The strategy's proposed take-profit, when it proposed one. Same rules as
+    ``stop_loss``."""
+    strategy_name: str | None = None
+    """The name of the strategy that produced the decision, for the Decisions view.
+    Never fabricated: ``None`` when the source did not name one."""
 
     def __post_init__(self) -> None:
         if not self.decision_id:
@@ -227,7 +238,13 @@ class TradingDecision:
             raise WorkerError(f"side must be buy or sell, got {self.side!r}")
         if self.notional is None and self.quantity is None:
             raise WorkerError("a decision must carry a notional or a quantity")
-        for value in (self.notional, self.quantity, self.limit_price):
+        for value in (
+            self.notional,
+            self.quantity,
+            self.limit_price,
+            self.stop_loss,
+            self.take_profit,
+        ):
             if value is not None and (not math.isfinite(value) or value <= 0):
                 raise WorkerError(
                     f"decision figures must be finite and positive, got {value!r}"
@@ -253,12 +270,14 @@ class TradingDecision:
             "quantity": self.quantity,
             "rationale": self.rationale,
             "limit_price": self.limit_price,
+            "stop_loss": self.stop_loss,
+            "take_profit": self.take_profit,
+            "strategy_name": self.strategy_name,
         }
 
 
 class DecisionSource(Protocol):
     """Yields the next strategy decision, or ``None`` when there is nothing to do.
-
     A source must be *deterministic in its ordering* and must not itself place an
     order. The worker treats a decision it has already processed as done, so a
     source that yields the same decision twice is safe.
@@ -668,6 +687,40 @@ def _status_for(exc: MarketDataError) -> str:
     return MARKET_DATA_STATUS_ERROR
 
 
+def _exit_reason(
+    price: float, stop_loss: Any, take_profit: Any
+) -> str | None:
+    """Which recorded exit level ``price`` has crossed, or ``None``.
+
+    A stop is checked before a target (the protective exit wins when a bar spans
+    both), and both are compared only against a finite price and a finite,
+    positive recorded level, so a malformed level is ignored rather than treated as
+    a trigger. Returns ``"stop_loss"`` or ``"take_profit"``.
+    """
+    if not math.isfinite(price) or price <= 0:
+        return None
+    stop = _as_float(stop_loss)
+    if stop is not None and stop > 0 and price <= stop:
+        return "stop_loss"
+    target = _as_float(take_profit)
+    if target is not None and target > 0 and price >= target:
+        return "take_profit"
+    return None
+
+
+def _exit_order_id(symbol: str, price: float, reason: str) -> str:
+    """A deterministic, broker-safe id for one exit trigger.
+
+    Derived from the symbol, the trigger reason and the *rounded* price, so a
+    re-run of the same trigger reconciles rather than resubmitting, while a
+    genuinely new trigger (a different price) gets a new id. Matches the broker's
+    client-order-id shape.
+    """
+    material = f"exit:{symbol.upper()}:{reason}:{price:.4f}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+    return f"ptx-{digest}"
+
+
 def _positive_finite(value: Any) -> float | None:
     """``value`` as a finite, positive float, or ``None`` for anything else."""
     try:
@@ -861,6 +914,24 @@ def _as_int(value: Any, default: int) -> int:
     return value
 
 
+def _as_float(value: Any, default: float | None = None) -> float | None:
+    """Coerce a persisted number, tolerating a missing or malformed value.
+
+    Non-finite values (NaN/Inf) are refused rather than propagated: a NaN baseline
+    would poison every daily-P&L subtraction silently, so it is read back as
+    ``default`` (unavailable) instead.
+    """
+    if isinstance(value, bool):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return number
+
+
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".worker-state-", suffix=".tmp")
@@ -900,7 +971,41 @@ class WorkerState:
     applied_fills: set[str] = field(default_factory=set)
     positions: dict[str, dict] = field(default_factory=dict)
     positions_at: str | None = None
+    positions_checked_at: str | None = None
+    """When the broker's positions were last reconciled into this state.
+
+    Distinct from ``positions_at`` (when the snapshot was *written*) only in
+    emphasis: this is the operational "last successful position synchronization"
+    the dashboard reports. Additive and optional."""
     account: dict[str, Any] = field(default_factory=dict)
+    initial_equity: float | None = None
+    """The account equity first observed for the current UTC day — the baseline a
+    daily P&L is measured from. Set once per day, so "daily P&L" is the change
+    since the day opened, not since the process started. Additive and optional: an
+    older state file reads back as ``None`` and the dashboard reports the daily P&L
+    as unavailable rather than fabricating a zero."""
+    day: str | None = None
+    """The UTC day ``initial_equity`` belongs to (``YYYY-MM-DD``). Additive."""
+    last_account_at: str | None = None
+    """When the account (cash, equity, buying power) was last read from the broker.
+    Additive and optional."""
+    last_strategy_evaluation_at: str | None = None
+    """When the strategy was last *evaluated* — a cycle reached the decision source
+    and asked it for a decision. This is distinct from a decision being *produced*:
+    a cycle that finds no decision still evaluates. Additive and optional."""
+    last_no_decision_reason: str | None = None
+    """Why the most recent evaluation produced no order — the decision source's own
+    skip reason, or ``None`` when the last evaluation yielded a decision. Recorded
+    so a RUNNING-but-idle worker is explainable rather than silent. Additive."""
+    exits: dict[str, dict] = field(default_factory=dict)
+    """Positions the exit policy has already acted on, keyed by symbol, with the
+    reason and time. The durable "do not exit this position twice" memory. Additive
+    and optional."""
+    stops: dict[str, dict] = field(default_factory=dict)
+    """The stop-loss / take-profit recorded for each open position the worker
+    opened, keyed by symbol. Written when an order fills from a decision that
+    carried them, and read by the exit policy. A position with no entry here has no
+    recorded exit level, so no exit is fabricated for it. Additive and optional."""
     cycles_completed: int = 0
     """Cycles the loop has run since the last start. Additive and optional: an
     older state file without the field reads back as ``0``, and a reader of an
@@ -931,7 +1036,15 @@ class WorkerState:
             "applied_fills": sorted(self.applied_fills),
             "positions": {k: dict(v) for k, v in sorted(self.positions.items())},
             "positions_at": self.positions_at,
+            "positions_checked_at": self.positions_checked_at,
             "account": dict(self.account),
+            "initial_equity": self.initial_equity,
+            "day": self.day,
+            "last_account_at": self.last_account_at,
+            "last_strategy_evaluation_at": self.last_strategy_evaluation_at,
+            "last_no_decision_reason": self.last_no_decision_reason,
+            "exits": {k: dict(v) for k, v in sorted(self.exits.items())},
+            "stops": {k: dict(v) for k, v in sorted(self.stops.items())},
             "cycles_completed": self.cycles_completed,
             "processed_decisions": sorted(self.processed_decisions),
         }
@@ -965,7 +1078,15 @@ class WorkerState:
             applied_fills=set(payload.get("applied_fills") or []),
             positions={k: dict(v) for k, v in (payload.get("positions") or {}).items()},
             positions_at=payload.get("positions_at"),
+            positions_checked_at=payload.get("positions_checked_at"),
             account=dict(payload.get("account") or {}),
+            initial_equity=_as_float(payload.get("initial_equity")),
+            day=payload.get("day"),
+            last_account_at=payload.get("last_account_at"),
+            last_strategy_evaluation_at=payload.get("last_strategy_evaluation_at"),
+            last_no_decision_reason=payload.get("last_no_decision_reason"),
+            exits={k: dict(v) for k, v in (payload.get("exits") or {}).items()},
+            stops={k: dict(v) for k, v in (payload.get("stops") or {}).items()},
             cycles_completed=_as_int(payload.get("cycles_completed"), 0),
             processed_decisions=set(payload.get("processed_decisions") or []),
         )
@@ -1074,6 +1195,8 @@ def worker_status_view(
         "last_processed_decision_id": state.last_processed_decision_id,
         "last_error": state.last_error,
         "last_cycle_at": state.last_cycle_at,
+        "last_strategy_evaluation_at": state.last_strategy_evaluation_at,
+        "last_no_decision_reason": state.last_no_decision_reason,
         "started_at": state.started_at,
         "stopped_at": state.stopped_at,
         "loop_running": loop_running,
@@ -1083,7 +1206,13 @@ def worker_status_view(
         "orders": {k: dict(v) for k, v in sorted(state.orders.items())},
         "positions": {k: dict(v) for k, v in sorted(state.positions.items())},
         "positions_at": state.positions_at,
+        "positions_checked_at": state.positions_checked_at,
         "account": dict(state.account),
+        "account_at": state.last_account_at,
+        "initial_equity": state.initial_equity,
+        "day": state.day,
+        "exits": {k: dict(v) for k, v in sorted(state.exits.items())},
+        "stops": {k: dict(v) for k, v in sorted(state.stops.items())},
         "last_cycle": last_cycle.to_dict() if last_cycle is not None else None,
         "risk_limits": {
             "max_order_notional": config.limits.max_order_notional,
@@ -1246,15 +1375,21 @@ class PaperTradingWorker:
         broker.positions(refresh=True)
 
         self._broker = broker
+        equity = _as_float(account.equity)
+        today = datetime.now(UTC).date().isoformat()
+        if equity is not None and (self.state.day != today or self.state.initial_equity is None):
+            self.state.day = today
+            self.state.initial_equity = equity
         self.state.account = {
             "account_id": account.account_id,
             "status": account.status,
-            "cash": account.cash,
-            "equity": account.equity,
-            "buying_power": account.buying_power,
+            "cash": _as_float(account.cash),
+            "equity": equity,
+            "buying_power": _as_float(account.buying_power),
             "currency": account.currency,
             "restrictions": account.restrictions(),
         }
+        self.state.last_account_at = datetime.now(UTC).isoformat()
         self._save()
         return {"checks": checks, "account": self.state.account}
 
@@ -1412,12 +1547,36 @@ class PaperTradingWorker:
             raise WorkerError("the worker has no broker; call start() first")
 
         self.state.last_cycle_at = datetime.now(UTC).isoformat()
+        # Refresh the account and positions *before* deciding, so the view and the
+        # risk checks work from the account's current figures rather than a
+        # start-up snapshot. Best-effort: a read failure is recorded, never fatal.
+        self._sync_observability()
+
+        # The exit policy runs before a new entry: a stop or target that has
+        # triggered is the most urgent action, and at most one order is placed per
+        # cycle. It returns a result only when it actually acted (or was refused).
+        exit_result = self._check_exits()
+        if exit_result is not None:
+            self.last_cycle = exit_result
+            return exit_result
+
         decision = self.decision_source.next_decision()
+        # The strategy was evaluated this cycle whether or not it produced a
+        # decision: the source was asked, and answered. Recording the evaluation
+        # separately from the decision is what lets the dashboard tell "the engine
+        # is looking and finding nothing to do" from "the engine is not looking".
+        self.state.last_strategy_evaluation_at = self.state.last_cycle_at
         if decision is None:
+            self.state.last_no_decision_reason = self._no_decision_reason()
+            self._sync_observability()
             self._save()
-            result = CycleResult(ran=False, skipped_reason="no decision is due")
+            result = CycleResult(
+                ran=False,
+                skipped_reason=self.state.last_no_decision_reason or "no decision is due",
+            )
             self.last_cycle = result
             return result
+        self.state.last_no_decision_reason = None
 
         if self._is_processed(decision.decision_id):
             self._save()
@@ -1511,6 +1670,7 @@ class PaperTradingWorker:
         self._mark_processed(decision.decision_id)
         self.state.last_error = None
         self._record_order(order)
+        self._record_exit_levels(decision, order)
         result = CycleResult(
             ran=True,
             decision_id=decision.decision_id,
@@ -1522,7 +1682,145 @@ class PaperTradingWorker:
         self.last_cycle = result
         return result
 
-    # -- helpers ----------------------------------------------------------
+    def _record_exit_levels(self, decision: TradingDecision, order: BrokerOrder) -> None:
+        """Record the strategy's stop/target for a *filled* long entry.
+
+        Only a long entry with a filled quantity is watched: a stop or target on a
+        position the worker does not hold, or on an unfilled order, has nothing to
+        exit. The levels are stored verbatim from the decision; when the strategy
+        proposed none, nothing is stored, so the exit policy has no level to act on
+        and fabricates none.
+        """
+        if order.side.lower() != "buy" or order.filled_quantity <= 0:
+            return
+        if decision.stop_loss is None and decision.take_profit is None:
+            return
+        self.state.stops[order.symbol.upper()] = {
+            "symbol": order.symbol.upper(),
+            "stop_loss": decision.stop_loss,
+            "take_profit": decision.take_profit,
+            "decision_id": decision.decision_id,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        }
+        self._save()
+
+    def _check_exits(self) -> CycleResult | None:
+        """Close a worker-held long whose recorded stop or target has triggered.
+
+        Returns ``None`` when there is nothing to exit (the common case, and the
+        only case when no stop/target was ever recorded, so default behaviour is
+        unchanged). Returns a :class:`CycleResult` only when it placed an exit order
+        or was refused placing one — at most one exit per cycle.
+
+        Bounds, each deliberate:
+
+        - only a **long** position the worker holds is considered (long-only, the
+          same rule the broker enforces);
+        - only a position with a **recorded** stop/target is watched, and only one
+          whose recorded level the current price has crossed;
+        - only a position the worker itself opened is exited (its symbol is in
+          ``state.stops``), so a manually-held position is never closed;
+        - a symbol already exited is never exited again (``state.exits``);
+        - the price comes from the worker's own seam, so a stale or invalid price
+          refuses the exit rather than fabricating one.
+
+        A refusal (for example a daily-order cap) is recorded and the position
+        stays open; the worker stays ``RUNNING`` for the next cycle.
+        """
+        broker = self._broker
+        if broker is None or not self.state.stops:
+            return None
+        for symbol in sorted(self.state.stops):
+            if symbol in self.state.exits:
+                continue
+            position = self.state.positions.get(symbol)
+            if not position:
+                continue
+            try:
+                held = float(position.get("quantity") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if held <= 0:
+                continue
+            level = self.state.stops[symbol]
+            stop_loss = level.get("stop_loss")
+            take_profit = level.get("take_profit")
+            if stop_loss is None and take_profit is None:
+                continue
+            try:
+                price = self.market_data.price(symbol)
+            except MarketDataError as exc:
+                self.state.last_error = f"MarketDataError: {exc}"
+                self._save()
+                return CycleResult(
+                    ran=False,
+                    error=str(exc),
+                    skipped_reason=f"an exit for {symbol} could not be priced",
+                    **self._market_data_fields(),
+                )
+            reason = _exit_reason(price, stop_loss, take_profit)
+            if reason is None:
+                continue
+            exit_id = _exit_order_id(symbol, price, reason)
+            if exit_id in self.state.orders:
+                # Already attempted for this trigger: reconcile, do not resubmit.
+                order = self._reconcile(exit_id)
+                self._record_order(order)
+                self.state.exits[symbol] = {
+                    "symbol": symbol,
+                    "reason": reason,
+                    "price": price,
+                    "exited_at": datetime.now(UTC).isoformat(),
+                }
+                self._save()
+                return CycleResult(
+                    ran=False,
+                    client_order_id=exit_id,
+                    order=order,
+                    skipped_reason=f"an exit order for {symbol} already exists",
+                    reference_price=price,
+                    **self._market_data_fields(),
+                )
+            try:
+                order = broker.submit_order(
+                    symbol=symbol,
+                    quantity=held,
+                    side="sell",
+                    reference_price=price,
+                    client_order_id=exit_id,
+                    order_type="market",
+                    allow_orders=True,
+                    refresh=True,
+                )
+            except (PaperRiskRejected, BrokerRejectedError, BrokerError) as exc:
+                self.state.last_error = f"{type(exc).__name__}: {exc}"
+                self._save()
+                return CycleResult(
+                    ran=False,
+                    client_order_id=exit_id,
+                    error=str(exc),
+                    skipped_reason=f"the exit for {symbol} was refused",
+                    reference_price=price,
+                    **self._market_data_fields(),
+                )
+            self.state.exits[symbol] = {
+                "symbol": symbol,
+                "reason": reason,
+                "price": price,
+                "exited_at": datetime.now(UTC).isoformat(),
+            }
+            self.state.last_error = None
+            self._record_order(order)
+            self._save()
+            return CycleResult(
+                ran=True,
+                client_order_id=exit_id,
+                order=order,
+                skipped_reason=None,
+                reference_price=price,
+                **self._market_data_fields(),
+            )
+        return None
 
     def _market_data_fields(self) -> dict[str, Any]:
         """The seam's identity for a cycle result, read defensively.
@@ -1603,9 +1901,73 @@ class PaperTradingWorker:
             raise WorkerError("the worker has no broker; start it first")
         positions = broker.positions(refresh=True)
         self.state.positions = {s: p.to_dict() for s, p in positions.items()}
-        self.state.positions_at = datetime.now(UTC).isoformat()
+        now = datetime.now(UTC).isoformat()
+        self.state.positions_at = now
+        self.state.positions_checked_at = now
         self._save()
         return dict(self.state.positions)
+
+    def sync_account(self) -> dict[str, Any]:
+        """Refresh the account and roll the daily-P&L baseline (read-only).
+
+        The account is read from the broker (never fabricated) and stored on the
+        state so the dashboard reports real cash, equity and buying power. The
+        first read of a new UTC day sets ``initial_equity`` — the baseline a daily
+        P&L is measured from — so the daily figure is the change since the day
+        opened rather than since the process started. A non-finite equity is
+        refused rather than stored, so a bad read cannot poison the baseline.
+        """
+        broker = self._broker
+        if broker is None:
+            raise WorkerError("the worker has no broker; start it first")
+        account = broker.refresh_account()
+        equity = _as_float(account.equity)
+        today = datetime.now(UTC).date().isoformat()
+        if equity is not None and (self.state.day != today or self.state.initial_equity is None):
+            self.state.day = today
+            self.state.initial_equity = equity
+        self.state.account = {
+            "account_id": account.account_id,
+            "status": account.status,
+            "cash": _as_float(account.cash),
+            "equity": equity,
+            "buying_power": _as_float(account.buying_power),
+            "currency": account.currency,
+            "restrictions": account.restrictions(),
+        }
+        self.state.last_account_at = datetime.now(UTC).isoformat()
+        self._save()
+        return dict(self.state.account)
+
+    def _sync_observability(self) -> None:
+        """Best-effort account/position refresh, so the view is not stale.
+
+        Read-only and *contained*: a broker read failure is recorded in
+        ``last_error`` and never propagates, because an observability refresh must
+        not be able to fail a trading cycle or stop the loop. This is what keeps
+        the dashboard's cash, equity and positions current between orders instead
+        of frozen at start-up.
+        """
+        if self._broker is None:
+            return
+        for step in (self.sync_account, self.sync_positions):
+            try:
+                step()
+            except Exception as exc:  # noqa: BLE001 - a stale view is better than a crash
+                self.state.last_error = f"{type(exc).__name__}: {exc}"
+
+    def _no_decision_reason(self) -> str:
+        """Why the last evaluation produced no order, in the source's own words.
+
+        A source may expose ``skip_reason`` (the experiment source does); when it
+        does, that reason is surfaced verbatim so a RUNNING-but-idle worker is
+        explainable. Otherwise a generic reason is returned rather than a
+        fabricated cause.
+        """
+        reason = getattr(self.decision_source, "skip_reason", None)
+        if isinstance(reason, str) and reason:
+            return reason
+        return "no decision is due"
 
     @classmethod
     def load(cls, path: str | os.PathLike) -> WorkerState:

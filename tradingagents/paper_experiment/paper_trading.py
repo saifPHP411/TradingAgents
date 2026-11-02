@@ -101,6 +101,13 @@ class ExperimentDecisionSource:
     """
     _baseline: set[str] = field(default_factory=set, init=False)
     _yielded: set[str] = field(default_factory=set, init=False)
+    skip_reason: str | None = field(default=None, init=False)
+    """Why the last :meth:`next_decision` yielded nothing, in plain words.
+
+    ``None`` after a call that produced a decision, or before any call. Read by the
+    worker so a RUNNING-but-idle cycle reports the real gate rather than a generic
+    "no decision is due". Not part of construction: it is an observation of the last
+    call, never an input."""
 
     def __post_init__(self) -> None:
         self._baseline = {
@@ -197,19 +204,57 @@ class ExperimentDecisionSource:
         experiment = self._current()
         candidates = self._candidates(experiment)
         if not candidates:
+            self.skip_reason = self._explain_no_decision(experiment)
             return None
+        self.skip_reason = None
         state = candidates[0]
         self._yielded.add(state.decision_id)
         side = self._side_for(experiment, state)
         if side is None:  # pragma: no cover - _candidates already filtered this
             return None
+        record = self._record_for(experiment, state)
         return TradingDecision(
             decision_id=state.decision_id,
             symbol=state.symbol,
             side=side,
             notional=self.order_notional,
             rationale=self._rationale_for(state),
+            # The stop/target the strategy itself proposed, carried verbatim from
+            # the recorded decision so the exit policy can act on them. When the
+            # record proposed none, these stay ``None`` — never invented here.
+            stop_loss=getattr(record, "stop_loss", None),
+            take_profit=getattr(record, "take_profit", None),
+            strategy_name=experiment.config.strategy_id,
         )
+
+    def _explain_no_decision(self, experiment: PaperExperiment) -> str:
+        """Why no decision was offered, from the experiment's own recorded state.
+
+        Names the actual gate — the cadence, the decision cap, an un-covered
+        execution session, or a settled backlog — rather than a generic message, so
+        a RUNNING-but-idle worker is explainable. Reads only persisted state.
+        """
+        try:
+            cadence = experiment.decision_cadence()
+        except Exception:  # noqa: BLE001 - an unreadable cadence must not crash a cycle
+            cadence = {}
+        if cadence.get("max_decisions_reached"):
+            return f"max_decisions ({cadence.get('max_decisions')}) reached"
+        next_due = cadence.get("next_decision_session")
+        last_session = None
+        try:
+            processed = sorted(experiment.processed_sessions)
+            last_session = processed[-1] if processed else None
+        except Exception:  # noqa: BLE001
+            last_session = None
+        if next_due and last_session:
+            return (
+                f"no decision is due yet: the next decision session is {next_due} "
+                f"and the experiment has advanced to {last_session}"
+            )
+        if next_due:
+            return f"no decision is due yet: the next decision session is {next_due}"
+        return "no due, tradeable decision is available"
 
     def reset(self) -> None:
         """Forget which decisions were yielded, so a fresh pass re-reads them.

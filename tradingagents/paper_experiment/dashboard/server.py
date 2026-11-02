@@ -116,6 +116,60 @@ class Dashboard:
     def view(self) -> ExperimentView:
         return ExperimentView(self.root)
 
+    # -- read-only engine views ------------------------------------------
+
+    def _internal_positions(self) -> dict[str, dict[str, Any]]:
+        """The experiment's simulation-ledger positions, or ``{}`` when unreadable.
+
+        Read from the report so the dashboard and the CLI cannot disagree. A
+        failure to read is an empty mapping, never a fabricated position.
+        """
+        try:
+            summary = self.view().summary()
+        except Exception:  # noqa: BLE001 - a missing experiment is not a crash here
+            return {}
+        positions = ((summary.get("book") or {}).get("positions")) or {}
+        return {k: v for k, v in positions.items() if isinstance(v, dict)}
+
+    def engine(self) -> dict[str, Any]:
+        """The separated engine states, from the worker's own recorded status.
+
+        Read-only and build-free: it reads the persisted worker state, so polling
+        it does not construct a worker or touch the broker.
+        """
+        from .engine_view import engine_view
+
+        return engine_view(self.paper.status())
+
+    def positions(self) -> dict[str, Any]:
+        """Open positions, broker-sourced, reconciled against the simulation book."""
+        from .engine_view import positions_view
+
+        status = self.paper.status()
+        rows = positions_view(status, self._internal_positions())
+        return {
+            "positions": rows,
+            "count": len(rows),
+            "positions_checked_at": status.get("positions_checked_at"),
+            "positions_at": status.get("positions_at"),
+            "banner": BANNER,
+            "live": False,
+        }
+
+    def trades(self) -> dict[str, Any]:
+        """The trade journal: submitted orders and settled trades, kept apart."""
+        from .engine_view import trades_view
+
+        status = self.paper.status()
+        try:
+            decisions = self.view().decisions()
+        except Exception:  # noqa: BLE001 - no experiment yet is an empty journal
+            decisions = []
+        result = trades_view(decisions, status)
+        result["banner"] = BANNER
+        result["live"] = False
+        return result
+
     # -- control ----------------------------------------------------------
 
     def run_sessions(self, sessions: int) -> dict[str, Any]:
@@ -255,6 +309,12 @@ def make_handler(dashboard: Dashboard):
                     )
                 elif path == "/api/paper/status":
                     self._send_json(200, dashboard.paper.status())
+                elif path == "/api/engine":
+                    self._send_json(200, dashboard.engine())
+                elif path == "/api/positions":
+                    self._send_json(200, dashboard.positions())
+                elif path == "/api/trades":
+                    self._send_json(200, dashboard.trades())
                 else:
                     self._send_json(404, {"error": "not found"})
             except DashboardStateError as exc:
@@ -678,166 +738,332 @@ INDEX_HTML = """<!doctype html>
 <title>TradingAgents · Paper</title>
 <style>
   :root{
-    --bg:#0b0f14; --card:#141b23; --line:#232d38; --fg:#e7edf3; --mut:#8ea0b3;
-    --acc:#4ea1ff; --ok:#3ddc84; --warn:#ffcc4d; --bad:#ff6b6b; --radius:14px;
+    --bg:#0a0e13; --card:#141c25; --line:#212c38; --line2:#2b3846;
+    --fg:#e8eef5; --mut:#8ba0b5; --mut2:#63788d;
+    --acc:#4ea1ff; --ok:#37d67a; --warn:#ffc74d; --bad:#ff6b6b;
+    --radius:14px; --radius-sm:10px;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--fg);
-    font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    padding:env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 12px)}
-  header{position:sticky;top:0;background:linear-gradient(180deg,var(--bg),var(--bg) 70%,transparent);
-    padding:14px 2px 8px;z-index:5}
-  h1{font-size:18px;margin:0 0 2px}
-  .sub{color:var(--mut);font-size:12.5px;word-break:break-all}
-  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-  .grow{flex:1}
-  .badge{display:inline-block;padding:3px 9px;border-radius:999px;font-size:12px;font-weight:600}
-  .b-ok{background:rgba(61,220,132,.15);color:var(--ok)}
-  .b-warn{background:rgba(255,204,77,.15);color:var(--warn)}
-  .b-bad{background:rgba(255,107,107,.15);color:var(--bad)}
-  .b-mut{background:rgba(142,160,179,.15);color:var(--mut)}
-  nav{display:flex;gap:6px;overflow:auto;margin:10px 0;position:sticky;top:58px;z-index:4;
-    background:var(--bg);padding:6px 0}
-  nav button{flex:0 0 auto;background:var(--card);color:var(--mut);border:1px solid var(--line);
-    padding:8px 14px;border-radius:999px;font-size:14px;font-weight:600}
-  nav button.on{color:var(--fg);border-color:var(--acc);background:rgba(78,161,255,.12)}
-  section{display:none}
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    padding:env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 8px)}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 16px}
+  header{position:sticky;top:0;z-index:20;background:rgba(10,14,19,.86);
+    backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+  .hrow{display:flex;gap:14px;align-items:center;padding:12px 0}
+  h1{font-size:17px;margin:0;letter-spacing:-.01em}
+  .sub{color:var(--mut2);font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    margin-top:2px;word-break:break-all}
+  .grow{flex:1;min-width:0}
+  .badge{display:inline-flex;align-items:center;gap:6px;padding:4px 11px;border-radius:999px;
+    font-size:12px;font-weight:700;white-space:nowrap;border:1px solid transparent}
+  .b-ok{background:rgba(55,214,122,.14);color:var(--ok);border-color:rgba(55,214,122,.3)}
+  .b-warn{background:rgba(255,199,77,.14);color:var(--warn);border-color:rgba(255,199,77,.3)}
+  .b-bad{background:rgba(255,107,107,.14);color:var(--bad);border-color:rgba(255,107,107,.3)}
+  .b-mut{background:rgba(139,160,181,.14);color:var(--mut);border-color:rgba(139,160,181,.28)}
+  .dot{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block}
+  nav{display:flex;gap:4px;overflow-x:auto;padding:0 0 8px;scrollbar-width:none}
+  nav::-webkit-scrollbar{display:none}
+  nav button{flex:0 0 auto;background:transparent;color:var(--mut);border:1px solid transparent;
+    padding:7px 13px;border-radius:999px;font-size:13.5px;font-weight:600;cursor:pointer;
+    font-family:inherit;transition:all .12s}
+  nav button:hover{color:var(--fg)}
+  nav button.on{color:var(--fg);border-color:var(--line2);background:var(--card)}
+  section{display:none;animation:fade .18s ease-out}
   section.on{display:block}
+  @keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+  .grid.two{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
   .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-    padding:12px 14px;margin:10px 0}
-  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);
-    margin:0 0 10px}
-  .kv{display:grid;grid-template-columns:1fr auto;gap:6px 12px;font-size:15px}
-  .kv .k{color:var(--mut)}
-  .kv .v{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
-  .pill{display:inline-block;padding:2px 8px;border-radius:8px;font-size:12px;font-weight:600}
-  .s-pending{background:rgba(142,160,179,.18);color:var(--mut)}
-  .s-executed{background:rgba(78,161,255,.18);color:var(--acc)}
-  .s-evaluated{background:rgba(61,220,132,.18);color:var(--ok)}
-  .s-blocked{background:rgba(255,107,107,.18);color:var(--bad)}
-  .s-unevaluable{background:rgba(255,204,77,.18);color:var(--warn)}
-  ul.clean{list-style:none;margin:0;padding:0}
-  ul.clean li{border-bottom:1px solid var(--line);padding:9px 0;font-size:14px}
-  ul.clean li:last-child{border-bottom:0}
-  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:var(--mut);
+    padding:14px 16px;margin:0}
+  .card h2{font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--mut);
+    margin:0 0 12px;font-weight:700;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .card h2 .spacer{flex:1}
+  .card h2 .tag{text-transform:none;letter-spacing:0;font-weight:600;font-size:11px;color:var(--mut2)}
+  .stat{display:flex;flex-direction:column;gap:3px}
+  .stat .label{color:var(--mut);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em}
+  .stat .value{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .stat .value.sm{font-size:16px}
+  .stat .hint{color:var(--mut2);font-size:11.5px}
+  .stats{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
+  .kv{display:grid;grid-template-columns:1fr auto;gap:7px 14px;font-size:14px}
+  .kv .k{color:var(--mut);min-width:0}
+  .kv .v{text-align:right;font-variant-numeric:tabular-nums;font-weight:600;word-break:break-word}
+  .kv .full{grid-column:1/3}
+  .pos{color:var(--ok)} .neg{color:var(--bad)} .warnc{color:var(--warn)}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--mut2);
     word-break:break-all}
-  .err{background:rgba(255,107,107,.12);border:1px solid rgba(255,107,107,.4);
-    border-radius:var(--radius);padding:10px 12px;margin:10px 0;font-size:14px;display:none}
-  button.act{background:var(--acc);color:#06121f;border:0;padding:11px 16px;border-radius:11px;
-    font-size:15px;font-weight:700}
-  button.act[disabled]{opacity:.45}
-  input{background:#0e141b;color:var(--fg);border:1px solid var(--line);border-radius:10px;
-    padding:11px 12px;font-size:16px;width:100%}
+  .pill{display:inline-block;padding:2px 8px;border-radius:7px;font-size:11.5px;font-weight:700;
+    letter-spacing:.02em;white-space:nowrap}
+  .s-pending{background:rgba(139,160,181,.16);color:var(--mut)}
+  .s-executed{background:rgba(78,161,255,.16);color:var(--acc)}
+  .s-evaluated{background:rgba(55,214,122,.16);color:var(--ok)}
+  .s-blocked{background:rgba(255,107,107,.16);color:var(--bad)}
+  .s-unevaluable{background:rgba(255,199,77,.16);color:var(--warn)}
+  .s-filled,.s-accepted,.s-new,.s-partially_filled{background:rgba(78,161,255,.16);color:var(--acc)}
+  .s-canceled,.s-expired,.s-rejected{background:rgba(255,107,107,.16);color:var(--bad)}
+  .state-RUNNING{background:rgba(55,214,122,.16);color:var(--ok)}
+  .state-STARTING,.state-STOPPING{background:rgba(255,199,77,.16);color:var(--warn)}
+  .state-STOPPED,.state-DISABLED{background:rgba(139,160,181,.16);color:var(--mut)}
+  .state-ERROR{background:rgba(255,107,107,.16);color:var(--bad)}
+  ul.clean{list-style:none;margin:0;padding:0}
+  ul.clean li{border-bottom:1px solid var(--line);padding:11px 0;font-size:14px}
+  ul.clean li:last-child{border-bottom:0}
+  ul.clean li:first-child{padding-top:0}
+  .err{background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.35);
+    border-radius:var(--radius);padding:11px 14px;margin:12px 0;font-size:14px;display:none}
+  button.act{background:var(--acc);color:#04121f;border:0;padding:10px 16px;border-radius:var(--radius-sm);
+    font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;transition:filter .12s}
+  button.act:hover{filter:brightness(1.08)}
+  button.act[disabled]{opacity:.4;cursor:not-allowed}
+  button.act.stop{background:var(--bad);color:#1a0505}
+  button.act.ghost{background:transparent;color:var(--fg);border:1px solid var(--line2)}
+  input{background:#0b1118;color:var(--fg);border:1px solid var(--line2);border-radius:var(--radius-sm);
+    padding:10px 12px;font-size:15px;width:100%;font-family:inherit}
   .muted{color:var(--mut);font-size:12.5px}
   .hide{display:none}
-  .livewarn{background:rgba(255,107,107,.14);border:1px solid rgba(255,107,107,.5);
-    color:#ffb3b3;border-radius:var(--radius);padding:9px 12px;margin:10px 0;font-size:13px;
-    font-weight:700;letter-spacing:.04em;text-align:center}
-  .state-RUNNING{background:rgba(61,220,132,.18);color:var(--ok)}
-  .state-STARTING,.state-STOPPING{background:rgba(255,204,77,.18);color:var(--warn)}
-  .state-STOPPED,.state-DISABLED{background:rgba(142,160,179,.18);color:var(--mut)}
-  .state-ERROR{background:rgba(255,107,107,.18);color:var(--bad)}
-  button.stop{background:var(--bad);color:#1a0505}
+  .banner{background:linear-gradient(90deg,rgba(255,107,107,.1),rgba(255,107,107,.04));
+    border:1px solid rgba(255,107,107,.35);color:#ffb9b9;border-radius:var(--radius);
+    padding:8px 14px;margin:12px 0;font-size:12.5px;font-weight:700;letter-spacing:.05em;
+    display:flex;align-items:center;gap:9px}
+  .flag{display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:var(--radius-sm);
+    background:#0b1118;border:1px solid var(--line);font-size:13px}
+  .flag .dot{flex:0 0 auto}
+  .flags{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+  .flag.ok{border-color:rgba(55,214,122,.3)}
+  .flag .name{flex:1;font-weight:600}
+  .flag .state{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+  .flag.ok .state{color:var(--ok)} .flag.off .state{color:var(--mut2)}
+  .timeline{display:flex;flex-direction:column;gap:2px}
+  .step{display:flex;gap:11px;align-items:flex-start;padding:8px 0}
+  .step .mark{flex:0 0 auto;width:22px;height:22px;border-radius:50%;display:flex;
+    align-items:center;justify-content:center;font-size:11px;font-weight:800;
+    background:var(--line);color:var(--mut2)}
+  .step.done .mark{background:rgba(55,214,122,.18);color:var(--ok)}
+  .step.wait .mark{background:rgba(255,199,77,.16);color:var(--warn)}
+  .step .body{flex:1;min-width:0}
+  .step .title{font-weight:600;font-size:13.5px}
+  .step .meta{font-size:12px;color:var(--mut2);margin-top:1px;word-break:break-word}
+  .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.05em;
+    padding:8px 10px;border-bottom:1px solid var(--line2);font-weight:700;white-space:nowrap}
+  td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top;
+    font-variant-numeric:tabular-nums}
+  tr:last-child td{border-bottom:0}
+  td.num{text-align:right;white-space:nowrap}
+  .empty{padding:18px 0;text-align:center;color:var(--mut2);font-size:13.5px}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{background:#0b1118;border:1px solid var(--line);border-radius:8px;padding:5px 9px;
+    font-size:12px;display:flex;gap:7px;align-items:baseline}
+  .chip .ck{color:var(--mut2);font-size:11px}
+  .chip .cv{font-weight:700;font-variant-numeric:tabular-nums}
+  .sec-title{font-size:12.5px;font-weight:700;color:var(--mut);text-transform:uppercase;
+    letter-spacing:.06em;margin:22px 0 10px}
+  .sec-title:first-child{margin-top:6px}
+  @media (max-width:600px){
+    .stat .value{font-size:19px}
+    .hrow{padding:10px 0}
+    h1{font-size:15.5px}
+  }
 </style>
 </head>
 <body>
 <header>
-  <div class="row">
-    <div class="grow">
-      <h1>TradingAgents · Paper</h1>
-      <div class="sub" id="expid">loading…</div>
+  <div class="wrap">
+    <div class="hrow">
+      <div class="grow">
+        <h1>TradingAgents · Paper</h1>
+        <div class="sub" id="expid">loading…</div>
+      </div>
+      <span id="status" class="badge b-mut"><span class="dot"></span>…</span>
     </div>
-    <span id="status" class="badge b-mut">…</span>
+    <nav id="nav" class="hide">
+      <button data-t="overview" class="on">Overview</button>
+      <button data-t="engine">Engine</button>
+      <button data-t="decisions">Decisions</button>
+      <button data-t="positions">Positions</button>
+      <button data-t="trades">Trades</button>
+      <button data-t="journal">Journal</button>
+      <button data-t="control">Control</button>
+    </nav>
   </div>
 </header>
 
-<div id="auth" class="card">
-  <h2>Access token</h2>
-  <input id="token" type="password" placeholder="paste dashboard token" autocomplete="off">
-  <div class="row" style="margin-top:10px">
-    <button class="act" onclick="saveToken()">Connect</button>
-    <span class="muted">stored only in this browser</span>
+<div class="wrap">
+  <div id="err" class="err"></div>
+
+  <div id="livewarn" class="banner"><span class="dot"></span>ALPACA PAPER — NOT LIVE</div>
+
+  <div id="auth" class="card">
+    <h2>Access token</h2>
+    <input id="token" type="password" placeholder="paste dashboard token" autocomplete="off">
+    <div style="display:flex;gap:10px;align-items:center;margin-top:10px">
+      <button class="act" onclick="saveToken()">Connect</button>
+      <span class="muted">stored only in this browser</span>
+    </div>
   </div>
+
+  <main id="main" class="hide">
+    <section id="overview" class="on">
+      <div class="sec-title">Live engine</div>
+      <div class="card">
+        <h2>Is the system actually working? <span class="spacer"></span>
+          <span class="tag" id="ov-updated">—</span></h2>
+        <div id="ov-states" class="flags"></div>
+        <p class="muted" id="ov-verdict" style="margin:12px 0 0"></p>
+      </div>
+      <div class="grid" style="margin-top:12px">
+        <div class="card"><h2>Account (Alpaca paper)</h2><div id="ov-account" class="stats"></div>
+          <div id="ov-account-note" class="muted" style="margin-top:10px"></div></div>
+        <div class="card"><h2>Activity</h2><div id="ov-activity" class="stats"></div></div>
+      </div>
+      <div class="sec-title">Simulation book <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:400">— the backtest ledger, separate from the paper account above</span></div>
+      <div class="grid">
+        <div class="card"><h2>Book</h2><div id="bookkv" class="kv"></div></div>
+        <div class="card"><h2>Performance</h2><div id="perf" class="kv"></div></div>
+      </div>
+      <div class="grid two" style="margin-top:12px">
+        <div class="card"><h2>Market data</h2><div id="market" class="kv"></div></div>
+        <div class="card"><h2>Dataset</h2><div id="data" class="kv"></div></div>
+      </div>
+      <div id="warncard" class="card" style="display:none;margin-top:12px">
+        <h2>Warnings</h2><ul class="clean" id="warnings"></ul>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h2>Readiness</h2><div id="readiness"></div>
+      </div>
+    </section>
+
+    <section id="engine">
+      <div class="grid two">
+        <div class="card">
+          <h2>Worker</h2>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+            <span id="pstate" class="pill state-STOPPED">…</span>
+            <span class="grow"></span>
+            <button class="act" id="pstart" onclick="doPaperStart()">START PAPER TRADING</button>
+            <button class="act stop" id="pstop" onclick="doPaperStop()">STOP PAPER TRADING</button>
+          </div>
+          <p class="muted" id="pnote" style="margin:0 0 12px"></p>
+          <div id="eng-worker" class="kv"></div>
+        </div>
+        <div class="card">
+          <h2>Pipeline <span class="spacer"></span><span class="tag" id="eng-cycle">—</span></h2>
+          <div id="eng-pipeline" class="timeline"></div>
+          <p class="muted" id="eng-reason" style="margin:12px 0 0"></p>
+        </div>
+      </div>
+      <div class="grid two" style="margin-top:12px">
+        <div class="card"><h2>Price seam</h2><div id="eng-market" class="kv"></div>
+          <p class="muted" id="eng-markethint" style="margin:10px 0 0"></p></div>
+        <div class="card"><h2>Heartbeat &amp; safety</h2><div id="eng-risk" class="kv"></div></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h2>Exit policy <span class="tag">stop-loss / take-profit, recorded from the strategy</span></h2>
+        <div id="eng-exits"></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h2>Last cycle <span class="spacer"></span>
+          <button class="act ghost" onclick="refreshEngine()">Refresh</button></h2>
+        <div id="eng-lasterr" class="err" style="display:none"></div>
+        <div id="eng-cycle-json" class="mono">—</div>
+      </div>
+    </section>
+
+    <section id="decisions">
+      <div class="card">
+        <h2>Decision cadence <span class="spacer"></span><span class="tag" id="dec-cadence"></span></h2>
+        <p class="muted" id="dec-cadence-note" style="margin:0"></p>
+      </div>
+      <div id="declist" style="margin-top:12px"></div>
+    </section>
+
+    <section id="positions">
+      <div class="card">
+        <h2>Open positions <span class="spacer"></span><span class="tag" id="pos-note"></span></h2>
+        <div id="pos-body"></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h2>Recorded exit levels</h2>
+        <div id="pos-exits"></div>
+      </div>
+    </section>
+
+    <section id="trades">
+      <div class="card">
+        <h2>Orders <span class="spacer"></span><span class="tag" id="ord-note"></span></h2>
+        <div id="ord-body"></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h2>Settled trades <span class="spacer"></span><span class="tag" id="trade-note"></span></h2>
+        <div id="trade-body"></div>
+      </div>
+    </section>
+
+    <section id="journal">
+      <div class="card">
+        <h2>Journal (latest 100) <span class="spacer"></span>
+          <span class="tag">append-only event log</span></h2>
+        <div id="jlist"></div>
+      </div>
+    </section>
+
+    <section id="control">
+      <div class="card">
+        <h2>Advance simulation</h2>
+        <p class="muted" id="ctlstate"></p>
+        <div style="display:flex;gap:10px;align-items:center">
+          <input id="nsessions" type="number" min="0" value="10" style="max-width:120px">
+          <button class="act" id="runbtn" onclick="doRun()">Run sessions</button>
+        </div>
+        <p class="muted" style="margin-bottom:0">Simulation only. No broker order is ever placed by
+          this control.</p>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h2>Last run</h2><div id="lastrun" class="mono">—</div>
+      </div>
+    </section>
+  </main>
 </div>
-
-<div id="err" class="err"></div>
-
-<div id="livewarn" class="livewarn">ALPACA PAPER — NOT LIVE</div>
-
-<nav id="nav" class="hide">
-  <button data-t="overview" class="on">Overview</button>
-  <button data-t="book">Book</button>
-  <button data-t="decisions">Decisions</button>
-  <button data-t="journal">Journal</button>
-  <button data-t="paper">Paper trading</button>
-  <button data-t="control">Control</button>
-</nav>
-
-<main>
-  <section id="overview" class="on">
-    <div class="card"><h2>Readiness</h2><div id="readiness"></div></div>
-    <div id="warncard" class="card" style="display:none">
-      <h2>Warnings</h2><ul class="clean" id="warnings"></ul>
-    </div>
-    <div class="card"><h2>Counts</h2><div id="counts" class="kv"></div></div>
-    <div class="card"><h2>Performance</h2><div id="perf" class="kv"></div></div>
-    <div class="card"><h2>Market data</h2><div id="market" class="kv"></div></div>
-    <div class="card"><h2>Data source</h2><div id="data" class="kv"></div></div>
-  </section>
-
-  <section id="book">
-    <div class="card"><h2>Book</h2><div id="bookkv" class="kv"></div></div>
-    <div class="card"><h2>Positions</h2><div id="positions"></div></div>
-    <div class="card"><h2>Resting orders</h2><div id="resting"></div></div>
-  </section>
-
-  <section id="decisions">
-    <div class="card"><h2>Decisions</h2><ul class="clean" id="declist"></ul></div>
-  </section>
-
-  <section id="journal">
-    <div class="card"><h2>Journal (latest)</h2><ul class="clean" id="jlist"></ul></div>
-  </section>
-
-  <section id="paper">
-    <div class="card">
-      <h2>Alpaca paper worker</h2>
-      <div class="livewarn" style="margin-top:0">ALPACA PAPER — NOT LIVE</div>
-      <div class="row" style="margin-top:6px">
-        <span id="pstate" class="pill state-STOPPED">…</span>
-        <span class="grow"></span>
-        <button class="act" id="pstart" onclick="doPaperStart()">START PAPER TRADING</button>
-        <button class="act stop" id="pstop" onclick="doPaperStop()">STOP PAPER TRADING</button>
-      </div>
-      <p class="muted" id="pnote" style="margin-bottom:0"></p>
-    </div>
-    <div class="card"><h2>Market data</h2><div id="pmarket" class="kv"></div>
-      <p class="muted" id="pmarkethint" style="margin-bottom:0"></p></div>
-    <div class="card"><h2>Account</h2><div id="paccount" class="kv"></div></div>
-    <div class="card"><h2>Positions</h2><div id="ppositions"></div></div>
-    <div class="card"><h2>Orders</h2><div id="porders"></div></div>
-    <div class="card"><h2>Last cycle</h2><div id="pcycle" class="mono">—</div></div>
-    <div class="card"><h2>Risk limits</h2><div id="prisk" class="kv"></div></div>
-  </section>
-
-  <section id="control">
-    <div class="card">
-      <h2>Advance simulation</h2>
-      <p class="muted" id="ctlstate"></p>
-      <div class="row">
-        <input id="nsessions" type="number" min="0" value="10" style="max-width:120px">
-        <button class="act" id="runbtn" onclick="doRun()">Run sessions</button>
-      </div>
-      <p class="muted" style="margin-bottom:0">Simulation only. No broker order is ever placed.</p>
-    </div>
-    <div class="card"><h2>Last run</h2><div id="lastrun" class="mono">—</div></div>
-  </section>
-</main>
 
 <script>
 const $ = (id) => document.getElementById(id);
 let TOKEN = localStorage.getItem("ta_token") || "";
 let timer = null;
+let LAST = {};
+
+function esc(v){
+  if(v===null||v===undefined) return "N/A";
+  return String(v).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+const money = (v) => (v===null||v===undefined||isNaN(v)) ? "N/A"
+  : Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const pct = (v) => (v===null||v===undefined||isNaN(v)) ? "N/A" : (Number(v)*100).toFixed(2)+"%";
+const num = (v,d) => (v===null||v===undefined||isNaN(v)) ? "N/A" : Number(v).toFixed(d===undefined?2:d);
+const when = (v) => v ? new Date(v).toLocaleString() : "—";
+const rel = (v) => {
+  if(!v) return "never";
+  const s = (Date.now() - new Date(v).getTime())/1000;
+  if(isNaN(s)) return "—";
+  if(s < 60) return Math.max(0,Math.round(s))+"s ago";
+  if(s < 3600) return Math.round(s/60)+"m ago";
+  if(s < 86400) return Math.round(s/3600)+"h ago";
+  return Math.round(s/86400)+"d ago";
+};
+const cls = (v) => (v>0?"pos":(v<0?"neg":""));
+const sgn = (v) => (v===null||v===undefined||isNaN(v)) ? "N/A" : (v>0?"+":"")+money(v);
+const stat = (label,value,extra) => `<div class="stat"><div class="label">${esc(label)}</div>
+  <div class="value ${(extra&&extra.sm)?"sm":""} ${(extra&&extra.cls)||""}">${value}</div>
+  ${(extra&&extra.hint)?`<div class="hint">${esc(extra.hint)}</div>`:""}</div>`;
+const kv = (obj,fmt) => Object.entries(obj).map(([k,v]) =>
+  `<div class="k">${esc(k)}</div><div class="v">${fmt?fmt(k,v):(v===null||v===undefined?"N/A":esc(v))}</div>`
+).join("");
+const full = (t) => t ? `<div class="k full mono" style="color:var(--mut2)">${esc(t)}</div>` : "";
+const empty = (t) => `<div class="empty">${esc(t)}</div>`;
+const flag = (ok,label,state) => `<div class="flag ${ok?"ok":"off"}"><span class="dot"></span>
+  <span class="name">${esc(label)}</span><span class="state">${esc(state)}</span></div>`;
 
 function showErr(msg){
   const e = $("err");
@@ -861,150 +1087,345 @@ async function api(path, opts){
   }
   return r.json();
 }
-function badge(status){
-  const cls = /READY/i.test(status) ? "b-ok" : /BLOCKED/i.test(status) ? "b-bad" : "b-warn";
-  return `<span class="badge ${cls}">${status}</span>`;
-}
-function kv(obj, fmt){
-  return Object.entries(obj).map(([k,v]) =>
-    `<div class="k">${k}</div><div class="v">${fmt ? fmt(k,v) : (v===null?"N/A":v)}</div>`
-  ).join("");
-}
-const money = (v) => v===null||v===undefined ? "N/A" : Number(v).toLocaleString(undefined,{maximumFractionDigits:2});
-const pct = (v) => v===null||v===undefined ? "N/A" : (Number(v)*100).toFixed(2)+"%";
 
-async function refresh(){
+// -- Overview ---------------------------------------------------------------
+function renderOverview(s){
+  $("expid").textContent = s.experiment_id + "  ·  " + s.strategy_id;
+  const rd = s.readiness || {};
+  const rdCls = /READY/i.test(rd.status)?"b-ok":(/BLOCKED/i.test(rd.status)?"b-bad":"b-warn");
+  $("status").className = "badge " + rdCls;
+  $("status").innerHTML = `<span class="dot"></span>${esc(rd.status||"—")}`;
+  $("readiness").innerHTML = `<span class="badge ${rdCls}">${esc(rd.status)}</span>` +
+    ((rd.blockers&&rd.blockers.length)
+      ? '<ul class="clean">'+rd.blockers.map(b=>`<li>${esc(b)}</li>`).join("")+"</ul>"
+      : '<p class="muted" style="margin:10px 0 0">No blockers.</p>');
+
+  const c = s.counts || {};
+  $("ov-activity").innerHTML =
+    stat("Sessions processed", esc(c.sessions_processed), {hint:"last "+(s.last_session_processed||"—")}) +
+    stat("Decisions", esc(c.decisions_total)) +
+    stat("Genuine inferences", esc(c.genuine_inferences), {hint:"model-produced, not blocked"}) +
+    stat("Orders submitted", esc((s.orders||{}).submitted)) +
+    stat("Filled orders", esc(c.filled_orders)) +
+    stat("Evaluated", esc(c.evaluated));
+
+  const cad = s.cadence || {};
+  $("dec-cadence").textContent = "every " + (cad.decision_frequency_sessions||"?") + " session(s)";
+  $("dec-cadence-note").textContent = cad.max_decisions_reached
+    ? `max_decisions (${cad.max_decisions}) reached — no later session decides.`
+    : (cad.next_decision_session
+        ? `Next decision due at ${cad.next_decision_session}. ${cad.decisions_taken||0}/${cad.max_decisions||"?"} decisions taken.`
+        : "No further decision session in the loaded data.");
+
+  $("bookkv").innerHTML = kv({
+    "Initial cash": money(s.book.initial_cash),
+    "Cash": money(s.book.cash),
+    "Market value": money(s.book.market_value),
+    "Equity": money(s.book.equity),
+    "Realized P&L": money(s.book.realized_pnl),
+    "Unrealized P&L": money(s.book.unrealized_pnl),
+    "Total fees": money(s.book.total_fees),
+    "Resting orders": s.book.resting_orders,
+  });
+  const p = s.performance || {};
+  $("perf").innerHTML = kv({
+    "Total return": pct(p.total_return),
+    "Max drawdown": pct(p.max_drawdown),
+    "Sharpe": p.sharpe_ratio===null||p.sharpe_ratio===undefined?"N/A":p.sharpe_ratio.toFixed(2),
+    "Closed outcomes": ((p.sample||{}).closed_outcomes),
+    "Sample limited": p.sample_limited?"yes":"no",
+  }) + full(p.sample_limited ? "Too few closed outcomes for reliable metrics." : "");
+
+  const f = s.freshness || {};
+  const ageText = (f.data_age_days===null||f.data_age_days===undefined)?"unknown":(f.data_age_days+" day(s)");
+  const stCls = (f.market_status==="stale"||f.market_status==="data_source_unavailable")?"b-bad":
+    (f.market_status==="up_to_date"?"b-ok":"b-mut");
+  $("market").innerHTML =
+    `<div class="k full" style="margin-bottom:8px"><span class="badge ${stCls}">${esc(f.market_status||"—")}</span></div>` +
+    kv({
+      "Latest available bar": f.latest_available_session||"—",
+      "Last source bar": f.last_source_bar||"—",
+      "Last processed session": f.last_processed_session||"—",
+      "Data age": ageText,
+      "Pending sessions": f.pending_sessions===undefined?"—":f.pending_sessions,
+      "Source health": f.source_status==="failed"?"FAILING":"ok",
+      "Last refresh": f.last_refresh_at||"never",
+      "Fetches today": (f.fetches_today===undefined?"—":f.fetches_today)+" / "+(f.fetch_quota_per_day===undefined?"—":f.fetch_quota_per_day),
+    }) +
+    (f.source_status==="failed"
+      ? `<div class="k full" style="color:var(--bad);margin-top:8px">Data source health: FAILING (${esc(f.source_failure_kind||"unknown")}) — ${esc(f.source_status_detail||f.reason||"")}</div>`
+      : "") +
+    full(f.reason||"") +
+    full('Daily-bar source: "latest available bar" is the newest daily session, not a live tick price.');
+
+  $("data").innerHTML = kv({
+    "Source": s.data.source_name,
+    "Kind": s.data.source_kind,
+    "Current market": s.data.is_current_market?"yes":"no",
+    "Dataset": (s.data.dataset_start||"?")+" → "+(s.data.dataset_end||"?"),
+    "Sessions available": s.data.sessions_available,
+    "Last processed": s.last_session_processed||"—",
+  }) + full(s.data.note||"");
+
+  const warn = s.warnings || [];
+  $("warncard").style.display = warn.length?"block":"none";
+  $("warnings").innerHTML = warn.map(w=>`<li style="color:var(--warn)">${esc(w)}</li>`).join("");
+}
+
+// -- Engine -----------------------------------------------------------------
+function paperState(status){
+  const known = ["STOPPED","STARTING","RUNNING","STOPPING","ERROR","DISABLED"];
+  const s = known.includes(status) ? status : "STOPPED";
+  const el = $("pstate");
+  el.textContent = status || "STOPPED";
+  el.className = "pill state-" + s;
+  $("pstart").disabled = status==="RUNNING" || status==="STARTING";
+  $("pstop").disabled = status==="STOPPED" || status==="STOPPING";
+}
+
+function renderEngine(e){
+  const w = e.worker || {};
+  paperState(w.status);
+  $("pnote").textContent = w.endpoint
+    ? `Mode ${e.mode} · endpoint ${w.endpoint} · paper-only ${w.paper_endpoint_only?"yes":"NO"}`
+    : (e.no_trade_reason || "paper trading is not configured on this dashboard");
+  $("ov-updated").textContent = "updated " + rel(e.timestamps && e.timestamps.last_cycle_at);
+
+  const st = e.states || {};
+  const mdStatus = (e.market_data && e.market_data.status) || "unknown";
+  $("ov-states").innerHTML =
+    flag(st.worker_running, "Worker loop running", st.worker_running?"running":"stopped") +
+    flag(st.market_data_available, "Market data available", st.market_data_available?"ok":mdStatus) +
+    flag(st.strategy_evaluating, "Strategy evaluating", st.strategy_evaluating?("last "+rel(e.timestamps&&e.timestamps.last_strategy_evaluation_at)):"never") +
+    flag(st.decision_generated, "Decision generated", st.decision_generated?"yes":"none yet") +
+    flag(st.order_submitted, "Order submitted", st.order_submitted?"yes":"none") +
+    flag(st.order_filled, "Order filled", st.order_filled?"yes":"none");
+
+  const parts = [];
+  if(!st.worker_running) parts.push("The worker is not running, so nothing is being analysed or traded.");
+  else if(!st.market_data_available) parts.push("The worker is running but its price seam reports no usable price.");
+  else if(!st.strategy_evaluating) parts.push("The worker is running and priced, but the strategy has not been evaluated yet.");
+  else if(!st.order_submitted) parts.push("The strategy is being evaluated but has not produced a tradeable decision yet.");
+  else parts.push("The strategy is evaluating and has produced orders.");
+  if(e.no_trade_reason) parts.push("Reason no order was placed: " + e.no_trade_reason);
+  $("ov-verdict").textContent = parts.join(" ");
+
+  const hb = e.heartbeat || {};
+  $("eng-worker").innerHTML = kv({
+    "Status": w.status||"—",
+    "Loop thread": w.loop_running?"alive":"not running",
+    "Strategy": w.strategy_id||"—",
+    "Endpoint": w.endpoint||"—",
+    "Paper-only": w.paper_endpoint_only?"yes":"NO",
+    "Started": when(e.timestamps&&e.timestamps.worker_started_at),
+    "Stopped": (e.timestamps&&e.timestamps.worker_stopped_at)?when(e.timestamps.worker_stopped_at):"—",
+    "Cycles completed": hb.cycles_completed===undefined?"—":hb.cycles_completed,
+    "Poll interval": hb.poll_interval_seconds===undefined?"—":(hb.poll_interval_seconds+"s"),
+    "Next cycle": when(hb.next_cycle_at),
+    "Last cycle": rel(hb.last_cycle_at),
+  });
+
+  const ts = e.timestamps || {};
+  const steps = [
+    ["Market data", st.market_data_available,
+      ((e.market_data&&e.market_data.provider)||"unknown") + " · " + mdStatus, null],
+    ["Strategy evaluated", st.strategy_evaluating,
+      ts.last_strategy_evaluation_at ? when(ts.last_strategy_evaluation_at) : "never", null],
+    ["Decision generated", st.decision_generated,
+      e.no_trade_reason || "a decision is in hand", null],
+    ["Order submitted", st.order_submitted,
+      st.order_submitted ? ("last " + rel(ts.last_order_submitted_at)) : "none yet", null],
+    ["Order filled", st.order_filled,
+      st.order_filled ? ((ts.last_fill_symbol||"?") + " · " + rel(ts.last_fill_at)) : "none yet", null],
+  ];
+  $("eng-pipeline").innerHTML = steps.map(([t,ok,meta],i)=>{
+    const klass = ok ? "done" : (i===0 ? "wait" : "");
+    return `<div class="step ${klass}"><div class="mark">${ok?"✓":(i+1)}</div><div class="body">
+      <div class="title">${esc(t)}</div><div class="meta">${esc(meta)}</div></div></div>`;
+  }).join("");
+  $("eng-reason").textContent = e.no_trade_reason ? ("No order: " + e.no_trade_reason) : "";
+  $("eng-cycle").textContent = "last cycle " + rel(ts.last_cycle_at);
+
+  const md = e.market_data || {};
+  $("eng-market").innerHTML = kv({
+    "Provider": md.provider||md.provider_configured||"unknown",
+    "Kind": md.kind||"—",
+    "Status": md.status||"not started",
+    "Last price": md.last_price===null||md.last_price===undefined?"—":money(md.last_price),
+    "Observed at": when(md.last_observed_at),
+    "Age": md.age_seconds===null||md.age_seconds===undefined?"—":(num(md.age_seconds,1)+"s"),
+    "Max age": md.max_age_seconds===null||md.max_age_seconds===undefined?"—":(md.max_age_seconds+"s"),
+  }) + full(md.status_detail||"");
+  $("eng-markethint").textContent = md.kind === "current"
+    ? "Sizing uses a current Alpaca snapshot, refused when stale."
+    : "Sizing uses the experiment's historical daily-bar open — a past session price, not a live quote.";
+
+  const rl = LAST.risk || {};
+  $("eng-risk").innerHTML = kv({
+    "Last position sync": rel(ts.last_position_sync_at),
+    "Last account read": rel(ts.last_account_at),
+    "Max order notional": money(rl.max_order_notional),
+    "Max open positions": rl.max_open_positions,
+    "Max daily orders": rl.max_daily_orders,
+    "Shorting": rl.allow_short?"ENABLED":"disabled",
+    "Share sizing": rl.whole_shares?"whole shares only":"fractional allowed",
+  });
+  $("eng-lasterr").style.display = e.last_error?"block":"none";
+  $("eng-lasterr").textContent = e.last_error||"";
+  $("eng-cycle-json").textContent = LAST.lastCycle ? JSON.stringify(LAST.lastCycle, null, 2) : "—";
+
+  const stops = LAST.stops || {};
+  $("eng-exits").innerHTML = Object.keys(stops).length
+    ? '<ul class="clean">'+Object.entries(stops).map(([s,v])=>`<li><b>${esc(s)}</b>
+        <div class="mono">stop ${money(v.stop_loss)} · target ${money(v.take_profit)} · decision ${esc(v.decision_id||"—")}</div></li>`).join("")+"</ul>"
+    : empty("No exit levels recorded. Stops and targets come only from decisions that carried them.");
+}
+
+async function refreshEngine(){
   try{
-    const s = await api("/api/summary");
-    showErr("");
-    $("auth").classList.add("hide");
-    $("nav").classList.remove("hide");
-    $("expid").textContent = s.experiment_id + "  ·  " + s.strategy_id;
-    $("status").textContent = s.readiness.status;
-    $("status").className = "badge " + (/READY/i.test(s.readiness.status)?"b-ok":
-      /BLOCKED/i.test(s.readiness.status)?"b-bad":"b-warn");
-
-    $("readiness").innerHTML = badge(s.readiness.status) +
-      (s.readiness.blockers.length
-        ? '<ul class="clean">'+s.readiness.blockers.map(b=>`<li>${b}</li>`).join("")+"</ul>"
-        : '<p class="muted">No blockers.</p>');
-
-    $("counts").innerHTML = kv({
-      "Sessions processed": s.counts.sessions_processed,
-      "Decisions": s.counts.decisions_total,
-      "Genuine inferences": s.counts.genuine_inferences,
-      "Settled (executed)": s.counts.executed,
-      "Evaluated": s.counts.evaluated,
-      "Blocked": s.counts.blocked,
-      "Pending": s.counts.pending,
-      "Orders submitted": s.orders.submitted,
-      "Filled orders": s.counts.filled_orders,
-      "Without an order": s.orders.without_order,
-    });
-    $("perf").innerHTML = kv({
-      "Total return": pct(s.performance.total_return),
-      "Max drawdown": pct(s.performance.max_drawdown),
-      "Sharpe": s.performance.sharpe_ratio===null?"N/A":s.performance.sharpe_ratio.toFixed(2),
-      "Closed outcomes": s.performance.sample.closed_outcomes,
-      "Min for metrics": s.performance.min_trades_for_metrics,
-      "Sample limited": s.performance.sample_limited ? "yes" : "no",
-    });
-    $("data").innerHTML = kv({
-      "Source": s.data.source_name,
-      "Kind": s.data.source_kind,
-      "Current market": s.data.is_current_market ? "yes" : "no",
-      "Dataset": (s.data.dataset_start||"?")+" → "+(s.data.dataset_end||"?"),
-      "Sessions available": s.data.sessions_available,
-      "Last processed": s.last_session_processed||"—",
-    }) + `<div class="k" style="grid-column:1/3;color:var(--mut);font-size:12.5px;margin-top:6px">${s.data.note}</div>`;
-
-    const f = s.freshness || {};
-    const ageText = (f.data_age_days===null||f.data_age_days===undefined) ? "unknown" : (f.data_age_days+" day(s)");
-    const stCls = (f.market_status==="stale"||f.market_status==="data_source_unavailable") ? "b-bad" : f.market_status==="up_to_date" ? "b-ok" : "b-mut";
-    const srcHealth = f.source_status==="failed"
-      ? `<div class="k" style="grid-column:1/3;color:var(--bad);font-size:12.5px;margin-top:6px">Data source health: FAILING (${f.source_failure_kind||"unknown"}) — ${f.source_status_detail||f.reason||""}</div>`
-      : "";
-    $("market").innerHTML =
-      `<div class="row" style="margin-bottom:8px"><span class="badge ${stCls}">${f.market_status||"—"}</span></div>` +
-      kv({
-        "Latest available bar": f.latest_available_session||"—",
-        "Last source bar": f.last_source_bar||"—",
-        "Last processed session": f.last_processed_session||"—",
-        "Data age": ageText,
-        "Pending sessions": f.pending_sessions===undefined?"—":f.pending_sessions,
-        "Source health": f.source_status==="failed"?"FAILING":"ok",
-        "Last refresh": f.last_refresh_at||"never",
-        "Next refresh allowed": f.next_refresh_allowed_at||"now",
-        "Fetches today": (f.fetches_today===undefined?"—":f.fetches_today)+" / "+(f.fetch_quota_per_day===undefined?"—":f.fetch_quota_per_day),
-      }) +
-      srcHealth +
-      `<div class="k" style="grid-column:1/3;color:var(--mut);font-size:12.5px;margin-top:6px">${f.reason||""}</div>` +
-      `<div class="k" style="grid-column:1/3;color:var(--mut);font-size:11.5px;margin-top:4px">Daily-bar source: "latest available bar" is the newest daily session, not a live tick price.</div>`;
-
-    const warn = s.warnings || [];
-    $("warncard").style.display = warn.length ? "block" : "none";
-    $("warnings").innerHTML = warn.map(w=>`<li style="color:var(--warn)">${w}</li>`).join("");
-
-    const c = s.cadence || {};
-    const cadDetail = c.max_decisions_reached ? `max_decisions ${c.max_decisions} reached`
-      : c.next_decision_session ? `next decision session ${c.next_decision_session}`
-      : "no further decision session in the data";
-    $("counts").innerHTML += `<div class="k" style="grid-column:1/3;color:var(--mut);font-size:12.5px;margin-top:8px">Decision cadence: every ${c.decision_frequency_sessions||"?"} session(s) · ${cadDetail}${c.decisions_taken!==undefined?` · ${c.decisions_taken}/${c.max_decisions} taken`:""}</div>`;
-
-    $("bookkv").innerHTML = kv({
-      "Initial cash": money(s.book.initial_cash),
-      "Cash": money(s.book.cash),
-      "Market value": money(s.book.market_value),
-      "Equity": money(s.book.equity),
-      "Realized P&L": money(s.book.realized_pnl),
-      "Unrealized P&L": money(s.book.unrealized_pnl),
-      "Total fees": money(s.book.total_fees),
-      "Resting orders": s.book.resting_orders,
-    });
-    const pos = Object.entries(s.book.positions);
-    $("positions").innerHTML = pos.length
-      ? '<ul class="clean">'+pos.map(([sym,p])=>`<li><b>${sym}</b> · qty ${p.quantity} @ ${money(p.average_entry_price)}
-          <div class="mono">mv ${money(p.market_value)} · uPnL ${money(p.unrealized_pnl)}</div></li>`).join("")+"</ul>"
-      : '<p class="muted">No open positions.</p>';
-    $("resting").innerHTML = s.resting_orders.length
-      ? '<ul class="clean">'+s.resting_orders.map(o=>`<li><b>${o.symbol}</b> ${o.side} ${o.order_type}
-          <span class="pill s-${(o.status||"").toLowerCase()}">${o.status}</span>
-          <div class="mono">qty ${o.quantity} · filled ${o.filled_quantity} · remaining ${o.remaining_quantity}
-          · limit ${money(o.limit_price)} · ${o.time_in_force}${o.expires_session?" → "+o.expires_session:""}</div></li>`).join("")+"</ul>"
-      : '<p class="muted">No resting orders.</p>';
-  }catch(e){
-    if(/unauthorized/i.test(e.message)){
-      $("auth").classList.remove("hide");
-      $("nav").classList.add("hide");
-    }
-    showErr(e.message);
-  }
+    const [p, e] = await Promise.all([api("/api/paper/status"), api("/api/engine")]);
+    LAST.risk = p.risk_limits;
+    LAST.stops = p.stops;
+    LAST.lastCycle = p.last_cycle;
+    renderEngine(e);
+  }catch(err){ showErr(err.message); }
+}
+async function doPaperStart(){
+  $("pstart").disabled = true;
+  try{ await api("/api/paper/start", {method:"POST", headers:{"X-Paper-Confirm":"yes"}}); }
+  catch(e){ showErr(e.message); }
+  finally{ refreshEngine(); }
+}
+async function doPaperStop(){
+  $("pstop").disabled = true;
+  try{ await api("/api/paper/stop", {method:"POST", headers:{"X-Paper-Confirm":"yes"}}); }
+  catch(e){ showErr(e.message); }
+  finally{ refreshEngine(); }
 }
 
+// -- Decisions --------------------------------------------------------------
+function indicatorChips(ind){
+  if(!ind) return "";
+  const pick = ["rsi","macd_hist","sma_trend","atr_pct","volume_ratio","realized_vol",
+    "return_5d","return_20d","range_position","boll_percent_b"];
+  const shown = pick.filter(k=>ind[k]!==null&&ind[k]!==undefined);
+  if(!shown.length) return "";
+  return '<div class="chips" style="margin-top:10px">'+shown
+    .map(k=>`<span class="chip"><span class="ck">${esc(k)}</span><span class="cv">${num(ind[k],3)}</span></span>`).join("")+"</div>";
+}
 async function refreshDecisions(){
   try{
     const d = await api("/api/decisions");
-    $("declist").innerHTML = d.decisions.length ? d.decisions.map(x=>`<li>
-      <b>${x.symbol}</b> ${x.decision_session}
-      <span class="pill s-${x.state}">${x.state}</span>
-      <div class="mono">src ${x.source} · exec ${x.execution_session||"—"} · ${x.order_status||"—"}
-      · filled ${x.filled_quantity}${x.average_fill_price?" @ "+money(x.average_fill_price):""}
-      · fees ${money(x.fees)}</div>
-      <div class="mono">ai ${x.provider||"—"}/${x.model||"—"} · prompt ${x.prompt_version||"—"} · ${x.graph_version||"—"}
-      · snapshot ${x.snapshot_id||"—"}</div>
-      ${x.blocked_reason?`<div class="mono" style="color:var(--bad)">${x.blocked_reason}</div>`:""}
-      ${x.evaluation?`<div class="mono">net ${money(x.evaluation.net_pnl)}</div>`:""}
-    </li>`).join("") : '<li class="muted">No decisions yet.</li>';
+    const list = d.decisions || [];
+    if(!list.length){ $("declist").innerHTML = `<div class="card">${empty("No decisions yet.")}</div>`; return; }
+    $("declist").innerHTML = list.map(x=>`<div class="card">
+        <h2>${esc(x.symbol)} <span class="spacer"></span>
+          <span class="tag">${esc(x.decision_session)}</span>
+          <span class="pill s-${esc(x.state)}">${esc(x.state)}</span></h2>
+        <div class="kv">
+          <div class="k">Action</div><div class="v">${esc(x.action||"—")}${x.rating?" · "+esc(x.rating):""}</div>
+          <div class="k">Confidence</div><div class="v">${x.confidence===null||x.confidence===undefined?"N/A":num(x.confidence,2)}</div>
+          <div class="k">Provenance</div><div class="v">${esc(x.provider||"—")}/${esc(x.model||"—")}</div>
+          <div class="k">Source</div><div class="v">${esc(x.source||"—")}</div>
+          <div class="k">Window</div><div class="v">${esc(x.window_start||"—")} → ${esc(x.window_end||"—")} (${x.indicator_bars===null||x.indicator_bars===undefined?"?":x.indicator_bars} bars)</div>
+          <div class="k">Proposed stop / target</div><div class="v">${money(x.proposed_stop_loss)} / ${money(x.proposed_take_profit)}</div>
+          <div class="k">Execution session</div><div class="v">${esc(x.execution_session||"—")}</div>
+          <div class="k">Order</div><div class="v">${esc(x.order_status||"—")} · filled ${num(x.filled_quantity,4)}${x.average_fill_price?" @ "+money(x.average_fill_price):""} · fees ${money(x.fees)}</div>
+        </div>
+        ${x.reasoning_excerpt?`<p class="muted" style="margin:10px 0 0">“${esc(x.reasoning_excerpt)}”</p>`:""}
+        ${x.rejection_reason?`<p class="muted warnc" style="margin:8px 0 0">Refused: ${esc(x.rejection_reason)}</p>`:""}
+        ${indicatorChips(x.indicators)}
+        ${x.evaluation?`<div class="mono" style="margin-top:8px">outcome: net ${money(x.evaluation.net_pnl)}${(x.evaluation.return_pct!==null&&x.evaluation.return_pct!==undefined)?" ("+pct(x.evaluation.return_pct)+")":""} · exit ${esc(x.evaluation.evaluation_session||"—")}</div>`:""}
+        ${x.record?"":'<div class="mono" style="margin-top:8px">no journal record found for this decision — provenance unavailable</div>'}
+      </div>`).join("");
   }catch(e){ showErr(e.message); }
 }
+
+// -- Positions --------------------------------------------------------------
+async function refreshPositions(){
+  try{
+    const [pos, p] = await Promise.all([api("/api/positions"), api("/api/paper/status")]);
+    LAST.stops = p.stops;
+    const rows = pos.positions || [];
+    $("pos-note").textContent = "synced " + rel(pos.positions_checked_at);
+    $("pos-body").innerHTML = rows.length ? `<div class="tablewrap"><table>
+      <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry</th>
+        <th class="num">Current</th><th class="num">Value</th><th class="num">uP&L</th>
+        <th class="num">Stop</th><th class="num">Target</th><th>Ledger</th></tr></thead>
+      <tbody>${rows.map(x=>`<tr>
+        <td><b>${esc(x.symbol)}</b><div class="mono">${esc(x.side)}</div></td>
+        <td class="num">${num(x.quantity,4)}</td>
+        <td class="num">${money(x.entry_price)}</td>
+        <td class="num">${money(x.current_price)}</td>
+        <td class="num">${money(x.market_value)}</td>
+        <td class="num ${cls(x.unrealized_pnl)}">${sgn(x.unrealized_pnl)}</td>
+        <td class="num">${money(x.stop_loss)}</td>
+        <td class="num">${money(x.take_profit)}</td>
+        <td>${x.reconciled?'<span class="pill s-evaluated">matched</span>':'<span class="pill s-unevaluable">broker only</span>'}</td>
+      </tr>`).join("")}</tbody></table></div>`
+      : empty("No open positions on the paper account.");
+
+    const stops = LAST.stops || {};
+    $("pos-exits").innerHTML = Object.keys(stops).length
+      ? '<ul class="clean">'+Object.entries(stops).map(([s,v])=>`<li><b>${esc(s)}</b>
+          <div class="mono">stop ${money(v.stop_loss)} · target ${money(v.take_profit)} · decision ${esc(v.decision_id||"—")}</div></li>`).join("")+"</ul>"
+      : empty("No recorded exit levels.");
+  }catch(e){ showErr(e.message); }
+}
+
+// -- Trades -----------------------------------------------------------------
+async function refreshTrades(){
+  try{
+    const t = await api("/api/trades");
+    const orders = t.orders || [];
+    $("ord-note").textContent = `${t.submitted_orders} submitted · ${t.filled_orders} filled`;
+    $("ord-body").innerHTML = orders.length ? `<div class="tablewrap"><table>
+      <thead><tr><th>Submitted</th><th>Symbol</th><th>Side</th><th class="num">Qty</th>
+        <th class="num">Filled</th><th class="num">Remaining</th><th class="num">Avg price</th>
+        <th>Status</th></tr></thead><tbody>${orders.map(o=>`<tr>
+        <td class="mono">${esc(o.submitted_at||"—")}</td>
+        <td><b>${esc(o.symbol)}</b></td><td>${esc(o.side)}</td>
+        <td class="num">${num(o.quantity,4)}</td>
+        <td class="num">${num(o.filled_quantity,4)}</td>
+        <td class="num">${num(o.remaining_quantity,4)}</td>
+        <td class="num">${money(o.average_fill_price)}</td>
+        <td><span class="pill s-${esc(o.status||"")}">${esc(o.status||"—")}</span></td>
+      </tr>`).join("")}</tbody></table></div>`
+      : empty("No orders submitted by the worker.");
+
+    const trades = t.trades || [];
+    $("trade-note").textContent = t.settled_trades + " settled";
+    $("trade-body").innerHTML = trades.length ? `<div class="tablewrap"><table>
+      <thead><tr><th>Entry</th><th>Symbol</th><th>Side</th><th class="num">Qty</th>
+        <th class="num">Entry px</th><th class="num">Exit px</th><th class="num">Fees</th>
+        <th class="num">Realized</th><th>Exit reason</th></tr></thead><tbody>${trades.map(x=>`<tr>
+        <td class="mono">${esc(x.entry_session||"—")}</td>
+        <td><b>${esc(x.symbol)}</b></td><td>${esc(x.side||"—")}</td>
+        <td class="num">${num(x.quantity,4)}</td>
+        <td class="num">${money(x.entry_price)}</td>
+        <td class="num">${money(x.exit_price)}</td>
+        <td class="num">${money(x.fees)}</td>
+        <td class="num ${cls(x.realized_pnl)}">${sgn(x.realized_pnl)}</td>
+        <td>${esc(x.exit_reason||"—")}</td>
+      </tr>`).join("")}</tbody></table></div>`
+      : empty("No settled trades yet.");
+  }catch(e){ showErr(e.message); }
+}
+
+// -- Journal ----------------------------------------------------------------
 async function refreshJournal(){
   try{
-    const j = await api("/api/journal?limit=50");
-    $("jlist").innerHTML = j.entries.length ? j.entries.map(x=>`<li>
-      <b>#${x.seq}</b> ${x.kind} <span class="muted">${x.timestamp}</span>
-      <div class="mono">${x.event_id}</div></li>`).join("") : '<li class="muted">Journal empty.</li>';
+    const j = await api("/api/journal?limit=100");
+    const entries = j.entries || [];
+    $("jlist").innerHTML = entries.length
+      ? '<ul class="clean">'+entries.map(x=>`<li>
+          <b>#${esc(x.seq)}</b> ${esc(x.kind)} <span class="muted">${esc(x.timestamp)}</span>
+          <div class="mono">${esc(x.event_id)}</div></li>`).join("")+"</ul>"
+      : empty("Journal empty.");
   }catch(e){ showErr(e.message); }
 }
+
+// -- Control ----------------------------------------------------------------
 async function refreshControl(){
   try{
     const c = await api("/api/control/status");
@@ -1019,113 +1440,76 @@ async function doRun(){
   const n = parseInt($("nsessions").value || "0", 10);
   $("runbtn").disabled = true;
   try{
-    const r = await api("/api/run", {
-      method:"POST",
+    const r = await api("/api/run", {method:"POST",
       headers:{"Content-Type":"application/json", "X-Control-Confirm":"yes"},
-      body: JSON.stringify({sessions:n}),
-    });
+      body: JSON.stringify({sessions:n})});
     $("lastrun").textContent = JSON.stringify(r, null, 2);
     await refresh();
   }catch(e){ showErr(e.message); }
   finally{ $("runbtn").disabled = false; }
 }
 
-function paperState(status){
-  const known = ["STOPPED","STARTING","RUNNING","STOPPING","ERROR","DISABLED"];
-  const s = known.includes(status) ? status : "STOPPED";
-  const el = $("pstate");
-  el.textContent = status || "STOPPED";
-  el.className = "pill state-" + s;
-}
-async function refreshPaper(){
-  try{
-    const p = await api("/api/paper/status");
-    paperState(p.status);
-    $("pnote").textContent = p.enabled
-      ? `Mode ${p.mode} · endpoint ${p.endpoint} · paper-only ${p.paper_endpoint_only?"yes":"NO"}`
-      : (p.reason || "paper trading is disabled on this dashboard");
-    const md = p.market_data_provider || p.market_data_provider_configured || "unknown";
-    const isCurrent = p.market_data_kind === "current";
-    const age = (p.last_snapshot_age_seconds===null || p.last_snapshot_age_seconds===undefined)
-      ? "—" : (p.last_snapshot_age_seconds.toFixed(1)+"s");
-    $("pmarket").innerHTML = kv({
-      "Provider": md + (isCurrent ? " (CURRENT price)" : (p.market_data_kind ? " (historical)" : "")),
-      "Kind": p.market_data_kind || "—",
-      "Freshness status": p.market_data_status || "not started",
-      "Snapshot price": p.last_snapshot_price!==null && p.last_snapshot_price!==undefined ? money(p.last_snapshot_price) : "—",
-      "Snapshot time": p.last_snapshot_at || "—",
-      "Snapshot age": age,
-      "Max snapshot age": p.max_snapshot_age_seconds!==null && p.max_snapshot_age_seconds!==undefined ? (p.max_snapshot_age_seconds+"s") : "—",
-    });
-    $("pmarkethint").textContent = isCurrent
-      ? "Sizing uses a current Alpaca snapshot, refused when stale."
-      : "Sizing uses the experiment's historical daily-bar open — a past session price, not a live quote.";
-    $("pstart").disabled = !p.enabled || p.status==="RUNNING" || p.status==="STARTING";
-    $("pstop").disabled = !p.enabled || p.status==="STOPPED" || p.status==="STOPPING";
-    const a = p.account || {};
-    $("paccount").innerHTML = kv({
-      "Status": a.status || "—",
-      "Cash": money(a.cash),
-      "Equity": money(a.equity),
-      "Buying power": money(a.buying_power),
-      "Currency": a.currency || "—",
-      "Restrictions": (a.restrictions && a.restrictions.length) ? a.restrictions.join(", ") : "none reported",
-      "Positions read": p.positions_at || "never",
-    });
-    const pos = Object.entries(p.positions || {});
-    $("ppositions").innerHTML = pos.length
-      ? '<ul class="clean">'+pos.map(([sym,x])=>`<li><b>${sym}</b> · qty ${x.quantity}
-          <div class="mono">mv ${money(x.market_value)} · avg ${money(x.average_entry_price)}</div></li>`).join("")+"</ul>"
-      : '<p class="muted">No positions reported.</p>';
-    const orders = Object.entries(p.orders || {});
-    $("porders").innerHTML = orders.length
-      ? '<ul class="clean">'+orders.map(([cid,o])=>`<li><b>${o.symbol}</b> ${o.side} ${o.quantity}
-          <span class="pill">${o.status}</span>
-          <div class="mono">${cid}<br>filled ${o.filled_quantity}${o.filled_avg_price?" @ "+money(o.filled_avg_price):""}
-          · broker ${o.broker_order_id||"—"}</div></li>`).join("")+"</ul>"
-      : '<p class="muted">No orders.</p>';
-    $("pcycle").textContent = p.last_cycle ? JSON.stringify(p.last_cycle, null, 2)
-      : (p.last_error ? ("error: "+p.last_error) : "—");
-    $("prisk").innerHTML = kv(p.risk_limits || {});
-  }catch(e){ showErr(e.message); }
-}
-async function doPaperStart(){
-  $("pstart").disabled = true;
-  try{
-    await api("/api/paper/start", {
-      method:"POST", headers:{"X-Paper-Confirm":"yes"},
-    });
-    await refreshPaper();
-  }catch(e){ showErr(e.message); }
-  finally{ refreshPaper(); }
-}
-async function doPaperStop(){
-  $("pstop").disabled = true;
-  try{
-    await api("/api/paper/stop", {
-      method:"POST", headers:{"X-Paper-Confirm":"yes"},
-    });
-    await refreshPaper();
-  }catch(e){ showErr(e.message); }
-  finally{ refreshPaper(); }
-}
-
+// -- nav / boot -------------------------------------------------------------
 document.querySelectorAll("nav button").forEach(b=>{
   b.onclick = () => {
     document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("on", x===b));
     document.querySelectorAll("section").forEach(s=>s.classList.toggle("on", s.id===b.dataset.t));
+    if(b.dataset.t==="engine") refreshEngine();
     if(b.dataset.t==="decisions") refreshDecisions();
+    if(b.dataset.t==="positions") refreshPositions();
+    if(b.dataset.t==="trades") refreshTrades();
     if(b.dataset.t==="journal") refreshJournal();
-    if(b.dataset.t==="paper") refreshPaper();
     if(b.dataset.t==="control") refreshControl();
   };
 });
+
+async function refresh(){
+  try{
+    const s = await api("/api/summary");
+    showErr("");
+    $("auth").classList.add("hide");
+    $("main").classList.remove("hide");
+    $("nav").classList.remove("hide");
+    renderOverview(s);
+    await refreshEngine();
+    await refreshOverviewAccount();
+  }catch(e){
+    if(/unauthorized/i.test(e.message)){
+      $("auth").classList.remove("hide");
+      $("main").classList.add("hide");
+      $("nav").classList.add("hide");
+    }
+    showErr(e.message);
+  }
+}
+
+async function refreshOverviewAccount(){
+  try{
+    const p = await api("/api/paper/status");
+    const a = p.account || {};
+    const eq = a.equity;
+    const base = p.initial_equity;
+    const daily = (eq!==null&&eq!==undefined&&base!==null&&base!==undefined) ? (eq-base) : null;
+    const dailyPct = (daily!==null&&base) ? daily/base : null;
+    $("ov-account").innerHTML =
+      stat("Equity", money(eq), {hint:a.currency||""}) +
+      stat("Cash", money(a.cash)) +
+      stat("Buying power", money(a.buying_power)) +
+      stat("Daily P&L", sgn(daily), {cls:cls(daily), hint:dailyPct===null?"no baseline":pct(dailyPct)+" today"}) +
+      stat("Positions", esc(Object.keys(p.positions||{}).length)) +
+      stat("Open orders", esc(Object.keys(p.orders||{}).length));
+    $("ov-account-note").textContent = (a.status?("Account "+a.status+". "):"") +
+      ((a.restrictions&&a.restrictions.length)?("Restrictions: "+a.restrictions.join(", ")+". "):"") +
+      (base===null||base===undefined?"Daily P&L baseline not yet recorded (the worker has not read the account today).":
+        ("Daily baseline "+money(base)+" set "+esc(p.day||"")+"."));
+  }catch(e){ /* overview already surfaces the error */ }
+}
 
 function boot(){
   if(!TOKEN){ $("auth").classList.remove("hide"); return; }
   refresh();
   if(timer) clearInterval(timer);
-  timer = setInterval(refresh, 15000);
+  timer = setInterval(refresh, 10000);
 }
 boot();
 </script>

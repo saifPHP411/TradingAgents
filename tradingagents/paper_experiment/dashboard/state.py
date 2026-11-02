@@ -103,11 +103,96 @@ class ExperimentView:
         }
 
     def decisions(self) -> list[dict[str, Any]]:
-        """Every decision, newest first, as JSON-safe records."""
+        """Every decision, newest first, as JSON-safe, *evidence-carrying* records.
+
+        Each entry joins the persisted decision state with the decision's own
+        journal record (action, rating, confidence, rationale, stop/target,
+        provenance) and, when the snapshot is still on disk, the technical
+        indicators that were computed for the window the model actually saw. Every
+        value is one that was stored at decision time — nothing is re-derived from
+        prose and no explanation is invented after the fact. A field the record did
+        not carry is ``None``.
+        """
         raw = self._raw_state()
         decisions = list(raw.get("decisions", {}).values())
         decisions.sort(key=lambda d: (d.get("decision_session", ""), d.get("symbol", "")))
-        return list(reversed(decisions))
+        enriched = [self._enrich_decision(d) for d in decisions]
+        enriched.reverse()
+        return enriched
+
+    def _journal_record(self, decision_id: str) -> dict[str, Any] | None:
+        from ..journal import ExperimentJournal
+
+        path = self.root / "journal.json"
+        if not path.exists():
+            return None
+        try:
+            journal = ExperimentJournal.load(path)
+        except Exception:  # noqa: BLE001 - an unreadable journal is not fatal here
+            return None
+        entry = journal.get(f"{self._experiment_id()}:decision:{decision_id}")
+        if entry is None:
+            return None
+        record = entry.payload.get("record")
+        return record if isinstance(record, dict) else None
+
+    def _experiment_id(self) -> str:
+        raw = self._raw_state()
+        return str(raw.get("experiment_id") or "")
+
+    def _snapshot_bars(self, snapshot_id: str | None) -> list[dict[str, Any]] | None:
+        if not snapshot_id:
+            return None
+        path = self.root / "snapshots" / f"{snapshot_id}.json"
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        bars = payload.get("bars")
+        return bars if isinstance(bars, list) else None
+
+    def _indicators(self, bars: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+        """The indicators computed for a window, from the stored bars.
+
+        Recomputed from the *stored* snapshot bars with the same code the
+        inference request used, so the numbers shown are exactly the evidence the
+        model was given. Returns ``None`` when the snapshot is unavailable, rather
+        than an empty dict that would read as "no indicators"."""
+        if not bars:
+            return None
+        try:
+            import pandas as pd
+
+            from ..indicators import compute_indicators
+
+            frame = pd.DataFrame(bars).set_index("date")
+            result = compute_indicators(frame)
+        except Exception:  # noqa: BLE001 - an indicator failure must not break the view
+            return None
+        return {
+            field: getattr(result, field)
+            for field in result.__dataclass_fields__  # type: ignore[attr-defined]
+        }
+
+    def _enrich_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
+        record = self._journal_record(str(decision.get("decision_id") or ""))
+        bars = self._snapshot_bars(decision.get("snapshot_id"))
+        entry = dict(decision)
+        entry["record"] = record
+        entry["action"] = (record or {}).get("action")
+        entry["rating"] = (record or {}).get("rating")
+        entry["confidence"] = (record or {}).get("confidence")
+        entry["reasoning_excerpt"] = (record or {}).get("reasoning_excerpt")
+        entry["proposed_stop_loss"] = (record or {}).get("stop_loss")
+        entry["proposed_take_profit"] = (record or {}).get("take_profit")
+        entry["window_start"] = (record or {}).get("window_start")
+        entry["window_end"] = (record or {}).get("window_end")
+        entry["indicators"] = self._indicators(bars)
+        entry["indicator_bars"] = len(bars) if bars else None
+        entry["rejection_reason"] = decision.get("blocked_reason")
+        return entry
 
     def journal_tail(self, limit: int = 50) -> list[dict[str, Any]]:
         """The last ``limit`` journal entries, newest first."""
