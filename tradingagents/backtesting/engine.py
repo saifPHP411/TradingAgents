@@ -663,6 +663,7 @@ class PortfolioBacktester:
             ledger=self.ledger,
             fill_price=fill_price,
             max_notional=max_notional,
+            stop_loss=item.signal.stop_loss,
         )
         if review.verdict is RiskVerdict.REJECTED:
             return self._refuse_at_fill(
@@ -690,6 +691,7 @@ class PortfolioBacktester:
             max_notional=self.config.costs.affordable_notional(
                 cash=self.ledger.cash, price=reduced_price
             ),
+            stop_loss=item.signal.stop_loss,
         )
         if final.verdict is RiskVerdict.REJECTED:
             return self._refuse_at_fill(

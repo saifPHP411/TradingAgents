@@ -365,6 +365,7 @@ class PaperSession:
                     max_notional=self.simulator.costs.affordable_notional(
                         cash=self.ledger.cash, price=projected
                     ),
+                    stop_loss=signal.stop_loss,
                 )
                 if review.verdict is not RiskVerdict.APPROVED:
                     # The order was created before the re-check ran, so the refusal

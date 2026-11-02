@@ -16,6 +16,36 @@ path, and no configuration that produces one.
 
 ### Added
 
+- **An optional per-trade risk cap** (`risk/engine.py`). `RiskLimits` gains
+  `max_risk_per_trade`, the most equity one trade may put at risk, measured as
+  `quantity x (entry - stop)`. It defaults to `None`, so every existing run sizes
+  exactly as before; enabling it can only reduce a size, never increase one,
+  because it is applied as a minimum over the notional the other caps already
+  produced. With no usable stop, or a stop at or above the entry, there is no
+  per-unit risk to measure, so the cap is left off and the decision records that
+  it could not be applied rather than inventing a stop. A risk budget that shrinks
+  an order below the minimum tradable value is refused with the named reason
+  `MAX_RISK_PER_TRADE`. It is re-checked at the fill price (`review_fill`), so a
+  gap cannot leave a position risking more than the budget. A non-positive,
+  NaN or infinite configured value is refused at construction. Covered by
+  `tests/test_risk_engine.py` (`TestRiskPerTradeSizing`).
+
+- **An isolated outcome-distribution evaluator**
+  (`backtesting/distribution.py`). Given a `BacktestResult`, it reports the mean
+  and median outcome, a bootstrap confidence interval, the probability of a
+  positive outcome, an autocorrelation-adjusted effective sample size, and
+  explicit small-sample warnings. The default resamples the equity curve's
+  per-session returns with a **moving-block bootstrap**, preserving the temporal
+  grouping that makes an i.i.d. resample invalid; a trade-level `trade_iid` method
+  is offered with a dependence warning because trades from one book are not
+  independent. It is analytics only: it never simulates a portfolio, never places
+  an order, never fetches a price, and never re-applies a cost — `Trade.net_pnl`
+  is already net of the `CostModel`'s fees, so costs are counted exactly once. It
+  is deterministic for a given seed, reports the sample count separately from the
+  bootstrap iteration count, returns `available=False` (never a zero) for an
+  empty run, refuses non-finite inputs, and keeps in-sample and out-of-sample
+  results apart by construction. Covered by `tests/test_backtest_distribution.py`.
+
 - **The documented `serve` entrypoint now actually wires the current-price seam**
   (`paper_experiment/market_data_wiring.py`, `paper_experiment/__main__.py`,
   `dashboard/server.py`). The audit finding: `serve` did not accept

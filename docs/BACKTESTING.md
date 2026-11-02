@@ -97,6 +97,30 @@ protocol, a pre-registered reference strategy and a published artifact — see
 To replay recorded LLM decisions through this same engine under the same protocol,
 see [`docs/LLM_EVALUATION.md`](LLM_EVALUATION.md).
 
+## Outcome distribution
+
+A backtest returns one equity curve: one realisation of a stochastic process.
+`backtesting/distribution.py` resamples that result to show how much of it is
+signal and how much is one path. It is analytics only — it does not simulate a
+portfolio, place an order, fetch a price or re-apply a cost.
+
+`outcome_distribution(result, seed=...)` reports the mean and median outcome, a
+bootstrap confidence interval, the probability of a positive outcome, an
+effective sample size and small-sample warnings. The default method resamples the
+equity curve's per-session returns with a **moving-block bootstrap**, which keeps
+short runs of consecutive sessions together so volatility clustering and
+multi-session drawdowns survive the resample; drawing sessions one at a time would
+report an interval narrower than the data supports. A trade-level `trade_iid`
+method is available but always warns: trades from one book overlap in time and
+share a market factor, so they are not independent observations.
+
+Two cautions the module states and enforces. The bootstrap iteration count is not
+a sample size — the sample count is reported separately — and a confidence
+interval describes the variability of *this sample under resampling*, not the
+range of future returns. An empty run returns `available=False`, never a zero.
+`in_sample_vs_out_of_sample` reports the two windows side by side with no pooled
+field, so the two cannot be merged by accident.
+
 ## Reproducing a run
 
 `BacktestConfig` holds everything that shapes a run: initial cash, holding
