@@ -233,6 +233,15 @@ endpoint, and risk limits are unchanged.
   resolved from worker evidence, never read as "broken".
 - The engine view is read at RUNNING time in tests: a stopped worker has no blocker,
   so assert the blocker before `stop()`.
+- A current-market decision is consumed only once it *produced an order*
+  (`WorkerState.ordered_decisions`, written by `_mark_ordered` at the two sites
+  that reach the broker: a submit and a reconcile). `processed_decisions` still
+  means "do not retry" and still records a refusal, because the historical path
+  relies on that bound; the current-market guard (`_is_processed`) and the current
+  source's `is_consumed` filter read the order-only set instead. Reading the
+  refusal-inclusive set there is what reported `CURRENT_MARKET_NO_NEW_DATA` for a
+  session whose only decision was a no-op. Both sets are additive to the state
+  file; an older file reads back with no ordered decisions.
 
 ## Known limitation
 
