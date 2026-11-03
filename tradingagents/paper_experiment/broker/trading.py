@@ -1161,6 +1161,16 @@ class WorkerState:
     ``None`` when the last cycle placed an order. Additive and optional: an older
     state file reads back as ``None``, which a view reports as unknown rather than
     as "no problem"."""
+    last_no_trade_decision_id: str | None = None
+    """The decision id whose most recent processing produced no order.
+
+    Recorded so a later cycle that finds the same decision already offered — and
+    so reports the current-market source's generic "no new data" — can still name
+    *which* decision was left un-traded and *why*, instead of letting the generic
+    code erase the honest reason. Additive and optional."""
+    last_no_trade_decision_code: str | None = None
+    """The stable no-trade code that decision produced (for example
+    ``NO_POSITION``). Paired with :attr:`last_no_trade_decision_id`. Additive."""
     exits: dict[str, dict] = field(default_factory=dict)
     """Positions the exit policy has already acted on, keyed by symbol, with the
     reason and time. The durable "do not exit this position twice" memory. Additive
@@ -1185,6 +1195,20 @@ class WorkerState:
     the broker definitively rejects it, and a resumed worker skips every id in the
     set. It is additive and optional: an older state file without the field reads
     back as "nothing processed", so the schema version does not change."""
+    ordered_decisions: set[str] = field(default_factory=set)
+    """The subset of :attr:`processed_decisions` that actually produced an order.
+
+    ``processed_decisions`` means "do not act on this id again", which is correct
+    for a decision that was ordered *and* for one the broker definitively refused.
+    It is the wrong signal for "an order exists", though: a refusal is recorded
+    there but places nothing, so a source that filters on it cannot tell a settled
+    order from a no-trade and may report a fully-consumed session for a decision
+    that never traded. This set is the order-only memory, added at the two sites
+    that genuinely reach the broker (a submitted order, and a reconciled existing
+    one), so a caller can ask whether a decision actually produced an order without
+    inferring it from the refusal-inclusive set. Additive and optional: an older
+    state file without the field reads back as "no order known", and the schema
+    version does not change."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1208,10 +1232,13 @@ class WorkerState:
             "last_strategy_evaluation_at": self.last_strategy_evaluation_at,
             "last_no_decision_reason": self.last_no_decision_reason,
             "last_no_trade_code": self.last_no_trade_code,
+            "last_no_trade_decision_id": self.last_no_trade_decision_id,
+            "last_no_trade_decision_code": self.last_no_trade_decision_code,
             "exits": {k: dict(v) for k, v in sorted(self.exits.items())},
             "stops": {k: dict(v) for k, v in sorted(self.stops.items())},
             "cycles_completed": self.cycles_completed,
             "processed_decisions": sorted(self.processed_decisions),
+            "ordered_decisions": sorted(self.ordered_decisions),
         }
 
     @classmethod
@@ -1251,10 +1278,13 @@ class WorkerState:
             last_strategy_evaluation_at=payload.get("last_strategy_evaluation_at"),
             last_no_decision_reason=payload.get("last_no_decision_reason"),
             last_no_trade_code=payload.get("last_no_trade_code"),
+            last_no_trade_decision_id=payload.get("last_no_trade_decision_id"),
+            last_no_trade_decision_code=payload.get("last_no_trade_decision_code"),
             exits={k: dict(v) for k, v in (payload.get("exits") or {}).items()},
             stops={k: dict(v) for k, v in (payload.get("stops") or {}).items()},
             cycles_completed=_as_int(payload.get("cycles_completed"), 0),
             processed_decisions=set(payload.get("processed_decisions") or []),
+            ordered_decisions=set(payload.get("ordered_decisions") or []),
         )
 
 
@@ -1379,6 +1409,8 @@ def worker_status_view(
         "last_strategy_evaluation_at": state.last_strategy_evaluation_at,
         "last_no_decision_reason": state.last_no_decision_reason,
         "last_no_trade_code": state.last_no_trade_code,
+        "last_no_trade_decision_id": state.last_no_trade_decision_id,
+        "last_no_trade_decision_code": state.last_no_trade_decision_code,
         "started_at": state.started_at,
         "stopped_at": state.stopped_at,
         "loop_running": loop_running,
@@ -1439,6 +1471,10 @@ class PaperTradingWorker:
         self.state.status = STATUS_STOPPED
         self.state.strategy_id = config.strategy_id
         self.last_cycle: CycleResult | None = None
+        # The decision id the source last handed this worker in the current run,
+        # used only to keep the honest no-trade reason visible once the source
+        # stops re-offering it. In-memory: a restart is a fresh observation.
+        self._last_offered_decision_id: str | None = None
         # The loop. `_lock` serialises control transitions (start/stop) and is the
         # same lock a cycle holds while it runs, so a stop cannot interleave a
         # start with a cycle mid-flight. `_stop_event` is the loop's stop signal.
@@ -1469,7 +1505,20 @@ class PaperTradingWorker:
             self._store.save(self.state)
 
     def _is_processed(self, decision_id: str) -> bool:
-        """Whether this decision has already been acted on (durably)."""
+        """Whether this decision has already been acted on (durably).
+
+        The guard is the *durable processed set* for the historical source, whose
+        decisions are one-shot and bounded: a refused historical decision is
+        deliberately not retried every cycle. The current-market source is the
+        opposite — its decision stands for a whole session and is re-offered until
+        it trades — so a decision it hands out is "done" only when it actually
+        produced an order. Reading the refusal-inclusive processed set there would
+        let a stale no-order entry mask a live decision (the reported
+        ``CURRENT_MARKET_NO_NEW_DATA`` with no order). ``ordered_decisions`` is the
+        order-only memory, so the current-market path uses it.
+        """
+        if self.config.decision_source == DECISION_SOURCE_CURRENT_MARKET:
+            return self.has_order_for(decision_id)
         return (
             decision_id in self.state.processed_decisions
             or decision_id == self.state.last_processed_decision_id
@@ -1479,6 +1528,37 @@ class PaperTradingWorker:
         """Remember a decision as done, so no cycle — and no restart — repeats it."""
         self.state.last_processed_decision_id = decision_id
         self.state.processed_decisions.add(decision_id)
+
+    def _mark_ordered(self, decision_id: str) -> None:
+        """Remember a decision as having *produced an order* (not merely processed).
+
+        Distinct from :meth:`_mark_processed`, which also records a decision the
+        broker refused: a refusal places nothing, so it is "do not retry", not "an
+        order exists". A caller that needs the latter (the current-market source,
+        which must not treat a no-trade as a consumed session) asks
+        :meth:`has_order_for` instead of reading the processed set.
+        """
+        self.state.ordered_decisions.add(decision_id)
+
+    def has_order_for(self, decision_id: str) -> bool:
+        """Whether this decision actually produced an order the worker knows of.
+
+        The order-only counterpart to :meth:`_is_processed`: true only for a
+        decision that reached the broker (submitted, or reconciled as already
+        existing), never for one that was refused or produced no trade.
+        """
+        return decision_id in self.state.ordered_decisions
+
+    def _remember_no_trade(self, decision_id: str, code: str) -> None:
+        """Remember which decision was left un-traded and the code that says why.
+
+        Paired with :meth:`_mark_ordered` as the honest counterpart: an ordered
+        decision is forgotten here (it is no longer un-traded), and a no-trade
+        decision is recorded so a later cycle that only sees "no new data" can
+        still name the decision and its reason.
+        """
+        self.state.last_no_trade_decision_id = decision_id
+        self.state.last_no_trade_decision_code = code
 
     # -- status -----------------------------------------------------------
 
@@ -1750,8 +1830,9 @@ class PaperTradingWorker:
         # is looking and finding nothing to do" from "the engine is not looking".
         self.state.last_strategy_evaluation_at = self.state.last_cycle_at
         if decision is None:
-            self.state.last_no_decision_reason = self._no_decision_reason()
-            self.state.last_no_trade_code = self._no_trade_code()
+            reason, code = self._no_decision_outcome()
+            self.state.last_no_decision_reason = reason
+            self.state.last_no_trade_code = code
             self._sync_observability()
             self._save()
             result = CycleResult(
@@ -1763,6 +1844,7 @@ class PaperTradingWorker:
             return result
         self.state.last_no_decision_reason = None
         self.state.last_no_trade_code = None
+        self._last_offered_decision_id = decision.decision_id
 
         if self._is_processed(decision.decision_id):
             self._save()
@@ -1780,6 +1862,9 @@ class PaperTradingWorker:
         if client_order_id in self.state.orders:
             order = self._reconcile(client_order_id)
             self._mark_processed(decision.decision_id)
+            self._mark_ordered(decision.decision_id)
+            self.state.last_no_trade_decision_id = None
+            self.state.last_no_trade_decision_code = None
             self._record_order(order)
             result = CycleResult(
                 ran=False,
@@ -1817,6 +1902,7 @@ class PaperTradingWorker:
             self.state.last_error = None
             self.state.last_no_decision_reason = str(exc)
             self.state.last_no_trade_code = NO_TRADE_NO_POSITION
+            self._remember_no_trade(decision.decision_id, NO_TRADE_NO_POSITION)
             self._save()
             result = CycleResult(
                 ran=False,
@@ -1835,6 +1921,7 @@ class PaperTradingWorker:
             self.state.last_error = f"PositionReadError: {exc}"
             self.state.last_no_decision_reason = str(exc)
             self.state.last_no_trade_code = NO_TRADE_POSITION_UNAVAILABLE
+            self._remember_no_trade(decision.decision_id, NO_TRADE_POSITION_UNAVAILABLE)
             self._save()
             result = CycleResult(
                 ran=False,
@@ -1851,6 +1938,7 @@ class PaperTradingWorker:
             self.state.last_error = f"WorkerError: {exc}"
             self.state.last_no_decision_reason = str(exc)
             self.state.last_no_trade_code = NO_TRADE_SIZE_TOO_SMALL
+            self._remember_no_trade(decision.decision_id, NO_TRADE_SIZE_TOO_SMALL)
             self._save()
             result = CycleResult(
                 ran=False,
@@ -1893,6 +1981,7 @@ class PaperTradingWorker:
             )
             self.state.last_no_decision_reason = str(exc)
             self.state.last_no_trade_code = code
+            self._remember_no_trade(decision.decision_id, code)
             self._save()
             result = CycleResult(
                 ran=False,
@@ -1908,9 +1997,12 @@ class PaperTradingWorker:
             return result
 
         self._mark_processed(decision.decision_id)
+        self._mark_ordered(decision.decision_id)
         self.state.last_error = None
         self.state.last_no_decision_reason = None
         self.state.last_no_trade_code = None
+        self.state.last_no_trade_decision_id = None
+        self.state.last_no_trade_decision_code = None
         self._record_order(order)
         self._record_exit_levels(decision, order)
         result = CycleResult(
@@ -2265,6 +2357,33 @@ class PaperTradingWorker:
                 step()
             except Exception as exc:  # noqa: BLE001 - a stale view is better than a crash
                 self.state.last_error = f"{type(exc).__name__}: {exc}"
+
+    def _no_decision_outcome(self) -> tuple[str, str]:
+        """The ``(reason, code)`` for a cycle the source yielded no decision.
+
+        Normally the source's own words. One case is worth not losing, though: the
+        current-market source reports a generic ``CURRENT_MARKET_NO_NEW_DATA`` once
+        every symbol already has a decision for the session — which includes the
+        case where a decision *was* evaluated and produced no trade (a SELL with
+        nothing to close, say). When this worker remembers that exact decision as
+        its last no-trade, that honest reason is reported instead, so the dashboard
+        keeps naming *why* the session was left un-traded rather than erasing it
+        with the generic code. It stays a pure observation: nothing is re-evaluated
+        and no order is affected.
+        """
+        code = self._no_trade_code()
+        if (
+            code == NO_TRADE_CURRENT_MARKET_NO_NEW_DATA
+            and self._last_offered_decision_id is not None
+            and self._last_offered_decision_id == self.state.last_no_trade_decision_id
+            and self.state.last_no_trade_decision_code
+        ):
+            return (
+                self.state.last_no_decision_reason
+                or "the decision produced no order this session",
+                self.state.last_no_trade_decision_code,
+            )
+        return self._no_decision_reason(), code
 
     def _no_decision_reason(self) -> str:
         """Why the last evaluation produced no order, in the source's own words.

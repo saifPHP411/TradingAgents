@@ -181,8 +181,12 @@ class PaperTradingController:
         over the experiment's recorded decisions, unchanged. ``current_market``
         builds the independent ``CurrentMarketDecisionSource``, which fetches live
         Alpaca data and is never blocked by a consumed historical history. Both
-        satisfy the same ``DecisionSource`` protocol and both filter against the
-        worker's durable processed-decision set through ``holder``.
+        satisfy the same ``DecisionSource`` protocol. They differ in what "already
+        done" means, though: the historical source filters against the worker's
+        processed-decision set (a refused historical decision is deliberately not
+        retried), while the current source filters against the order-only set, so a
+        current decision that produced no order is re-offered rather than mistaken
+        for a consumed session.
         """
         if self.decision_source_kind == DECISION_SOURCE_CURRENT_MARKET:
             return self._build_current_source(experiment, holder)
@@ -231,7 +235,7 @@ class PaperTradingController:
             "market_hours": market_hours,
             "order_notional": self.order_notional,
             "strategy_name": experiment.config.strategy_id,
-            "is_consumed": lambda decision_id: holder["worker"]._is_processed(decision_id),
+            "is_consumed": lambda decision_id: holder["worker"].has_order_for(decision_id),
             "state_path": self.root / "current_source_state.json",
         }
         if self._current_source_factory is not None:
