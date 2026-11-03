@@ -167,6 +167,19 @@ NO_TRADE_CURRENT_MARKET_NO_NEW_DATA = "CURRENT_MARKET_NO_NEW_DATA"
 Distinct from ``HISTORY_EXHAUSTED``: that names a fully-consumed historical
 experiment, which does *not* block the current-market source.
 """
+NO_TRADE_NO_POSITION = "NO_POSITION"
+"""A SELL with nothing held to close. Not a risk breach: closing a position that
+does not exist is simply not a trade, so it is named apart from
+``RISK_REJECTED`` and can never be recorded as a short. A long-only book has no
+position to open short, and a SELL is only ever a close.
+"""
+NO_TRADE_POSITION_UNAVAILABLE = "POSITION_UNAVAILABLE"
+"""The held quantity could not be read from the broker, so a SELL cannot be sized.
+
+Distinct from ``NO_POSITION``: that means "the book holds none", which is a fact;
+this means "the broker could not be asked", which is a failure. Kept apart so a
+real broker error is never misreported as "nothing to close".
+"""
 
 NO_TRADE_REASONS = (
     NO_TRADE_NO_DECISION_DUE,
@@ -184,6 +197,8 @@ NO_TRADE_REASONS = (
     NO_TRADE_MARKET_CLOSED,
     NO_TRADE_STRATEGY_UNAVAILABLE,
     NO_TRADE_CURRENT_MARKET_NO_NEW_DATA,
+    NO_TRADE_NO_POSITION,
+    NO_TRADE_POSITION_UNAVAILABLE,
 )
 """The closed vocabulary of reasons a RUNNING worker placed no order. A reason is
 ``None`` only when the cycle actually placed an order."""
@@ -264,6 +279,26 @@ class PreflightError(WorkerError):
 
 class MarketDataError(WorkerError):
     """The market-data source could not supply a usable price."""
+
+
+class NoPositionError(WorkerError):
+    """A SELL asked to close a position the book does not hold.
+
+    Distinct from :class:`WorkerError` (which the worker records as a sizing
+    failure) because a SELL with nothing to close is not a defect: on a long-only
+    book a SELL is only ever a close, so there is simply no trade to place. The
+    worker reports it as ``NO_TRADE_NO_POSITION`` rather than a size error or a
+    risk breach, and never turns it into a short.
+    """
+
+
+class PositionReadError(WorkerError):
+    """The held quantity could not be read, so a SELL cannot be sized safely.
+
+    A broker read failure is a *failure*, not the fact "nothing is held": the two
+    are reported apart (``NO_TRADE_POSITION_UNAVAILABLE`` vs ``NO_TRADE_NO_POSITION``)
+    so a genuine broker error is never misread as "there is no position".
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -1775,6 +1810,43 @@ class PaperTradingWorker:
 
         try:
             quantity = self._size(decision, reference_price)
+        except NoPositionError as exc:
+            # A SELL with nothing to close is not a defect and not a risk breach:
+            # on this long-only book it is simply not a trade. Recorded with its
+            # own code, never as a sizing failure or a short.
+            self.state.last_error = None
+            self.state.last_no_decision_reason = str(exc)
+            self.state.last_no_trade_code = NO_TRADE_NO_POSITION
+            self._save()
+            result = CycleResult(
+                ran=False,
+                decision_id=decision.decision_id,
+                skipped_reason=str(exc),
+                reason_code=NO_TRADE_NO_POSITION,
+                reference_price=reference_price,
+                **self._market_data_fields(),
+            )
+            self.last_cycle = result
+            return result
+        except PositionReadError as exc:
+            # The broker could not be asked for the holding, so a SELL cannot be
+            # sized. Recorded as a market-data-style unavailability, never as
+            # "there is no position", so a real broker error is not swallowed.
+            self.state.last_error = f"PositionReadError: {exc}"
+            self.state.last_no_decision_reason = str(exc)
+            self.state.last_no_trade_code = NO_TRADE_POSITION_UNAVAILABLE
+            self._save()
+            result = CycleResult(
+                ran=False,
+                decision_id=decision.decision_id,
+                error=str(exc),
+                skipped_reason="the held quantity could not be read",
+                reason_code=NO_TRADE_POSITION_UNAVAILABLE,
+                reference_price=reference_price,
+                **self._market_data_fields(),
+            )
+            self.last_cycle = result
+            return result
         except WorkerError as exc:
             self.state.last_error = f"WorkerError: {exc}"
             self.state.last_no_decision_reason = str(exc)
@@ -2012,20 +2084,33 @@ class PaperTradingWorker:
         }
 
     def _size(self, decision: TradingDecision, reference_price: float) -> float:
-        """Convert a decision into a share quantity, sized from the current price.
+        """Convert a decision into a share quantity.
 
-        With ``whole_shares`` (the default) the quantity is floored to an integer.
-        A high-priced symbol under a small notional can then floor to zero — for
-        example a 25 USD notional at a 580 USD price. That is refused with an
-        explicit message naming the fix (enable fractional shares, or raise the
-        notional), never sent to the broker as a zero-quantity order.
+        **BUY** is sized from the *notional* at the current price, exactly as
+        before. With ``whole_shares`` (the default) the quantity is floored to an
+        integer; a high-priced symbol under a small notional can then floor to zero
+        — for example a 25 USD notional at a 580 USD price — which is refused with
+        an explicit message naming the fix (enable fractional shares, or raise the
+        notional), never sent to the broker as a zero-quantity order. With
+        fractional shares enabled the quantity is floored to six decimals (never
+        rounded up), so ``quantity * reference_price`` can never exceed the
+        requested notional.
 
-        With fractional shares enabled the quantity is floored to six decimals (never
-        rounded up), so ``quantity * reference_price`` can never exceed the requested
-        notional — and therefore can never trip the ``max_order_notional`` cap by a
-        rounding artefact. It is still refused if it floors to zero, so an order is
-        never empty.
+        **SELL** is *not* sized from the notional: on this long-only book a SELL is
+        only ever a **close**, so its quantity is the position actually held,
+        clamped to that holding. Sizing a close from a dollar target is the defect
+        this split removes — it would sell a tiny fraction of a position (or floor
+        to zero) instead of closing it. The held quantity comes from the broker's
+        own positions, refreshed here, so a stale local view cannot size the
+        close. A SELL with nothing held raises :class:`NoPositionError`, which the
+        caller reports as ``NO_TRADE_NO_POSITION`` and never turns into a short.
         """
+        if decision.side.lower() == "sell":
+            return self._size_sell(decision)
+        return self._size_buy(decision, reference_price)
+
+    def _size_buy(self, decision: TradingDecision, reference_price: float) -> float:
+        """The BUY quantity: the notional at the current price, unchanged."""
         if decision.quantity is not None:
             return float(decision.quantity)
         assert decision.notional is not None  # __post_init__ guarantees one
@@ -2047,6 +2132,57 @@ class PaperTradingWorker:
                 f"{reference_price}; the order would be empty"
             )
         return float(quantity)
+
+    def _size_sell(self, decision: TradingDecision) -> float:
+        """The SELL quantity: the held long, clamped to it. Never the notional.
+
+        The holding is read from the broker (refreshed), so the close is sized from
+        the account's *current* position rather than a stale local copy. A decision
+        that carries an explicit ``quantity`` may ask for a *partial* close; a
+        quantity above the holding is clamped down to the holding, so a SELL can
+        never exceed what is held (and so can never open a short). With no explicit
+        quantity the whole position is closed.
+        """
+        held = self._held_quantity(decision.symbol)
+        if held <= 0:
+            raise NoPositionError(
+                f"there is no position in {decision.symbol} to sell; a SELL closes a "
+                "held long and this book will not open a short"
+            )
+        requested = decision.quantity
+        if requested is None:
+            return float(held)
+        return float(min(float(requested), held))
+
+    def _held_quantity(self, symbol: str) -> float:
+        """The long quantity held for ``symbol``, from the broker when reachable.
+
+        The broker is the authority: its positions are re-read here so a close is
+        never sized from a stale local copy. When there is no broker (offline) the
+        worker's own last-synced position view is used instead, which is the same
+        figure the observability sync keeps current while running. Only a *long*
+        is returned: a non-positive quantity means nothing to close.
+        """
+        symbol = symbol.upper()
+        broker = self._broker
+        if broker is not None:
+            try:
+                positions = broker.positions(refresh=True)
+            except Exception as exc:  # noqa: BLE001 - a read failure is not "flat"
+                raise PositionReadError(
+                    f"the held quantity for {symbol} could not be read from the "
+                    f"broker ({type(exc).__name__}), so a SELL cannot be sized; "
+                    "refusing rather than assuming the position is flat"
+                ) from None
+            held = positions.get(symbol)
+            quantity = float(held.quantity) if held is not None else 0.0
+        else:
+            position = self.state.positions.get(symbol)
+            try:
+                quantity = float(position.get("quantity") or 0.0) if position else 0.0
+            except (TypeError, ValueError):
+                quantity = 0.0
+        return quantity if quantity > 0 else 0.0
 
     def _reconcile(self, client_order_id: str) -> BrokerOrder:
         broker = self._broker

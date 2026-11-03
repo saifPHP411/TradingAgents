@@ -286,22 +286,27 @@ class PaperRiskLimits:
     notional cap, because an order with no cap is the thing a safe default is
     meant to prevent.
 
-    ``max_order_notional`` is a *local* ceiling on one order's notional. It is
-    enforced *in addition to* the account's own buying power: an order is refused
-    when it exceeds either. ``allow_short`` defaults ``False`` because a cash
+    ``max_order_notional`` is a *local* ceiling on one **entry** order's notional.
+    It is enforced *in addition to* the account's own buying power: a BUY is
+    refused when it exceeds either. A SELL only ever reduces a held position, so
+    it is not an entry and is not subject to this cap; it is bounded by the held
+    quantity instead. ``allow_short`` defaults ``False`` because a cash
     paper account typically has shorting disabled, and a short must be a
     deliberate opt-in rather than an accident of a SELL with no holding.
     """
 
     max_order_notional: float = 25.0
-    """A *local* ceiling on one order's notional, and the binding second layer.
+    """A *local* ceiling on one **entry** order's notional, and the binding second
+    layer for a BUY.
 
     Sized to the smallest account this path is used with (a ~50 USD paper
-    account), so it actually constrains an order instead of being nominal. It is
-    enforced *in addition to* the account's own buying power: an order is refused
+    account), so it actually constrains an entry instead of being nominal. It is
+    enforced *in addition to* the account's own buying power: a BUY is refused
     when it exceeds either. ``order_notional`` (the target size) must not exceed
     it, checked at configuration time, so ``order_notional <= max_order_notional``
-    always holds.
+    always holds. A SELL that closes a held position is not an entry, so the cap
+    does not apply to it — a full close of a position larger than the cap is
+    allowed, and the SELL is still bounded by the held quantity.
     """
     max_open_positions: int = 5
     max_daily_orders: int = 10
@@ -671,6 +676,14 @@ class AlpacaPaperBroker:
         purely-local ones first (symbol, daily count, price/quantity shape), then
         the account-state ones (buying power, open positions, long-only), so a
         malformed order is refused without needing a fresh account read.
+
+        ``max_order_notional`` caps an **entry**: it bounds how much new exposure
+        one order may add. A SELL on this long-only book only ever *reduces* a held
+        position — it is never an entry — so the cap does not apply to it, and a
+        full close of a position larger than the cap is allowed. A SELL is still
+        bounded by the holding: :meth:`_check_sell_is_not_a_short` refuses a
+        quantity above what is held, so the exemption cannot become an oversized
+        order or a short. The cap itself is unchanged.
         """
         if self.limits.allowed_symbols and symbol.upper() not in {
             s.upper() for s in self.limits.allowed_symbols
@@ -691,16 +704,18 @@ class AlpacaPaperBroker:
                 f"price={reference_price}, quantity={quantity}"
             )
         notional = quantity * reference_price
-        if notional > self.limits.max_order_notional:
-            raise PaperRiskRejected(
-                f"the order notional {notional:.2f} exceeds the cap "
-                f"{self.limits.max_order_notional:.2f}"
-            )
 
         side = (side or "").lower()
         if side == "sell":
+            # A close reduces the position, so the entry notional cap is not applied;
+            # the long-only guard (quantity must not exceed the holding) still is.
             self._check_sell_is_not_a_short(symbol=symbol, quantity=quantity)
         else:
+            if notional > self.limits.max_order_notional:
+                raise PaperRiskRejected(
+                    f"the order notional {notional:.2f} exceeds the cap "
+                    f"{self.limits.max_order_notional:.2f}"
+                )
             self._check_buy_against_account(symbol=symbol, notional=notional)
         return notional
 

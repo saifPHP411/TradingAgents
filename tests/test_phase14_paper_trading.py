@@ -412,7 +412,14 @@ class TestOrderPath:
         assert "open-position limit" in (result.error or "")
         assert [c for c in calls if c["method"] == "POST"] == []
 
-    def test_a_short_is_refused(self, tmp_path):
+    def test_a_sell_with_no_position_is_a_named_no_trade(self, tmp_path):
+        """A SELL with nothing held is not a trade and not a short.
+
+        It is reported as ``NO_POSITION`` — a fact, not a risk breach — and no
+        order is sent. It must never be recorded as a short or a risk rejection.
+        """
+        from tradingagents.paper_experiment.broker import NO_TRADE_NO_POSITION
+
         calls = []
         worker = _worker(
             tmp_path,
@@ -424,7 +431,9 @@ class TestOrderPath:
         worker.start()
         result = worker.run_once()
         assert not result.ran
-        assert "short" in (result.error or "").lower()
+        assert result.reason_code == NO_TRADE_NO_POSITION
+        assert result.error is None
+        assert worker.state.last_no_trade_code == NO_TRADE_NO_POSITION
         assert [c for c in calls if c["method"] == "POST"] == []
 
     def test_a_sell_within_the_holding_is_allowed(self, tmp_path):
