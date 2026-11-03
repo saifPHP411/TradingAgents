@@ -34,18 +34,23 @@ from urllib.parse import parse_qs, urlsplit
 
 from ..broker import (
     BANNER,
+    DECISION_SOURCE_CHOICES,
+    DECISION_SOURCE_HISTORY,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     MARKET_DATA_CHOICES,
     PROVIDER_BAR_OPEN,
     BrokerError,
 )
 from ..market_data_wiring import (
+    DECISION_SOURCE_ENV,
     FRACTIONAL_SHARES_ENV,
     MARKET_DATA_ENV,
     SNAPSHOT_MAX_AGE_ENV,
     MarketDataWiringError,
+    describe_decision_source,
     describe_provider,
     market_data_factory_for,
+    resolve_paper_settings,
     resolve_settings,
 )
 from .auth import DashboardAuthError, check_bearer, require_bindable, resolve_token
@@ -88,6 +93,7 @@ class Dashboard:
         paper_whole_shares: bool = True,
         paper_market_data_provider: str = PROVIDER_BAR_OPEN,
         paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+        paper_decision_source: str = DECISION_SOURCE_HISTORY,
         refresh_policy=None,
         refresh_fetcher=None,
     ) -> None:
@@ -111,6 +117,7 @@ class Dashboard:
             whole_shares=paper_whole_shares,
             market_data_provider=paper_market_data_provider,
             market_data_max_age_seconds=paper_market_data_max_age_seconds,
+            decision_source_kind=paper_decision_source,
         )
 
     def view(self) -> ExperimentView:
@@ -507,6 +514,20 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--paper-decision-source",
+        choices=DECISION_SOURCE_CHOICES,
+        default=None,
+        help=(
+            "which decisions the paper worker acts on (default: "
+            f"${DECISION_SOURCE_ENV}, else history). 'history' is the existing paper "
+            "experiment's recorded, historical decisions, bounded by its sessions (it "
+            "reports HISTORY_EXHAUSTED once they are consumed). 'current_market' is an "
+            "INDEPENDENT decision taken live over current Alpaca market data, gated on "
+            "Alpaca's market clock; it is not blocked by a consumed history, and needs "
+            "ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET and an LLM credential."
+        ),
+    )
+    parser.add_argument(
         "--paper-fractional-shares",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -554,6 +575,9 @@ def main(argv: list[str] | None = None) -> int:
             max_age=args.paper_snapshot_max_age_seconds,
             fractional=args.paper_fractional_shares,
         )
+        decision_source = resolve_paper_settings(
+            decision_source=args.paper_decision_source,
+        )[3]
     except MarketDataWiringError as exc:
         parser.error(str(exc))
     print(
@@ -565,6 +589,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         file=sys.stderr,
     )
+    print(f"paper decision source: {describe_decision_source(decision_source)}", file=sys.stderr)
     try:
         serve(
             args.root,
@@ -581,6 +606,7 @@ def main(argv: list[str] | None = None) -> int:
             paper_whole_shares=whole_shares,
             paper_market_data_provider=provider,
             paper_market_data_max_age_seconds=max_age,
+            paper_decision_source=decision_source,
         )
     except DashboardAuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -606,6 +632,7 @@ def serve(
     paper_whole_shares: bool = True,
     paper_market_data_provider: str = PROVIDER_BAR_OPEN,
     paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+    paper_decision_source: str = DECISION_SOURCE_HISTORY,
 ) -> None:
     """Run the dashboard until interrupted.
 
@@ -637,6 +664,7 @@ def serve(
         paper_whole_shares=paper_whole_shares,
         paper_market_data_provider=paper_market_data_provider,
         paper_market_data_max_age_seconds=paper_market_data_max_age_seconds,
+        paper_decision_source=paper_decision_source,
     )
     httpd = ThreadingHTTPServer((host, port), make_handler(dashboard))
     httpd.daemon_threads = True

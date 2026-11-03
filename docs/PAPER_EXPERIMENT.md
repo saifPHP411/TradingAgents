@@ -635,6 +635,78 @@ account must support fractional trading or the broker will reject the order.
 order routing, no credential in any artifact, and no flag that reaches a live
 endpoint.
 
+### Which decisions the worker acts on: history, or the current market
+
+By default the worker acts on the paper experiment's **recorded, historical
+decisions** — the `ExperimentDecisionSource`. That source is bounded by the
+experiment's session set, so once every session is consumed it reports
+`HISTORY_EXHAUSTED` and the worker waits for new experiment data. That is correct
+for replaying a recorded experiment, but it means the worker cannot trade the live
+market.
+
+`--paper-decision-source` (or `$TRADINGAGENTS_PAPER_DECISION_SOURCE`) selects a
+**separate, independent** decision source:
+
+- `--paper-decision-source history` (default) — the existing historical source,
+  unchanged. Default, so nothing changes unless you opt in.
+- `--paper-decision-source current_market` — an independent decision taken live
+  over **current** Alpaca market data. It is *not* the historical source and is
+  never blocked by a consumed history. Its pipeline is:
+
+  ```
+  Alpaca market clock (paper host)
+    -> open?  no  -> MARKET_CLOSED
+    -> current daily OHLCV bars (Alpaca market data, feed iex)
+       -> stale / malformed / future / unavailable -> MARKET_DATA_UNAVAILABLE
+    -> the SAME strategy prompt the historical path sends (ProviderInference)
+       -> BUY / SELL -> decision   |   HOLD -> NO_SIGNAL (an honest no-trade)
+    -> the existing PaperTradingWorker -> risk -> Alpaca paper broker
+  ```
+
+  The two paths differ in exactly one place: **where the decision's input window
+  comes from** (a point-in-time session slice versus a current-market fetch). The
+  strategy, the prompt, the worker, the risk engine, the broker, the ledger and the
+  exit policy are all the same code.
+
+Two prices are deliberately kept apart, and the current-market path supplies only
+the first:
+
+- **decision data** — the daily OHLCV window the strategy reasons on, from
+  `https://data.alpaca.markets` (feed `iex`). It is never the execution price.
+- **execution price** — the price the worker sizes and submits from, still read
+  through the existing `--paper-market-data` seam
+  (`AlpacaSnapshotMarketData`). The current decision path does not touch it.
+
+**Cadence and idempotency.** A decision is taken **once per symbol per trading
+session**, keyed on the market clock's own session date. The `decision_id` is
+`current-<symbol>-<session>`, so it is deterministic: the same session yields the
+same id, a new session yields a new one, and a restart within a session re-yields
+the *same* id rather than a second decision. The evaluation outcome is persisted in
+the source's **own** state file (`current_source_state.json`) — never the
+experiment's `session_state.json`/`journal.json`, so the source is not a second
+writer to the experiment directory — and a restart replays it without a second
+model call. The worker's durable `processed_decisions` set and the broker's
+`client_order_id` idempotency are the second and third guards, so a restart cannot
+place a duplicate order.
+
+**Freshness.** A newest bar older than the freshness limit relative to the decision
+session is refused as `stale`; a bar dated after the session is refused as
+`future`; a malformed, non-finite, duplicate or non-positive payload is refused as
+`malformed`; a missing or unreachable feed is `no_data`/`transport`. Every such
+failure is a `MARKET_DATA_UNAVAILABLE` cycle, so the strategy never reasons on a
+bar that is not current.
+
+**No fabrication.** The current source invents no size, stop or target: the notional
+is the worker's configured target and `stop_loss`/`take_profit` are `None` because
+the strategy proposed none. A rating with no tradeable action, or a strategy that
+cannot be reached, yields *no* decision with a named code (`NO_SIGNAL`,
+`STRATEGY_UNAVAILABLE`) — never a fake signal.
+
+The current-market path is **opt-in**, and needs `ALPACA_PAPER_API_KEY` /
+`ALPACA_PAPER_API_SECRET` (the same paper credentials the broker uses) and an LLM
+credential for the strategy. There is still no live path: the market-data host and
+the clock host are both gated, and the broker refuses every live endpoint.
+
 ### Why the worker placed no order (a stable code, not a shrug)
 
 A worker can be `RUNNING`, with the account `ACTIVE` and the paper endpoint
@@ -645,7 +717,8 @@ tell those apart, so every no-order cycle now records a code from a closed
 vocabulary (`NO_TRADE_REASONS` in `paper_experiment/broker/trading.py`):
 `NO_DECISION_DUE`, `HISTORY_EXHAUSTED`, `MAX_DECISIONS_REACHED`, `NO_SIGNAL`,
 `INSUFFICIENT_DATA`, `MARKET_DATA_UNAVAILABLE`, `SIZE_TOO_SMALL`, `RISK_REJECTED`,
-`BROKER_REJECTED`, `ALREADY_PROCESSED`, `ORDER_EXISTS`, `EXIT_REFUSED`.
+`BROKER_REJECTED`, `ALREADY_PROCESSED`, `ORDER_EXISTS`, `EXIT_REFUSED`,
+`MARKET_CLOSED`, `STRATEGY_UNAVAILABLE`, `CURRENT_MARKET_NO_NEW_DATA`.
 
 The code rides on the cycle result (`CycleResult.reason_code`) and the persisted
 worker state (`WorkerState.last_no_trade_code`), with the human detail in

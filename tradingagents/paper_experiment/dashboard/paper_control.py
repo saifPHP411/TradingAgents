@@ -32,6 +32,8 @@ from typing import Any
 
 from ..broker import (
     BANNER,
+    DECISION_SOURCE_CURRENT_MARKET,
+    DECISION_SOURCE_HISTORY,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     PROVIDER_BAR_OPEN,
     STATUS_STOPPED,
@@ -69,6 +71,10 @@ class PaperTradingController:
         whole_shares: bool = True,
         market_data_provider: str = PROVIDER_BAR_OPEN,
         market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+        decision_source_kind: str = DECISION_SOURCE_HISTORY,
+        current_source_factory: Callable[..., Any] | None = None,
+        market_hours_gate: Callable[[], Any] | None = None,
+        decision_data_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.root = Path(root)
         self.enabled = enabled
@@ -88,6 +94,15 @@ class PaperTradingController:
         # this is the label, and the two are set together by the entrypoints.
         self.market_data_provider = market_data_provider
         self.market_data_max_age_seconds = market_data_max_age_seconds
+        # Which decision source the worker draws on. ``history`` is the default, so
+        # the existing historical path is unchanged. ``current_market`` is opt-in
+        # and builds the independent current-market source instead.
+        self.decision_source_kind = decision_source_kind
+        # Seams the current-market path needs, injectable so a test drives them
+        # offline. ``None`` means "build the real one" (Alpaca clock, Alpaca bars).
+        self._current_source_factory = current_source_factory
+        self._market_hours_gate = market_hours_gate
+        self._decision_data_factory = decision_data_factory
         self._worker: PaperTradingWorker | None = None
         self._lock = threading.Lock()
 
@@ -110,6 +125,7 @@ class PaperTradingController:
             state_path=self.root / "worker_state.json",
             market_data_provider=self.market_data_provider,
             market_data_max_age_seconds=self.market_data_max_age_seconds,
+            decision_source=self.decision_source_kind,
         )
 
     def _reload_experiment(self):
@@ -125,7 +141,6 @@ class PaperTradingController:
 
     def _build_worker(self) -> PaperTradingWorker:
         from ..experiment import PaperExperiment
-        from ..paper_trading import ExperimentDecisionSource
 
         experiment = PaperExperiment.load(self.root, inference=None)
         # Build the decision source from the persisted config, so the worker acts
@@ -137,23 +152,17 @@ class PaperTradingController:
             state_path=self.root / "worker_state.json",
             market_data_provider=self.market_data_provider,
             market_data_max_age_seconds=self.market_data_max_age_seconds,
+            decision_source=self.decision_source_kind,
         )
         source = experiment.source
         sessions = source.sessions()
         market = self._build_market_data(experiment, source, sessions)
-        # The source re-reads the experiment state from disk on every decision, so a
-        # decision produced *after* this worker was built — by an autonomous
-        # auto-advance progressing the experiment, for example — is still discovered.
-        # It also filters against the worker's own durable processed-decision set,
-        # wired through a late-bound holder so the source (which the worker needs at
-        # construction) can consult the worker's state once it exists.
+        # The worker needs the decision source at construction, but the current
+        # source's idempotency filter consults the worker's own durable
+        # processed-decision set. A late-bound holder breaks that cycle, exactly as
+        # the historical source does.
         holder: dict[str, PaperTradingWorker] = {}
-        decision_source = ExperimentDecisionSource(
-            experiment,
-            order_notional=self.order_notional,
-            reload=self._reload_experiment,
-            is_consumed=lambda decision_id: holder["worker"]._is_processed(decision_id),
-        )
+        decision_source = self._build_decision_source(experiment, holder)
         kwargs: dict[str, Any] = {
             "config": config,
             "decision_source": decision_source,
@@ -164,6 +173,86 @@ class PaperTradingController:
         worker = self._worker_factory(**kwargs)
         holder["worker"] = worker
         return worker
+
+    def _build_decision_source(self, experiment, holder: dict[str, PaperTradingWorker]):
+        """The worker's decision source, from the configured kind.
+
+        ``history`` (the default) builds the existing ``ExperimentDecisionSource``
+        over the experiment's recorded decisions, unchanged. ``current_market``
+        builds the independent ``CurrentMarketDecisionSource``, which fetches live
+        Alpaca data and is never blocked by a consumed historical history. Both
+        satisfy the same ``DecisionSource`` protocol and both filter against the
+        worker's durable processed-decision set through ``holder``.
+        """
+        if self.decision_source_kind == DECISION_SOURCE_CURRENT_MARKET:
+            return self._build_current_source(experiment, holder)
+        return self._build_history_source(experiment, holder)
+
+    def _build_history_source(self, experiment, holder: dict[str, PaperTradingWorker]):
+        """The existing historical decision source, unchanged.
+
+        It re-reads the experiment state from disk on every decision, so a decision
+        produced *after* this worker was built — by an autonomous ``auto-advance``
+        progressing the experiment, for example — is still discovered. It also
+        filters against the worker's own durable processed-decision set, wired
+        through a late-bound holder so the source (which the worker needs at
+        construction) can consult the worker's state once it exists.
+        """
+        from ..paper_trading import ExperimentDecisionSource
+
+        return ExperimentDecisionSource(
+            experiment,
+            order_notional=self.order_notional,
+            reload=self._reload_experiment,
+            is_consumed=lambda decision_id: holder["worker"]._is_processed(decision_id),
+        )
+
+    def _build_current_source(self, experiment, holder: dict[str, PaperTradingWorker]):
+        """The independent current-market decision source.
+
+        Its decision data comes from Alpaca's market-data host, its market-hours
+        gate from Alpaca's paper clock, and its strategy from the *same*
+        ``ProviderInference`` seam the historical path uses (built from the
+        persisted config). Its per-session memory lives in the source's own state
+        file — never the experiment's — so it is not a second writer to the
+        historical experiment directory. A test may inject any of the three seams
+        through the controller, so the path is exercisable offline.
+        """
+        from ..current_source import CurrentMarketDecisionSource
+        from ..runner import build_inference
+
+        inference = build_inference(experiment.config, stub=self.stub)
+        market_hours = self._build_market_hours()
+        decision_data = self._build_decision_data()
+        kwargs: dict[str, Any] = {
+            "symbols": tuple(experiment.config.symbols),
+            "inference": inference,
+            "market_data": decision_data,
+            "market_hours": market_hours,
+            "order_notional": self.order_notional,
+            "strategy_name": experiment.config.strategy_id,
+            "is_consumed": lambda decision_id: holder["worker"]._is_processed(decision_id),
+            "state_path": self.root / "current_source_state.json",
+        }
+        if self._current_source_factory is not None:
+            return self._current_source_factory(**kwargs)
+        return CurrentMarketDecisionSource(**kwargs)
+
+    def _build_market_hours(self):
+        """The market-hours gate: an injected one, else Alpaca's paper clock."""
+        if self._market_hours_gate is not None:
+            return self._market_hours_gate()
+        from ..market_hours import AlpacaMarketClock
+
+        return AlpacaMarketClock()
+
+    def _build_decision_data(self):
+        """The current decision-data seam: an injected one, else Alpaca bars."""
+        if self._decision_data_factory is not None:
+            return self._decision_data_factory()
+        from ..current_market_data import AlpacaCurrentBars
+
+        return AlpacaCurrentBars()
 
     def _build_market_data(self, experiment, source, sessions):
         """The worker's current-price seam.

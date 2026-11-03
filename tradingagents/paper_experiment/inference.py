@@ -44,6 +44,7 @@ __all__ = [
     "InferenceUnavailable",
     "ProviderInference",
     "StubInference",
+    "render_strategy_prompt",
 ]
 
 WINDOW_BARS = 30
@@ -120,6 +121,24 @@ def _render_indicators(window) -> str:
         raise InferenceUnavailable(
             f"the indicator context could not be computed from the price window: {exc}"
         ) from exc
+
+
+def render_strategy_prompt(*, symbol: str, session: str, window=None) -> str:
+    """The one strategy prompt both the historical and current paths send.
+
+    Extracted verbatim from :class:`ProviderInference` so the current-market
+    path reuses the *same* request shape and the *same* deterministic indicator
+    block rather than growing a second strategy. The two paths differ only in how
+    the window is acquired (a historical session slice versus a current-market
+    fetch), never in what the model is asked or shown. A malformed window raises
+    :class:`InferenceUnavailable` before any request, exactly as before.
+    """
+    return _PROMPT.format(
+        symbol=symbol,
+        session=session,
+        indicators=_render_indicators(window),
+        window=_render_window(window),
+    )
 
 
 @dataclass
@@ -221,13 +240,10 @@ class ProviderInference:
 
     def __call__(self, *, symbol: str, session: str, window=None) -> tuple[str, str]:
         # Build the prompt first: a malformed window is refused before any request,
-        # so no provider is asked to decide on evidence that is not real.
-        prompt = _PROMPT.format(
-            symbol=symbol,
-            session=session,
-            indicators=_render_indicators(window),
-            window=_render_window(window),
-        )
+        # so no provider is asked to decide on evidence that is not real. The
+        # builder is the shared seam the current-market path also uses, so the two
+        # ask the model the identical question.
+        prompt = render_strategy_prompt(symbol=symbol, session=session, window=window)
         errors: list[str] = []
         for index, (provider, model) in enumerate(self._attempts()):
             present, env_name = self._credential_present(provider)

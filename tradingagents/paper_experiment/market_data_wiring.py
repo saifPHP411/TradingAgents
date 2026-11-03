@@ -18,6 +18,9 @@ from __future__ import annotations
 import os
 
 from .broker import (
+    DECISION_SOURCE_CHOICES,
+    DECISION_SOURCE_CURRENT_MARKET,
+    DECISION_SOURCE_HISTORY,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     MARKET_DATA_CHOICES,
     PROVIDER_ALPACA_SNAPSHOT,
@@ -26,6 +29,9 @@ from .broker import (
 
 MARKET_DATA_ENV = "TRADINGAGENTS_PAPER_MARKET_DATA"
 """Environment variable the entrypoints read the provider choice from."""
+
+DECISION_SOURCE_ENV = "TRADINGAGENTS_PAPER_DECISION_SOURCE"
+"""Environment variable the entrypoints read the decision-source choice from."""
 
 FRACTIONAL_SHARES_ENV = "TRADINGAGENTS_PAPER_FRACTIONAL_SHARES"
 """Environment variable that opts into fractional sizing (default: whole shares)."""
@@ -96,6 +102,28 @@ def env_provider(default: str = PROVIDER_BAR_OPEN) -> str:
     return resolve_provider(os.environ.get(MARKET_DATA_ENV) or default)
 
 
+def resolve_decision_source(choice: str | None) -> str:
+    """Validate an explicit decision-source choice, or raise.
+
+    No default is applied here: the caller supplies the default (``history``), so
+    a bad value from a flag or an environment variable is a loud error rather than
+    a silent fall-back to a different decision source.
+    """
+    if choice is None:
+        raise MarketDataWiringError("no decision source was given")
+    if choice not in DECISION_SOURCE_CHOICES:
+        raise MarketDataWiringError(
+            f"unknown decision source {choice!r}; expected one of "
+            f"{', '.join(DECISION_SOURCE_CHOICES)}"
+        )
+    return choice
+
+
+def env_decision_source(default: str = DECISION_SOURCE_HISTORY) -> str:
+    """The decision source named by :data:`DECISION_SOURCE_ENV`, or ``default``."""
+    return resolve_decision_source(os.environ.get(DECISION_SOURCE_ENV) or default)
+
+
 def env_fractional(default: bool = False) -> bool:
     """Whether fractional sizing is opted into via :data:`FRACTIONAL_SHARES_ENV`."""
     return parse_bool(os.environ.get(FRACTIONAL_SHARES_ENV), default=default)
@@ -137,6 +165,31 @@ def resolve_settings(
     return resolved_provider, resolved_max_age, not resolved_fractional
 
 
+def resolve_paper_settings(
+    *,
+    provider: str | None = None,
+    max_age: str | float | None = None,
+    fractional: str | bool | None = None,
+    decision_source: str | None = None,
+) -> tuple[str, float | None, bool, str]:
+    """Resolve the paper market-data settings *and* the decision source.
+
+    The same CLI-over-environment precedence as :func:`resolve_settings`, extended
+    with the decision-source choice. Kept as a separate function so existing
+    callers of :func:`resolve_settings` are unchanged. Returns
+    ``(provider, max_age_seconds, whole_shares, decision_source)``.
+    """
+    resolved_provider, resolved_max_age, whole_shares = resolve_settings(
+        provider=provider, max_age=max_age, fractional=fractional
+    )
+    resolved_source = (
+        env_decision_source()
+        if decision_source is None
+        else resolve_decision_source(decision_source)
+    )
+    return resolved_provider, resolved_max_age, whole_shares, resolved_source
+
+
 def market_data_factory_for(choice: str, *, max_age_seconds: float | None = None):
     """The market-data factory the chosen provider selects.
 
@@ -176,18 +229,40 @@ def describe_provider(choice: str) -> str:
     )
 
 
+def describe_decision_source(choice: str) -> str:
+    """A one-line, operator-facing description of a decision-source choice."""
+    source = resolve_decision_source(choice)
+    if source == DECISION_SOURCE_CURRENT_MARKET:
+        return (
+            "current_market: an INDEPENDENT decision taken live over current Alpaca "
+            "market data, gated on Alpaca's market clock; requires "
+            "ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET and an LLM credential. "
+            "Not blocked by a consumed historical experiment."
+        )
+    return (
+        "history: the paper experiment's recorded, HISTORICAL decisions (the "
+        "default); bounded by the experiment's sessions, so it reports "
+        "HISTORY_EXHAUSTED once they are consumed"
+    )
+
+
 __all__ = [
+    "DECISION_SOURCE_ENV",
     "FRACTIONAL_SHARES_ENV",
     "MARKET_DATA_ENV",
     "SNAPSHOT_MAX_AGE_ENV",
     "MarketDataWiringError",
+    "describe_decision_source",
     "describe_provider",
+    "env_decision_source",
     "env_fractional",
     "env_max_age",
     "env_provider",
     "market_data_factory_for",
     "parse_bool",
+    "resolve_decision_source",
     "resolve_max_age",
+    "resolve_paper_settings",
     "resolve_provider",
     "resolve_settings",
 ]

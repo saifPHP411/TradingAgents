@@ -157,6 +157,16 @@ NO_TRADE_BROKER_REJECTED = "BROKER_REJECTED"
 NO_TRADE_ALREADY_PROCESSED = "ALREADY_PROCESSED"
 NO_TRADE_ORDER_EXISTS = "ORDER_EXISTS"
 NO_TRADE_EXIT_REFUSED = "EXIT_REFUSED"
+NO_TRADE_MARKET_CLOSED = "MARKET_CLOSED"
+"""The current-market source's market-hours gate: the market is closed."""
+NO_TRADE_STRATEGY_UNAVAILABLE = "STRATEGY_UNAVAILABLE"
+"""The current-market source could not reach a strategy decision (no inference)."""
+NO_TRADE_CURRENT_MARKET_NO_NEW_DATA = "CURRENT_MARKET_NO_NEW_DATA"
+"""Every symbol already has a decision for the current session; new data is needed.
+
+Distinct from ``HISTORY_EXHAUSTED``: that names a fully-consumed historical
+experiment, which does *not* block the current-market source.
+"""
 
 NO_TRADE_REASONS = (
     NO_TRADE_NO_DECISION_DUE,
@@ -171,6 +181,9 @@ NO_TRADE_REASONS = (
     NO_TRADE_ALREADY_PROCESSED,
     NO_TRADE_ORDER_EXISTS,
     NO_TRADE_EXIT_REFUSED,
+    NO_TRADE_MARKET_CLOSED,
+    NO_TRADE_STRATEGY_UNAVAILABLE,
+    NO_TRADE_CURRENT_MARKET_NO_NEW_DATA,
 )
 """The closed vocabulary of reasons a RUNNING worker placed no order. A reason is
 ``None`` only when the cycle actually placed an order."""
@@ -178,6 +191,26 @@ NO_TRADE_REASONS = (
 MARKET_DATA_CHOICES = (PROVIDER_BAR_OPEN, PROVIDER_ALPACA_SNAPSHOT)
 """The price seams an operator may select. ``bar_open`` is the historical default;
 ``alpaca_snapshot`` is the current-price opt-in."""
+
+# -- which decision source the worker draws on -----------------------------------
+
+DECISION_SOURCE_HISTORY = "history"
+"""The default: the paper experiment's recorded, historical decisions.
+
+This is the existing ``ExperimentDecisionSource``. It is bounded by the
+experiment's session set, so it reports ``HISTORY_EXHAUSTED`` once every session
+is consumed. Unchanged by the current-market work.
+"""
+DECISION_SOURCE_CURRENT_MARKET = "current_market"
+"""Opt-in: a live decision over current Alpaca market data.
+
+The independent ``CurrentMarketDecisionSource``. It is *not* the historical
+source and is never blocked by a consumed historical history. It is opt-in so
+the default behaviour is unchanged.
+"""
+
+DECISION_SOURCE_CHOICES = (DECISION_SOURCE_HISTORY, DECISION_SOURCE_CURRENT_MARKET)
+"""The decision sources an operator may select. ``history`` is the default."""
 
 
 @dataclass(frozen=True)
@@ -357,6 +390,28 @@ def market_data_identity(market_data: Any) -> dict[str, Any]:
     if callable(describe):
         with contextlib.suppress(Exception):  # a status view must never raise
             identity.update(describe())
+    return identity
+
+
+def decision_source_identity(decision_source: Any) -> dict[str, Any]:
+    """The secret-free identity of a decision source, for a status view.
+
+    A source that describes itself (the current-market source does, with its
+    last market state, session and last-fetched data) contributes those fields;
+    a source that predates this protocol contributes nothing, so the view falls
+    back to the *configured* ``decision_source`` label rather than mislabelling
+    it. Never raises: a status view must not fail because a source is odd.
+    """
+    identity: dict[str, Any] = {}
+    kind = getattr(decision_source, "source_kind", None)
+    if isinstance(kind, str):
+        identity["decision_source_kind"] = kind
+    describe = getattr(decision_source, "describe", None)
+    if callable(describe):
+        with contextlib.suppress(Exception):
+            described = describe()
+            if isinstance(described, dict):
+                identity.update(described)
     return identity
 
 
@@ -922,6 +977,16 @@ class PaperTradingConfig:
     """The maximum age of a snapshot price, in seconds, when the snapshot seam is
     used. ``None`` disables the age check (not recommended). Ignored by
     ``bar_open``, which is historical by construction."""
+    decision_source: str = DECISION_SOURCE_HISTORY
+    """Which decision source this worker draws on — ``history`` (the default) or
+    ``current_market``.
+
+    Recorded on the config so a read-only status view can name the *configured*
+    source without building a worker. It is a label of the wiring, not a switch:
+    the source itself is passed in as ``decision_source`` to the worker.
+    ``history`` is the default, so existing behaviour is unchanged unless an
+    operator opts into the current-market path explicitly.
+    """
 
     def __post_init__(self) -> None:
         if not (self.order_notional > 0):
@@ -937,6 +1002,11 @@ class PaperTradingConfig:
             raise WorkerError(
                 f"unknown market_data_provider {self.market_data_provider!r}; expected "
                 f"one of {', '.join(MARKET_DATA_CHOICES)}"
+            )
+        if self.decision_source not in DECISION_SOURCE_CHOICES:
+            raise WorkerError(
+                f"unknown decision_source {self.decision_source!r}; expected one of "
+                f"{', '.join(DECISION_SOURCE_CHOICES)}"
             )
         if self.market_data_max_age_seconds is not None and not (
             self.market_data_max_age_seconds > 0
@@ -1227,6 +1297,7 @@ def worker_status_view(
     next_cycle_at: str | None = None,
     last_cycle: CycleResult | None = None,
     market_data_identity: dict[str, Any] | None = None,
+    decision_source_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The secret-free status of a paper worker, from its state and config alone.
 
@@ -1240,6 +1311,11 @@ def worker_status_view(
     exists; with no worker it is ``None`` and the *configured* provider from
     ``config`` is reported instead, so the view always names a provider and never
     implies a current price it cannot prove.
+
+    ``decision_source_identity`` is the decision source's own self-description
+    when a worker exists (the current-market source reports its last market state,
+    session and last-fetched data); with no worker it is ``None`` and the
+    *configured* ``decision_source`` label from ``config`` is reported instead.
     """
     identity = dict(market_data_identity or {})
     configured_provider = config.market_data_provider
@@ -1247,6 +1323,8 @@ def worker_status_view(
     # a stopped worker still reports which seam it *would* use.
     identity.setdefault("market_data_provider", configured_provider)
     identity.setdefault("market_data_kind", None)
+    source_identity = dict(decision_source_identity or {})
+    source_identity.setdefault("decision_source_kind", config.decision_source)
     return {
         "banner": BANNER,
         "mode": "ALPACA_PAPER",
@@ -1257,7 +1335,9 @@ def worker_status_view(
         "paper_endpoint_only": config.base_url == PAPER_BASE_URL,
         "market_data_provider_configured": configured_provider,
         "market_data_max_age_seconds": config.market_data_max_age_seconds,
+        "decision_source_configured": config.decision_source,
         **identity,
+        **source_identity,
         "last_processed_decision_id": state.last_processed_decision_id,
         "last_error": state.last_error,
         "last_cycle_at": state.last_cycle_at,
@@ -1376,6 +1456,7 @@ class PaperTradingWorker:
             next_cycle_at=self._next_cycle_at,
             last_cycle=self.last_cycle,
             market_data_identity=market_data_identity(self.market_data),
+            decision_source_identity=decision_source_identity(self.decision_source),
         )
 
     # -- lifecycle --------------------------------------------------------

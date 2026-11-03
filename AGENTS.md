@@ -177,6 +177,43 @@ faking a success.
   constructs the worker (and so the decision source) is what froze a live view; the
   status path reads the persisted `worker_state.json` as `STOPPED` instead.
 
+## Current-market decision source (Phase 27)
+
+The worker draws its decisions from one of two **separate** sources, selected by
+`--paper-decision-source` / `$TRADINGAGENTS_PAPER_DECISION_SOURCE`, default
+`history`:
+
+- `history` — the existing `ExperimentDecisionSource` over the experiment's
+  recorded decisions. Bounded by the experiment's sessions, so it reports
+  `HISTORY_EXHAUSTED` once they are consumed. Unchanged.
+- `current_market` — the independent `CurrentMarketDecisionSource`
+  (`paper_experiment/current_source.py`). It is **not** an extension of the
+  historical source and is never blocked by a consumed history. Do not make
+  `ExperimentDecisionSource` the current-market source, and do not merge the two:
+  one replays a recorded experiment, the other decides live.
+
+The two paths differ in exactly one place: where the decision's input window comes
+from. `render_strategy_prompt` (`inference.py`) is the shared builder both paths
+send, so the current path reuses the *same* strategy — never grow a second one.
+The current path's market-data and market-hours seams are their own modules
+(`current_market_data.py`, `market_hours.py`), and its decision data
+(`data.alpaca.markets`, feed `iex`) is kept apart from the worker's execution price
+(the existing `--paper-market-data` seam). Do not price an order from the decision
+window, and do not fetch decision data from the paper/order host.
+
+Its cadence is one decision **per symbol per trading session**, keyed on the
+market clock's session date; `decision_id` is `current-<symbol>-<session>`, so it
+is deterministic and a restart within a session replays the same id without a
+second model call. The source persists its own state in
+`current_source_state.json` — never the experiment's `session_state.json` /
+`journal.json` — so it is not a second writer to the experiment directory. It
+fabricates no size, stop or target: the notional is the worker's, and a rating with
+no tradeable action is an honest `NO_SIGNAL`, never a fake signal. Market-hours
+failures are `MARKET_CLOSED`; a stale, future, malformed or unreachable window is
+`MARKET_DATA_UNAVAILABLE`. Do not treat a stale bar as current, and do not let an
+unknown clock be read as open. The path is opt-in and stays paper-only; no live
+endpoint, and risk limits are unchanged.
+
 ## Paper-trading observability
 
 - The paper worker records *why* it placed no order as a stable code from a closed

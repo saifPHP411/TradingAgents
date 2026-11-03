@@ -198,6 +198,30 @@ def engine_view(status: dict[str, Any]) -> dict[str, Any]:
             "age_seconds": status.get("last_snapshot_age_seconds"),
             "max_age_seconds": status.get("max_snapshot_age_seconds"),
         },
+        # Which decision source the worker draws on, and — for the current-market
+        # source — its own last market state and last-fetched decision data. A
+        # historical source contributes no extra fields, so the *configured* label
+        # is what the view reports rather than a fabricated current state.
+        "decision_source": {
+            "configured": status.get("decision_source_configured"),
+            "kind": status.get("decision_source_kind"),
+            "symbols": status.get("decision_source_symbols"),
+            "strategy": status.get("decision_source_strategy"),
+            "market_state": status.get("decision_source_last_market_state"),
+            "market_session": status.get("decision_source_last_market_session"),
+            "market_hours_provider": status.get("market_hours_provider"),
+            "decision_data_provider": status.get("decision_data_provider"),
+            "decision_data_kind": status.get("decision_data_kind"),
+            "decision_data_timeframe": status.get("decision_data_timeframe"),
+            "decision_data_endpoint": status.get("decision_data_endpoint"),
+            "decision_data_feed": status.get("decision_data_feed"),
+            "decision_data_last_fetch_at": status.get("decision_data_last_fetch_at"),
+            "decision_data_last_bar_date": status.get("decision_data_last_bar_date"),
+            "decision_data_last_session": status.get("decision_data_last_session"),
+            "decision_data_age_days": status.get("decision_data_age_days"),
+            "decision_data_bar_count": status.get("decision_data_bar_count"),
+            "decision_data_last_error": status.get("decision_data_last_error"),
+        },
         "timestamps": {
             "worker_started_at": status.get("started_at"),
             "worker_stopped_at": status.get("stopped_at"),

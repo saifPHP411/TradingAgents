@@ -40,6 +40,7 @@ import sys
 from pathlib import Path
 
 from .broker import (
+    DECISION_SOURCE_CHOICES,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     MARKET_DATA_CHOICES,
     BrokerError,
@@ -48,12 +49,15 @@ from .config import ExperimentConfig
 from .experiment import ExperimentError, PaperExperiment
 from .journal import JournalError
 from .market_data_wiring import (
+    DECISION_SOURCE_ENV,
     FRACTIONAL_SHARES_ENV,
     MARKET_DATA_ENV,
     SNAPSHOT_MAX_AGE_ENV,
     MarketDataWiringError,
+    describe_decision_source,
     describe_provider,
     market_data_factory_for,
+    resolve_paper_settings,
     resolve_settings,
 )
 from .providers import (
@@ -304,6 +308,22 @@ def _paper_market_data_settings(args) -> tuple[str, float | None, bool]:
         raise RunnerError(str(exc)) from exc
 
 
+def _paper_decision_source(args) -> str:
+    """Resolve the paper worker's decision source from the CLI/environment.
+
+    ``history`` (the default) keeps the existing historical path; ``current_market``
+    opts into the independent live path. A bad value raises rather than falling
+    back, so a typo cannot silently switch which decisions the worker acts on.
+    """
+    try:
+        _, _, _, source = resolve_paper_settings(
+            decision_source=getattr(args, "paper_decision_source", None),
+        )
+    except MarketDataWiringError as exc:
+        raise RunnerError(str(exc)) from exc
+    return source
+
+
 def _announce_paper_market_data(provider: str, max_age: float | None) -> None:
     """Print the effective price seam to stderr, so a start log names it."""
     suffix = (
@@ -312,6 +332,11 @@ def _announce_paper_market_data(provider: str, max_age: float | None) -> None:
         else ""
     )
     print(f"paper market data: {describe_provider(provider)}{suffix}", file=sys.stderr)
+
+
+def _announce_paper_decision_source(source: str) -> None:
+    """Print the effective decision source to stderr, so a start log names it."""
+    print(f"paper decision source: {describe_decision_source(source)}", file=sys.stderr)
 
 
 def _serve(args) -> int:
@@ -329,12 +354,19 @@ def _serve(args) -> int:
     passed through as the same factory the module-form server uses, so the two
     entrypoints cannot diverge. ``bar_open`` keeps the historical default;
     ``alpaca_snapshot`` reads a current price and never falls back to a bar open.
+
+    ``--paper-decision-source`` selects which decisions the worker acts on.
+    ``history`` (the default) keeps the existing historical path; ``current_market``
+    opts into the independent live path. The two are separate objects on separate
+    data, so a consumed historical history does not block the current path.
     """
     from .dashboard import DashboardAuthError, serve
 
     root = _root(args)
     provider, max_age, whole_shares = _paper_market_data_settings(args)
+    decision_source = _paper_decision_source(args)
     _announce_paper_market_data(provider, max_age)
+    _announce_paper_decision_source(decision_source)
     # Honour a platform-provided port (Railway sets $PORT) when --port is omitted.
     port = args.port if args.port is not None else int(os.environ.get("PORT", "8000"))
     try:
@@ -353,6 +385,7 @@ def _serve(args) -> int:
             paper_whole_shares=whole_shares,
             paper_market_data_provider=provider,
             paper_market_data_max_age_seconds=max_age,
+            paper_decision_source=decision_source,
         )
     except DashboardAuthError as exc:
         raise RunnerError(str(exc)) from exc
@@ -496,16 +529,19 @@ def _paper_trade(args) -> int:
     ``--paper-market-data`` selects the price seam, exactly as ``serve`` does, so
     the CLI and the deployed dashboard cannot diverge: ``bar_open`` is the
     historical default and ``alpaca_snapshot`` reads a current price that is
-    refused when stale. ``--dry-run`` performs preflight and reports what would
-    happen without placing an order. There is no flag that reaches a live
-    endpoint: the broker's gate refuses every live host, and the endpoint is not
-    configurable here.
+    refused when stale. ``--paper-decision-source`` selects which decisions the
+    worker acts on — ``history`` (the default) or the independent ``current_market``.
+    ``--dry-run`` performs preflight and reports what would happen without placing
+    an order. There is no flag that reaches a live endpoint: the broker's gate
+    refuses every live host, and the endpoint is not configurable here.
     """
     from .dashboard.paper_control import PaperTradingController
 
     root = _root(args)
     provider, max_age, whole_shares = _paper_market_data_settings(args)
+    decision_source = _paper_decision_source(args)
     _announce_paper_market_data(provider, max_age)
+    _announce_paper_decision_source(decision_source)
     controller = PaperTradingController(
         root,
         enabled=True,
@@ -514,6 +550,7 @@ def _paper_trade(args) -> int:
         whole_shares=whole_shares,
         market_data_provider=provider,
         market_data_max_age_seconds=max_age,
+        decision_source_kind=decision_source,
     )
     if getattr(args, "dry_run", False):
         worker = controller._ensure_worker()  # noqa: SLF001 - the CLI owns the worker
@@ -524,6 +561,7 @@ def _paper_trade(args) -> int:
                     "preflight": result,
                     "placed_order": False,
                     "market_data_provider": provider,
+                    "decision_source": decision_source,
                 },
                 indent=2,
                 default=str,
@@ -774,6 +812,21 @@ def _build_parser() -> argparse.ArgumentParser:
             "serve / paper-trade: the maximum age of a snapshot price before it is "
             f"refused, in seconds (default: ${SNAPSHOT_MAX_AGE_ENV}, else "
             f"{DEFAULT_MAX_SNAPSHOT_AGE_SECONDS:.0f}). Only used by alpaca_snapshot."
+        ),
+    )
+    parser.add_argument(
+        "--paper-decision-source",
+        choices=DECISION_SOURCE_CHOICES,
+        default=None,
+        help=(
+            "serve / paper-trade: which decisions the paper worker acts on "
+            f"(default: ${DECISION_SOURCE_ENV}, else history). 'history' is the "
+            "existing paper experiment's recorded, historical decisions, bounded by "
+            "its sessions (it reports HISTORY_EXHAUSTED once they are consumed). "
+            "'current_market' is an INDEPENDENT decision taken live over current "
+            "Alpaca market data, gated on Alpaca's market clock; it is not blocked by "
+            "a consumed history, and needs ALPACA_PAPER_API_KEY / "
+            "ALPACA_PAPER_API_SECRET and an LLM credential."
         ),
     )
     parser.add_argument(
