@@ -270,3 +270,41 @@ uses the *projected* fill price, which for a MARKET order is the price the
 simulator will use, so the two agree; an order type that filled at a price not
 derivable from the bar would need the re-check to reconcile after the fill. See
 `docs/PR1_INDEPENDENT_REVIEW.md`.
+
+## TJR intraday strategy
+
+`tradingagents/tjr/` is a self-contained intraday strategy: the TJR rule chain
+(liquidity sweep → 5m reversal confirmation → 5m continuation confluence → 1m
+entry), its own backtest loop, and a report. It does not run inside the daily
+engine, because that engine marks every bar to a midnight date and cannot express
+a 5-minute bar-close. It reuses everything *around* the loop: the same `Ledger`,
+`RiskEngine`, `CostModel` and `TradingSignal`. Do not give it a private ledger or
+risk path.
+
+- The closed-bar rule lives in `frames.IntradaySeries`. `available(as_of)` is the
+  only reader and never returns a bar whose close is after `as_of`. Do not add a
+  method that returns a later bar; that re-opens look-ahead.
+- `rules.evaluate` is a pure function of the bars visible at an instant. A session
+  can sweep several levels, so it tries every recent sweep and keeps the most
+  *progressed* setup (a completed entry beats a bare sweep). Do not go back to
+  picking only the most recent sweep: a small sweep made during a retrace would
+  then replace the sweep that is actually setting up.
+- The confirmation's break-of-structure reference is the most recent swing **as it
+  stood at the sweep bar**, fixed there. Recomputing it per bar lets a later swing
+  move the reference and un-confirm a setup that had already confirmed.
+- The strategy is long-only. A complete bearish setup returns
+  `SHORT_SETUP_LONG_ONLY`, never a fabricated long. Every "no trade" carries a
+  reason code from a closed vocabulary; do not replace a reason code with prose.
+- The strategy never requests a size, a stop or a target it did not derive from
+  structure. Sizing is the risk engine's; the levels come from the sweep, the leg
+  and the next draw on liquidity.
+- The engine fills at the **next** 5m bar's open, and a bar that covers both the
+  stop and the target is read as the stop first (the conservative choice). It is
+  flat by the session close, or by the last bar the data carries when the feed
+  stops short of 16:00.
+- Real data comes only from `dataflows/vendors/yahoo/intraday.py` (the data layer,
+  which `tests/test_layering.py` enforces). `tjr/fetch_data.py` is the package's
+  only network entry point, run once by a human; `tjr/run.py` is offline. Yahoo
+  serves 1m bars only for the last 30 days and 5m bars for the last 60, so an
+  honest study is a few recent weeks, not years. A window the vendor will not serve
+  raises; it is never shortened into a frame that looks complete.
