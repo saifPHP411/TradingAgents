@@ -73,6 +73,39 @@ CURRENT_SOURCE_SCHEMA_VERSION = 1
 
 _SIDE_BY_ACTION = {SignalAction.BUY: "buy", SignalAction.SELL: "sell"}
 
+_REASONING_EXCERPT = 400
+"""How much of the model's own words to keep for a HOLD reason, bounded so the
+statistics block stays small. The full reasoning is still persisted per decision;
+this is only the summary excerpt the dashboard shows next to the HOLD count."""
+
+_EMPTY_STATS: dict[str, Any] = {
+    "evaluations": 0,
+    "rating_counts": {},
+    "side_counts": {"buy": 0, "sell": 0, "hold": 0},
+    "last_rating": None,
+    "last_side": None,
+    "last_hold_reason": None,
+    "last_symbol": None,
+    "last_session": None,
+    "first_evaluated_at": None,
+    "last_evaluated_at": None,
+}
+"""The decision statistics the source keeps, one genuine evaluation at a time.
+
+Persisted so a restart does not reset the tally, and additive: an older state file
+without the block reads back as zeros rather than as a fabricated count. Only a
+real model call bumps these — a replay, a skip or a market-closed poll does not,
+so "evaluations" means "the strategy was asked", never "the worker polled".
+"""
+
+
+def _fresh_stats() -> dict[str, Any]:
+    """A new tally with its nested maps copied, so instances never share one."""
+    return {
+        key: (dict(value) if isinstance(value, dict) else value)
+        for key, value in _EMPTY_STATS.items()
+    }
+
 
 class CurrentSourceError(RuntimeError):
     """The current-market source was driven in a way it cannot support."""
@@ -141,6 +174,10 @@ class CurrentMarketDecisionSource:
     first decision is not silently replaced by an identical second one."""
     _last_market_state: str | None = field(default=None, init=False)
     _last_market_session: str | None = field(default=None, init=False)
+    _stats: dict[str, Any] = field(default_factory=lambda: _fresh_stats(), init=False)
+    """The lifetime decision tally, loaded from and saved to the source's own state.
+    Distinct from ``_decisions`` (the per-session decision memory): this survives a
+    session roll and answers "how often has the strategy chosen BUY/SELL/HOLD"."""
 
     def __post_init__(self) -> None:
         if not self.symbols:
@@ -148,11 +185,13 @@ class CurrentMarketDecisionSource:
         self.symbols = tuple(s.upper() for s in self.symbols)
         self._store = Path(self.state_path) if self.state_path else None
         if self._store is not None:
-            self._decisions = self._load()
+            payload = self._read_payload()
+            self._decisions = self._decode_decisions(payload)
+            self._stats = self._decode_stats(payload)
 
     # -- persistence ------------------------------------------------------
 
-    def _load(self) -> dict[str, _SymbolDecision]:
+    def _read_payload(self) -> dict[str, Any]:
         assert self._store is not None
         if not self._store.exists():
             return {}
@@ -160,8 +199,13 @@ class CurrentMarketDecisionSource:
             payload = json.loads(self._store.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
+        if not isinstance(payload, dict):
+            return {}
         if payload.get("schema_version") != CURRENT_SOURCE_SCHEMA_VERSION:
             return {}
+        return payload
+
+    def _decode_decisions(self, payload: dict[str, Any]) -> dict[str, _SymbolDecision]:
         raw = payload.get("decisions") or {}
         out: dict[str, _SymbolDecision] = {}
         for symbol, record in raw.items():
@@ -170,6 +214,56 @@ class CurrentMarketDecisionSource:
                     out[symbol] = _SymbolDecision.from_dict(record)
         return out
 
+    def _decode_stats(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """The persisted tally, or empty. A malformed block reads as empty, never
+        as a partially-trusted count, so a dashboard never shows a corrupted total."""
+        raw = payload.get("statistics")
+        stats = _fresh_stats()
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                if key not in stats:
+                    continue
+                if isinstance(stats[key], dict):
+                    if isinstance(value, dict):
+                        stats[key].update(value)
+                elif value is not None or stats[key] is None:
+                    stats[key] = value
+        return stats
+
+    def statistics(self) -> dict[str, Any]:
+        """A copy of the lifetime decision tally, for a status view."""
+        return {
+            key: (dict(value) if isinstance(value, dict) else value)
+            for key, value in self._stats.items()
+        }
+
+    def _record_evaluation(self, record: _SymbolDecision) -> None:
+        """Bump the tally for one genuine evaluation, then persist.
+
+        Called only where a real model call returned a rating, so the counts mean
+        "the strategy was asked and answered", never "the worker polled". The
+        HOLD reason is the model's own reasoning, bounded to an excerpt, so a
+        dashboard can show *why* the strategy chose to do nothing.
+        """
+        stats = self._stats
+        stats["evaluations"] = int(stats.get("evaluations") or 0) + 1
+        ratings = stats.setdefault("rating_counts", {})
+        ratings[record.rating] = int(ratings.get(record.rating) or 0) + 1
+        sides = stats.setdefault("side_counts", {"buy": 0, "sell": 0, "hold": 0})
+        side_key = record.side or "hold"
+        sides[side_key] = int(sides.get(side_key) or 0) + 1
+        stats["last_rating"] = record.rating
+        stats["last_side"] = record.side
+        stats["last_symbol"] = record.symbol
+        stats["last_session"] = record.session
+        stats["last_evaluated_at"] = record.evaluated_at
+        if stats.get("first_evaluated_at") is None:
+            stats["first_evaluated_at"] = record.evaluated_at
+        if record.side is None:
+            stats["last_hold_reason"] = (record.reasoning or "")[:_REASONING_EXCERPT] or None
+        else:
+            stats["last_hold_reason"] = None
+
     def _save(self) -> None:
         if self._store is None:
             return
@@ -177,6 +271,7 @@ class CurrentMarketDecisionSource:
             "schema_version": CURRENT_SOURCE_SCHEMA_VERSION,
             "updated_at": datetime.now(UTC).isoformat(),
             "decisions": {k: v.to_dict() for k, v in sorted(self._decisions.items())},
+            "statistics": self._stats,
         }
         self._store.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(self._store.parent), prefix=".current-", suffix=".tmp")
@@ -202,6 +297,7 @@ class CurrentMarketDecisionSource:
             "decision_source_strategy": self.strategy_name,
             "decision_source_last_market_state": self._last_market_state,
             "decision_source_last_market_session": self._last_market_session,
+            "decision_source_statistics": self.statistics(),
         }
         describe = getattr(self.market_data, "describe", None)
         if callable(describe):
@@ -333,6 +429,7 @@ class CurrentMarketDecisionSource:
             evaluated_at=datetime.now(UTC).isoformat(),
         )
         self._decisions[symbol] = record
+        self._record_evaluation(record)
         self._save()
         if side is None:
             return (

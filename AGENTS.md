@@ -242,6 +242,21 @@ endpoint, and risk limits are unchanged.
   refusal-inclusive set there is what reported `CURRENT_MARKET_NO_NEW_DATA` for a
   session whose only decision was a no-op. Both sets are additive to the state
   file; an older file reads back with no ordered decisions.
+- Two decision tallies answer "why are there so few trades", and they are kept
+  apart because they answer different questions. The **strategy tally**
+  (`CurrentMarketDecisionSource.statistics()`, persisted in the source's own
+  state) counts genuine model evaluations by rating (BUY/SELL/HOLD) and keeps the
+  model's own last HOLD reason; only a real call bumps it, so a replay, a
+  market-closed poll or a data failure counts nothing. The **worker tally**
+  (`WorkerState.decision_outcomes` → `_decision_statistics()`) counts settled
+  outcomes: `DECISION_OUTCOME_ORDERED` for a decision that produced an order,
+  otherwise the `NO_TRADE_REASONS` code that says why (including `RISK_REJECTED`).
+  A source that does not describe itself (the historical one) contributes no
+  strategy tally, reported as `None`, never a fabricated zero. Both are
+  observational: they change no cadence, no sizing, and no risk limit.
+- `DECISION_OUTCOME_ORDERED` is deliberately *not* in `NO_TRADE_REASONS`: it is the
+  absence of a no-trade reason, and a consumer iterating the vocabulary must not
+  read it as one.
 
 ## Known limitation
 

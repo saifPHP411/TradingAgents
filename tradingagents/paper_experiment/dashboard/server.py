@@ -887,6 +887,12 @@ INDEX_HTML = """<!doctype html>
     font-size:12px;display:flex;gap:7px;align-items:baseline}
   .chip .ck{color:var(--mut2);font-size:11px}
   .chip .cv{font-weight:700;font-variant-numeric:tabular-nums}
+  .chip.s-buy{background:rgba(55,214,122,.16);border-color:rgba(55,214,122,.35)}
+  .chip.s-buy .cv{color:var(--ok)}
+  .chip.s-sell{background:rgba(255,107,107,.16);border-color:rgba(255,107,107,.35)}
+  .chip.s-sell .cv{color:var(--bad)}
+  .chip.s-hold{background:rgba(255,199,77,.14);border-color:rgba(255,199,77,.30)}
+  .chip.s-hold .cv{color:var(--warn)}
   .sec-title{font-size:12.5px;font-weight:700;color:var(--mut);text-transform:uppercase;
     letter-spacing:.06em;margin:22px 0 10px}
   .sec-title:first-child{margin-top:6px}
@@ -987,6 +993,11 @@ INDEX_HTML = """<!doctype html>
         <div class="card"><h2>Price seam</h2><div id="eng-market" class="kv"></div>
           <p class="muted" id="eng-markethint" style="margin:10px 0 0"></p></div>
         <div class="card"><h2>Heartbeat &amp; safety</h2><div id="eng-risk" class="kv"></div></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h2>Decision statistics <span class="spacer"></span>
+          <span class="tag" id="eng-stats-note">—</span></h2>
+        <div id="eng-stats"></div>
       </div>
       <div class="card" style="margin-top:12px">
         <h2>Exit policy <span class="tag">stop-loss / take-profit, recorded from the strategy</span></h2>
@@ -1318,6 +1329,62 @@ function renderEngine(e){
     ? '<ul class="clean">'+Object.entries(stops).map(([s,v])=>`<li><b>${esc(s)}</b>
         <div class="mono">stop ${money(v.stop_loss)} · target ${money(v.take_profit)} · decision ${esc(v.decision_id||"—")}</div></li>`).join("")+"</ul>"
     : empty("No exit levels recorded. Stops and targets come only from decisions that carried them.");
+
+  renderDecisionStats(e.statistics);
+}
+
+function renderDecisionStats(stats){
+  const s = stats || {};
+  const strat = s.strategy;
+  const work = s.worker;
+  $("eng-stats-note").textContent = s.last_evaluated_at
+    ? "last evaluation " + rel(s.last_evaluated_at)
+    : "no evaluation yet";
+  if(!strat && !work){
+    $("eng-stats").innerHTML = empty("No decision statistics yet. They appear after the strategy is evaluated.");
+    return;
+  }
+  const parts = [];
+  if(strat){
+    const sides = strat.side_counts || {};
+    const evals = strat.evaluations;
+    parts.push(`<h3 style="margin:0 0 8px">Strategy ratings
+      <span class="tag">${evals===undefined?"—":evals} evaluation(s)</span></h3>`);
+    parts.push('<div class="chips">'+
+      statChip("BUY", sides.buy, "s-buy") +
+      statChip("SELL", sides.sell, "s-sell") +
+      statChip("HOLD", sides.hold, "s-hold") + "</div>");
+    if(strat.rating_counts && Object.keys(strat.rating_counts).length){
+      parts.push('<div class="mono" style="margin-top:6px">by rating: '+
+        Object.entries(strat.rating_counts).map(([k,v])=>`${esc(k)} ${v}`).join(" · ")+"</div>");
+    }
+    if(strat.last_hold_reason){
+      parts.push(`<p class="muted" style="margin:8px 0 0">Last HOLD reason: “${esc(strat.last_hold_reason)}”</p>`);
+    }
+  }
+  if(work){
+    const byCode = work.no_trade_by_code || {};
+    const codes = Object.keys(byCode);
+    parts.push(`<h3 style="margin:14px 0 8px">Worker outcomes
+      <span class="tag">${work.decisions_settled===undefined?"—":work.decisions_settled} settled</span></h3>`);
+    parts.push('<div class="chips">'+
+      statChip("Orders produced", work.orders_produced, "s-buy") +
+      statChip("No-trade", work.no_trade_total, "s-hold") +
+      statChip("Risk rejected", work.risk_rejections, "s-sell") + "</div>");
+    if(work.orders_by_side && Object.keys(work.orders_by_side).length){
+      parts.push('<div class="mono" style="margin-top:6px">orders by side: '+
+        Object.entries(work.orders_by_side).map(([k,v])=>`${esc(k)} ${v}`).join(" · ")+"</div>");
+    }
+    parts.push('<div style="margin-top:8px">'+(codes.length
+      ? '<div class="kv">'+codes.map(c=>`<div class="k">${esc(c)}</div><div class="v">${byCode[c]}</div>`).join("")+'</div>'
+      : '<p class="muted" style="margin:0">No no-trade outcomes recorded.</p>')+'</div>');
+  }
+  $("eng-stats").innerHTML = parts.join("");
+}
+
+function statChip(label, value, cls){
+  const n = (value===null||value===undefined) ? "—" : value;
+  return `<span class="chip ${cls||""}"><span class="ck">${esc(label)}</span><span class="cv">${esc(String(n))}</span></span>`;
 }
 
 async function refreshEngine(){

@@ -130,6 +130,32 @@ def _blocker(
     }
 
 
+def _statistics(status: dict[str, Any]) -> dict[str, Any]:
+    """The decision statistics the dashboard shows, from data the worker stored.
+
+    Two tallies, deliberately kept apart because they answer different questions:
+
+    - **strategy ratings** (``strategy``): how often the *source* chose BUY / SELL /
+      HOLD, with the model's own last HOLD reason. Only the source sees a rating the
+      worker then refused to trade, so this is the honest "what did the strategy
+      want" figure.
+    - **worker outcomes** (``worker``): how many decisions produced an order and how
+      many did not, split by the :data:`NO_TRADE_REASONS` code — including
+      ``RISK_REJECTED``. This is "what the worker actually did".
+
+    Both come from persisted state, so a restart does not reset them. A source that
+    does not describe itself (the historical source) contributes no strategy tally,
+    and it is reported as ``None`` rather than a fabricated zero.
+    """
+    strategy = status.get("decision_source_statistics")
+    worker = status.get("decision_statistics")
+    return {
+        "strategy": strategy if isinstance(strategy, dict) else None,
+        "worker": worker if isinstance(worker, dict) else None,
+        "last_evaluated_at": status.get("last_strategy_evaluation_at"),
+    }
+
+
 def engine_view(status: dict[str, Any]) -> dict[str, Any]:
     """The separated engine states and their timestamps, from a worker status.
 
@@ -248,6 +274,7 @@ def engine_view(status: dict[str, Any]) -> dict[str, Any]:
         "last_error": status.get("last_error"),
         "no_trade_reason": no_trade_reason,
         "no_trade_code": no_trade_code,
+        "statistics": _statistics(status),
         "blocker": _blocker(
             worker_status=worker_status,
             loop_running=loop_running,

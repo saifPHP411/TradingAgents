@@ -39,6 +39,7 @@ from .alpaca_paper import (
 from .state import BrokerAccountState, BrokerStateError, BrokerStateStore
 from .trading import (
     BANNER,
+    DECISION_OUTCOME_ORDERED,
     DECISION_SOURCE_CHOICES,
     DECISION_SOURCE_CURRENT_MARKET,
     DECISION_SOURCE_HISTORY,
@@ -110,6 +111,7 @@ from .trading import (
 
 __all__ = [
     "BANNER",
+    "DECISION_OUTCOME_ORDERED",
     "DECISION_SOURCE_CHOICES",
     "DECISION_SOURCE_CURRENT_MARKET",
     "DECISION_SOURCE_HISTORY",

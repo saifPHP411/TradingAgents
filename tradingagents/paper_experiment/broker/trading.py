@@ -203,6 +203,13 @@ NO_TRADE_REASONS = (
 """The closed vocabulary of reasons a RUNNING worker placed no order. A reason is
 ``None`` only when the cycle actually placed an order."""
 
+DECISION_OUTCOME_ORDERED = "ORDERED"
+"""The :attr:`WorkerState.decision_outcomes` value for a decision that produced an
+order (submitted, or reconciled as already existing). Distinct from every
+:data:`NO_TRADE_REASONS` value, which names why no order was produced. Kept out of
+``NO_TRADE_REASONS`` because it is the *absence* of a no-trade reason, and a
+consumer that iterates the no-trade vocabulary must not read it as one."""
+
 MARKET_DATA_CHOICES = (PROVIDER_BAR_OPEN, PROVIDER_ALPACA_SNAPSHOT)
 """The price seams an operator may select. ``bar_open`` is the historical default;
 ``alpaca_snapshot`` is the current-price opt-in."""
@@ -1195,6 +1202,16 @@ class WorkerState:
     the broker definitively rejects it, and a resumed worker skips every id in the
     set. It is additive and optional: an older state file without the field reads
     back as "nothing processed", so the schema version does not change."""
+    decision_outcomes: dict[str, str] = field(default_factory=dict)
+    """The settled outcome of each decision the worker has acted on, by id.
+
+    ``"ORDERED"`` for a decision that produced an order (submitted or reconciled),
+    otherwise the :data:`NO_TRADE_REASONS` code that says why it produced none
+    (``NO_POSITION``, ``RISK_REJECTED``, ``MARKET_CLOSED``, …). The durable record
+    behind the dashboard's BUY/SELL/HOLD-and-no-trade statistics, so a restart does
+    not reset the counts. Distinct from :attr:`processed_decisions`, which is only
+    a membership set with no reason. Additive and optional: an older state file
+    reads back as "no outcomes known", and the schema version does not change."""
     ordered_decisions: set[str] = field(default_factory=set)
     """The subset of :attr:`processed_decisions` that actually produced an order.
 
@@ -1238,6 +1255,7 @@ class WorkerState:
             "stops": {k: dict(v) for k, v in sorted(self.stops.items())},
             "cycles_completed": self.cycles_completed,
             "processed_decisions": sorted(self.processed_decisions),
+            "decision_outcomes": dict(sorted(self.decision_outcomes.items())),
             "ordered_decisions": sorted(self.ordered_decisions),
         }
 
@@ -1284,6 +1302,11 @@ class WorkerState:
             stops={k: dict(v) for k, v in (payload.get("stops") or {}).items()},
             cycles_completed=_as_int(payload.get("cycles_completed"), 0),
             processed_decisions=set(payload.get("processed_decisions") or []),
+            decision_outcomes={
+                str(k): str(v)
+                for k, v in (payload.get("decision_outcomes") or {}).items()
+                if isinstance(v, str)
+            },
             ordered_decisions=set(payload.get("ordered_decisions") or []),
         )
 
@@ -1352,6 +1375,39 @@ class CycleResult:
             "market_data_status": self.market_data_status,
             "reason_code": self.reason_code,
         }
+
+
+def _decision_statistics(state: WorkerState) -> dict[str, Any]:
+    """The worker's own settled-outcome tally, from :attr:`WorkerState.decision_outcomes`.
+
+    Counts how many decisions produced an order and how many did not, split by the
+    :data:`NO_TRADE_REASONS` code that says why. Derived from persisted state, so a
+    restart does not reset it, and it is a *worker* tally: it counts what the worker
+    did, not what the strategy rated. The source's own rating tally (BUY/SELL/HOLD)
+    is reported separately, because only the source sees a rating the worker then
+    refused to trade.
+    """
+    outcomes = state.decision_outcomes or {}
+    ordered = sum(1 for value in outcomes.values() if value == DECISION_OUTCOME_ORDERED)
+    by_code: dict[str, int] = {}
+    for value in outcomes.values():
+        if value == DECISION_OUTCOME_ORDERED:
+            continue
+        by_code[value] = by_code.get(value, 0) + 1
+    orders_by_side: dict[str, int] = {}
+    for order in (state.orders or {}).values():
+        side = str(order.get("side") or "").lower()
+        if side:
+            orders_by_side[side] = orders_by_side.get(side, 0) + 1
+    return {
+        "decisions_settled": len(outcomes),
+        "orders_produced": ordered,
+        "no_trade_total": len(outcomes) - ordered,
+        "no_trade_by_code": by_code,
+        "orders_by_side": orders_by_side,
+        "risk_rejections": by_code.get(NO_TRADE_RISK_REJECTED, 0),
+        "broker_rejections": by_code.get(NO_TRADE_BROKER_REJECTED, 0),
+    }
 
 
 def worker_status_view(
@@ -1428,6 +1484,7 @@ def worker_status_view(
         "exits": {k: dict(v) for k, v in sorted(state.exits.items())},
         "stops": {k: dict(v) for k, v in sorted(state.stops.items())},
         "last_cycle": last_cycle.to_dict() if last_cycle is not None else None,
+        "decision_statistics": _decision_statistics(state),
         "risk_limits": {
             "max_order_notional": config.limits.max_order_notional,
             "max_open_positions": config.limits.max_open_positions,
@@ -1539,6 +1596,7 @@ class PaperTradingWorker:
         :meth:`has_order_for` instead of reading the processed set.
         """
         self.state.ordered_decisions.add(decision_id)
+        self.state.decision_outcomes[decision_id] = DECISION_OUTCOME_ORDERED
 
     def has_order_for(self, decision_id: str) -> bool:
         """Whether this decision actually produced an order the worker knows of.
@@ -1559,6 +1617,7 @@ class PaperTradingWorker:
         """
         self.state.last_no_trade_decision_id = decision_id
         self.state.last_no_trade_decision_code = code
+        self.state.decision_outcomes[decision_id] = code
 
     # -- status -----------------------------------------------------------
 
