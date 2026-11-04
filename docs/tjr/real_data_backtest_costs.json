@@ -1,0 +1,1379 @@
+{
+  "metrics": {
+    "initial_capital": 100000.0,
+    "final_equity": 99902.75637302214,
+    "total_return": -0.0009724362697785546,
+    "annualized_return": -0.00021713600356920715,
+    "cagr": -0.017610841897602758,
+    "realized_pnl": -77.96161174735752,
+    "unrealized_pnl": 0.0,
+    "total_fees": 19.282015230446923,
+    "num_trades": 137,
+    "winning_trades": 50,
+    "losing_trades": 87,
+    "win_rate": 0.36496350364963503,
+    "profit_factor": 0.9203717859249474,
+    "average_win": 22.479542376029755,
+    "average_loss": -14.0370200664287,
+    "expectancy": -0.7098074961883896,
+    "max_drawdown": 0.004339890203713186,
+    "max_drawdown_start": "2026-10-15T19:55:00+00:00",
+    "max_drawdown_end": "2026-11-03T16:55:00+00:00",
+    "sharpe_ratio": -0.14596421715048866,
+    "sortino_ratio": -0.12040232557866984,
+    "calmar_ratio": -0.05003260298692045,
+    "exposure": 0.0,
+    "turnover": 0.0,
+    "volatility": 0.0014815650652370955,
+    "benchmark_return": null,
+    "benchmark_final_equity": null,
+    "excess_return": null,
+    "sessions": 1129,
+    "start": "2026-10-15T13:35:00+00:00",
+    "end": "2026-11-04T17:35:00+00:00",
+    "annualization_days": 252
+  },
+  "reason_counts": {
+    "ENTRY_WINDOW_CLOSED": 63,
+    "INVALID_GEOMETRY": 45,
+    "NO_1M_ENTRY": 101,
+    "NO_5M_CONFIRMATION": 1653,
+    "NO_CONTINUATION": 447,
+    "NO_SWEEP": 119,
+    "READY": 137,
+    "SHORT_SETUP_LONG_ONLY": 1550
+  },
+  "reason_labels": {
+    "ENTRY_WINDOW_CLOSED": "entry window closed",
+    "INVALID_GEOMETRY": "stop ended up on the wrong side of the entry",
+    "NO_1M_ENTRY": "in the zone, no 1m confirmation",
+    "NO_5M_CONFIRMATION": "swept, no 5m BOS/IFVG",
+    "NO_CONTINUATION": "confirmed, no retrace into a zone / no target",
+    "NO_SWEEP": "no liquidity sweep",
+    "READY": "complete setup",
+    "SHORT_SETUP_LONG_ONLY": "complete bearish setup, book is long-only"
+  },
+  "per_symbol": {
+    "AAPL": {
+      "trades": 14,
+      "net_pnl": -110.21500189690465,
+      "wins": 4,
+      "losses": 10
+    },
+    "AMD": {
+      "trades": 14,
+      "net_pnl": 15.938063111493744,
+      "wins": 4,
+      "losses": 10
+    },
+    "AMZN": {
+      "trades": 12,
+      "net_pnl": -58.39413831797542,
+      "wins": 4,
+      "losses": 8
+    },
+    "AVGO": {
+      "trades": 13,
+      "net_pnl": 69.75651393340007,
+      "wins": 6,
+      "losses": 7
+    },
+    "GOOGL": {
+      "trades": 15,
+      "net_pnl": -58.746012396625616,
+      "wins": 4,
+      "losses": 11
+    },
+    "JPM": {
+      "trades": 13,
+      "net_pnl": 38.644471096294176,
+      "wins": 7,
+      "losses": 6
+    },
+    "META": {
+      "trades": 15,
+      "net_pnl": -120.53465896041648,
+      "wins": 4,
+      "losses": 11
+    },
+    "MSFT": {
+      "trades": 15,
+      "net_pnl": -20.598423054501346,
+      "wins": 4,
+      "losses": 11
+    },
+    "NVDA": {
+      "trades": 13,
+      "net_pnl": -52.40171397886385,
+      "wins": 4,
+      "losses": 9
+    },
+    "TSLA": {
+      "trades": 13,
+      "net_pnl": 199.30727348629,
+      "wins": 9,
+      "losses": 4
+    }
+  },
+  "exit_reasons": {
+    "session_close": 12,
+    "stop": 84,
+    "target": 41
+  },
+  "average_rr": -0.00014091768741112195,
+  "fees": 19.282015230446923,
+  "slippage_note": "half_spread_bps=1.0, slippage_bps=1.0, commission_per_unit=0.005, commission_min=0.0",
+  "buy_and_hold_return": null,
+  "sessions": 15,
+  "symbols": [
+    "AAPL",
+    "AMD",
+    "AMZN",
+    "AVGO",
+    "GOOGL",
+    "JPM",
+    "META",
+    "MSFT",
+    "NVDA",
+    "TSLA"
+  ],
+  "start": "2026-10-15T13:35:00+00:00",
+  "end": "2026-11-04T17:35:00+00:00",
+  "notes": [],
+  "trades": [
+    {
+      "symbol": "AMD",
+      "session": "2026-10-15",
+      "entry_time": "2026-10-15T14:10:00+00:00",
+      "exit_time": "2026-10-15T15:20:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 95.52485432045256,
+      "fees": 0.09254803075595203
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-10-15",
+      "entry_time": "2026-10-15T14:30:00+00:00",
+      "exit_time": "2026-10-15T16:15:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 42.519267435903885,
+      "fees": 0.0934918691857537
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-10-15",
+      "entry_time": "2026-10-15T15:40:00+00:00",
+      "exit_time": "2026-10-15T16:35:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 10.046483999127755,
+      "fees": 0.1459112809157021
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-10-15",
+      "entry_time": "2026-10-15T17:10:00+00:00",
+      "exit_time": "2026-10-15T17:25:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 12.851419542333208,
+      "fees": 0.1435479061264398
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-10-15",
+      "entry_time": "2026-10-15T14:25:00+00:00",
+      "exit_time": "2026-10-15T20:00:00+00:00",
+      "exit_reason": "session_close",
+      "net_pnl": 66.1347837501689,
+      "fees": 0.14718846908820887
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-10-15",
+      "entry_time": "2026-10-15T14:35:00+00:00",
+      "exit_time": "2026-10-15T20:00:00+00:00",
+      "exit_reason": "session_close",
+      "net_pnl": 4.713316832293568,
+      "fees": 0.14920376911857486
+    },
+    {
+      "symbol": "META",
+      "session": "2026-10-15",
+      "entry_time": "2026-10-15T17:15:00+00:00",
+      "exit_time": "2026-10-15T20:00:00+00:00",
+      "exit_reason": "session_close",
+      "net_pnl": -6.588083336678787,
+      "fees": 0.06793462854569467
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-10-15",
+      "entry_time": "2026-10-15T14:35:00+00:00",
+      "exit_time": "2026-10-15T20:00:00+00:00",
+      "exit_reason": "session_close",
+      "net_pnl": 55.727595388812276,
+      "fees": 0.1394797008585535
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-10-16",
+      "entry_time": "2026-10-16T14:45:00+00:00",
+      "exit_time": "2026-10-16T14:55:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -20.14548451221203,
+      "fees": 0.09149362999000225
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-10-16",
+      "entry_time": "2026-10-16T14:50:00+00:00",
+      "exit_time": "2026-10-16T14:55:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -7.835552189763158,
+      "fees": 0.14460458298462114
+    },
+    {
+      "symbol": "META",
+      "session": "2026-10-16",
+      "entry_time": "2026-10-16T14:45:00+00:00",
+      "exit_time": "2026-10-16T15:10:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -20.476218359574595,
+      "fees": 0.06930805676409232
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-10-16",
+      "entry_time": "2026-10-16T15:45:00+00:00",
+      "exit_time": "2026-10-16T15:50:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -8.13655989939818,
+      "fees": 0.13955786452899724
+    },
+    {
+      "symbol": "AMZN",
+      "session": "2026-10-16",
+      "entry_time": "2026-10-16T15:30:00+00:00",
+      "exit_time": "2026-10-16T16:00:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -12.018046960419984,
+      "fees": 0.1976909154898611
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-10-16",
+      "entry_time": "2026-10-16T16:35:00+00:00",
+      "exit_time": "2026-10-16T17:00:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -12.84720870346111,
+      "fees": 0.09482777413679172
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-10-16",
+      "entry_time": "2026-10-16T17:40:00+00:00",
+      "exit_time": "2026-10-16T17:45:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 5.896944994753381,
+      "fees": 0.2323500945605457
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-10-16",
+      "entry_time": "2026-10-16T14:00:00+00:00",
+      "exit_time": "2026-10-16T18:25:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -45.12668643104426,
+      "fees": 0.1454126545073586
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-10-16",
+      "entry_time": "2026-10-16T17:30:00+00:00",
+      "exit_time": "2026-10-16T20:00:00+00:00",
+      "exit_reason": "session_close",
+      "net_pnl": 14.712588953647451,
+      "fees": 0.14795820682765767
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-10-19",
+      "entry_time": "2026-10-19T14:20:00+00:00",
+      "exit_time": "2026-10-19T14:25:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -11.397806876271456,
+      "fees": 0.09169172897665392
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-10-19",
+      "entry_time": "2026-10-19T14:20:00+00:00",
+      "exit_time": "2026-10-19T14:25:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 8.871724305035158,
+      "fees": 0.14900124831719047
+    },
+    {
+      "symbol": "META",
+      "session": "2026-10-19",
+      "entry_time": "2026-10-19T14:15:00+00:00",
+      "exit_time": "2026-10-19T14:30:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -19.772926232097007,
+      "fees": 0.07169063348806379
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-10-19",
+      "entry_time": "2026-10-19T14:40:00+00:00",
+      "exit_time": "2026-10-19T15:25:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 27.393252931395203,
+      "fees": 0.2306049370344934
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-10-19",
+      "entry_time": "2026-10-19T15:10:00+00:00",
+      "exit_time": "2026-10-19T15:30:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -13.390513413553471,
+      "fees": 0.1481425868028426
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-10-19",
+      "entry_time": "2026-10-19T15:10:00+00:00",
+      "exit_time": "2026-10-19T15:45:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 9.622212341508206,
+      "fees": 0.09377734840017576
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-10-19",
+      "entry_time": "2026-10-19T15:25:00+00:00",
+      "exit_time": "2026-10-19T17:05:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -17.10864063207616,
+      "fees": 0.14493518832993682
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-10-19",
+      "entry_time": "2026-10-19T16:55:00+00:00",
+      "exit_time": "2026-10-19T17:35:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 6.518531288987949,
+      "fees": 0.14659539301016788
+    },
+    {
+      "symbol": "AMZN",
+      "session": "2026-10-19",
+      "entry_time": "2026-10-19T17:55:00+00:00",
+      "exit_time": "2026-10-19T18:25:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -13.346129884351306,
+      "fees": 0.19092763001483393
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-10-19",
+      "entry_time": "2026-10-19T14:25:00+00:00",
+      "exit_time": "2026-10-19T20:00:00+00:00",
+      "exit_reason": "session_close",
+      "net_pnl": 30.033650240614982,
+      "fees": 0.13693735654248468
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-10-20",
+      "entry_time": "2026-10-20T14:35:00+00:00",
+      "exit_time": "2026-10-20T15:05:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -25.714803480474984,
+      "fees": 0.14788897902053819
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-10-20",
+      "entry_time": "2026-10-20T15:10:00+00:00",
+      "exit_time": "2026-10-20T15:15:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -8.337022762020215,
+      "fees": 0.14576718070057612
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-10-20",
+      "entry_time": "2026-10-20T15:00:00+00:00",
+      "exit_time": "2026-10-20T15:15:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -12.708700265531832,
+      "fees": 0.09433205157637152
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-10-20",
+      "entry_time": "2026-10-20T16:05:00+00:00",
+      "exit_time": "2026-10-20T16:20:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -9.72839866335105,
+      "fees": 0.1493490184120466
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-10-20",
+      "entry_time": "2026-10-20T15:55:00+00:00",
+      "exit_time": "2026-10-20T16:20:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -21.596745039242748,
+      "fees": 0.13362720833179084
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-10-20",
+      "entry_time": "2026-10-20T16:10:00+00:00",
+      "exit_time": "2026-10-20T16:25:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -7.145789200634525,
+      "fees": 0.14694580919042646
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-10-20",
+      "entry_time": "2026-10-20T16:45:00+00:00",
+      "exit_time": "2026-10-20T16:50:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -4.272171502162831,
+      "fees": 0.23040136967874097
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-10-20",
+      "entry_time": "2026-10-20T16:45:00+00:00",
+      "exit_time": "2026-10-20T16:55:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -12.529203577156501,
+      "fees": 0.09232810671731242
+    },
+    {
+      "symbol": "META",
+      "session": "2026-10-20",
+      "entry_time": "2026-10-20T17:25:00+00:00",
+      "exit_time": "2026-10-20T17:45:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -11.47189792245197,
+      "fees": 0.07228195707036816
+    },
+    {
+      "symbol": "AMZN",
+      "session": "2026-10-20",
+      "entry_time": "2026-10-20T14:30:00+00:00",
+      "exit_time": "2026-10-20T20:00:00+00:00",
+      "exit_reason": "session_close",
+      "net_pnl": -31.750701434282462,
+      "fees": 0.1895096360337357
+    },
+    {
+      "symbol": "AMZN",
+      "session": "2026-10-21",
+      "entry_time": "2026-10-21T14:40:00+00:00",
+      "exit_time": "2026-10-21T14:55:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 16.852822195018554,
+      "fees": 0.19203668507511826
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-10-21",
+      "entry_time": "2026-10-21T14:55:00+00:00",
+      "exit_time": "2026-10-21T15:00:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 8.396936660757163,
+      "fees": 0.14965038722577526
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-10-21",
+      "entry_time": "2026-10-21T14:45:00+00:00",
+      "exit_time": "2026-10-21T15:05:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -15.504819915966493,
+      "fees": 0.09176051246055315
+    },
+    {
+      "symbol": "META",
+      "session": "2026-10-21",
+      "entry_time": "2026-10-21T15:05:00+00:00",
+      "exit_time": "2026-10-21T15:10:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -8.45307225674296,
+      "fees": 0.07060542673716327
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-10-21",
+      "entry_time": "2026-10-21T15:25:00+00:00",
+      "exit_time": "2026-10-21T15:30:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 6.013095990423274,
+      "fees": 0.09430216406814665
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-10-21",
+      "entry_time": "2026-10-21T14:30:00+00:00",
+      "exit_time": "2026-10-21T15:35:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 29.061964989275545,
+      "fees": 0.15082185037455964
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-10-21",
+      "entry_time": "2026-10-21T15:40:00+00:00",
+      "exit_time": "2026-10-21T16:10:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -10.740975185937735,
+      "fees": 0.145201288864903
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-10-21",
+      "entry_time": "2026-10-21T15:05:00+00:00",
+      "exit_time": "2026-10-21T16:40:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 9.544351969190874,
+      "fees": 0.14997156232209144
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-10-21",
+      "entry_time": "2026-10-21T14:50:00+00:00",
+      "exit_time": "2026-10-21T16:40:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 23.58355976596716,
+      "fees": 0.2274625276439691
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-10-21",
+      "entry_time": "2026-10-21T15:45:00+00:00",
+      "exit_time": "2026-10-21T20:00:00+00:00",
+      "exit_reason": "session_close",
+      "net_pnl": 12.2117877161391,
+      "fees": 0.12983259931291946
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-10-22",
+      "entry_time": "2026-10-22T14:55:00+00:00",
+      "exit_time": "2026-10-22T15:10:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 6.446208960615573,
+      "fees": 0.14537994294399484
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-10-22",
+      "entry_time": "2026-10-22T15:25:00+00:00",
+      "exit_time": "2026-10-22T15:30:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -12.671202273260729,
+      "fees": 0.23350127791659991
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-10-22",
+      "entry_time": "2026-10-22T15:25:00+00:00",
+      "exit_time": "2026-10-22T15:30:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -18.22914011070079,
+      "fees": 0.12957099995619464
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-10-22",
+      "entry_time": "2026-10-22T15:35:00+00:00",
+      "exit_time": "2026-10-22T15:45:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 9.24060160874253,
+      "fees": 0.14992171959418413
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-10-22",
+      "entry_time": "2026-10-22T15:30:00+00:00",
+      "exit_time": "2026-10-22T15:45:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -9.647384771518169,
+      "fees": 0.09533310805394422
+    },
+    {
+      "symbol": "AMZN",
+      "session": "2026-10-22",
+      "entry_time": "2026-10-22T15:30:00+00:00",
+      "exit_time": "2026-10-22T16:00:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 7.034041970524006,
+      "fees": 0.1986347893684498
+    },
+    {
+      "symbol": "META",
+      "session": "2026-10-22",
+      "entry_time": "2026-10-22T14:05:00+00:00",
+      "exit_time": "2026-10-22T16:35:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -75.54844033825702,
+      "fees": 0.07611740058291486
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-10-22",
+      "entry_time": "2026-10-22T15:20:00+00:00",
+      "exit_time": "2026-10-22T16:50:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -15.42693235987209,
+      "fees": 0.1528798132132694
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-10-22",
+      "entry_time": "2026-10-22T17:25:00+00:00",
+      "exit_time": "2026-10-22T17:55:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -14.263851901268982,
+      "fees": 0.15387582976750427
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-10-22",
+      "entry_time": "2026-10-22T18:00:00+00:00",
+      "exit_time": "2026-10-22T18:05:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -15.563174976356745,
+      "fees": 0.09798034095885343
+    },
+    {
+      "symbol": "AMZN",
+      "session": "2026-10-23",
+      "entry_time": "2026-10-23T14:25:00+00:00",
+      "exit_time": "2026-10-23T14:35:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 10.394747109116185,
+      "fees": 0.20157164079482254
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-10-23",
+      "entry_time": "2026-10-23T14:35:00+00:00",
+      "exit_time": "2026-10-23T14:40:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -6.198916012739961,
+      "fees": 0.1547149870179296
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-10-23",
+      "entry_time": "2026-10-23T14:50:00+00:00",
+      "exit_time": "2026-10-23T14:55:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 19.689706201006132,
+      "fees": 0.15331404936891294
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-10-23",
+      "entry_time": "2026-10-23T15:05:00+00:00",
+      "exit_time": "2026-10-23T15:10:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -3.8339074079626503,
+      "fees": 0.09528540248127515
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-10-23",
+      "entry_time": "2026-10-23T14:25:00+00:00",
+      "exit_time": "2026-10-23T15:10:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 61.73498143940509,
+      "fees": 0.1346298007816219
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-10-23",
+      "entry_time": "2026-10-23T15:40:00+00:00",
+      "exit_time": "2026-10-23T15:45:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -9.760921737920349,
+      "fees": 0.150361392467808
+    },
+    {
+      "symbol": "META",
+      "session": "2026-10-23",
+      "entry_time": "2026-10-23T15:10:00+00:00",
+      "exit_time": "2026-10-23T16:25:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -13.138571156347112,
+      "fees": 0.07751119916703403
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-10-23",
+      "entry_time": "2026-10-23T16:35:00+00:00",
+      "exit_time": "2026-10-23T16:40:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -4.387205240799279,
+      "fees": 0.23564424732522893
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-10-23",
+      "entry_time": "2026-10-23T15:05:00+00:00",
+      "exit_time": "2026-10-23T16:55:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -30.821381612744062,
+      "fees": 0.09613348107859432
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-10-23",
+      "entry_time": "2026-10-23T16:55:00+00:00",
+      "exit_time": "2026-10-23T17:10:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -7.6676574985175066,
+      "fees": 0.14410308794671103
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-10-26",
+      "entry_time": "2026-10-26T13:55:00+00:00",
+      "exit_time": "2026-10-26T14:00:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -11.574689707570407,
+      "fees": 0.14548843199995853
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-10-26",
+      "entry_time": "2026-10-26T14:20:00+00:00",
+      "exit_time": "2026-10-26T14:25:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -12.14367768780627,
+      "fees": 0.1530056476303475
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-10-26",
+      "entry_time": "2026-10-26T14:25:00+00:00",
+      "exit_time": "2026-10-26T14:35:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -19.32914112292383,
+      "fees": 0.09637654736343691
+    },
+    {
+      "symbol": "AMZN",
+      "session": "2026-10-26",
+      "entry_time": "2026-10-26T14:25:00+00:00",
+      "exit_time": "2026-10-26T14:35:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -11.787317138881608,
+      "fees": 0.19984346179868373
+    },
+    {
+      "symbol": "META",
+      "session": "2026-10-26",
+      "entry_time": "2026-10-26T14:25:00+00:00",
+      "exit_time": "2026-10-26T14:40:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 34.19635974545811,
+      "fees": 0.07870000584140933
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-10-26",
+      "entry_time": "2026-10-26T15:55:00+00:00",
+      "exit_time": "2026-10-26T16:00:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -3.227474637908654,
+      "fees": 0.1494112515226332
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-10-26",
+      "entry_time": "2026-10-26T14:30:00+00:00",
+      "exit_time": "2026-10-26T16:50:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -18.55022229487181,
+      "fees": 0.1562450625589433
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-10-26",
+      "entry_time": "2026-10-26T16:25:00+00:00",
+      "exit_time": "2026-10-26T16:50:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -10.197356963892883,
+      "fees": 0.09428105999340378
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-10-26",
+      "entry_time": "2026-10-26T16:30:00+00:00",
+      "exit_time": "2026-10-26T17:15:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 19.000479845208915,
+      "fees": 0.1265300997122426
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-10-26",
+      "entry_time": "2026-10-26T17:30:00+00:00",
+      "exit_time": "2026-10-26T17:35:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -8.655926211508337,
+      "fees": 0.23118808436309135
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-10-27",
+      "entry_time": "2026-10-27T13:55:00+00:00",
+      "exit_time": "2026-10-27T14:10:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 13.812271057699526,
+      "fees": 0.14917785590611024
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-10-27",
+      "entry_time": "2026-10-27T14:30:00+00:00",
+      "exit_time": "2026-10-27T14:35:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -8.618260288109088,
+      "fees": 0.1472728315157691
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-10-27",
+      "entry_time": "2026-10-27T14:50:00+00:00",
+      "exit_time": "2026-10-27T15:00:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 6.17027390734868,
+      "fees": 0.23016325534015183
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-10-27",
+      "entry_time": "2026-10-27T15:50:00+00:00",
+      "exit_time": "2026-10-27T15:55:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -6.081826926914518,
+      "fees": 0.14398592408605418
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-10-27",
+      "entry_time": "2026-10-27T15:10:00+00:00",
+      "exit_time": "2026-10-27T16:05:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 15.344585069942365,
+      "fees": 0.15628156170383817
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-10-27",
+      "entry_time": "2026-10-27T16:15:00+00:00",
+      "exit_time": "2026-10-27T16:20:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -5.200507373520548,
+      "fees": 0.09360652209094704
+    },
+    {
+      "symbol": "META",
+      "session": "2026-10-27",
+      "entry_time": "2026-10-27T16:15:00+00:00",
+      "exit_time": "2026-10-27T17:20:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -9.898995790477098,
+      "fees": 0.0800597712479847
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-10-27",
+      "entry_time": "2026-10-27T17:25:00+00:00",
+      "exit_time": "2026-10-27T19:05:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 14.117684234457254,
+      "fees": 0.1230544503153675
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-10-27",
+      "entry_time": "2026-10-27T15:40:00+00:00",
+      "exit_time": "2026-10-27T19:50:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 59.87365989836897,
+      "fees": 0.08975341162997073
+    },
+    {
+      "symbol": "AMZN",
+      "session": "2026-10-28",
+      "entry_time": "2026-10-28T14:25:00+00:00",
+      "exit_time": "2026-10-28T14:40:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -6.37481987247633,
+      "fees": 0.19740416827357238
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-10-28",
+      "entry_time": "2026-10-28T14:35:00+00:00",
+      "exit_time": "2026-10-28T14:50:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -7.70951902734558,
+      "fees": 0.09445576820761067
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-10-28",
+      "entry_time": "2026-10-28T14:55:00+00:00",
+      "exit_time": "2026-10-28T15:00:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -5.996664836657828,
+      "fees": 0.124826674504903
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-10-28",
+      "entry_time": "2026-10-28T15:20:00+00:00",
+      "exit_time": "2026-10-28T15:30:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 6.620931260147108,
+      "fees": 0.14492842122003854
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-10-28",
+      "entry_time": "2026-10-28T15:10:00+00:00",
+      "exit_time": "2026-10-28T15:35:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -8.171093265893116,
+      "fees": 0.22962691401667396
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-10-28",
+      "entry_time": "2026-10-28T15:10:00+00:00",
+      "exit_time": "2026-10-28T16:15:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 20.139251030029527,
+      "fees": 0.14473831398276743
+    },
+    {
+      "symbol": "META",
+      "session": "2026-10-28",
+      "entry_time": "2026-10-28T16:05:00+00:00",
+      "exit_time": "2026-10-28T16:15:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -15.944334889996675,
+      "fees": 0.08130889622399319
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-10-28",
+      "entry_time": "2026-10-28T16:15:00+00:00",
+      "exit_time": "2026-10-28T16:20:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -5.579146788622122,
+      "fees": 0.1543348794658883
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-10-28",
+      "entry_time": "2026-10-28T15:10:00+00:00",
+      "exit_time": "2026-10-28T18:40:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 57.49250379375361,
+      "fees": 0.08815465034249868
+    },
+    {
+      "symbol": "META",
+      "session": "2026-10-29",
+      "entry_time": "2026-10-29T14:15:00+00:00",
+      "exit_time": "2026-10-29T14:30:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 23.667823203396722,
+      "fees": 0.08035667982011058
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-10-29",
+      "entry_time": "2026-10-29T14:20:00+00:00",
+      "exit_time": "2026-10-29T14:50:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -36.5205840041959,
+      "fees": 0.0879037133395942
+    },
+    {
+      "symbol": "AMZN",
+      "session": "2026-10-29",
+      "entry_time": "2026-10-29T14:45:00+00:00",
+      "exit_time": "2026-10-29T14:50:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -10.181350804112597,
+      "fees": 0.2029016937515989
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-10-29",
+      "entry_time": "2026-10-29T15:05:00+00:00",
+      "exit_time": "2026-10-29T15:15:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -10.936597699854254,
+      "fees": 0.14312538287140913
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-10-29",
+      "entry_time": "2026-10-29T14:10:00+00:00",
+      "exit_time": "2026-10-29T15:15:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 36.27481363037995,
+      "fees": 0.14640016654440222
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-10-29",
+      "entry_time": "2026-10-29T15:10:00+00:00",
+      "exit_time": "2026-10-29T15:20:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -6.404873483618577,
+      "fees": 0.09549198493077768
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-10-29",
+      "entry_time": "2026-10-29T15:05:00+00:00",
+      "exit_time": "2026-10-29T15:25:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 21.394090084566557,
+      "fees": 0.1752788945476296
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-10-29",
+      "entry_time": "2026-10-29T15:50:00+00:00",
+      "exit_time": "2026-10-29T16:15:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -10.113525446975999,
+      "fees": 0.23393914913829517
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-10-30",
+      "entry_time": "2026-10-30T14:20:00+00:00",
+      "exit_time": "2026-10-30T14:25:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -13.946918100566666,
+      "fees": 0.15243956310370035
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-10-30",
+      "entry_time": "2026-10-30T14:30:00+00:00",
+      "exit_time": "2026-10-30T14:45:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 26.131971233540604,
+      "fees": 0.1256188957751567
+    },
+    {
+      "symbol": "META",
+      "session": "2026-10-30",
+      "entry_time": "2026-10-30T15:05:00+00:00",
+      "exit_time": "2026-10-30T15:10:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 13.467307086155444,
+      "fees": 0.08016490648785292
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-10-30",
+      "entry_time": "2026-10-30T15:05:00+00:00",
+      "exit_time": "2026-10-30T15:20:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -15.021483274209224,
+      "fees": 0.14363950002711343
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-10-30",
+      "entry_time": "2026-10-30T15:05:00+00:00",
+      "exit_time": "2026-10-30T15:45:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -21.673767991762304,
+      "fees": 0.09763073226980527
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-10-30",
+      "entry_time": "2026-10-30T14:45:00+00:00",
+      "exit_time": "2026-10-30T15:45:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -37.58588412143011,
+      "fees": 0.2416490967322982
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-10-30",
+      "entry_time": "2026-10-30T15:15:00+00:00",
+      "exit_time": "2026-10-30T16:15:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -18.057115675877867,
+      "fees": 0.17730358954668446
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-10-30",
+      "entry_time": "2026-10-30T16:10:00+00:00",
+      "exit_time": "2026-10-30T16:15:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -4.115617981752775,
+      "fees": 0.0958852955165358
+    },
+    {
+      "symbol": "AMZN",
+      "session": "2026-10-30",
+      "entry_time": "2026-10-30T17:00:00+00:00",
+      "exit_time": "2026-10-30T17:05:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -14.113359568685183,
+      "fees": 0.20914781974900606
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-10-30",
+      "entry_time": "2026-10-30T17:05:00+00:00",
+      "exit_time": "2026-10-30T17:20:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -7.3018676463022345,
+      "fees": 0.14764526035804063
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-11-02",
+      "entry_time": "2026-11-02T15:10:00+00:00",
+      "exit_time": "2026-11-02T15:15:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 26.56827847291966,
+      "fees": 0.12369424450666479
+    },
+    {
+      "symbol": "META",
+      "session": "2026-11-02",
+      "entry_time": "2026-11-02T15:50:00+00:00",
+      "exit_time": "2026-11-02T15:55:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -4.458873953830482,
+      "fees": 0.08107040935661798
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-11-02",
+      "entry_time": "2026-11-02T16:05:00+00:00",
+      "exit_time": "2026-11-02T16:20:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -7.355920828589145,
+      "fees": 0.14659552011147203
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-11-02",
+      "entry_time": "2026-11-02T16:10:00+00:00",
+      "exit_time": "2026-11-02T16:25:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -15.030456889551552,
+      "fees": 0.15055633033609447
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-11-02",
+      "entry_time": "2026-11-02T18:00:00+00:00",
+      "exit_time": "2026-11-02T18:05:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -8.48732135396233,
+      "fees": 0.14784111115215942
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-11-02",
+      "entry_time": "2026-11-02T17:55:00+00:00",
+      "exit_time": "2026-11-02T18:25:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -10.548260109229602,
+      "fees": 0.09609908392366112
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-11-02",
+      "entry_time": "2026-11-02T18:50:00+00:00",
+      "exit_time": "2026-11-02T19:00:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -9.770577627895648,
+      "fees": 0.17590519740616686
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-11-02",
+      "entry_time": "2026-11-02T20:05:00+00:00",
+      "exit_time": "2026-11-02T20:35:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -23.188624678023004,
+      "fees": 0.2448205003291118
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-11-03",
+      "entry_time": "2026-11-03T15:25:00+00:00",
+      "exit_time": "2026-11-03T15:35:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -7.502166213982628,
+      "fees": 0.17959574654028093
+    },
+    {
+      "symbol": "META",
+      "session": "2026-11-03",
+      "entry_time": "2026-11-03T15:35:00+00:00",
+      "exit_time": "2026-11-03T15:45:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 15.495605057737695,
+      "fees": 0.08100697623814052
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-11-03",
+      "entry_time": "2026-11-03T16:10:00+00:00",
+      "exit_time": "2026-11-03T16:25:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -24.997120132370924,
+      "fees": 0.10158576071205444
+    },
+    {
+      "symbol": "AVGO",
+      "session": "2026-11-03",
+      "entry_time": "2026-11-03T16:10:00+00:00",
+      "exit_time": "2026-11-03T16:25:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -16.019138113323155,
+      "fees": 0.14938234997998928
+    },
+    {
+      "symbol": "AAPL",
+      "session": "2026-11-03",
+      "entry_time": "2026-11-03T16:35:00+00:00",
+      "exit_time": "2026-11-03T16:45:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -17.064130127138263,
+      "fees": 0.15063539533391412
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-11-03",
+      "entry_time": "2026-11-03T16:20:00+00:00",
+      "exit_time": "2026-11-03T17:35:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 11.440469570216091,
+      "fees": 0.09681653999988023
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-11-03",
+      "entry_time": "2026-11-03T17:35:00+00:00",
+      "exit_time": "2026-11-03T17:50:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 4.238739696751862,
+      "fees": 0.14851786940708847
+    },
+    {
+      "symbol": "TSLA",
+      "session": "2026-11-03",
+      "entry_time": "2026-11-03T18:00:00+00:00",
+      "exit_time": "2026-11-03T18:10:00+00:00",
+      "exit_reason": "target",
+      "net_pnl": 7.739954801191688,
+      "fees": 0.12567214740744112
+    },
+    {
+      "symbol": "AMZN",
+      "session": "2026-11-03",
+      "entry_time": "2026-11-03T18:20:00+00:00",
+      "exit_time": "2026-11-03T19:00:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -12.459024606830301,
+      "fees": 0.19924449905758998
+    },
+    {
+      "symbol": "NVDA",
+      "session": "2026-11-03",
+      "entry_time": "2026-11-03T20:15:00+00:00",
+      "exit_time": "2026-11-03T20:20:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -6.400112838274865,
+      "fees": 0.24173668104656132
+    },
+    {
+      "symbol": "META",
+      "session": "2026-11-04",
+      "entry_time": "2026-11-04T16:05:00+00:00",
+      "exit_time": "2026-11-04T16:10:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -21.610339816710777,
+      "fees": 0.0789282694787959
+    },
+    {
+      "symbol": "GOOGL",
+      "session": "2026-11-04",
+      "entry_time": "2026-11-04T16:50:00+00:00",
+      "exit_time": "2026-11-04T17:15:00+00:00",
+      "exit_reason": "stop",
+      "net_pnl": -23.031779525021634,
+      "fees": 0.17096758047726673
+    },
+    {
+      "symbol": "AMD",
+      "session": "2026-11-04",
+      "entry_time": "2026-11-04T17:05:00+00:00",
+      "exit_time": "2026-11-04T17:35:00+00:00",
+      "exit_reason": "session_close",
+      "net_pnl": 11.529529820878832,
+      "fees": 0.10288029407327516
+    },
+    {
+      "symbol": "AMZN",
+      "session": "2026-11-04",
+      "entry_time": "2026-11-04T16:45:00+00:00",
+      "exit_time": "2026-11-04T17:35:00+00:00",
+      "exit_reason": "session_close",
+      "net_pnl": 19.355000677405613,
+      "fees": 0.186933704843951
+    },
+    {
+      "symbol": "JPM",
+      "session": "2026-11-04",
+      "entry_time": "2026-11-04T15:45:00+00:00",
+      "exit_time": "2026-11-04T17:35:00+00:00",
+      "exit_reason": "session_close",
+      "net_pnl": 49.1341027227172,
+      "fees": 0.1436565781068713
+    },
+    {
+      "symbol": "MSFT",
+      "session": "2026-11-04",
+      "entry_time": "2026-11-04T17:10:00+00:00",
+      "exit_time": "2026-11-04T17:35:00+00:00",
+      "exit_reason": "session_close",
+      "net_pnl": -6.9801323047190795,
+      "fees": 0.08979187634897005
+    }
+  ],
+  "rejections": []
+}

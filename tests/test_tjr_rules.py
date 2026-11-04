@@ -19,6 +19,7 @@ from tradingagents.tjr.rules import (
     STAGE_READY,
     STAGE_SWEPT,
     TJR_ENTRY_WINDOW_CLOSED,
+    TJR_INVALID_GEOMETRY,
     TJR_NO_1M_ENTRY,
     TJR_NO_5M_CONFIRMATION,
     TJR_NO_SWEEP,
@@ -214,3 +215,41 @@ def test_no_look_ahead_the_decision_never_reads_a_later_bar():
         series_1m=IntradaySeries("X", "1m", cut_1m),
     )
     assert full.to_dict() == truncated.to_dict()
+
+
+def test_a_stop_on_the_wrong_side_of_the_entry_is_refused_not_traded(monkeypatch):
+    """A long whose stop is above the entry must never be reported READY.
+
+    Real bars do this: price makes a new low *after* the sweep, so the sweep's own
+    extreme ends up above the entry the 1m trigger closed at. ``risk = abs(entry -
+    stop)`` would hide the sign and report a clean R:R, and the contract would then
+    refuse the BUY at construction. The strategy has to refuse it first, with a
+    reason code, so a run never dies on a signal it should have declined.
+
+    The condition is forced at the boundary (a real deep-retrace session reaches it,
+    as the live ten-symbol run showed) so the guard is pinned without a fragile
+    hand-built chain.
+    """
+    import tradingagents.tjr.rules as rules
+
+    five, one = series_pair("X", SESSION, BULLISH_BARS)
+    ready_index = _first_ready(five, one)
+    assert ready_index is not None  # the chain does complete under the real rules
+
+    def flipped_target(side, *, entry, stop, levels, settings, formed_by, impulse):
+        # Force the geometry the guard exists for: a "long" whose stop sits above
+        # its entry. The target is a valid reward beyond the entry, so only the
+        # stop's side can make the setup invalid.
+        return entry + 2.0 * abs(entry - stop) + 1.0
+
+    monkeypatch.setattr(
+        rules, "_levels_and_stop", lambda frame, sweep, settings: (10_000.0, 10_000.0)
+    )
+    monkeypatch.setattr(rules, "_target", flipped_target)
+    outcome = evaluate(
+        symbol="X", session=SESSION, as_of=_as_of(five, ready_index),
+        series_5m=five, series_1m=one,
+    )
+    assert outcome.reason_code == TJR_INVALID_GEOMETRY
+    assert outcome.side is None
+    assert not outcome.is_ready

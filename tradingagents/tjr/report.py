@@ -21,6 +21,7 @@ from tradingagents.performance.metrics import PerformanceMetrics, compute_metric
 from .engine import TjrResult
 from .rules import (
     TJR_ENTRY_WINDOW_CLOSED,
+    TJR_INVALID_GEOMETRY,
     TJR_NO_1M_ENTRY,
     TJR_NO_5M_CONFIRMATION,
     TJR_NO_CONTINUATION,
@@ -37,6 +38,7 @@ _REASON_LABELS: dict[str, str] = {
     TJR_NO_5M_CONFIRMATION: "swept, no 5m BOS/IFVG",
     TJR_NO_CONTINUATION: "confirmed, no retrace into a zone / no target",
     TJR_NO_1M_ENTRY: "in the zone, no 1m confirmation",
+    TJR_INVALID_GEOMETRY: "stop ended up on the wrong side of the entry",
     TJR_SHORT_SETUP_LONG_ONLY: "complete bearish setup, book is long-only",
     TJR_OUTSIDE_SESSION: "outside the regular session",
     TJR_ENTRY_WINDOW_CLOSED: "entry window closed",

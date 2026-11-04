@@ -52,6 +52,7 @@ TJR_NO_SWEEP = "NO_SWEEP"
 TJR_NO_5M_CONFIRMATION = "NO_5M_CONFIRMATION"
 TJR_NO_CONTINUATION = "NO_CONTINUATION"
 TJR_NO_1M_ENTRY = "NO_1M_ENTRY"
+TJR_INVALID_GEOMETRY = "INVALID_GEOMETRY"
 TJR_SHORT_SETUP_LONG_ONLY = "SHORT_SETUP_LONG_ONLY"
 TJR_OUTSIDE_SESSION = "OUTSIDE_SESSION"
 TJR_ENTRY_WINDOW_CLOSED = "ENTRY_WINDOW_CLOSED"
@@ -63,6 +64,7 @@ TJR_REASON_CODES: tuple[str, ...] = (
     TJR_NO_5M_CONFIRMATION,
     TJR_NO_CONTINUATION,
     TJR_NO_1M_ENTRY,
+    TJR_INVALID_GEOMETRY,
     TJR_SHORT_SETUP_LONG_ONLY,
     TJR_OUTSIDE_SESSION,
     TJR_ENTRY_WINDOW_CLOSED,
@@ -535,6 +537,18 @@ def _evaluate_sweep(
 
     stop, _ = _levels_and_stop(frame_5m, sweep, settings=settings)
     entry = float(frame_1m["close"].iloc[-1])
+    # A long needs its stop below the entry and a short above it. Real bars can put
+    # the sweep's extreme on the wrong side of the entry: price makes a new low
+    # *after* the sweep, so a long's stop would sit above the price it is protecting.
+    # That is not a wide stop, it is an inverted one, and it must never become an
+    # order — the contract refuses it, and the strategy must refuse it first.
+    if (side == "long" and stop >= entry) or (side == "short" and stop <= entry):
+        return TjrEvaluation(
+            symbol=symbol, session=session, as_of=as_of, side=None,
+            stage=STAGE_IN_ZONE, reason_code=TJR_INVALID_GEOMETRY,
+            detail="the invalidation stop is on the wrong side of the entry",
+            sweep=sweep, confirmation=confirmation, zone=zone, levels=levels,
+        )
     impulse = _impulse_extreme(frame_5m, sweep, confirmed_at)
     target = _target(
         side, entry=entry, stop=stop, levels=levels, settings=settings,
