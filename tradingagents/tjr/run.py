@@ -72,6 +72,11 @@ def build_run(
             "exit_time": trade.exit_time,
             "exit_reason": trade.exit_reason,
             "net_pnl": trade.net_pnl,
+            "fees": trade.fees,
+            "stop": trade.stop,
+            "target": trade.target,
+            "planned_reward_risk": trade.planned_reward_risk,
+            "realized_r": trade.realized_r,
             "reason_code": trade.reason_code,
         }
         for trade in result.trades

@@ -13,6 +13,7 @@ from tradingagents.risk.engine import (
     RiskVerdict,
     drawdown_from_peak,
 )
+from tradingagents.risk.paper_parity import paper_parity_limits
 
 __all__ = [
     "RiskDecision",
@@ -21,4 +22,5 @@ __all__ = [
     "RiskReason",
     "RiskVerdict",
     "drawdown_from_peak",
+    "paper_parity_limits",
 ]

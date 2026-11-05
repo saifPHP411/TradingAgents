@@ -39,7 +39,7 @@ import pandas as pd
 
 from tradingagents.execution.costs import CostModel
 from tradingagents.portfolio import Ledger
-from tradingagents.risk import RiskEngine, RiskLimits
+from tradingagents.risk import RiskEngine, RiskLimits, paper_parity_limits
 from tradingagents.signals.contract import SignalAction, TradingSignal
 
 from .frames import (
@@ -68,6 +68,10 @@ class TjrTrade:
     fees: float
     gross_pnl: float
     net_pnl: float
+    stop: float | None = None
+    """The invalidation stop the setup produced, or ``None`` if it carried none."""
+    target: float | None = None
+    """The take-profit the setup produced, or ``None`` if it carried none."""
     reason_code: str = ""
     detail: str = ""
 
@@ -76,6 +80,37 @@ class TjrTrade:
         cost = self.entry_price * self.quantity
         return self.net_pnl / cost if cost else 0.0
 
+    @property
+    def planned_reward_risk(self) -> float | None:
+        """The setup's reward-to-risk at entry: ``(target-entry)/(entry-stop)``.
+
+        ``None`` when the trade carries no stop or target, or when the geometry is
+        not a long's (a stop at or above the entry has no positive risk to divide
+        by). This is the R:R the chain *planned*, not the P&L it realised.
+        """
+        if self.stop is None or self.target is None:
+            return None
+        risk = self.entry_price - self.stop
+        if risk <= 0:
+            return None
+        return (self.target - self.entry_price) / risk
+
+    @property
+    def realized_r(self) -> float | None:
+        """Net P&L as a multiple of the risk the setup defined at entry.
+
+        ``net_pnl / (quantity x (entry - stop))``. ``None`` when there is no
+        positive per-unit risk to divide by. This is the realised counterpart to
+        :attr:`planned_reward_risk`: a trade that planned 2R and stopped out
+        realises about -1R.
+        """
+        if self.stop is None or self.quantity <= 0:
+            return None
+        risk = (self.entry_price - self.stop) * self.quantity
+        if risk <= 0:
+            return None
+        return self.net_pnl / risk
+
 
 @dataclass
 class TjrConfig:
@@ -83,7 +118,9 @@ class TjrConfig:
 
     initial_cash: float = 100_000.0
     currency: str = "USD"
-    risk_limits: RiskLimits = field(default_factory=lambda: RiskLimits(max_open_positions=5))
+    risk_limits: RiskLimits = field(default_factory=paper_parity_limits)
+    """The paper account's own caps, so the backtest measures the strategy the
+    worker would actually run. See :mod:`tradingagents.risk.paper_parity`."""
     costs: CostModel = field(default_factory=CostModel)
     """Fees and slippage. A default of zero is honest: it reports a frictionless
     figure, and the caller sets the schedule the study is meant to use."""
@@ -106,15 +143,31 @@ class TjrResult:
     sessions: list[str] = field(default_factory=list)
     equity_curve: list[tuple[str, float]] = field(default_factory=list)
     """(instant ISO, equity) at each marked 5m bar-close."""
+    exposure_curve: list[tuple[str, float]] = field(default_factory=list)
+    """(instant ISO, market value / equity) at each marked 5m bar-close.
+
+    The fraction of the book that was actually at risk, marked every 5m bar rather
+    than once a session, so a day-trading strategy's exposure is measured over the
+    same clock its equity is.
+    """
+    traded_notional: float = 0.0
+    """Total absolute notional of every fill (entries and exits)."""
     trades: list[TjrTrade] = field(default_factory=list)
     evaluations: list[dict] = field(default_factory=list)
     rejections: list[dict] = field(default_factory=list)
     unfilled: list[dict] = field(default_factory=list)
     reason_counts: dict[str, int] = field(default_factory=dict)
+    entries_per_session: dict[str, int] = field(default_factory=dict)
+    """Entries placed in each session, for the ``max_daily_orders`` audit."""
     per_symbol: dict[str, dict] = field(default_factory=dict)
     ledger: Ledger | None = None
     config: TjrConfig | None = None
     initial_cash: float = 0.0
+    one_minute: dict[str, IntradaySeries] = field(default_factory=dict, repr=False)
+    """The 1m series per symbol, kept for the report's own price lookups (the
+    benchmark marks at closes). It is the same object the strategy read, so the
+    report invents no price."""
+    five_minute: dict[str, IntradaySeries] = field(default_factory=dict, repr=False)
     symbols: tuple[str, ...] = ()
 
     @property
@@ -127,6 +180,15 @@ class TjrResult:
         return pd.Series(
             [value for _, value in self.equity_curve],
             index=pd.Index([stamp for stamp, _ in self.equity_curve], name="instant"),
+            dtype=float,
+        )
+
+    def exposure_series(self) -> pd.Series:
+        if not self.exposure_curve:
+            return pd.Series(dtype=float)
+        return pd.Series(
+            [value for _, value in self.exposure_curve],
+            index=pd.Index([stamp for stamp, _ in self.exposure_curve], name="instant"),
             dtype=float,
         )
 
@@ -179,11 +241,15 @@ class TjrBacktester:
         self.result = TjrResult(
             run_id=run_id, ledger=self.ledger, config=self.config,
             initial_cash=self.config.initial_cash, symbols=self.symbols,
+            one_minute=self.one_minute,
         )
         self._open: dict[str, _OpenPosition] = {}
         self._last_close: dict[str, float] = {}
         self._attempted: dict[tuple[str, str], bool] = {}
         self._equity_peak = self.config.initial_cash
+        self._daily_orders: int = 0
+        """Entries placed in the session currently being run. Reset at each
+        session's start, because ``max_daily_orders`` is a per-session count."""
 
     # --- The loop -----------------------------------------------------------
 
@@ -201,6 +267,7 @@ class TjrBacktester:
 
     def _run_session(self, session: str) -> None:
         self.result.sessions.append(session)
+        self._daily_orders = 0
         day_start_equity = self.ledger.equity
         instants = self._timeline(session)
         last_instant = instants[-1] if instants else None
@@ -288,6 +355,7 @@ class TjrBacktester:
         )
         gross = exit_notional - entry_notional
         net = gross - position.fees - fee
+        self.result.traded_notional += abs(exit_notional)
         self.result.trades.append(
             TjrTrade(
                 symbol=symbol,
@@ -302,6 +370,8 @@ class TjrBacktester:
                 fees=position.fees + fee,
                 gross_pnl=gross,
                 net_pnl=net,
+                stop=position.evaluation.stop,
+                target=position.evaluation.target,
                 reason_code=position.evaluation.reason_code,
                 detail=position.evaluation.detail,
             )
@@ -350,6 +420,7 @@ class TjrBacktester:
             price=reference,
             equity_peak=self._equity_peak,
             day_start_equity=day_start_equity,
+            daily_orders_placed=self._daily_orders,
         )
         if not decision.approved or decision.quantity <= 0:
             self.result.rejections.append(
@@ -387,6 +458,7 @@ class TjrBacktester:
                  "reasons": ["LEDGER_REFUSED"], "detail": type(exc).__name__}
             )
             return
+        self.result.traded_notional += abs(fill_price * quantity)
         self._open[symbol] = _OpenPosition(
             symbol=symbol,
             session=session,
@@ -398,6 +470,8 @@ class TjrBacktester:
             fees=fee,
             evaluation=evaluation,
         )
+        self._daily_orders += 1
+        self.result.entries_per_session[session] = self._daily_orders
 
     # --- Marking ------------------------------------------------------------
 
@@ -411,6 +485,7 @@ class TjrBacktester:
         equity = self.ledger.equity
         self._equity_peak = max(self._equity_peak, equity)
         self.result.equity_curve.append((instant.isoformat(), equity))
+        self.result.exposure_curve.append((instant.isoformat(), self.ledger.total_exposure))
 
     # --- Cost helpers -------------------------------------------------------
 

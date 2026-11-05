@@ -178,6 +178,54 @@ def test_a_hold_produces_no_order():
     assert result.reason_counts.get("NO_SWEEP", 0) > 0
 
 
+def test_the_report_reports_the_setups_planned_reward_risk():
+    # The 2R setup the bullish session builds: risk = entry - stop, reward =
+    # target - entry. The report must average that planned R:R, not the P&L.
+    result = _run(_WIN)
+    report = build_report(result)
+    assert report.average_rr == pytest.approx(2.0, rel=1e-6)
+    # The winner reaches its target, so it realises close to the planned 2R.
+    assert report.average_realized_r == pytest.approx(2.0, rel=1e-3)
+
+
+def test_a_trade_that_stops_out_realises_minus_one_r():
+    result = _run(_LOSS)
+    trade = result.trades[0]
+    assert trade.exit_reason == "stop"
+    assert trade.realized_r == pytest.approx(-1.0, rel=0.05)
+    report = build_report(result)
+    assert report.average_realized_r == pytest.approx(-1.0, rel=0.05)
+
+
+def test_exposure_and_turnover_are_measured_over_the_intraday_marks():
+    result = _run(_WIN)
+    report = build_report(result)
+    # A 25 USD entry on a 100k book is a tiny exposure, but it is a real,
+    # non-zero one — the pre-fix report could only report a per-session mark.
+    assert 0.0 < report.metrics.exposure < 0.01
+    assert report.metrics.turnover > 0.0
+
+
+def test_the_benchmark_is_an_equal_weight_hold_of_the_traded_names():
+    result = _run(_WIN, symbols={"X": _WIN, "Y": _WIN})
+    report = build_report(result)
+    assert report.buy_and_hold_return is not None
+    assert "equal-weight" in report.buy_and_hold_method
+
+
+def test_no_trades_means_no_benchmark():
+    flat = [
+        (100.0, 100.2, 99.9, 100.1),
+        (100.1, 100.3, 100.0, 100.2),
+        (100.2, 100.4, 100.1, 100.3),
+        (100.3, 100.5, 100.2, 100.4),
+    ]
+    result = _run(flat)
+    report = build_report(result)
+    assert result.trades == []
+    assert report.buy_and_hold_return is None
+
+
 def test_the_report_reuses_the_performance_engine_and_tallies_the_reasons():
     result = _run(_WIN)
     report = build_report(result)

@@ -61,6 +61,7 @@ class RiskReason(StrEnum):
     MAX_PORTFOLIO_EXPOSURE = "MAX_PORTFOLIO_EXPOSURE"
     MAX_RISK_PER_TRADE = "MAX_RISK_PER_TRADE"
     MAX_OPEN_POSITIONS = "MAX_OPEN_POSITIONS"
+    MAX_DAILY_ORDERS = "MAX_DAILY_ORDERS"
     MAX_DAILY_LOSS = "MAX_DAILY_LOSS"
     MAX_DRAWDOWN = "MAX_DRAWDOWN"
     INSUFFICIENT_CASH = "INSUFFICIENT_CASH"
@@ -94,6 +95,36 @@ class RiskLimits(BaseModel):
     )
     max_open_positions: int | None = Field(
         default=10, ge=1, description="Most distinct open positions at once"
+    )
+    max_daily_orders: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Most entry orders that may be placed in one trading session. None "
+            "(the default) disables the check. The count is the caller's: the "
+            "engine is stateless, so a caller that wants this enforced passes the "
+            "number of entries already placed today to ``RiskEngine.evaluate``."
+        ),
+    )
+    target_order_value: float | None = Field(
+        default=None,
+        gt=0.0,
+        description=(
+            "Fixed cash notional a signal is sized to when it requests no size of "
+            "its own. None (the default) leaves sizing to "
+            "``default_position_size``. This is the paper worker's "
+            "``order_notional``: it turns 'size this entry to a target cash "
+            "amount' into an explicit limit rather than a fraction of equity."
+        ),
+    )
+    fractional_shares: bool = Field(
+        default=True,
+        description=(
+            "Whether a sized quantity may be fractional. ``True`` (the default) "
+            "leaves the engine's sizes as they were. ``False`` floors an approved "
+            "quantity to whole units — the paper worker's ``whole_shares`` — and "
+            "refuses the order when the floor is zero."
+        ),
     )
     max_daily_loss: float | None = Field(
         default=None,
@@ -229,6 +260,7 @@ class RiskEngine:
         price: float | None,
         equity_peak: float | None = None,
         day_start_equity: float | None = None,
+        daily_orders_placed: int | None = None,
     ) -> RiskDecision:
         """Decide whether ``signal`` may become an order, and at what size.
 
@@ -240,6 +272,13 @@ class RiskEngine:
         history the drawdown and daily-loss checks need. When they are absent
         those two checks cannot fire, and the decision says so in its notes
         rather than silently passing.
+
+        ``daily_orders_placed`` is how many entry orders the caller has already
+        placed in the current trading session, for the ``max_daily_orders``
+        limit. The engine is stateless, so the count is the caller's to keep;
+        when the limit is configured but no count is supplied, the check cannot
+        fire and the decision records that in its notes rather than assuming
+        zero.
         """
         decision = RiskDecision(
             verdict=RiskVerdict.APPROVED, symbol=signal.symbol, action=signal.action
@@ -264,7 +303,9 @@ class RiskEngine:
 
         # Book-level checks first: a book already over a limit must not accept a
         # new position, whatever the individual order would look like.
-        self._check_book_limits(decision, ledger, equity, equity_peak, day_start_equity)
+        self._check_book_limits(
+            decision, ledger, equity, equity_peak, day_start_equity, daily_orders_placed
+        )
         if decision.reasons:
             return self._reject(decision)
 
@@ -276,6 +317,21 @@ class RiskEngine:
             self._check_sell(decision, ledger, signal.symbol, quantity)
             if decision.reasons:
                 return self._reject(decision)
+
+        if not self.limits.fractional_shares and quantity > 0:
+            floored = math.floor(quantity)
+            if floored <= 0:
+                decision.reasons.append(RiskReason.NON_POSITIVE_QUANTITY)
+                decision.notes.append(
+                    f"the {quantity:.6g} unit size floors to zero whole shares at "
+                    f"{price:g}; the book is configured for whole shares only"
+                )
+                return self._reject(decision)
+            if floored < quantity:
+                decision.notes.append(
+                    f"size floored from {quantity:.6g} to {floored} whole shares"
+                )
+            quantity = float(floored)
 
         decision.quantity = quantity
         decision.notional = quantity * price
@@ -290,9 +346,22 @@ class RiskEngine:
         equity: float,
         equity_peak: float | None,
         day_start_equity: float | None,
+        daily_orders_placed: int | None,
     ) -> None:
         """The limits that depend on the whole book, not on this order."""
         limits = self.limits
+
+        if limits.max_daily_orders is not None:
+            if daily_orders_placed is None:
+                decision.notes.append(
+                    "max_daily_orders not checked: no count of the day's entries was supplied"
+                )
+            elif daily_orders_placed >= limits.max_daily_orders:
+                decision.reasons.append(RiskReason.MAX_DAILY_ORDERS)
+                decision.notes.append(
+                    f"{daily_orders_placed} entries have already been placed today, at the "
+                    f"{limits.max_daily_orders} limit"
+                )
 
         if limits.max_drawdown is not None:
             if equity_peak is None:
@@ -347,6 +416,12 @@ class RiskEngine:
             requested,
             limits.max_position_size if limits.max_position_size is not None else requested,
         ) * equity
+        if limits.target_order_value is not None:
+            # A target cash notional (the paper worker's order_notional) replaces the
+            # equity fraction. It is taken *and* treated as a ceiling, so a later cap
+            # can only shrink the order — never let it grow past the target, which is
+            # what would let a 25 USD order become a 100 USD one.
+            requested_value = limits.target_order_value
 
         # Every cap bounds the position the order would *leave behind*, not the
         # order itself. Capping the order alone would let a strategy that buys

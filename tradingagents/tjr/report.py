@@ -55,9 +55,21 @@ class TjrReport:
     per_symbol: dict[str, dict]
     exit_reasons: dict[str, int]
     average_rr: float | None
+    """Mean planned reward-to-risk ``(target-entry)/(entry-stop)`` over the trades
+    that carried both a stop and a target. This is the setup's design R:R, not the
+    P&L it realised."""
+    average_realized_r: float | None
+    """Mean realised R-multiple ``net_pnl / (quantity x (entry-stop))`` over the
+    trades with a positive per-unit risk. The realised counterpart to
+    ``average_rr``: it says how much of the planned reward each trade actually
+    captured."""
+    entries_per_session: dict[str, int]
+    """Entries placed per session, so the ``max_daily_orders`` cap is auditable."""
+    max_entries_in_a_session: int
     fees: float
     slippage_note: str
     buy_and_hold_return: float | None
+    buy_and_hold_method: str
     sessions: int
     symbols: tuple[str, ...]
     start: str | None
@@ -72,9 +84,13 @@ class TjrReport:
             "per_symbol": self.per_symbol,
             "exit_reasons": self.exit_reasons,
             "average_rr": self.average_rr,
+            "average_realized_r": self.average_realized_r,
+            "entries_per_session": self.entries_per_session,
+            "max_entries_in_a_session": self.max_entries_in_a_session,
             "fees": self.fees,
             "slippage_note": self.slippage_note,
             "buy_and_hold_return": self.buy_and_hold_return,
+            "buy_and_hold_method": self.buy_and_hold_method,
             "sessions": self.sessions,
             "symbols": list(self.symbols),
             "start": self.start,
@@ -84,26 +100,43 @@ class TjrReport:
 
 
 def build_report(result: TjrResult, *, buy_and_hold: pd.Series | None = None) -> TjrReport:
-    """Compute the report for a TJR run."""
+    """Compute the report for a TJR run.
+
+    ``buy_and_hold`` may be supplied as an explicit benchmark equity series. When
+    it is not, one is derived from the strategy's own fills: an equal-weight book
+    holding every symbol the strategy ever traded, from each symbol's first fill to
+    the run's end. That is the honest comparison — the strategy chose which names
+    to touch, so the benchmark should hold the same names — and it is reported
+    with ``buy_and_hold_method`` naming exactly what it is.
+    """
     equity = result.equity_series()
+    exposure = result.exposure_series()
     trades = result.trades
     total_fees = result.ledger.total_fees if result.ledger is not None else 0.0
+    if buy_and_hold is None:
+        buy_and_hold = _equal_weight_benchmark(result)
     metrics = compute_metrics(
         equity,
         initial_capital=result.initial_cash,
         trades=trades,
+        exposure=exposure,
+        traded_notional=result.traded_notional,
         realized_pnl=result.ledger.realized_pnl if result.ledger is not None else 0.0,
         unrealized_pnl=result.ledger.unrealized_pnl if result.ledger is not None else 0.0,
         total_fees=total_fees,
         benchmark=buy_and_hold,
     )
     exit_reasons: dict[str, int] = {}
-    rr_values: list[float] = []
+    planned_rr: list[float] = []
+    realized_r: list[float] = []
     for trade in trades:
         exit_reasons[trade.exit_reason] = exit_reasons.get(trade.exit_reason, 0) + 1
-        if trade.entry_price and trade.exit_price and trade.entry_price != trade.exit_price:
-            rr_values.append(trade.net_pnl / (trade.entry_price * trade.quantity) if trade.quantity else 0.0)
-    average_rr = (sum(rr_values) / len(rr_values)) if rr_values else None
+        if trade.planned_reward_risk is not None:
+            planned_rr.append(trade.planned_reward_risk)
+        if trade.realized_r is not None:
+            realized_r.append(trade.realized_r)
+    average_rr = (sum(planned_rr) / len(planned_rr)) if planned_rr else None
+    average_realized_r = (sum(realized_r) / len(realized_r)) if realized_r else None
     benchmark_return = metrics.benchmark_return
     notes: list[str] = []
     if result.config is not None and _is_frictionless(result.config.costs):
@@ -117,14 +150,53 @@ def build_report(result: TjrResult, *, buy_and_hold: pd.Series | None = None) ->
         per_symbol=dict(sorted(result.per_symbol.items())),
         exit_reasons=dict(sorted(exit_reasons.items())),
         average_rr=average_rr,
+        average_realized_r=average_realized_r,
+        entries_per_session=dict(sorted(result.entries_per_session.items())),
+        max_entries_in_a_session=max(result.entries_per_session.values(), default=0),
         fees=total_fees,
         slippage_note=_slippage_note(result),
         buy_and_hold_return=benchmark_return,
+        buy_and_hold_method=_benchmark_method(result),
         sessions=len(result.sessions),
         symbols=result.symbols,
         start=metrics.start,
         end=metrics.end,
         notes=notes,
+    )
+
+
+def _equal_weight_benchmark(result: TjrResult) -> pd.Series | None:
+    """Equal-weight Buy & Hold over the names the strategy traded, at 1m closes.
+
+    Built on the same index as the equity curve, so the two series are comparable.
+    Each traded symbol is bought at its first available close for an equal share of
+    the starting cash; a symbol with no price yet is held as cash. Returns ``None``
+    when nothing was traded, because there is no basket to hold.
+    """
+    traded = [symbol for symbol, stats in result.per_symbol.items() if stats.get("trades")]
+    if not traded or not result.equity_curve:
+        return None
+    index = pd.DatetimeIndex(pd.to_datetime([stamp for stamp, _ in result.equity_curve]))
+    weights = result.initial_cash / len(traded)
+    total = pd.Series(0.0, index=index)
+    for symbol in traded:
+        series = result.one_minute.get(symbol)
+        closes = None if series is None else series.frame["close"].reindex(index, method="ffill")
+        entry = None if closes is None else closes.bfill().iloc[0]
+        if closes is None or not entry or entry <= 0:
+            total = total + weights
+            continue
+        units = weights / float(entry)
+        total = total + closes.mul(units).where(closes.notna(), weights)
+    return total
+
+
+def _benchmark_method(result: TjrResult) -> str:
+    if not any(stats.get("trades") for stats in result.per_symbol.values()):
+        return "none: nothing was traded"
+    return (
+        "equal-weight Buy & Hold of the traded symbols at 1m closes, from each "
+        "symbol's first available bar, against the run's own index"
     )
 
 
