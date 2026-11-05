@@ -329,3 +329,49 @@ alter a decision, it belongs in `rules.py` and its tests instead.
   cut must be identical. It is the executable form of the closed-bar rule.
 - The real window is ~1 month (the vendor cap), not the 6–12 months a study would
   want. Never describe this as a long-horizon test, and never fill the gap.
+
+## TJR on the paper worker
+
+`paper_experiment/tjr_source.py` is the third `DecisionSource`: it runs the
+deterministic TJR rule chain (no model) over current *intraday* Alpaca bars and
+hands the worker a decision the existing risk layer and broker already understand.
+It is a *separate* source from `ExperimentDecisionSource` (historical replay) and
+`CurrentMarketDecisionSource` (live, but through the LLM inference seam). Do not
+make one source do another's job, and do not route TJR through the LLM.
+
+- Its decision data is current 1m/5m bars from `tjr_intraday_data.py`, on Alpaca's
+  **market-data** host and the `iex` feed only — never the paper/order host. This
+  is the *decision* window; the *execution* price stays the worker's existing
+  `--paper-market-data` seam. Do not price an order from the decision window.
+- The seam drops every bar that had not *closed* at the decision instant, refuses
+  a stale or future-dated newest bar, and validates every bar. The closed-bar rule
+  lives in `tjr/frames.py`; the seam only ever hands back bars the caller could
+  already have seen. A missing window raises; it is never shortened into a frame
+  that looks complete.
+- One decision per symbol per session, id `tjr-<symbol>-<session>`, mirroring the
+  TJR backtest's one-attempt-per-session rule. The id is deterministic, so a
+  restart within a session replays the same id without re-evaluating the chain.
+  Like `current_market`, consumption is **order-only** (`ordered_decisions` via
+  `has_order_for`), not the refusal-inclusive `processed_decisions`: a session
+  decision that produced no order must be re-offered, not mistaken for consumed.
+- A completed setup is put through the project's own `RiskEngine` with
+  `paper_parity_limits()` — the same caps the backtest and the paper account use.
+  Only an *approved* signal becomes a decision, carrying the RiskEngine's sized
+  quantity and the chain's stop/target. The book the engine sizes against is a
+  read-only mirror of the worker's broker account/positions (`_book_snapshot_from_worker`),
+  never a fabricated book; with no book the engine is handed an empty book and
+  refuses to size. The source invents no size, no stop and no target.
+- Every no-trade carries a code from the worker's closed vocabulary: a closed
+  market is `MARKET_CLOSED`, an unreadable clock or an unreachable/stale/malformed
+  window is `MARKET_DATA_UNAVAILABLE`, a RiskEngine refusal is `RISK_REJECTED`, an
+  incomplete chain is `NO_SIGNAL`, and a session whose symbols are all decided is
+  `TJR_NO_NEW_DATA` (the worker's own code, not the current-market one). The rule
+  chain's own reason code (`NO_1M_ENTRY` and friends) rides in the record detail
+  for the audit trail, never as the worker's code.
+- The source persists its own state in `tjr_source_state.json` under the
+  experiment root — never the experiment's `session_state.json`/`journal.json` —
+  so it is not a second writer to the experiment directory.
+- It is opt-in via `--paper-decision-source tjr` / `$TRADINGAGENTS_PAPER_DECISION_SOURCE`,
+  paper-only, and changes no risk limit. Best paired with
+  `--paper-market-data alpaca_snapshot` so an order sizes at a current price.
+  `tests/test_phase30_tjr_paper_source.py` drives the whole chain offline.

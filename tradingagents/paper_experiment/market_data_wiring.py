@@ -23,6 +23,7 @@ from .broker import (
     DECISION_SOURCE_CHOICES,
     DECISION_SOURCE_CURRENT_MARKET,
     DECISION_SOURCE_HISTORY,
+    DECISION_SOURCE_TJR,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     MARKET_DATA_CHOICES,
     PROVIDER_ALPACA_SNAPSHOT,
@@ -245,6 +246,14 @@ def describe_decision_source(choice: str) -> str:
             "market data, gated on Alpaca's market clock; requires "
             "ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET and an LLM credential. "
             "Not blocked by a consumed historical experiment."
+        )
+    if source == DECISION_SOURCE_TJR:
+        return (
+            "tjr: the deterministic TJR rule chain (no model) over current Alpaca "
+            "INTRADAY 1m/5m market data, gated on Alpaca's market clock and the "
+            "RiskEngine; requires ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET. "
+            "One decision per symbol per session. Pair with --paper-market-data "
+            "alpaca_snapshot so orders size at a current price."
         )
     return (
         "history: the paper experiment's recorded, HISTORICAL decisions (the "

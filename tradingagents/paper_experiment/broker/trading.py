@@ -169,6 +169,14 @@ NO_TRADE_CURRENT_MARKET_NO_NEW_DATA = "CURRENT_MARKET_NO_NEW_DATA"
 Distinct from ``HISTORY_EXHAUSTED``: that names a fully-consumed historical
 experiment, which does *not* block the current-market source.
 """
+NO_TRADE_TJR_NO_NEW_DATA = "TJR_NO_NEW_DATA"
+"""Every symbol already produced its one TJR decision for the session.
+
+The TJR source attempts at most one entry per symbol per session, exactly as the
+TJR backtest does, so once every symbol is decided a new *session* (not a new
+poll) is what produces the next decision. Named apart from the current-market
+code so a dashboard can tell the two session-scoped sources apart.
+"""
 NO_TRADE_NO_POSITION = "NO_POSITION"
 """A SELL with nothing held to close. Not a risk breach: closing a position that
 does not exist is simply not a trade, so it is named apart from
@@ -199,6 +207,7 @@ NO_TRADE_REASONS = (
     NO_TRADE_MARKET_CLOSED,
     NO_TRADE_STRATEGY_UNAVAILABLE,
     NO_TRADE_CURRENT_MARKET_NO_NEW_DATA,
+    NO_TRADE_TJR_NO_NEW_DATA,
     NO_TRADE_NO_POSITION,
     NO_TRADE_POSITION_UNAVAILABLE,
 )
@@ -232,8 +241,21 @@ The independent ``CurrentMarketDecisionSource``. It is *not* the historical
 source and is never blocked by a consumed historical history. It is opt-in so
 the default behaviour is unchanged.
 """
+DECISION_SOURCE_TJR = "tjr"
+"""Opt-in: the deterministic TJR rule chain over current Alpaca *intraday* bars.
 
-DECISION_SOURCE_CHOICES = (DECISION_SOURCE_HISTORY, DECISION_SOURCE_CURRENT_MARKET)
+The independent ``TjrDecisionSource``. Like the current-market source it is
+session-scoped (one decision per symbol per session) and is never blocked by a
+consumed historical history, but its strategy is the TJR rule chain
+(``tradingagents.tjr``), which consults no model at all. Opt-in, so the default
+behaviour is unchanged.
+"""
+
+DECISION_SOURCE_CHOICES = (
+    DECISION_SOURCE_HISTORY,
+    DECISION_SOURCE_CURRENT_MARKET,
+    DECISION_SOURCE_TJR,
+)
 """The decision sources an operator may select. ``history`` is the default."""
 
 
@@ -1570,15 +1592,18 @@ class PaperTradingWorker:
 
         The guard is the *durable processed set* for the historical source, whose
         decisions are one-shot and bounded: a refused historical decision is
-        deliberately not retried every cycle. The current-market source is the
-        opposite — its decision stands for a whole session and is re-offered until
-        it trades — so a decision it hands out is "done" only when it actually
-        produced an order. Reading the refusal-inclusive processed set there would
-        let a stale no-order entry mask a live decision (the reported
-        ``CURRENT_MARKET_NO_NEW_DATA`` with no order). ``ordered_decisions`` is the
-        order-only memory, so the current-market path uses it.
+        deliberately not retried every cycle. The current-market and TJR sources
+        are the opposite — their decision stands for a whole session and is
+        re-offered until it trades — so a decision they hand out is "done" only
+        when it actually produced an order. Reading the refusal-inclusive processed
+        set there would let a stale no-order entry mask a live decision (the
+        reported ``CURRENT_MARKET_NO_NEW_DATA`` with no order). ``ordered_decisions``
+        is the order-only memory, so those session-scoped paths use it.
         """
-        if self.config.decision_source == DECISION_SOURCE_CURRENT_MARKET:
+        if self.config.decision_source in (
+            DECISION_SOURCE_CURRENT_MARKET,
+            DECISION_SOURCE_TJR,
+        ):
             return self.has_order_for(decision_id)
         return (
             decision_id in self.state.processed_decisions

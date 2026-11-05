@@ -826,7 +826,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "'current_market' is an INDEPENDENT decision taken live over current "
             "Alpaca market data, gated on Alpaca's market clock; it is not blocked by "
             "a consumed history, and needs ALPACA_PAPER_API_KEY / "
-            "ALPACA_PAPER_API_SECRET and an LLM credential."
+            "ALPACA_PAPER_API_SECRET and an LLM credential. "
+            "'tjr' is the DETERMINISTIC TJR rule chain (no model) over current Alpaca "
+            "INTRADAY 1m/5m data, gated on Alpaca's market clock and the RiskEngine; "
+            "it needs ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET and is best "
+            "paired with --paper-market-data alpaca_snapshot."
         ),
     )
     parser.add_argument(

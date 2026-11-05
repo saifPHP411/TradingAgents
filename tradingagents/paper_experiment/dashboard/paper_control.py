@@ -36,6 +36,7 @@ from ..broker import (
     BANNER,
     DECISION_SOURCE_CURRENT_MARKET,
     DECISION_SOURCE_HISTORY,
+    DECISION_SOURCE_TJR,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     PROVIDER_BAR_OPEN,
     STATUS_STOPPED,
@@ -51,6 +52,63 @@ from ..broker import (
 
 class PaperTradingDisabled(RuntimeError):
     """The dashboard was not started with paper trading enabled."""
+
+
+def _book_snapshot_from_worker(worker: Any) -> Any:
+    """A read-only TJR book snapshot mirroring the worker's broker account.
+
+    The RiskEngine gate must size against the *real* paper book, not a fabricated
+    one, so this reads the worker's own last-synced account and positions. Nothing
+    here writes or places an order. Cash/equity come from the account snapshot;
+    the daily entry count comes from the broker's own counter when a broker exists
+    (the same counter the broker enforces ``max_daily_orders`` with), else 0 —
+    which is honest: with no broker there is no order history to count, and the
+    broker's own limit is the backstop.
+    """
+    from ..tjr_source import TjrBookSnapshot
+
+    state = getattr(worker, "state", None)
+    account = getattr(state, "account", None) or {}
+    cash = _as_finite(account.get("cash"))
+    if cash is None:
+        cash = 0.0
+    positions: dict[str, float] = {}
+    for symbol, record in (getattr(state, "positions", None) or {}).items():
+        if not isinstance(record, dict):
+            continue
+        quantity = _as_finite(record.get("quantity"))
+        if quantity is not None and quantity > 0:
+            positions[str(symbol).upper()] = float(quantity)
+    broker = getattr(worker, "_broker", None)
+    daily_orders = 0
+    if broker is not None:
+        counter = getattr(broker, "daily_orders", None)
+        if callable(counter):
+            try:
+                daily_orders = int(counter())
+            except Exception:  # noqa: BLE001 - an unreadable counter is not fatal
+                daily_orders = 0
+    return TjrBookSnapshot(
+        cash=float(cash),
+        positions=positions,
+        daily_orders=max(daily_orders, 0),
+        day_start_equity=_as_finite(getattr(state, "initial_equity", None)),
+    )
+
+
+def _as_finite(value: Any) -> float | None:
+    """``value`` as a finite float, or ``None``. A NaN never passes."""
+    import math
+
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 class PaperTradingController:
@@ -77,6 +135,8 @@ class PaperTradingController:
         current_source_factory: Callable[..., Any] | None = None,
         market_hours_gate: Callable[[], Any] | None = None,
         decision_data_factory: Callable[..., Any] | None = None,
+        tjr_source_factory: Callable[..., Any] | None = None,
+        tjr_data_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.root = Path(root)
         self.enabled = enabled
@@ -107,6 +167,8 @@ class PaperTradingController:
         self._current_source_factory = current_source_factory
         self._market_hours_gate = market_hours_gate
         self._decision_data_factory = decision_data_factory
+        self._tjr_source_factory = tjr_source_factory
+        self._tjr_data_factory = tjr_data_factory
         self._worker: PaperTradingWorker | None = None
         self._lock = threading.Lock()
 
@@ -194,6 +256,8 @@ class PaperTradingController:
         """
         if self.decision_source_kind == DECISION_SOURCE_CURRENT_MARKET:
             return self._build_current_source(experiment, holder)
+        if self.decision_source_kind == DECISION_SOURCE_TJR:
+            return self._build_tjr_source(experiment, holder)
         return self._build_history_source(experiment, holder)
 
     def _build_history_source(self, experiment, holder: dict[str, PaperTradingWorker]):
@@ -245,6 +309,66 @@ class PaperTradingController:
         if self._current_source_factory is not None:
             return self._current_source_factory(**kwargs)
         return CurrentMarketDecisionSource(**kwargs)
+
+    def _build_tjr_source(self, experiment, holder: dict[str, PaperTradingWorker]):
+        """The independent TJR rule-chain decision source.
+
+        Its decision data is current *intraday* (1m/5m) Alpaca market data, its
+        market-hours gate is Alpaca's paper clock, and its strategy is the
+        deterministic TJR rule chain — no model is consulted. The RiskEngine gate
+        and the book it sizes against are wired here: the book is a read-only
+        mirror of the worker's own broker account/positions, and the price the
+        RiskEngine sizes against is the worker's execution seam, so the live path
+        sizes at the same price the backtest would fill at. Its per-session memory
+        lives in the source's own state file — never the experiment's. A test may
+        inject any of the seams through the controller, so the path is exercisable
+        offline.
+        """
+        from ..tjr_source import TjrBookSnapshot, TjrDecisionSource
+
+        market_hours = self._build_market_hours()
+        data = self._build_tjr_data()
+
+        def _book() -> TjrBookSnapshot:
+            worker = holder.get("worker")
+            if worker is None:
+                return TjrBookSnapshot(0.0)
+            return _book_snapshot_from_worker(worker)
+
+        def _price(symbol: str) -> float:
+            worker = holder.get("worker")
+            if worker is None:
+                return 0.0
+            try:
+                return float(worker.market_data.price(symbol))
+            except Exception:  # noqa: BLE001 - an unpriceable entry is no decision
+                # 0.0 is not a price: the source falls back to the newest closed 1m
+                # close and, failing that, the RiskEngine refuses to size. A market-
+                # data failure must never raise out of the decision source.
+                return 0.0
+
+        kwargs: dict[str, Any] = {
+            "symbols": tuple(experiment.config.symbols),
+            "data": data,
+            "market_hours": market_hours,
+            "order_notional": self.order_notional,
+            "strategy_name": experiment.config.strategy_id,
+            "book_provider": _book,
+            "price_provider": _price,
+            "is_consumed": lambda decision_id: holder["worker"].has_order_for(decision_id),
+            "state_path": self.root / "tjr_source_state.json",
+        }
+        if self._tjr_source_factory is not None:
+            return self._tjr_source_factory(**kwargs)
+        return TjrDecisionSource(**kwargs)
+
+    def _build_tjr_data(self):
+        """The TJR decision-data seam: an injected one, else Alpaca intraday bars."""
+        if self._tjr_data_factory is not None:
+            return self._tjr_data_factory()
+        from ..tjr_intraday_data import AlpacaIntradayBars
+
+        return AlpacaIntradayBars()
 
     def _build_market_hours(self):
         """The market-hours gate: an injected one, else Alpaca's paper clock."""
