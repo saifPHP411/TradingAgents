@@ -308,3 +308,24 @@ risk path.
   serves 1m bars only for the last 30 days and 5m bars for the last 60, so an
   honest study is a few recent weeks, not years. A window the vendor will not serve
   raises; it is never shortened into a frame that looks complete.
+
+`tjr/validation.py` is the ten-symbol historical study harness. It runs the
+*unchanged* rule chain over the fetched frames under `paper_parity_limits()` and
+reports the metrics, the per-symbol split, the cost scenarios and a chronological
+development/test split. It changes no rule and no limit; if a change there would
+alter a decision, it belongs in `rules.py` and its tests instead.
+
+- The harness memoizes the pure evaluation (`_MemoStrategy`) keyed on
+  `(symbol, session, as_of)`. The rule chain is a pure function of the bars closed
+  by an instant, so a cached answer is the same answer; the cache is exact and
+  `tests/test_tjr_validation.py` pins a cached run equal to a cold one. Do not
+  memoize anything that depends on the book — the cache key carries no book state,
+  because none of the rule chain reads it.
+- A sub-period (development/test) is a *view* of the one shared-book run
+  (`period_view`), rebased to the starting cash, not a second run. The book is flat
+  at every session close, so a session set is self-contained. Label it a view; do
+  not present it as an independent run.
+- The look-ahead probe truncates the feed and re-runs: any entry at or before the
+  cut must be identical. It is the executable form of the closed-bar rule.
+- The real window is ~1 month (the vendor cap), not the 6–12 months a study would
+  want. Never describe this as a long-horizon test, and never fill the gap.

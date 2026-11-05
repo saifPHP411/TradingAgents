@@ -114,7 +114,7 @@ def build_report(result: TjrResult, *, buy_and_hold: pd.Series | None = None) ->
     trades = result.trades
     total_fees = result.ledger.total_fees if result.ledger is not None else 0.0
     if buy_and_hold is None:
-        buy_and_hold = _equal_weight_benchmark(result)
+        buy_and_hold = equal_weight_benchmark(result)
     metrics = compute_metrics(
         equity,
         initial_capital=result.initial_cash,
@@ -165,7 +165,7 @@ def build_report(result: TjrResult, *, buy_and_hold: pd.Series | None = None) ->
     )
 
 
-def _equal_weight_benchmark(result: TjrResult) -> pd.Series | None:
+def equal_weight_benchmark(result: TjrResult) -> pd.Series | None:
     """Equal-weight Buy & Hold over the names the strategy traded, at 1m closes.
 
     Built on the same index as the equity curve, so the two series are comparable.

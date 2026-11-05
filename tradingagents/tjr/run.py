@@ -23,14 +23,21 @@ from .frames import IntradayFrameError, IntradaySeries, resample
 from .report import build_report
 
 
-def build_run(
+def load_series(
     data_dir: Path,
     symbols: tuple[str, ...],
-    *,
-    initial_cash: float = 100_000.0,
-    allow_short: bool = False,
-) -> dict:
-    """Load the frames, run the backtest, and return the report as a dict."""
+) -> tuple[
+    dict[str, IntradaySeries],
+    dict[str, IntradaySeries],
+    dict[str, IntradaySeries],
+    dict[str, IntradaySeries],
+]:
+    """The 1m, 5m, 1h and 4h series a TJR run reads, from the frames a fetch wrote.
+
+    The 5m series is the vendor's when it was fetched, otherwise it is resampled
+    from the 1m series — the coarser bars are always built from bars that had
+    closed, so the closed-bar rule survives either path.
+    """
     one_minute_frames = load_frames(data_dir, symbols, "1m")
     one_minute = {
         symbol: IntradaySeries(symbol, "1m", frame) for symbol, frame in one_minute_frames.items()
@@ -48,6 +55,18 @@ def build_run(
         )
     hourly = _resample_if_possible(five_minute, "60m")
     four_hour = _resample_if_possible(five_minute, "4h")
+    return one_minute, five_minute, hourly, four_hour
+
+
+def build_run(
+    data_dir: Path,
+    symbols: tuple[str, ...],
+    *,
+    initial_cash: float = 100_000.0,
+    allow_short: bool = False,
+) -> dict:
+    """Load the frames, run the backtest, and return the report as a dict."""
+    one_minute, five_minute, hourly, four_hour = load_series(data_dir, symbols)
 
     config = TjrConfig(initial_cash=initial_cash, allow_short=allow_short)
     backtester = TjrBacktester(
