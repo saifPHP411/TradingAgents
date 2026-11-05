@@ -265,3 +265,133 @@ class TestRiskEngineLimits:
         decision = engine.evaluate(self._signal(), ledger, price=10.0)
         # 25 / 10 = 2.5 units -> 2 whole shares.
         assert decision.quantity == 2.0
+
+
+# ---------------------------------------------------------------------------
+# One source for the sizing setting, shared with the paper worker
+# ---------------------------------------------------------------------------
+
+
+class TestSizingIsUnifiedAcrossPaths:
+    """The worker's ``whole_shares`` and the backtest's ``fractional_shares`` are one
+    setting, so the two paths cannot size differently by accident.
+
+    ``WHOLE_SHARES`` is derived from ``FRACTIONAL_SHARES`` in
+    :mod:`tradingagents.risk.paper_parity`; the worker config and every entrypoint
+    default read it, and the backtest reads ``paper_parity_limits()``. These tests
+    pin that the two agree, so a change to one cannot silently leave the other
+    behind.
+    """
+
+    def test_whole_shares_is_the_negation_of_fractional_shares(self):
+        from tradingagents.risk.paper_parity import FRACTIONAL_SHARES, WHOLE_SHARES
+
+        assert WHOLE_SHARES is (not FRACTIONAL_SHARES)
+
+    def test_the_worker_config_default_matches_the_backtest(self):
+        from tradingagents.paper_experiment.broker import PaperTradingConfig
+        from tradingagents.risk.paper_parity import WHOLE_SHARES
+
+        config = PaperTradingConfig()
+        assert config.whole_shares is WHOLE_SHARES
+        # The worker's whole_shares is the backtest's fractional_shares, negated.
+        assert config.whole_shares is (not paper_parity_limits().fractional_shares)
+
+    def test_the_wiring_default_matches_the_backtest(self, monkeypatch):
+        from tradingagents.paper_experiment.market_data_wiring import (
+            FRACTIONAL_SHARES_ENV,
+            env_fractional,
+            resolve_settings,
+        )
+
+        monkeypatch.delenv(FRACTIONAL_SHARES_ENV, raising=False)
+        assert env_fractional() is paper_parity_limits().fractional_shares
+        # resolve_settings returns whole_shares, the negation of fractional.
+        _, _, whole_shares = resolve_settings(provider="bar_open")
+        assert whole_shares is (not paper_parity_limits().fractional_shares)
+
+
+class TestFractionalSizingBuysAHighPricedName:
+    """A $25 order must buy a positive quantity of a $200+ name, and never more than
+    $25 of it. This is the concrete failure the unification fixes."""
+
+    def _worker(self, tmp_path, price: float):
+        from tradingagents.paper_experiment.broker import (
+            PaperRiskLimits,
+            PaperTradingConfig,
+            PaperTradingWorker,
+            StaticMarketData,
+        )
+
+        class _NoDecisions:
+            def next_decision(self):
+                return None
+
+        config = PaperTradingConfig(
+            order_notional=MAX_ORDER_NOTIONAL,
+            limits=PaperRiskLimits(),
+            state_path=tmp_path / "worker_state.json",
+        )
+        return PaperTradingWorker(
+            config=config,
+            decision_source=_NoDecisions(),
+            market_data=StaticMarketData({"AAPL": price}),
+        )
+
+    @pytest.mark.parametrize("price", [200.0, 331.57, 632.86])
+    def test_a_25_dollar_order_buys_a_fraction_of_a_high_priced_name(self, tmp_path, price):
+        from tradingagents.paper_experiment.broker import TradingDecision
+
+        worker = self._worker(tmp_path, price)
+        decision = TradingDecision(
+            decision_id="d1", symbol="AAPL", side="buy", notional=MAX_ORDER_NOTIONAL
+        )
+        quantity = worker._size(decision, price)  # noqa: SLF001
+        assert 0 < quantity < 1
+        assert quantity * price <= MAX_ORDER_NOTIONAL + 1e-9
+
+    def test_whole_shares_would_floor_that_same_order_to_zero(self, tmp_path):
+        """The contrast that motivates the unified default: whole shares buy nothing."""
+        from tradingagents.paper_experiment.broker import (
+            PaperRiskLimits,
+            PaperTradingConfig,
+            PaperTradingWorker,
+            StaticMarketData,
+            TradingDecision,
+            WorkerError,
+        )
+
+        class _NoDecisions:
+            def next_decision(self):
+                return None
+
+        price = 200.0
+        config = PaperTradingConfig(
+            order_notional=MAX_ORDER_NOTIONAL,
+            whole_shares=True,
+            limits=PaperRiskLimits(),
+            state_path=tmp_path / "worker_state.json",
+        )
+        worker = PaperTradingWorker(
+            config=config,
+            decision_source=_NoDecisions(),
+            market_data=StaticMarketData({"AAPL": price}),
+        )
+        decision = TradingDecision(
+            decision_id="d1", symbol="AAPL", side="buy", notional=MAX_ORDER_NOTIONAL
+        )
+        with pytest.raises(WorkerError):
+            worker._size(decision, price)  # noqa: SLF001
+
+    def test_the_cap_and_other_limits_are_unchanged(self):
+        from tradingagents.paper_experiment.broker import PaperRiskLimits
+        from tradingagents.risk.paper_parity import ALLOW_SHORT
+
+        limits = paper_parity_limits()
+        broker = PaperRiskLimits()
+        assert limits.max_open_positions == 5 == broker.max_open_positions
+        assert limits.max_daily_orders == 10 == broker.max_daily_orders
+        assert limits.long_only is True
+        assert ALLOW_SHORT is False
+        assert broker.allow_short is False
+        assert limits.max_order_value == MAX_ORDER_NOTIONAL == 25.0

@@ -835,10 +835,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "serve / paper-trade: allow a fractional quantity (default: "
-            f"${FRACTIONAL_SHARES_ENV}, else whole shares only). Needed for a "
-            "high-priced symbol such as SPY under a small notional, where whole "
-            "shares would floor to zero. The $25 notional cap and long-only rule are "
-            "unchanged."
+            f"${FRACTIONAL_SHARES_ENV}, else fractional, the one parity constant). "
+            "Needed for a high-priced symbol such as SPY under a small notional, "
+            "where whole shares would floor to zero. The $25 notional cap and "
+            "long-only rule are unchanged."
         ),
     )
     parser.add_argument(

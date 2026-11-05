@@ -1,13 +1,14 @@
 """Phase 25: fractional shares, so a high-priced symbol fits a small notional.
 
-The reported blocker: with ``whole_shares=True`` (the default) a $25 notional at
-SPY's ~$580 price floors to **zero** shares, and the worker raised
-``WorkerError: the notional ... buys no shares``. This phase makes fractional
-sizing an explicit opt-in and pins the safety properties around it:
+The reported blocker: with whole shares a $25 notional at SPY's ~$580 price floors
+to **zero** shares, and the worker raised ``WorkerError: the notional ... buys no
+shares``. This phase pins the safety properties around sizing:
 
-- the default is still whole shares, and a symbol that floors to zero is refused
-  with a message naming the fix (never a zero-quantity order);
-- fractional sizing is opt-in and produces the expected quantity;
+- fractional sizing is the default (the one parity constant, ``WHOLE_SHARES``), so
+  the worker sizes the same way the TJR backtest does, and a symbol that floors to
+  zero under whole shares is refused with a message naming the fix (never a
+  zero-quantity order);
+- fractional sizing produces the expected quantity;
 - the $25 notional cap still binds — fractional sizing never lets an order exceed
   it, including by a rounding artefact;
 - shorting stays blocked, and the decision shape is unchanged.
@@ -25,6 +26,7 @@ from tradingagents.paper_experiment.broker import (
     TradingDecision,
     WorkerError,
 )
+from tradingagents.risk import WHOLE_SHARES
 
 SPY_PRICE = 580.0
 
@@ -71,8 +73,11 @@ class TestWholeSharesRefusal:
         assert "no whole shares" in message
         assert "fractional" in message
 
-    def test_the_default_config_is_whole_shares(self):
-        assert PaperTradingConfig().whole_shares is True
+    def test_the_default_config_matches_the_parity_constant(self):
+        """The worker's default sizing is the TJR backtest's, not a second policy."""
+        from tradingagents.risk import FRACTIONAL_SHARES
+
+        assert PaperTradingConfig().whole_shares is (not FRACTIONAL_SHARES)
 
     def test_a_symbol_that_fits_still_sizes_to_whole_shares(self, tmp_path):
         worker = _worker(tmp_path, whole_shares=True, prices={"XYZ": 10.0})
@@ -100,10 +105,11 @@ class TestFractionalSizing:
         quantity = _size(worker)
         assert quantity * SPY_PRICE <= 25.0 + 1e-9
 
-    def test_fractional_is_opt_in_not_the_default(self, tmp_path):
-        worker = _worker(tmp_path, whole_shares=True)
-        with pytest.raises(WorkerError):
-            _size(worker)
+    def test_fractional_is_the_default(self, tmp_path):
+        worker = _worker(tmp_path, whole_shares=WHOLE_SHARES)
+        quantity = _size(worker)
+        assert quantity > 0
+        assert quantity * SPY_PRICE <= 25.0 + 1e-9
 
     def test_a_tiny_notional_that_floors_to_zero_is_refused(self, tmp_path):
         worker = _worker(tmp_path, whole_shares=False, order_notional=0.0000001)

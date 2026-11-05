@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import os
 
+from tradingagents.risk.paper_parity import FRACTIONAL_SHARES
+
 from .broker import (
     DECISION_SOURCE_CHOICES,
     DECISION_SOURCE_CURRENT_MARKET,
@@ -34,7 +36,8 @@ DECISION_SOURCE_ENV = "TRADINGAGENTS_PAPER_DECISION_SOURCE"
 """Environment variable the entrypoints read the decision-source choice from."""
 
 FRACTIONAL_SHARES_ENV = "TRADINGAGENTS_PAPER_FRACTIONAL_SHARES"
-"""Environment variable that opts into fractional sizing (default: whole shares)."""
+"""Environment variable that opts into fractional sizing (default: fractional, the
+one parity constant)."""
 
 SNAPSHOT_MAX_AGE_ENV = "TRADINGAGENTS_PAPER_SNAPSHOT_MAX_AGE_SECONDS"
 """Environment variable for the maximum age of a snapshot price, in seconds."""
@@ -124,8 +127,12 @@ def env_decision_source(default: str = DECISION_SOURCE_HISTORY) -> str:
     return resolve_decision_source(os.environ.get(DECISION_SOURCE_ENV) or default)
 
 
-def env_fractional(default: bool = False) -> bool:
-    """Whether fractional sizing is opted into via :data:`FRACTIONAL_SHARES_ENV`."""
+def env_fractional(default: bool = FRACTIONAL_SHARES) -> bool:
+    """Whether fractional sizing is opted into via :data:`FRACTIONAL_SHARES_ENV`.
+
+    The default is the one parity constant, so an unset environment variable and
+    an unset flag both leave sizing on the same footing as the TJR backtest.
+    """
     return parse_bool(os.environ.get(FRACTIONAL_SHARES_ENV), default=default)
 
 
@@ -159,7 +166,7 @@ def resolve_settings(
     if fractional is None:
         resolved_fractional = env_fractional()
     elif isinstance(fractional, str):
-        resolved_fractional = parse_bool(fractional, default=False)
+        resolved_fractional = parse_bool(fractional, default=FRACTIONAL_SHARES)
     else:
         resolved_fractional = bool(fractional)
     return resolved_provider, resolved_max_age, not resolved_fractional

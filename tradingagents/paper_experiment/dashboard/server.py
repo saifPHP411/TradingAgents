@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from tradingagents.risk.paper_parity import WHOLE_SHARES
+
 from ..broker import (
     BANNER,
     DECISION_SOURCE_CHOICES,
@@ -90,7 +92,7 @@ class Dashboard:
         paper_order_notional: float = 25.0,
         broker_factory=None,
         market_data_factory=None,
-        paper_whole_shares: bool = True,
+        paper_whole_shares: bool = WHOLE_SHARES,
         paper_market_data_provider: str = PROVIDER_BAR_OPEN,
         paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
         paper_decision_source: str = DECISION_SOURCE_HISTORY,
@@ -533,11 +535,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=(
             "allow the paper worker to size a fractional quantity (default: "
-            f"${FRACTIONAL_SHARES_ENV}, else whole shares only). Needed for a "
-            "high-priced symbol such as SPY under a small notional, where whole "
-            "shares would floor to zero. The account must support fractional "
-            "trading, or the broker will reject the order; the $25 notional cap and "
-            "long-only rule are unchanged."
+            f"${FRACTIONAL_SHARES_ENV}, else fractional, the one parity constant). "
+            "Needed for a high-priced symbol such as SPY under a small notional, "
+            "where whole shares would floor to zero. The account must support "
+            "fractional trading, or the broker will reject the order; the $25 "
+            "notional cap and long-only rule are unchanged."
         ),
     )
     parser.add_argument(
@@ -629,7 +631,7 @@ def serve(
     paper_order_notional: float = 25.0,
     broker_factory=None,
     market_data_factory=None,
-    paper_whole_shares: bool = True,
+    paper_whole_shares: bool = WHOLE_SHARES,
     paper_market_data_provider: str = PROVIDER_BAR_OPEN,
     paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     paper_decision_source: str = DECISION_SOURCE_HISTORY,

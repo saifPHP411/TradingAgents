@@ -30,6 +30,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from tradingagents.risk.paper_parity import WHOLE_SHARES
+
 from ..broker import (
     BANNER,
     DECISION_SOURCE_CURRENT_MARKET,
@@ -68,7 +70,7 @@ class PaperTradingController:
         broker_factory: Callable[[], AlpacaPaperBroker] | None = None,
         worker_factory: Callable[..., PaperTradingWorker] | None = None,
         market_data_factory: Callable[[tuple[str, ...]], Any] | None = None,
-        whole_shares: bool = True,
+        whole_shares: bool = WHOLE_SHARES,
         market_data_provider: str = PROVIDER_BAR_OPEN,
         market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
         decision_source_kind: str = DECISION_SOURCE_HISTORY,
@@ -80,8 +82,10 @@ class PaperTradingController:
         self.enabled = enabled
         self.order_notional = order_notional
         self.stub = stub
-        # Whole shares by default; fractional is an explicit opt-in for a
-        # high-priced symbol under a small notional (e.g. SPY at ~580 under $25).
+        # Sizing follows the one parity constant (WHOLE_SHARES). Fractional sizing
+        # is the default so a high-priced symbol under a small notional (e.g. SPY
+        # at ~580 under $25) still buys a positive quantity instead of flooring to
+        # zero, matching what the TJR backtest enforces.
         self.whole_shares = whole_shares
         self._broker_factory = broker_factory
         self._worker_factory = worker_factory or PaperTradingWorker

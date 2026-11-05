@@ -66,6 +66,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from tradingagents.risk.paper_parity import WHOLE_SHARES
+
 from .alpaca_paper import (
     PAPER_BASE_URL,
     AlpacaPaperBroker,
@@ -992,15 +994,17 @@ class PaperTradingConfig:
     order_notional: float = 25.0
     """Target cash per order. Deliberately small, so a 50 USD paper account is not
     drained by one order."""
-    whole_shares: bool = True
-    """When ``True`` (the default), size to whole shares.
+    whole_shares: bool = WHOLE_SHARES
+    """Whether to size to whole shares, derived from the one parity constant.
 
-    Alpaca supports fractional shares, but whole shares keep a tiny account's
-    behaviour obvious. Set ``False`` to allow a fractional quantity, which is what
-    lets a high-priced symbol such as SPY fit inside a small notional. This is a
-    deliberate, per-worker opt-in: it is never enabled silently for every account,
-    and a broker that does not support fractional shares will reject the order
-    rather than receive a fabricated zero quantity (see :meth:`PaperTradingWorker._size`).
+    ``False`` (the default) allows a fractional quantity, which is what lets a
+    $25 order on a $200+ name buy a positive quantity instead of flooring to zero.
+    This is not a second policy: it reads :data:`tradingagents.risk.paper_parity.WHOLE_SHARES`,
+    the same source the TJR backtest's ``fractional_shares`` comes from, so the
+    worker and the backtest size identically. A broker that does not support
+    fractional shares will reject the order rather than receive a fabricated zero
+    quantity (see :meth:`PaperTradingWorker._size`). The $25 notional cap and the
+    long-only rule are unchanged by this setting.
     """
     base_url: str = PAPER_BASE_URL
     limits: PaperRiskLimits = field(default_factory=PaperRiskLimits)

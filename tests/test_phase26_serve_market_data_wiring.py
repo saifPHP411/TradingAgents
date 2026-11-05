@@ -69,6 +69,7 @@ from tradingagents.paper_experiment.providers.alpaca_iex import (
 )
 from tradingagents.paper_experiment.providers.base import HttpResponse
 from tradingagents.paper_experiment.sources import StaticPriceSource
+from tradingagents.risk import WHOLE_SHARES
 
 SYMBOL = "SPY"
 SPY_PRICE = 580.0
@@ -308,9 +309,11 @@ class TestEnvironmentParsing:
         with pytest.raises(MarketDataWiringError):
             parse_bool("maybe", default=False)
 
-    def test_fractional_defaults_to_false(self, monkeypatch):
+    def test_fractional_defaults_to_the_parity_constant(self, monkeypatch):
+        from tradingagents.risk import FRACTIONAL_SHARES
+
         monkeypatch.delenv(FRACTIONAL_SHARES_ENV, raising=False)
-        assert env_fractional() is False
+        assert env_fractional() is FRACTIONAL_SHARES
 
     def test_fractional_reads_the_env_var(self, monkeypatch):
         monkeypatch.setenv(FRACTIONAL_SHARES_ENV, "yes")
@@ -388,12 +391,13 @@ class TestServeWiring:
         assert callable(factory)
         assert isinstance(factory((SYMBOL,)), AlpacaSnapshotMarketData)
 
-    def test_serve_passes_whole_shares_by_default(self, tmp_path, monkeypatch):
+    def test_serve_passes_the_parity_sizing_by_default(self, tmp_path, monkeypatch):
         from tradingagents.paper_experiment import __main__ as cli
+        from tradingagents.risk import WHOLE_SHARES
 
         captured = _capture_serve(monkeypatch)
         assert cli.main(["serve", "--root", str(tmp_path / "exp")]) == 0
-        assert captured["paper_whole_shares"] is True
+        assert captured["paper_whole_shares"] is WHOLE_SHARES
 
     def test_serve_enables_fractional_only_when_asked(self, tmp_path, monkeypatch):
         from tradingagents.paper_experiment import __main__ as cli
@@ -444,7 +448,7 @@ class TestServeWiring:
         assert server.main(["--root", str(root), "--host", "127.0.0.1"]) == 0
         assert captured["paper_market_data_provider"] == "alpaca_snapshot"
         assert callable(captured["market_data_factory"])
-        assert captured["paper_whole_shares"] is True
+        assert captured["paper_whole_shares"] is WHOLE_SHARES
 
     def test_module_form_main_honours_fractional_env(self, tmp_path, monkeypatch):
         from tradingagents.paper_experiment.dashboard import server
@@ -1046,7 +1050,7 @@ class TestProviderIsSurfaced:
         )
         status = worker.status()
         assert status["market_data_provider_configured"] == "alpaca_snapshot"
-        assert status["risk_limits"]["whole_shares"] is True
+        assert status["risk_limits"]["whole_shares"] is WHOLE_SHARES
 
     def test_the_cycle_result_carries_the_reference_price(self, tmp_path):
         worker = PaperTradingWorker(

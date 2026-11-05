@@ -32,7 +32,19 @@ ALLOW_SHORT: bool = False
 """Whether a short may be opened. Kept False: the book is long-only."""
 
 FRACTIONAL_SHARES: bool = True
-"""Whether a sized quantity may be fractional."""
+"""Whether a sized quantity may be fractional. ``True`` keeps the size exact, so a
+$25 order on a $200+ name still buys a positive quantity instead of flooring to
+zero. The paper worker's ``whole_shares`` is its negation, and both read this one
+constant (see :data:`WHOLE_SHARES`)."""
+
+WHOLE_SHARES: bool = not FRACTIONAL_SHARES
+"""The paper worker's ``whole_shares`` setting, derived from
+:data:`FRACTIONAL_SHARES` so the two paths cannot disagree.
+
+``PaperTradingConfig.whole_shares`` and the entrypoints default to this, and the
+TJR backtest reads :func:`paper_parity_limits` (whose ``fractional_shares`` is
+:data:`FRACTIONAL_SHARES`). One constant therefore decides both. Flipping it
+flips sizing on both sides together; there is no second place to edit."""
 
 
 def paper_parity_limits() -> RiskLimits:
@@ -60,5 +72,6 @@ __all__ = [
     "MAX_DAILY_ORDERS",
     "MAX_OPEN_POSITIONS",
     "MAX_ORDER_NOTIONAL",
+    "WHOLE_SHARES",
     "paper_parity_limits",
 ]
