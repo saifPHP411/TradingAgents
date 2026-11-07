@@ -36,7 +36,7 @@ import contextlib
 import json
 import threading
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -327,7 +327,12 @@ class MarketStream:
 
     def _handle_trade(self, event: dict) -> None:
         trade = PublicTrade.from_binance(event)
-        if trade is None or not self._valid_timestamp(trade.observed_at):
+        if trade is None:
+            return
+        # Normalize the venue spelling (``BTCUSDT``) to the canonical pair so a
+        # trade is keyed the same as a candle and a ticker for the same instrument.
+        trade = replace(trade, symbol=parse_pair(trade.symbol).canonical)
+        if not self._valid_timestamp(trade.observed_at):
             return
         if trade.trade_id is not None:
             if trade.trade_id in self._seen_trades:
@@ -361,7 +366,14 @@ class MarketStream:
             return
         interval = str(kline.get("i") or "")
         candle = _candle_from_kline_event(event.get("s"), interval, kline)
-        if candle is None or not self._valid_timestamp(candle.close_time):
+        if candle is None:
+            return
+        # A bar's *open* is what a clock can validate: it is always in the past for
+        # a real bar. The *close* of a forming bar is by definition in the future,
+        # so validating it would reject every in-progress bar — the one a display
+        # needs. The closed/forming split is the venue's own ``x`` flag, carried on
+        # the candle and re-checked by the engine against the decision instant.
+        if not self._valid_timestamp(candle.open_time):
             return
         key = (candle.symbol, candle.interval)
         closed = bool(kline.get("x"))

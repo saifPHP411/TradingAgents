@@ -224,3 +224,6 @@ reports/
 
 # TJR intraday frames are vendor data, re-fetched per study window.
 tradingagents/tjr/data/
+
+# Crypto bars are vendor data, re-fetched and cached on disk, never committed.
+.crypto_cache/

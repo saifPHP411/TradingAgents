@@ -200,16 +200,22 @@ def intervals_for_window(
     1m data and the chain would report no entry for a reason that is about *data*,
     not about the market. So the 1m interval is dropped when it does not reach the
     window's first session, and the report states which intervals a view used.
+
+    Coverage is compared by *session date*, not by the exact instant: the venue
+    serves 1m bars from partway through a day, so the first covered session is
+    partial. Requiring a bar at the session's midnight would drop the 1m trigger
+    from a window the 1m data in fact covers almost entirely.
     """
     if not window:
         return base
-    start = pd.Timestamp(window[0], tz="UTC")
+    start_date = window[0]
     has_one_minute = False
     for bundle in series.values():
         one = bundle.get("1m")
         if one is None or one.frame.empty:
             continue
-        if one.frame.index[0].tz_convert("UTC") <= start:
+        first = one.frame.index[0].tz_convert("UTC").strftime("%Y-%m-%d")
+        if first <= start_date:
             has_one_minute = True
             break
     if has_one_minute:
@@ -259,10 +265,19 @@ def run_window(
             four_hour[symbol] = bundle["4h"]
     if not five_minute:
         raise ValueError("no 5-minute series to run over")
-    usable = sorted(s for s in five_minute)
-    if "1m" in (wanted or {"1m"}) and not any(s in one_minute for s in usable):
-        raise ValueError("no symbol has both a 1m and a 5m series")
-    usable = sorted(s for s in usable if s in one_minute) if one_minute else usable
+    # TJR's entry trigger is a 1-minute rule, so a window the 1m data does not
+    # cover cannot be evaluated: rather than run the chain with the 1m series
+    # silently absent (which would report no trade for a *data* reason), the run
+    # is refused and the caller reports the period as unavailable.
+    if "1m" in (wanted or {"1m"}):
+        missing_one = sorted(s for s in five_minute if s not in one_minute)
+        if missing_one:
+            raise ValueError(
+                f"no 1-minute series for {missing_one}; the window is not covered at 1m"
+            )
+    usable = (
+        sorted(s for s in five_minute if s in one_minute) if one_minute else sorted(five_minute)
+    )
     if not usable:
         raise ValueError("no symbol has a usable series set")
     tjr_config = TjrConfig(
