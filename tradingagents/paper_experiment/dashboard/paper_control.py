@@ -225,69 +225,68 @@ class PaperTradingController:
         # Market data comes from Binance (USDT-quoted), execution on Alpaca (USD-quoted)
         symbol_mappings: tuple[SymbolMapping, ...] = ()
         if self.decision_source_kind == DECISION_SOURCE_CRYPTO:
-            try:
-                # Build Binance instrument registry from exchange info
-                from ..crypto_intraday_data import BinancePublicClient
-                binance_client = BinancePublicClient()
-                binance_registry = binance_client.exchange_info()
+            # For crypto paper trading, Alpaca execution registry is REQUIRED.
+            # Missing credentials, network errors, malformed responses, and
+            # unavailable registry must fail closed - never interpret an unavailable
+            # registry as proof that a symbol is tradable.
 
-                # Try to get Alpaca registry if available (optional)
-                alpaca_registry = None
-                try:
-                    from ..alpaca_paper import AlpacaPaperBroker
-                    # Use the broker to fetch Alpaca instruments
-                    broker = AlpacaPaperBroker(
-                        base_url=PaperTradingConfig().base_url,
-                        limits=PaperTradingConfig().limits,
-                    )
-                    broker.connect()
-                    alpaca_assets = broker.list_assets()
-                    # Build a simple registry from assets
-                    from datetime import UTC, datetime
+            # Build Binance instrument registry from exchange info
+            from ..crypto_intraday_data import BinancePublicClient
+            binance_client = BinancePublicClient()
+            binance_registry = binance_client.exchange_info()
 
-                    from ..crypto.instruments import InstrumentRegistry, TradingRules
-                    alpaca_rules = {}
-                    for asset in alpaca_assets:
-                        if asset.get("class") == "crypto" and asset.get("tradable"):
-                            symbol = asset.get("symbol", "")
-                            if "/" in symbol:
-                                alpaca_rules[symbol] = TradingRules(
-                                    symbol=symbol,
-                                    tradable=True,
-                                    min_qty=float(asset.get("min_order_size", "0.00001")),
-                                    step_qty=float(asset.get("qty_increment", "0.00001")),
-                                    min_notional=float(asset.get("min_notional", "1")),
-                                    price_increment=float(asset.get("price_increment", "0.01")),
-                                    status="TRADING",
-                                )
-                    alpaca_registry = InstrumentRegistry(
-                        rules=alpaca_rules,
-                        venue="alpaca_paper",
-                        fetched_at=datetime.now(UTC).isoformat(),
-                    )
-                except Exception:
-                    # Alpaca registry is optional; continue without it
-                    pass
+            # Get Alpaca registry - REQUIRED for crypto paper execution
+            from ..alpaca_paper import AlpacaPaperBroker
+            broker = AlpacaPaperBroker(
+                base_url=PaperTradingConfig().base_url,
+                limits=PaperTradingConfig().limits,
+            )
+            broker.connect()
+            alpaca_assets = broker.list_assets()
+            # Build a simple registry from assets
+            from datetime import UTC, datetime
 
-                # Build mappings from experiment config symbols
-                mappings, rejected = map_binance_to_alpaca(
-                    canonical_symbols=list(experiment.config.symbols),
-                    binance_registry=binance_registry,
-                    alpaca_registry=alpaca_registry,
-                )
-                if rejected:
-                    # Log rejected symbols but continue with valid ones
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    for sym, reason in rejected.items():
-                        logger.warning(f"Symbol {sym} rejected for paper trading: {reason}")
+            from ..crypto.instruments import InstrumentRegistry, TradingRules
+            alpaca_rules = {}
+            for asset in alpaca_assets:
+                if asset.get("class") == "crypto" and asset.get("tradable"):
+                    symbol = asset.get("symbol", "")
+                    if "/" in symbol:
+                        alpaca_rules[symbol] = TradingRules(
+                            symbol=symbol,
+                            tradable=True,
+                            min_qty=float(asset.get("min_order_size", "0.00001")),
+                            step_qty=float(asset.get("qty_increment", "0.00001")),
+                            min_notional=float(asset.get("min_notional", "1")),
+                            price_increment=float(asset.get("price_increment", "0.01")),
+                            status="TRADING",
+                        )
+            alpaca_registry = InstrumentRegistry(
+                rules=alpaca_rules,
+                venue="alpaca_paper",
+                fetched_at=datetime.now(UTC).isoformat(),
+            )
 
-                symbol_mappings = tuple(mappings)
-            except Exception as e:
-                # If mapping fails, log and continue without mappings
+            # Build mappings from experiment config symbols
+            mappings, rejected = map_binance_to_alpaca(
+                canonical_symbols=list(experiment.config.symbols),
+                binance_registry=binance_registry,
+                alpaca_registry=alpaca_registry,
+            )
+            if rejected:
+                # Log rejected symbols but continue with valid ones
                 import logging
                 logger = logging.getLogger(__name__)
-                logger.warning(f"Failed to build symbol mappings: {e}")
+                for sym, reason in rejected.items():
+                    logger.warning(f"Symbol {sym} rejected for paper trading: {reason}")
+
+            symbol_mappings = tuple(mappings)
+            if not symbol_mappings:
+                raise RuntimeError(
+                    "No valid symbol mappings for crypto paper trading. "
+                    "All configured symbols were rejected. Check Alpaca credentials "
+                    "and ensure symbols are tradable on both Binance and Alpaca Paper."
+                )
 
         # Build the decision source from the persisted config, so the worker acts
         # on the same decisions the experiment recorded.

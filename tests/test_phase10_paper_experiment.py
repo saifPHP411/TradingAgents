@@ -1032,7 +1032,7 @@ class TestRunnerCLI:
         from tradingagents.paper_experiment.__main__ import main
 
         root = str(tmp_path / "cli")
-        assert main(["start", "--root", root, "--stub"]) == 0
+        assert main(["start", "--root", root, "--stub", "--symbol", "SPY"]) == 0
         assert main(["run", "--root", root, "--stub", "--sessions", "4"]) == 0
         report_path = str(tmp_path / "report.json")
         assert main(["report", "--root", root, "--out", report_path]) == 0
@@ -1045,7 +1045,7 @@ class TestRunnerCLI:
         from tradingagents.paper_experiment.__main__ import main
 
         root = tmp_path / "cli"
-        assert main(["start", "--root", str(root), "--stub"]) == 0
+        assert main(["start", "--root", str(root), "--stub", "--symbol", "SPY"]) == 0
         journal_path = root / "journal.json"
         raw = json.loads(journal_path.read_text())
         raw["entries"][0]["payload"]["config_hash"] = "0" * 64

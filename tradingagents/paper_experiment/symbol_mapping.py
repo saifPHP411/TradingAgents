@@ -111,26 +111,27 @@ def build_symbol_mapping(
         # For Alpaca, crypto pairs are typically USD-quoted
         exec_symbol = f"{base}/USD"
 
-        # Check execution venue if registry provided
-        exec_tradable = True
+        # Check execution venue - REQUIRED for crypto paper trading
+        # Fail closed if execution registry is not provided
+        if execution_registry is None:
+            rejected[canonical] = "execution venue registry not available (required for crypto paper trading)"
+            continue
+
+        exec_tradable = False
         exec_rules = None
-        if execution_registry is not None:
-            # Try the USD-quoted symbol first
-            exec_rules = execution_registry.get(exec_symbol)
-            if exec_rules is not None:
-                exec_tradable = exec_rules.tradable
-            else:
-                # Try other common quote assets
-                for quote in ("USDT", "USDC", "USD"):
-                    test_symbol = f"{base}/{quote}"
-                    exec_rules = execution_registry.get(test_symbol)
-                    if exec_rules is not None:
-                        exec_symbol = test_symbol
-                        exec_tradable = exec_rules.tradable
-                        break
-                else:
-                    exec_tradable = False
-                    exec_rules = None
+        # Try the USD-quoted symbol first
+        exec_rules = execution_registry.get(exec_symbol)
+        if exec_rules is not None:
+            exec_tradable = exec_rules.tradable
+        else:
+            # Try other common quote assets
+            for quote in ("USDT", "USDC", "USD"):
+                test_symbol = f"{base}/{quote}"
+                exec_rules = execution_registry.get(test_symbol)
+                if exec_rules is not None:
+                    exec_symbol = test_symbol
+                    exec_tradable = exec_rules.tradable
+                    break
 
         if not exec_tradable:
             rejected[canonical] = "not tradable on execution venue"

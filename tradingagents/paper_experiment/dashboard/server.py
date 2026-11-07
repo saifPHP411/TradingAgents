@@ -36,6 +36,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from tradingagents.risk.paper_parity import WHOLE_SHARES
 
+from ...crypto.symbols import parse_pair
 from ..broker import (
     BANNER,
     DECISION_SOURCE_CHOICES,
@@ -45,6 +46,7 @@ from ..broker import (
     PROVIDER_BAR_OPEN,
     BrokerError,
 )
+from ..experiment import ExperimentConfig, PaperExperiment
 from ..market_data_wiring import (
     DECISION_SOURCE_ENV,
     FRACTIONAL_SHARES_ENV,
@@ -86,6 +88,91 @@ Space- or comma-separated, e.g. ``"BTC/USD ETH/USD"``. It selects what the
 dashboard *displays*; it never decides what can be traded — the venue's own
 listing and the risk engine do that.
 """
+
+EXPERIMENT_SYMBOLS_ENV = "TRADINGAGENTS_EXPERIMENT_SYMBOLS"
+"""Environment variable naming the experiment symbols (canonical crypto pairs).
+
+Space- or comma-separated, e.g. ``"BTC/USDT ETH/USDT"``. Used to create the
+experiment idempotently on first startup.
+"""
+
+DEFAULT_CRYPTO_SYMBOLS = ("BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT",
+                          "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "LTC/USDT", "BCH/USDT")
+
+
+def _ensure_experiment(root: Path, *, crypto_symbols: tuple[str, ...] = ()) -> None:
+    """Idempotently create a crypto experiment if one doesn't exist.
+
+    This is called at dashboard startup to guarantee that the experiment
+    directory has a valid `session_state.json` before any dashboard component
+    tries to read it. It never overwrites an existing experiment, never resets
+    state, never auto-starts the worker, and never submits orders.
+
+    Args:
+        root: Experiment root directory.
+        crypto_symbols: Canonical crypto pairs to use if creating a new experiment.
+                       If empty, falls back to DEFAULT_CRYPTO_SYMBOLS.
+
+    Raises:
+        RuntimeError: If experiment creation fails for any reason.
+    """
+    root = Path(root)
+    state_path = root / "session_state.json"
+    if state_path.exists():
+        # Experiment already exists - do nothing, preserve existing state
+        return
+
+    # No experiment exists - create one using symbols from env or defaults
+    symbols = tuple(crypto_symbols) if crypto_symbols else DEFAULT_CRYPTO_SYMBOLS
+
+    # Validate symbols are well-formed pairs
+    for sym in symbols:
+        try:
+            parse_pair(sym)
+        except Exception as exc:
+            raise RuntimeError(f"Invalid crypto symbol {sym!r}: {exc}") from exc
+
+    # Build a frozen-baseline source (no network call) for the experiment
+    # Use the same frozen dataset the CLI uses
+    from tradingagents.baseline.data import load_feed
+    from tradingagents.llm_evaluation.protocol import DEFAULT_PROTOCOL
+
+    from ..sources import FrozenPriceSource
+
+    try:
+        feed = load_feed(DEFAULT_PROTOCOL)
+    except Exception as exc:
+        raise RuntimeError(f"the frozen dataset is unavailable: {exc}") from exc
+
+    # Use the frozen baseline as the data source - it's local and requires no API
+    source = FrozenPriceSource(feed, name="frozen_baseline")
+
+    # Build experiment config
+    config = ExperimentConfig.from_protocol(
+        symbols=symbols,
+        provider="frozen",
+        model="frozen",
+    )
+
+    # Create the experiment
+    experiment = PaperExperiment(
+        source=source,
+        config=config,
+        root=root,
+        inference=None,  # No inference needed for frozen baseline
+    )
+
+    try:
+        experiment.ensure_created()
+        experiment.save_state()
+    except Exception as exc:
+        # Clean up any partial state
+        if state_path.exists():
+            state_path.unlink()
+        journal_path = root / "journal.json"
+        if journal_path.exists():
+            journal_path.unlink()
+        raise RuntimeError(f"Failed to create crypto experiment: {exc}") from exc
 
 
 class Dashboard:
@@ -782,6 +869,9 @@ def serve(
     than by an empty engine. It is off by default: with no symbols and no live
     flag the crypto section reports *not started* instead of inventing data.
     """
+    # Ensure crypto experiment exists (idempotent, safe to call on every startup)
+    _ensure_experiment(root, crypto_symbols=crypto_symbols)
+
     resolved = resolve_token(token)
     require_bindable(host, resolved)
     crypto_engine = None

@@ -1807,6 +1807,10 @@ class PaperTradingWorker:
         # used only to keep the honest no-trade reason visible once the source
         # stops re-offering it. In-memory: a restart is a fresh observation.
         self._last_offered_decision_id: str | None = None
+        # Build symbol mapping lookup for crypto path (canonical -> execution)
+        self._symbol_map: dict[str, SymbolMapping] = {
+            m.canonical: m for m in config.symbol_mappings
+        }
         # The loop. `_lock` serialises control transitions (start/stop) and is the
         # same lock a cycle holds while it runs, so a stop cannot interleave a
         # start with a cycle mid-flight. `_stop_event` is the loop's stop signal.
@@ -2215,7 +2219,23 @@ class PaperTradingWorker:
             return result
 
         try:
-            reference_price = self.market_data.price(decision.symbol)
+            # Translate decision symbol to execution symbol if symbol mappings are configured
+            # The decision carries the canonical symbol (e.g., BTC/USDT); broker needs execution symbol (e.g., BTC/USD)
+            execution_symbol = decision.symbol
+            market_data_symbol = decision.symbol
+
+            if self._symbol_map and decision.symbol in self._symbol_map:
+                mapping = self._symbol_map[decision.symbol]
+                execution_symbol = mapping.execution_symbol
+                market_data_symbol = mapping.market_data_symbol
+            elif self._symbol_map:
+                # Decision symbol not in mappings - reject
+                raise WorkerError(
+                    f"decision symbol {decision.symbol!r} has no valid symbol mapping; "
+                    f"available mappings: {list(self._symbol_map.keys())}"
+                )
+
+            reference_price = self.market_data.price(market_data_symbol)
         except MarketDataError as exc:
             self.state.last_error = f"MarketDataError: {exc}"
             self._save()
@@ -2291,7 +2311,7 @@ class PaperTradingWorker:
 
         try:
             order = broker.submit_order(
-                symbol=decision.symbol,
+                symbol=execution_symbol,
                 quantity=quantity,
                 side=decision.side,
                 reference_price=reference_price,
@@ -2418,8 +2438,18 @@ class PaperTradingWorker:
             take_profit = level.get("take_profit")
             if stop_loss is None and take_profit is None:
                 continue
+
+            # Translate execution symbol to market data symbol for pricing
+            market_data_symbol = symbol
+            if self._symbol_map:
+                # Find mapping by execution symbol
+                for _canonical, mapping in self._symbol_map.items():
+                    if mapping.execution_symbol == symbol:
+                        market_data_symbol = mapping.market_data_symbol
+                        break
+
             try:
-                price = self.market_data.price(symbol)
+                price = self.market_data.price(market_data_symbol)
             except MarketDataError as exc:
                 self.state.last_error = f"MarketDataError: {exc}"
                 self._save()
