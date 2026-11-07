@@ -253,6 +253,17 @@ def trade_stream_names(symbols: Iterable[str]) -> list[str]:
     return [f"{binance_symbol(s).lower()}@trade" for s in symbols]
 
 
+def ticker_stream_names(symbols: Iterable[str]) -> list[str]:
+    """The ``<market>@ticker`` stream names for a set of symbols.
+
+    The ``@trade`` stream carries only a price and a quantity, but the live view
+    also needs the bid, the ask and the rolling 24-hour statistics. The
+    ``@ticker`` stream is the one that carries them, and it pushes on the venue's
+    own cadence, so the dashboard does not have to poll for them.
+    """
+    return [f"{binance_symbol(s).lower()}@ticker" for s in symbols]
+
+
 __all__ = [
     "REQUEST_TIMEOUT",
     "REST_HOST",
@@ -260,5 +271,6 @@ __all__ = [
     "BinancePublicClient",
     "binance_symbol",
     "kline_stream_names",
+    "ticker_stream_names",
     "trade_stream_names",
 ]

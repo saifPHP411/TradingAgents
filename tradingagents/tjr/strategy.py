@@ -78,11 +78,19 @@ class TjrStrategy:
 class MemoTjrStrategy(TjrStrategy):
     """A :class:`TjrStrategy` that caches its pure evaluations for one study run.
 
-    The rule chain is a pure function of the bars closed by an instant, so its
-    answer for a ``(symbol, session, instant)`` is identical in every scenario of a
-    study. Memoizing it is what makes a multi-scenario study of ten symbols finish
-    in minutes rather than hours, and the cache is exact — a miss calls the real
-    function — so a cached run and a cold run produce identical trades.
+    The rule chain is a pure function of the bars closed by an instant *and of
+    the settings it is run with*, so its answer for a ``(symbol, session,
+    instant)`` is identical across the scenarios of a study that share those
+    settings. Memoizing it is what makes a multi-scenario study of ten symbols
+    finish in minutes rather than hours, and the cache is exact — a miss calls
+    the real function — so a cached run and a cold run produce identical trades.
+
+    The cache key carries the **settings and the session policy** as well as the
+    instant. The rule chain reads both: a different swing lookback finds
+    different swings, a different minimum R:R rejects a different setup, and a
+    different session policy labels and bounds a different session. A key that
+    omitted them would hand a sensitivity variant the *baseline's* answer and
+    report a difference that the variation never produced.
 
     The cache key carries no book state because none of the rule chain reads the
     book; memoizing anything that did would be wrong, so nothing that does is
@@ -93,8 +101,19 @@ class MemoTjrStrategy(TjrStrategy):
         super().__init__(**kwargs)
         self._cache = cache
 
+    def _cache_key(self, symbol: str, session: str, as_of: pd.Timestamp) -> tuple:
+        """The identity of an evaluation: the instant *and* what it was run with."""
+        return (
+            symbol,
+            session,
+            pd.Timestamp(as_of).isoformat(),
+            self.settings,
+            self.session_policy,
+            self.allow_short,
+        )
+
     def evaluate(self, symbol: str, session: str, as_of: pd.Timestamp) -> TjrEvaluation:
-        key = (symbol, session, pd.Timestamp(as_of).isoformat())
+        key = self._cache_key(symbol, session, as_of)
         hit = self._cache.get(key)
         if hit is None:
             hit = super().evaluate(symbol, session, as_of)

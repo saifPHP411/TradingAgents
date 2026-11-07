@@ -40,7 +40,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from .binance import WS_HOST, kline_stream_names, trade_stream_names
+from .binance import WS_HOST, kline_stream_names, ticker_stream_names, trade_stream_names
 from .symbols import parse_pair
 from .types import Candle, PublicTrade, Ticker, candle_from_binance_kline
 
@@ -173,6 +173,9 @@ class MarketStream:
         self._seen_trades: set[int] = set()
         self._seen_trade_order: list[int] = []
         self._last_candle_open: dict[tuple[str, str], datetime] = {}
+        self._watermarks: dict[str, datetime] = {}
+        """The last accepted event time, per stream. A single global watermark
+        would reject the venue's normal interleaving of the 1m and 5m streams."""
         self._last_event_at: datetime | None = None
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -182,7 +185,8 @@ class MarketStream:
     # -- URLs -------------------------------------------------------------
 
     def _subscription_names(self) -> tuple[str, ...]:
-        names: list[str] = trade_stream_names(self.symbols)
+        names: list[str] = ticker_stream_names(self.symbols)
+        names += trade_stream_names(self.symbols)
         for interval in self.intervals:
             names += kline_stream_names(self.symbols, interval)
         return tuple(names)
@@ -304,13 +308,25 @@ class MarketStream:
         event_type = event.get("e")
         self.status.messages += 1
         self.status.last_message_at = self._clock().isoformat()
-        if event_type == "trade":
+        # The venue spells the rolling-ticker event ``24hrTicker``; ``ticker`` is
+        # accepted as the alias some venues use for the same payload.
+        if event_type in ("24hrTicker", "ticker"):
+            self._handle_ticker(event)
+        elif event_type == "trade":
             self._handle_trade(event)
         elif event_type == "kline":
             self._handle_kline(event)
 
-    def _valid_timestamp(self, stamp: datetime | None) -> bool:
-        """Whether an event's timestamp is acceptable: not skewed, not out of order."""
+    def _valid_timestamp(self, stamp: datetime | None, *, key: str = "") -> bool:
+        """Whether an event's timestamp is acceptable: not skewed, not out of order.
+
+        The out-of-order check is **per stream**, not global. A 5-minute bar's open
+        time is five minutes behind a 1-minute bar's, and the venue interleaves
+        them; a single global watermark would reject every 5m kline that arrived
+        after a 1m one, which is the normal case. Each stream therefore keeps its
+        own watermark, and an event is refused only if it is older than the last
+        event *of the same stream*.
+        """
         if stamp is None:
             self.status.rejected += 1
             return False
@@ -318,12 +334,33 @@ class MarketStream:
         if (stamp - now).total_seconds() > self.future_tolerance_seconds:
             self.status.rejected += 1
             return False
-        if self._last_event_at is not None and stamp < self._last_event_at:
-            self.status.rejected += 1
-            return False
-        self._last_event_at = stamp
-        self.status.last_event_at = stamp.isoformat()
+        with self._lock:
+            previous = self._watermarks.get(key)
+            if previous is not None and stamp < previous:
+                self.status.rejected += 1
+                return False
+            self._watermarks[key] = stamp
+            if self._last_event_at is None or stamp > self._last_event_at:
+                self._last_event_at = stamp
+        self.status.last_event_at = self._last_event_at.isoformat()
         return True
+
+    def _handle_ticker(self, event: dict) -> None:
+        """A rolling 24-hour ticker event: the bid, the ask and the day's stats.
+
+        The venue's ``@ticker`` stream carries the same fields as the REST
+        ``ticker/24hr`` endpoint, so it is parsed by the same normalizer. This is
+        what gives the live view its bid, ask, spread and 24-hour change without
+        a poll.
+        """
+        ticker = Ticker.from_binance(event)
+        if ticker is None:
+            return
+        ticker = replace(ticker, symbol=parse_pair(ticker.symbol).canonical)
+        if not self._valid_timestamp(ticker.observed_at, key=f"ticker:{ticker.symbol}"):
+            return
+        if self.callbacks.on_ticker is not None:
+            self.callbacks.on_ticker(ticker)
 
     def _handle_trade(self, event: dict) -> None:
         trade = PublicTrade.from_binance(event)
@@ -332,7 +369,7 @@ class MarketStream:
         # Normalize the venue spelling (``BTCUSDT``) to the canonical pair so a
         # trade is keyed the same as a candle and a ticker for the same instrument.
         trade = replace(trade, symbol=parse_pair(trade.symbol).canonical)
-        if not self._valid_timestamp(trade.observed_at):
+        if not self._valid_timestamp(trade.observed_at, key=f"trade:{trade.symbol}"):
             return
         if trade.trade_id is not None:
             if trade.trade_id in self._seen_trades:
@@ -373,9 +410,9 @@ class MarketStream:
         # so validating it would reject every in-progress bar — the one a display
         # needs. The closed/forming split is the venue's own ``x`` flag, carried on
         # the candle and re-checked by the engine against the decision instant.
-        if not self._valid_timestamp(candle.open_time):
-            return
         key = (candle.symbol, candle.interval)
+        if not self._valid_timestamp(candle.open_time, key=f"kline:{key[0]}:{key[1]}"):
+            return
         closed = bool(kline.get("x"))
         # Only a *closed* bar may reach the strategy; an in-progress bar is carried
         # for display and is never a decision input.

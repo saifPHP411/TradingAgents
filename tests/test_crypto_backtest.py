@@ -43,7 +43,9 @@ from tradingagents.crypto.backtest.study import (
 )
 from tradingagents.execution.costs import CostModel
 from tradingagents.tjr.frames import IntradaySeries
-from tradingagents.tjr.sessions import utc_day_session
+from tradingagents.tjr.rules import TjrSettings
+from tradingagents.tjr.sessions import crypto_named_session, utc_day_session
+from tradingagents.tjr.strategy import MemoTjrStrategy
 
 # A bullish session extended so the entry's target is reached before the bell.
 WIN = BULLISH_BARS[:15] + [
@@ -296,6 +298,58 @@ class TestSensitivity:
         series = _crypto_series()
         results = run_sensitivity(series, _config())
         assert len(results) == len(sensitivity_variants(_config()))
+
+    def test_a_variant_is_not_answered_from_the_baselines_cache(self):
+        """A variation must be evaluated with its own settings.
+
+        The study memoizes the rule chain's pure evaluations across a study's
+        scenarios, so the cache key has to carry the settings and the session
+        policy. If it did not, a variant would be handed the *baseline's*
+        answer and the sensitivity table would report a difference that the
+        variation never produced — a fabricated result, and a plausible one.
+        """
+        series = _crypto_series()
+        bundle = series["BTC/USD"]
+        cache: dict = {}
+        baseline = MemoTjrStrategy(
+            one_minute={"BTC/USD": bundle["1m"]},
+            five_minute={"BTC/USD": bundle["5m"]},
+            settings=TjrSettings(),
+            session_policy=utc_day_session(),
+            cache=cache,
+        )
+        variant = MemoTjrStrategy(
+            one_minute={"BTC/USD": bundle["1m"]},
+            five_minute={"BTC/USD": bundle["5m"]},
+            settings=TjrSettings(swing_lookback=1),
+            session_policy=utc_day_session(),
+            cache=cache,
+        )
+        instant = pd.Timestamp(f"{SESSION}T00:30:00+00:00")
+        baseline.evaluate("BTC/USD", SESSION, instant)
+        # The variant's evaluation must be its own, not the baseline's entry.
+        variant.evaluate("BTC/USD", SESSION, instant)
+        assert len(cache) == 2
+
+    def test_a_different_session_policy_is_not_answered_from_the_cache(self):
+        series = _crypto_series()
+        bundle = series["BTC/USD"]
+        cache: dict = {}
+        strategies = []
+        for policy in (utc_day_session(), crypto_named_session()):
+            strategies.append(
+                MemoTjrStrategy(
+                    one_minute={"BTC/USD": bundle["1m"]},
+                    five_minute={"BTC/USD": bundle["5m"]},
+                    settings=TjrSettings(),
+                    session_policy=policy,
+                    cache=cache,
+                )
+            )
+        instant = pd.Timestamp(f"{SESSION}T00:30:00+00:00")
+        for strategy in strategies:
+            strategy.evaluate("BTC/USD", SESSION, instant)
+        assert len(cache) == 2
 
 
 @pytest.mark.unit

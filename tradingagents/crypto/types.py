@@ -135,19 +135,46 @@ class Ticker:
 
     @classmethod
     def from_binance(cls, payload: dict) -> Ticker:
-        """Normalize a Binance ``/api/v3/ticker/24hr`` object."""
+        """Normalize a Binance 24-hour ticker.
+
+        The REST endpoint (``/api/v3/ticker/24hr``) and the WebSocket's
+        ``@ticker`` event carry the same fields under different names: the REST
+        object spells the close time ``closeTime``, while the stream event spells
+        it ``C`` (with ``E`` as the event time). Both are accepted, so the same
+        normalizer serves the snapshot and the live tape.
+        """
+        observed = _stamp(payload.get("closeTime"))
+        if observed is None:
+            observed = _stamp(payload.get("C"))
+        if observed is None:
+            observed = _stamp(payload.get("E"))
+
+        def first(*keys: str) -> float | None:
+            """The first key that holds a finite number, or ``None``.
+
+            A plain ``or`` would skip a legitimate zero — a last price of exactly
+            zero is not a real observation, but the *volume* may legitimately be
+            zero, and losing it would report a non-zero figure that the venue
+            never sent.
+            """
+            for key in keys:
+                value = _finite(payload.get(key))
+                if value is not None:
+                    return value
+            return None
+
         return cls(
-            symbol=str(payload.get("symbol") or "").upper(),
-            last=_finite(payload.get("lastPrice")),
-            bid=_finite(payload.get("bidPrice")),
-            ask=_finite(payload.get("askPrice")),
-            volume_24h=_finite(payload.get("volume")),
-            quote_volume_24h=_finite(payload.get("quoteVolume")),
-            high_24h=_finite(payload.get("highPrice")),
-            low_24h=_finite(payload.get("lowPrice")),
-            change_24h=_finite(payload.get("priceChange")),
-            change_percent_24h=_finite(payload.get("priceChangePercent")),
-            observed_at=_stamp(payload.get("closeTime")) or datetime.now(UTC),
+            symbol=str(payload.get("symbol") or payload.get("s") or "").upper(),
+            last=first("lastPrice", "c"),
+            bid=first("bidPrice", "b"),
+            ask=first("askPrice", "a"),
+            volume_24h=first("volume", "v"),
+            quote_volume_24h=first("quoteVolume", "q"),
+            high_24h=first("highPrice", "h"),
+            low_24h=first("lowPrice", "l"),
+            change_24h=first("priceChange", "p"),
+            change_percent_24h=first("priceChangePercent", "P"),
+            observed_at=observed or datetime.now(UTC),
         )
 
 

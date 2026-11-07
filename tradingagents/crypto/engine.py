@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -166,10 +166,44 @@ class CryptoMarketDataEngine:
         return self._stream.status.to_dict(now=self._clock())
 
     def _on_stream_ticker(self, ticker: Ticker) -> None:
+        """Merge a streamed ticker into the symbol's state.
+
+        The stream's ``@ticker`` event carries the bid, the ask and the 24-hour
+        statistics, so it replaces the REST ticker wholesale. A *trade* event also
+        produces a ticker, but only with a price: that one updates the price and
+        leaves the richer fields from the last full ticker in place, rather than
+        blanking the bid and the ask.
+
+        A stream ticker that is **older** than the ticker the engine already holds
+        does not replace it. The engine's price is the newer of the two sources,
+        so overwriting a newer ticker with an older one would make the view
+        report a stale price as the current one.
+        """
         with self._lock:
             state = self._state.get(ticker.symbol)
             if state is None:
                 return
+            previous = state.ticker
+            if previous is not None and ticker.observed_at < previous.observed_at:
+                # Older than what we already hold: keep the ticker, but let the
+                # stream's own price field carry the observation.
+                state.stream_price = ticker.last
+                state.stream_price_at = ticker.observed_at
+                return
+            price_only = ticker.bid is None and ticker.ask is None
+            if price_only and previous is not None:
+                ticker = replace(
+                    ticker,
+                    bid=previous.bid,
+                    ask=previous.ask,
+                    volume_24h=previous.volume_24h,
+                    quote_volume_24h=previous.quote_volume_24h,
+                    high_24h=previous.high_24h,
+                    low_24h=previous.low_24h,
+                    change_24h=previous.change_24h,
+                    change_percent_24h=previous.change_percent_24h,
+                )
+            state.ticker = ticker
             state.stream_price = ticker.last
             state.stream_price_at = ticker.observed_at
 

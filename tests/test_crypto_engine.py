@@ -138,6 +138,53 @@ class TestNewestPriceWins:
         assert engine.snapshot("BTC/USDT")["price"] == 100.0
 
 
+class TestStreamTickerMerge:
+    """A streamed ticker carries the bid, the ask and the day's statistics.
+
+    The trade stream carries only a price, so the live view's bid, ask, spread
+    and 24-hour change have to come from the ticker's own stream event. These
+    tests pin that a stream ticker reaches the view's ticker, and that a
+    price-only trade tick does not blank the fields it does not carry.
+    """
+
+    def test_a_streamed_ticker_reaches_the_view(self):
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        engine = CryptoMarketDataEngine(symbols=["BTC/USDT"], client=_FakeClient(), clock=lambda: now)
+        engine._on_stream_ticker(_ticker("BTC/USDT", last=101.0, at=now))
+        ticker = engine.snapshot("BTC/USDT")["ticker"]
+        assert ticker is not None
+        assert ticker["last"] == 101.0
+        assert ticker["bid"] == 100.9
+        assert ticker["ask"] == 101.1
+
+    def test_a_price_only_tick_keeps_the_bid_and_the_ask(self):
+        """A trade tick has a price but no book; it must not blank the book."""
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        client = _FakeClient(tickers={"BTC/USDT": _ticker("BTC/USDT", last=100.0, at=now)})
+        engine = CryptoMarketDataEngine(symbols=["BTC/USDT"], client=client, clock=lambda: now)
+        engine.refresh_tickers()
+        engine._on_stream_ticker(
+            Ticker(
+                symbol="BTC/USDT",
+                last=100.5,
+                bid=None,
+                ask=None,
+                volume_24h=None,
+                quote_volume_24h=None,
+                high_24h=None,
+                low_24h=None,
+                change_24h=None,
+                change_percent_24h=None,
+                observed_at=now + timedelta(seconds=1),
+            )
+        )
+        ticker = engine.snapshot("BTC/USDT")["ticker"]
+        assert ticker["last"] == 100.5
+        assert ticker["bid"] == 99.9
+        assert ticker["ask"] == 100.1
+        assert ticker["volume_24h"] == 100.0
+
+
 class TestClosedVersusForming:
     def test_only_a_closed_bar_is_kept_as_closed(self):
         now = datetime(2026, 1, 1, 0, 5, tzinfo=UTC)
