@@ -70,15 +70,21 @@ class TradingAgentsGraph:
         self.config = config or DEFAULT_CONFIG
         self.callbacks = callbacks or []
 
+        # A real model call is what makes a captured decision genuine inference.
+        # The InferenceObserver below rides the callbacks handed to the *real*
+        # provider clients; a scripted/stubbed model never fires it, so a mock run
+        # cannot be mislabelled as genuine. Read via `inference_observed`.
         set_config(self.config)
 
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
         os.makedirs(self.config["results_dir"], exist_ok=True)
 
-        extra = {"callbacks": self.callbacks} if self.callbacks else {}
+        from tradingagents.llm_clients.observed import InferenceObserver
+
+        self._inference_observer = InferenceObserver()
+        extra = {"callbacks": [*self.callbacks, self._inference_observer]}
         self.deep_thinking_llm = create_tier_client(self.config, "deep", **extra).get_llm()
         self.quick_thinking_llm = create_tier_client(self.config, "quick", **extra).get_llm()
-
         self.memory_log = TradingMemoryLog(self.config)
 
         self.conditional_logic = ConditionalLogic(
@@ -251,6 +257,18 @@ class TradingAgentsGraph:
                 self.config["data_cache_dir"], company_name, str(trade_date),
                 self._run_signature(asset_type, portfolio),
             )
+
+    @property
+    def inference_observed(self) -> bool:
+        """Whether a real model call completed for this graph.
+
+        Backed by the observer on the real provider clients. A graph built with a
+        stubbed model reports ``False``, so the capture path cannot label a mock
+        run as genuine inference. The name is read by ``capture`` via
+        ``graph_observed_real_inference``.
+        """
+        observer = getattr(self, "_inference_observer", None)
+        return bool(observer is not None and observer.observed)
 
     def run_settings(self) -> dict:
         """What produces this graph's runs, for the saved report and state log.

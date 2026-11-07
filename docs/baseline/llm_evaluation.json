@@ -1,0 +1,932 @@
+{
+  "artifact_schema_version": "1.0.0",
+  "generated_at": "2026-10-28T13:47:08.237745+00:00",
+  "status": "LLM BASELINE BLOCKED",
+  "mode": "blocked",
+  "evaluation_mode": "blocked",
+  "metadata": {
+    "package_version": "0.7.1",
+    "python": "3.13.15",
+    "platform": "Linux-6.8.0-1055-gke-x86_64-with-glibc2.41"
+  },
+  "protocol": {
+    "version": "1.0.0",
+    "universe": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "TLT",
+      "GLD"
+    ],
+    "benchmark": "SPY",
+    "start": "2015-01-02",
+    "end": "2024-12-30",
+    "timeframe": "1 day",
+    "initial_cash": 100000.0,
+    "currency": "USD",
+    "holding_period_days": 40,
+    "splits": {
+      "development": [
+        "2015-01-02",
+        "2018-12-31"
+      ],
+      "validation": [
+        "2019-01-01",
+        "2021-12-31"
+      ],
+      "test": [
+        "2022-01-01",
+        "2024-12-30"
+      ]
+    },
+    "decision_frequency_sessions": 5,
+    "max_decisions": 120,
+    "input_scope": "price_only",
+    "prompt_version": "tradingagents-default",
+    "graph_version": "tradingagents-graph",
+    "default_position_size": 0.2,
+    "stop_loss_pct": 0.2,
+    "temperature": null,
+    "config_hash": "890a5ee7106d51c1a2bc84a8a6889f84522c2254c1a81fb947cfd03cdcca39b9",
+    "inherited_from_baseline": "1.0.0",
+    "dataset_checksums": {
+      "SPY": "302f5df85a306f701295a80050546f330d5f10205ff39e85427df958cf12e766",
+      "QQQ": "1236a60c6bfa298993223aff05bd91a1733b915e74f7e4e5b4ecebd15a0958f8",
+      "IWM": "6277aad9252a78208503d82364ad05f3145a9719e2382860b6ce33e47eef3b9e",
+      "TLT": "e5540dc4ad890b340816dd6bf88e7f26ce6246148a4ca7626b46a7e0bcf9c132",
+      "GLD": "b065ea9e171100235aac80c483b4da0a82a9bf92ae80d6c1fa0c9f0b3eca832f"
+    }
+  },
+  "credentials": {
+    "keyed_providers": [
+      "openai",
+      "google",
+      "anthropic",
+      "xai",
+      "deepseek",
+      "minimax",
+      "openrouter",
+      "mistral",
+      "groq",
+      "nvidia",
+      "azure",
+      "openai_compatible"
+    ],
+    "non_key_providers": [
+      "chatgpt",
+      "bedrock"
+    ],
+    "env_var_by_provider": {
+      "openai": "OPENAI_API_KEY",
+      "google": "GOOGLE_API_KEY",
+      "anthropic": "ANTHROPIC_API_KEY",
+      "xai": "XAI_API_KEY",
+      "deepseek": "DEEPSEEK_API_KEY",
+      "minimax": "MINIMAX_API_KEY",
+      "openrouter": "OPENROUTER_API_KEY",
+      "mistral": "MISTRAL_API_KEY",
+      "groq": "GROQ_API_KEY",
+      "nvidia": "NVIDIA_API_KEY",
+      "azure": "AZURE_OPENAI_API_KEY",
+      "openai_compatible": "OPENAI_COMPATIBLE_API_KEY"
+    },
+    "providers_with_credentials": [],
+    "providers_without_credentials": [
+      "openai",
+      "google",
+      "anthropic",
+      "xai",
+      "deepseek",
+      "minimax",
+      "openrouter",
+      "mistral",
+      "groq",
+      "nvidia",
+      "azure",
+      "openai_compatible"
+    ],
+    "any_credential_available": false,
+    "local_endpoint_configured": false
+  },
+  "provider_readiness": {
+    "providers": {
+      "anthropic": {
+        "provider": "anthropic",
+        "transport": "anthropic",
+        "credential_requirement": "api_key",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "pay-as-you-go API; no free API tier documented (checked 2026-10-28)",
+        "base_url": null,
+        "notes": ""
+      },
+      "google": {
+        "provider": "google",
+        "transport": "google",
+        "credential_requirement": "api_key",
+        "api_key_env": "GOOGLE_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "yes",
+        "free_tier_source": "https://ai.google.dev/gemini-api/docs/rate-limits",
+        "free_tier_note": "Gemini documents a Free tier with per-model RPM/TPM/RPD limits; moving to Tier 1 requires setting up billing (verified 2026-10-28).",
+        "base_url": null,
+        "notes": ""
+      },
+      "azure": {
+        "provider": "azure",
+        "transport": "azure_openai",
+        "credential_requirement": "api_key",
+        "api_key_env": "AZURE_OPENAI_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": null,
+        "notes": ""
+      },
+      "bedrock": {
+        "provider": "bedrock",
+        "transport": "aws_bedrock",
+        "credential_requirement": "aws_credential_chain",
+        "api_key_env": null,
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": null,
+        "notes": ""
+      },
+      "openai": {
+        "provider": "openai",
+        "transport": "openai_responses",
+        "credential_requirement": "api_key",
+        "api_key_env": "OPENAI_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "pay-as-you-go API; no free API tier documented (checked 2026-10-28)",
+        "base_url": null,
+        "notes": ""
+      },
+      "xai": {
+        "provider": "xai",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "XAI_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": "https://api.x.ai/v1",
+        "notes": ""
+      },
+      "deepseek": {
+        "provider": "deepseek",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "no free API tier found on the official pricing page (checked 2026-10-28)",
+        "base_url": "https://api.deepseek.com",
+        "notes": ""
+      },
+      "qwen": {
+        "provider": "qwen",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "notes": ""
+      },
+      "qwen-cn": {
+        "provider": "qwen-cn",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "DASHSCOPE_CN_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "notes": ""
+      },
+      "glm": {
+        "provider": "glm",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "ZHIPU_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": "https://api.z.ai/api/paas/v4/",
+        "notes": ""
+      },
+      "glm-cn": {
+        "provider": "glm-cn",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "ZHIPU_CN_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4/",
+        "notes": ""
+      },
+      "minimax": {
+        "provider": "minimax",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "MINIMAX_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": "https://api.minimax.io/v1",
+        "notes": ""
+      },
+      "minimax-cn": {
+        "provider": "minimax-cn",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "MINIMAX_CN_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": "https://api.minimaxi.com/v1",
+        "notes": ""
+      },
+      "openrouter": {
+        "provider": "openrouter",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "yes",
+        "free_tier_source": "https://openrouter.ai/docs/api-reference/limits",
+        "free_tier_note": "OpenRouter documents free model variants (IDs ending in ':free') with their own per-minute/per-day caps; the caps depend on credits purchased all-time (verified 2026-10-28).",
+        "base_url": "https://openrouter.ai/api/v1",
+        "notes": ""
+      },
+      "mistral": {
+        "provider": "mistral",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "MISTRAL_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": "https://api.mistral.ai/v1",
+        "notes": ""
+      },
+      "kimi": {
+        "provider": "kimi",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "MOONSHOT_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": "https://api.moonshot.ai/v1",
+        "notes": ""
+      },
+      "groq": {
+        "provider": "groq",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "GROQ_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "yes",
+        "free_tier_source": "https://console.groq.com/docs/rate-limits",
+        "free_tier_note": "Groq documents a 'Free Plan Limits' table alongside 'Developer Plan Limits' (verified 2026-10-28). A free-plan key is required; the plan is free of charge but needs a Groq account.",
+        "base_url": "https://api.groq.com/openai/v1",
+        "notes": ""
+      },
+      "nvidia": {
+        "provider": "nvidia",
+        "transport": "openai_compatible",
+        "credential_requirement": "api_key",
+        "api_key_env": "NVIDIA_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "notes": ""
+      },
+      "ollama": {
+        "provider": "ollama",
+        "transport": "openai_compatible_local",
+        "credential_requirement": "none_or_optional",
+        "api_key_env": null,
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "yes",
+        "free_tier_source": "https://ollama.com",
+        "free_tier_note": "A local Ollama runtime serves models with no account and no per-token cost; it needs a machine able to run the model (verified 2026-10-28).",
+        "base_url": "http://localhost:11434/v1",
+        "notes": ""
+      },
+      "chatgpt": {
+        "provider": "chatgpt",
+        "transport": "chatgpt_signin",
+        "credential_requirement": "chatgpt_signin",
+        "api_key_env": null,
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": "https://api.openai.com/v1",
+        "notes": ""
+      },
+      "openai_compatible": {
+        "provider": "openai_compatible",
+        "transport": "openai_compatible_generic",
+        "credential_requirement": "none_or_optional",
+        "api_key_env": "OPENAI_COMPATIBLE_API_KEY",
+        "api_key_present": false,
+        "needs_structured_output": true,
+        "free_tier_documented": "unverified",
+        "free_tier_source": "",
+        "free_tier_note": "",
+        "base_url": null,
+        "notes": ""
+      }
+    },
+    "usable_now": [],
+    "free_tier_options": [
+      "google",
+      "groq",
+      "ollama",
+      "openrouter"
+    ],
+    "local_endpoint_configured": false,
+    "any_provider_usable": false,
+    "checked_on": "2026-10-28",
+    "network_probed": false,
+    "note": "Readiness is derived from environment-variable *names* and the client registries; no credential value is read into this report and no provider was contacted. A documented free tier is not proof a key is held; a key is not proof the tier is free."
+  },
+  "capture_status": {
+    "evaluation_mode": "blocked",
+    "provider_configured": false,
+    "genuine_inference_request_succeeded": false,
+    "decision_record_captured": false,
+    "inputs_reproducible": false,
+    "inputs_point_in_time_safe": true,
+    "historical_evaluation_allowed": false,
+    "historical_evaluation_scope": "price_only",
+    "full_graph_historical_evaluation_allowed": false,
+    "prospective_paper_experiment_possible": false,
+    "blocked_prerequisites": [
+      "no provider credential in this environment; set one of OPENAI_API_KEY, GOOGLE_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY, DEEPSEEK_API_KEY, MINIMAX_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, AZURE_OPENAI_API_KEY, OPENAI_COMPATIBLE_API_KEY (or a local OpenAI-compatible endpoint) to run genuine inference",
+      "no genuine decision record set was captured here; run the opt-in smoke test (python -m tradingagents.llm_evaluation.smoke) with a credential, or supply a captured set to build_evaluation(record_set=...)",
+      "the captured record has no reproducible price window (bar_count 0 or an unavailable snapshot), so it cannot anchor a prospective paper experiment; re-capture against a session the frozen dataset covers, e.g. python -m tradingagents.llm_evaluation.smoke --snapshot-out <path>"
+    ],
+    "note": "A captured current inference is not automatically a valid historical backtest observation. Input reproducibility (the replay sees the same bars) is distinct from point-in-time safety (those bars were available at the decision time)."
+  },
+  "dataset_checksums": {
+    "SPY": "302f5df85a306f701295a80050546f330d5f10205ff39e85427df958cf12e766",
+    "QQQ": "1236a60c6bfa298993223aff05bd91a1733b915e74f7e4e5b4ecebd15a0958f8",
+    "IWM": "6277aad9252a78208503d82364ad05f3145a9719e2382860b6ce33e47eef3b9e",
+    "TLT": "e5540dc4ad890b340816dd6bf88e7f26ce6246148a4ca7626b46a7e0bcf9c132",
+    "GLD": "b065ea9e171100235aac80c483b4da0a82a9bf92ae80d6c1fa0c9f0b3eca832f"
+  },
+  "point_in_time": {
+    "scope": "price_only",
+    "agent_dependency_matrix": {
+      "market": {
+        "agent": "Market Analyst",
+        "report_key": "market_report",
+        "tools": [
+          "get_stock_data",
+          "get_indicators",
+          "get_verified_market_snapshot"
+        ],
+        "tool_vendors": {
+          "get_stock_data": [
+            "alpha_vantage",
+            "yfinance"
+          ],
+          "get_indicators": [
+            "alpha_vantage",
+            "yfinance"
+          ],
+          "get_verified_market_snapshot": []
+        },
+        "sources": [
+          "yahoo_prices",
+          "yahoo_indicators"
+        ],
+        "source_details": {
+          "yahoo_prices": {
+            "classification": "PIT_VERIFIED",
+            "historical": true,
+            "has_availability_timestamp": true,
+            "revisions_possible": false,
+            "required_for_graph": true,
+            "disables_cleanly": false,
+            "internet_access": true
+          },
+          "yahoo_indicators": {
+            "classification": "PIT_VERIFIED",
+            "historical": true,
+            "has_availability_timestamp": true,
+            "revisions_possible": false,
+            "required_for_graph": true,
+            "disables_cleanly": false,
+            "internet_access": true
+          }
+        }
+      },
+      "social": {
+        "agent": "Sentiment Analyst",
+        "report_key": "sentiment_report",
+        "tools": [],
+        "tool_vendors": {},
+        "sources": [
+          "yahoo_news",
+          "stocktwits",
+          "reddit"
+        ],
+        "source_details": {
+          "yahoo_news": {
+            "classification": "PIT_PARTIALLY_VERIFIED",
+            "historical": true,
+            "has_availability_timestamp": true,
+            "revisions_possible": false,
+            "required_for_graph": true,
+            "disables_cleanly": false,
+            "internet_access": true
+          },
+          "stocktwits": {
+            "classification": "PIT_PARTIALLY_VERIFIED",
+            "historical": true,
+            "has_availability_timestamp": true,
+            "revisions_possible": false,
+            "required_for_graph": true,
+            "disables_cleanly": false,
+            "internet_access": true
+          },
+          "reddit": {
+            "classification": "PIT_PARTIALLY_VERIFIED",
+            "historical": true,
+            "has_availability_timestamp": true,
+            "revisions_possible": false,
+            "required_for_graph": true,
+            "disables_cleanly": false,
+            "internet_access": true
+          }
+        }
+      },
+      "news": {
+        "agent": "News Analyst",
+        "report_key": "news_report",
+        "tools": [
+          "get_news",
+          "get_global_news",
+          "get_macro_indicators",
+          "get_prediction_markets"
+        ],
+        "tool_vendors": {
+          "get_news": [
+            "alpha_vantage",
+            "yfinance"
+          ],
+          "get_global_news": [
+            "alpha_vantage",
+            "yfinance"
+          ],
+          "get_macro_indicators": [
+            "fred"
+          ],
+          "get_prediction_markets": [
+            "polymarket"
+          ]
+        },
+        "sources": [
+          "yahoo_news",
+          "fred",
+          "polymarket"
+        ],
+        "source_details": {
+          "yahoo_news": {
+            "classification": "PIT_PARTIALLY_VERIFIED",
+            "historical": true,
+            "has_availability_timestamp": true,
+            "revisions_possible": false,
+            "required_for_graph": true,
+            "disables_cleanly": false,
+            "internet_access": true
+          },
+          "fred": {
+            "classification": "PIT_VERIFIED",
+            "historical": true,
+            "has_availability_timestamp": true,
+            "revisions_possible": true,
+            "required_for_graph": false,
+            "disables_cleanly": true,
+            "internet_access": true
+          },
+          "polymarket": {
+            "classification": "CURRENT_ONLY",
+            "historical": false,
+            "has_availability_timestamp": false,
+            "revisions_possible": false,
+            "required_for_graph": false,
+            "disables_cleanly": true,
+            "internet_access": true
+          }
+        }
+      },
+      "fundamentals": {
+        "agent": "Fundamentals Analyst",
+        "report_key": "fundamentals_report",
+        "tools": [
+          "get_fundamentals",
+          "get_balance_sheet",
+          "get_cashflow",
+          "get_income_statement",
+          "get_insider_transactions"
+        ],
+        "tool_vendors": {
+          "get_fundamentals": [
+            "alpha_vantage",
+            "yfinance"
+          ],
+          "get_balance_sheet": [
+            "alpha_vantage",
+            "sec_edgar",
+            "yfinance"
+          ],
+          "get_cashflow": [
+            "alpha_vantage",
+            "sec_edgar",
+            "yfinance"
+          ],
+          "get_income_statement": [
+            "alpha_vantage",
+            "sec_edgar",
+            "yfinance"
+          ],
+          "get_insider_transactions": [
+            "alpha_vantage",
+            "yfinance"
+          ]
+        },
+        "sources": [
+          "yahoo_profile",
+          "sec_edgar",
+          "insider_transactions"
+        ],
+        "source_details": {
+          "yahoo_profile": {
+            "classification": "CURRENT_ONLY",
+            "historical": false,
+            "has_availability_timestamp": false,
+            "revisions_possible": false,
+            "required_for_graph": true,
+            "disables_cleanly": false,
+            "internet_access": true
+          },
+          "sec_edgar": {
+            "classification": "PIT_PARTIALLY_VERIFIED",
+            "historical": true,
+            "has_availability_timestamp": true,
+            "revisions_possible": true,
+            "required_for_graph": true,
+            "disables_cleanly": false,
+            "internet_access": true
+          },
+          "insider_transactions": {
+            "classification": "CURRENT_ONLY",
+            "historical": false,
+            "has_availability_timestamp": false,
+            "revisions_possible": false,
+            "required_for_graph": true,
+            "disables_cleanly": false,
+            "internet_access": true
+          }
+        }
+      }
+    },
+    "source_classifications": {
+      "yahoo_prices": {
+        "classification": "PIT_VERIFIED",
+        "guard": "agents.tools.get_stock_data -> date_window.as_of_window",
+        "historical": true,
+        "has_availability_timestamp": true,
+        "revisions_possible": false,
+        "required_for_graph": true,
+        "disables_cleanly": false,
+        "internet_access": true,
+        "note": "The agent tool clamps the requested window's end to the run's date before the vendor is called, so a bar after it is never returned. The clamp is in the tool layer, not the vendor: a direct call to the vendor or the router bypasses it, which is why the backtester reads bars from MarketDataFeed rather than calling the vendor itself. Adjusted prices reflect later splits and dividends, so a historical price is the split-adjusted value rather than the price on the tape that day."
+      },
+      "yahoo_indicators": {
+        "classification": "PIT_VERIFIED",
+        "guard": "agents.tools.get_indicators -> date_window.as_of_window",
+        "historical": true,
+        "has_availability_timestamp": true,
+        "revisions_possible": false,
+        "required_for_graph": true,
+        "disables_cleanly": false,
+        "internet_access": true,
+        "note": "An indicator is computed from the price window, which is itself clamped to the run's date, so no future bar enters the calculation."
+      },
+      "sec_edgar": {
+        "classification": "PIT_PARTIALLY_VERIFIED",
+        "guard": "date_window.withhold_undated_statements",
+        "historical": true,
+        "has_availability_timestamp": true,
+        "revisions_possible": true,
+        "required_for_graph": true,
+        "disables_cleanly": false,
+        "internet_access": true,
+        "note": "EDGAR serves US filings as filed, which is the right shape for a backtest. A statement whose filing date the vendor does not expose is withheld from a historical run rather than assumed to predate it, so a historical run may see less than was available rather than more. Restatements are served as filed, which is the point, but a filing dated by acceptance time can be a day late."
+      },
+      "fred": {
+        "classification": "PIT_VERIFIED",
+        "guard": "fred.get_macro_data (observation_end + vintage pinning)",
+        "historical": true,
+        "has_availability_timestamp": true,
+        "revisions_possible": true,
+        "required_for_graph": false,
+        "disables_cleanly": true,
+        "internet_access": true,
+        "note": "Observations are requested up to the run's date, clamped to FRED's own today, and a series with a vintage is pinned to it, so a revision published later does not appear in an earlier run. Publication lags mean a run may see a release before its figures were public in the ordinary case; the clamp bounds the window but does not model each series' release calendar."
+      },
+      "yahoo_news": {
+        "classification": "PIT_PARTIALLY_VERIFIED",
+        "guard": "agents.tools.get_news -> date_window.as_of_window + in_window + coverage_gap",
+        "historical": true,
+        "has_availability_timestamp": true,
+        "revisions_possible": false,
+        "required_for_graph": true,
+        "disables_cleanly": false,
+        "internet_access": true,
+        "note": "Yahoo news search returns its latest items whatever window is asked for. Dated items are filtered to the window and an undated item is withheld from a historical run. A window the feed never observed is reported as unavailable rather than empty, so an absence is not invented."
+      },
+      "reddit": {
+        "classification": "PIT_PARTIALLY_VERIFIED",
+        "guard": "date_window.in_window + reddit._within_window + date_window.coverage_gap",
+        "historical": true,
+        "has_availability_timestamp": true,
+        "revisions_possible": false,
+        "required_for_graph": true,
+        "disables_cleanly": false,
+        "internet_access": true,
+        "note": "The search API serves recent posts, so a window older than its lookback is reported as unobserved. Posts are filtered on their own created_utc, and an undated post is withheld from a historical run."
+      },
+      "stocktwits": {
+        "classification": "PIT_PARTIALLY_VERIFIED",
+        "guard": "date_window.in_window + stocktwits._within_window + date_window.coverage_gap",
+        "historical": true,
+        "has_availability_timestamp": true,
+        "revisions_possible": false,
+        "required_for_graph": true,
+        "disables_cleanly": false,
+        "internet_access": true,
+        "note": "The public feed serves the latest messages, so only recent windows are observed and an older one is reported as unavailable. Messages are filtered on their created_at."
+      },
+      "yahoo_profile": {
+        "classification": "CURRENT_ONLY",
+        "guard": "date_window.withhold_live_profile",
+        "historical": false,
+        "has_availability_timestamp": false,
+        "revisions_possible": false,
+        "required_for_graph": true,
+        "disables_cleanly": false,
+        "internet_access": true,
+        "note": "Company profile fields (sector, industry, name) are present-day snapshots with no historical view, so they are withheld entirely from a historical run rather than served as if they applied then. Companies are reclassified over time, so serving them would put post-decision information into the analysis. The withholding is the mitigation, not a point-in-time guarantee."
+      },
+      "insider_transactions": {
+        "classification": "CURRENT_ONLY",
+        "guard": "date_window.withhold_undisclosed_trades",
+        "historical": false,
+        "has_availability_timestamp": false,
+        "revisions_possible": false,
+        "required_for_graph": true,
+        "disables_cleanly": false,
+        "internet_access": true,
+        "note": "The vendor does not date insider transactions by public disclosure, so a historical run cannot tell which trades were known on its date. They are withheld from a historical run rather than served as if disclosed."
+      },
+      "polymarket": {
+        "classification": "CURRENT_ONLY",
+        "guard": "none",
+        "historical": false,
+        "has_availability_timestamp": false,
+        "revisions_possible": false,
+        "required_for_graph": false,
+        "disables_cleanly": true,
+        "internet_access": true,
+        "note": "Prediction-market prices are served as of now with no historical endpoint, so a backtest must not use them. There is no guard because there is nothing to clamp: the source has no date parameter to bound."
+      }
+    },
+    "readiness": {
+      "scope": "price_only",
+      "ready": true,
+      "verified_sources": [
+        "yahoo_prices",
+        "yahoo_indicators"
+      ],
+      "weak_sources": [],
+      "current_only_sources": [],
+      "blockers": []
+    },
+    "verified_source_count": 3,
+    "weak_source_count": 4,
+    "current_only_source_count": 3
+  },
+  "evaluation_scope": {
+    "input_scope": "price_only",
+    "restricted": true,
+    "agents_evaluated": [
+      "market"
+    ],
+    "agents_omitted": [
+      "social",
+      "news",
+      "fundamentals"
+    ],
+    "is_full_graph": false
+  },
+  "reference_context": {
+    "note": "SMA reference and buy-and-hold SPY over the same windows, for context only. These are NOT LLM-strategy results.",
+    "sma_reference": {
+      "development": {
+        "label": "development",
+        "start": "2015-01-02",
+        "end": "2018-12-31",
+        "sessions": 1006,
+        "initial_capital": 100000.0,
+        "final_equity": 109320.11798504918,
+        "net_pnl": 9320.117985049175,
+        "total_return": 0.09320117985049176,
+        "annualized_return": 0.022572849625502878,
+        "cagr": 0.022558788053064438,
+        "max_drawdown": 0.15292467024505738,
+        "max_drawdown_start": "2015-07-17",
+        "max_drawdown_end": "2016-01-21",
+        "volatility": 0.07497928796509547,
+        "sharpe_ratio": 0.3356167263195564,
+        "sortino_ratio": 0.2895025930341039,
+        "calmar_ratio": 0.1476076396916896,
+        "num_trades": 88,
+        "winning_trades": 52,
+        "losing_trades": 36,
+        "win_rate": 0.5909090909090909,
+        "average_win": 714.6992087895698,
+        "average_loss": -810.3946893643904,
+        "profit_factor": 1.273877180012893,
+        "expectancy": 90.79715954476782,
+        "exposure": 0.6821414525787239,
+        "turnover": 34.54636855074325,
+        "total_fees": 1733.9771663429156,
+        "benchmark_return": 0.31755703606144353,
+        "excess_return": -0.22435585621095178,
+        "rejections": 0,
+        "unfilled": 0,
+        "cross_check_passes": true
+      },
+      "validation": {
+        "label": "validation",
+        "start": "2019-01-01",
+        "end": "2021-12-31",
+        "sessions": 757,
+        "initial_capital": 100000.0,
+        "final_equity": 146992.92126847268,
+        "net_pnl": 46992.92126847268,
+        "total_return": 0.4699292126847268,
+        "annualized_return": 0.13682026631152966,
+        "cagr": 0.1372466809546824,
+        "max_drawdown": 0.16033034087486925,
+        "max_drawdown_start": "2020-02-19",
+        "max_drawdown_end": "2020-03-18",
+        "volatility": 0.10091216639098852,
+        "sharpe_ratio": 1.3233361137369024,
+        "sortino_ratio": 1.158284362585569,
+        "calmar_ratio": 0.8533647815188756,
+        "num_trades": 73,
+        "winning_trades": 49,
+        "losing_trades": 24,
+        "win_rate": 0.6712328767123288,
+        "average_win": 1479.8418821683913,
+        "average_loss": -1018.4270973949133,
+        "profit_factor": 2.966676604038635,
+        "expectancy": 658.4931765585378,
+        "exposure": 0.7713873945653485,
+        "turnover": 29.18135997681907,
+        "total_fees": 1752.649686431853,
+        "benchmark_return": 0.996814441015587,
+        "excess_return": -0.5268852283308603,
+        "rejections": 0,
+        "unfilled": 0,
+        "cross_check_passes": true
+      },
+      "test": {
+        "label": "test",
+        "start": "2022-01-01",
+        "end": "2024-12-30",
+        "sessions": 752,
+        "initial_capital": 100000.0,
+        "final_equity": 112977.12095743929,
+        "net_pnl": 12977.120957439285,
+        "total_return": 0.12977120957439287,
+        "annualized_return": 0.04173548004287975,
+        "cagr": 0.041655613706556904,
+        "max_drawdown": 0.17345562863195857,
+        "max_drawdown_start": "2022-01-04",
+        "max_drawdown_end": "2022-12-28",
+        "volatility": 0.0917933781520811,
+        "sharpe_ratio": 0.4919583391117459,
+        "sortino_ratio": 0.45715029720799777,
+        "calmar_ratio": 0.24061185198800827,
+        "num_trades": 62,
+        "winning_trades": 41,
+        "losing_trades": 21,
+        "win_rate": 0.6612903225806451,
+        "average_win": 932.3331302194372,
+        "average_loss": -1127.5407597907058,
+        "profit_factor": 1.6143713022418966,
+        "expectancy": 234.63390940955006,
+        "exposure": 0.6584677270072169,
+        "turnover": 25.138623008405613,
+        "total_fees": 1205.3939522133674,
+        "benchmark_return": 0.28662207030477466,
+        "excess_return": -0.1568508607303818,
+        "rejections": 0,
+        "unfilled": 0,
+        "cross_check_passes": true
+      }
+    },
+    "spy_buy_and_hold": {
+      "development": {
+        "total_return": 0.31755703606144353,
+        "final_equity": 131755.70360614435,
+        "sessions": 1006
+      },
+      "validation": {
+        "total_return": 0.996814441015587,
+        "final_equity": 199681.4441015587,
+        "sessions": 757
+      },
+      "test": {
+        "total_return": 0.28662207030477466,
+        "final_equity": 128662.20703047747,
+        "sessions": 752
+      }
+    }
+  },
+  "llm_results": null,
+  "provenance": {},
+  "blockers": [
+    "no LLM provider credential is available in this environment; set one of OPENAI_API_KEY, GOOGLE_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY, DEEPSEEK_API_KEY, MINIMAX_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, AZURE_OPENAI_API_KEY, OPENAI_COMPATIBLE_API_KEY (or configure a local OpenAI-compatible endpoint) to run genuine inference",
+    "documented free-tier options to obtain a key: google, groq, ollama, openrouter; see docs/LLM_PROVIDER_AUDIT.md for the official source of each claim",
+    "no captured decision record set was supplied; pass one to build_evaluation() to evaluate real model output via replay",
+    "input_scope='price_only' is a RESTRICTED evaluation: only the market analyst runs. Omitted agents: social, news, fundamentals. It does not measure the news/sentiment/fundamentals pipeline."
+  ],
+  "genuine_inference": false,
+  "replay_tested": false,
+  "reproducibility": {
+    "execution_determinism": "verified by tests (same records -> identical fills/ledger)",
+    "replay_determinism": "verified by tests (two replays -> identical artifact)",
+    "inference_repeatability": "not tested: requires a working credential",
+    "inference_determinism_claimed": false
+  },
+  "limitations": {
+    "point_in_time_scope": "price_only",
+    "point_in_time_ready": true,
+    "news_sentiment_fundamentals_evaluated": false,
+    "note": "The frozen dataset is price-only and the news/sentiment/fundamentals sources are not point-in-time safe for a historical run; see docs/LLM_POINT_IN_TIME_AUDIT.md."
+  }
+}
