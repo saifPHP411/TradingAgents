@@ -163,4 +163,22 @@ __all__ = [
     "is_crypto_symbol",
     "parse_pair",
     "try_parse_pair",
+    "binance_symbol",
+    "alpaca_symbol",
+    "yahoo_symbol",
 ]
+
+
+def binance_symbol(symbol: str) -> str:
+    """Convert a canonical BASE/QUOTE symbol to Binance's format (e.g., BTCUSDT)."""
+    return parse_pair(symbol).binance_symbol
+
+
+def alpaca_symbol(symbol: str) -> str:
+    """Convert a canonical BASE/QUOTE symbol to Alpaca's format (e.g., BTC/USD)."""
+    return parse_pair(symbol).alpaca_symbol
+
+
+def yahoo_symbol(symbol: str) -> str:
+    """Convert a canonical BASE/QUOTE symbol to Yahoo's format (e.g., BTC-USD)."""
+    return parse_pair(symbol).venue_symbol(separator="-")

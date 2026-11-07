@@ -49,6 +49,10 @@ from ..broker import (
     WorkerStateStore,
     worker_status_view,
 )
+from ..symbol_mapping import (
+    SymbolMapping,
+    map_binance_to_alpaca,
+)
 
 
 class PaperTradingDisabled(RuntimeError):
@@ -216,6 +220,75 @@ class PaperTradingController:
         from ..experiment import PaperExperiment
 
         experiment = PaperExperiment.load(self.root, inference=None)
+
+        # Build symbol mappings for crypto TJR path
+        # Market data comes from Binance (USDT-quoted), execution on Alpaca (USD-quoted)
+        symbol_mappings: tuple[SymbolMapping, ...] = ()
+        if self.decision_source_kind == DECISION_SOURCE_CRYPTO:
+            try:
+                # Build Binance instrument registry from exchange info
+                from ..crypto_intraday_data import BinancePublicClient
+                binance_client = BinancePublicClient()
+                binance_registry = binance_client.exchange_info()
+
+                # Try to get Alpaca registry if available (optional)
+                alpaca_registry = None
+                try:
+                    from ..alpaca_paper import AlpacaPaperBroker
+                    # Use the broker to fetch Alpaca instruments
+                    broker = AlpacaPaperBroker(
+                        base_url=PaperTradingConfig().base_url,
+                        limits=PaperTradingConfig().limits,
+                    )
+                    broker.connect()
+                    alpaca_assets = broker.list_assets()
+                    # Build a simple registry from assets
+                    from datetime import UTC, datetime
+
+                    from ..crypto.instruments import InstrumentRegistry, TradingRules
+                    alpaca_rules = {}
+                    for asset in alpaca_assets:
+                        if asset.get("class") == "crypto" and asset.get("tradable"):
+                            symbol = asset.get("symbol", "")
+                            if "/" in symbol:
+                                alpaca_rules[symbol] = TradingRules(
+                                    symbol=symbol,
+                                    tradable=True,
+                                    min_qty=float(asset.get("min_order_size", "0.00001")),
+                                    step_qty=float(asset.get("qty_increment", "0.00001")),
+                                    min_notional=float(asset.get("min_notional", "1")),
+                                    price_increment=float(asset.get("price_increment", "0.01")),
+                                    status="TRADING",
+                                )
+                    alpaca_registry = InstrumentRegistry(
+                        rules=alpaca_rules,
+                        venue="alpaca_paper",
+                        fetched_at=datetime.now(UTC).isoformat(),
+                    )
+                except Exception:
+                    # Alpaca registry is optional; continue without it
+                    pass
+
+                # Build mappings from experiment config symbols
+                mappings, rejected = map_binance_to_alpaca(
+                    canonical_symbols=list(experiment.config.symbols),
+                    binance_registry=binance_registry,
+                    alpaca_registry=alpaca_registry,
+                )
+                if rejected:
+                    # Log rejected symbols but continue with valid ones
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    for sym, reason in rejected.items():
+                        logger.warning(f"Symbol {sym} rejected for paper trading: {reason}")
+
+                symbol_mappings = tuple(mappings)
+            except Exception as e:
+                # If mapping fails, log and continue without mappings
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to build symbol mappings: {e}")
+
         # Build the decision source from the persisted config, so the worker acts
         # on the same decisions the experiment recorded.
         config = PaperTradingConfig(
@@ -226,6 +299,7 @@ class PaperTradingController:
             market_data_provider=self.market_data_provider,
             market_data_max_age_seconds=self.market_data_max_age_seconds,
             decision_source=self.decision_source_kind,
+            symbol_mappings=symbol_mappings,
         )
         source = experiment.source
         sessions = source.sessions()

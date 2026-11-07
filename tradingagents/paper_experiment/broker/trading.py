@@ -68,6 +68,10 @@ from typing import Any, Protocol
 
 from tradingagents.risk.paper_parity import WHOLE_SHARES
 
+from ..symbol_mapping import (
+    SymbolMapping,
+    get_allowed_symbols_for_broker,
+)
 from .alpaca_paper import (
     PAPER_BASE_URL,
     AlpacaPaperBroker,
@@ -1277,6 +1281,15 @@ class PaperTradingConfig:
     ``history`` is the default, so existing behaviour is unchanged unless an
     operator opts into the current-market path explicitly.
     """
+    symbol_mappings: tuple[SymbolMapping, ...] = field(default_factory=tuple)
+    """Validated symbol mappings between market-data and execution venues.
+
+    When configured, these mappings are used to translate decision symbols to
+    execution symbols, and the execution symbols are enforced via
+    ``limits.allowed_symbols``. An empty tuple means no mapping is configured
+    and no additional symbol validation is performed beyond the existing
+    ``allowed_symbols`` check.
+    """
 
     def __post_init__(self) -> None:
         if not (self.order_notional > 0):
@@ -1305,6 +1318,20 @@ class PaperTradingConfig:
         # The endpoint is validated at configuration time, so a live host is
         # refused before a broker is ever constructed.
         assert_paper_endpoint(self.base_url)
+
+        # If symbol mappings are provided, populate allowed_symbols in limits
+        if self.symbol_mappings:
+            allowed = get_allowed_symbols_for_broker(list(self.symbol_mappings))
+            if allowed:
+                # Create new limits with allowed_symbols populated
+                self.limits = PaperRiskLimits(
+                    max_order_notional=self.limits.max_order_notional,
+                    max_open_positions=self.limits.max_open_positions,
+                    max_daily_orders=self.limits.max_daily_orders,
+                    allowed_symbols=allowed,
+                    allow_short=self.limits.allow_short,
+                    buying_power_fraction=self.limits.buying_power_fraction,
+                )
 
 
 # ---------------------------------------------------------------------------

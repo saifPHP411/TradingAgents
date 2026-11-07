@@ -63,6 +63,10 @@ API_SECRET_ENV = "ALPACA_PAPER_API_SECRET"
 _LIVE_KEY_ENVS = ("APCA_API_KEY_ID", "ALPACA_API_KEY", "ALPACA_API_SECRET", "APCA_API_SECRET_KEY")
 """Live/ambiguous credential variable names that are refused, not used."""
 
+EXPERIMENT_SYMBOLS_ENV = "TRADINGAGENTS_EXPERIMENT_SYMBOLS"
+"""Environment variable for configuring multiple crypto symbols for experiment initialization.
+Format: space-separated list of canonical BASE/QUOTE symbols, e.g., 'BTC/USDT ETH/USDT SOL/USDT'"""
+
 REQUEST_TIMEOUT = 30.0
 
 

@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "python -m tradingagents.paper_experiment.dashboard.server --root /home/appuser/app/data --host 0.0.0.0 --port $PORT --allow-paper-trading --paper-market-data binance_snapshot --paper-decision-source crypto --crypto-symbols BTC/USDT ETH/USDT SOL/USDT --crypto-live",
+    "startCommand": "python -m tradingagents.paper_experiment.dashboard.server --root /home/appuser/app/data --host 0.0.0.0 --port $PORT --allow-paper-trading --paper-market-data binance_snapshot --paper-decision-source crypto --crypto-live",
     "healthcheckPath": "/healthz",
     "healthcheckTimeout": 10,
     "restartPolicyType": "ON_FAILURE",

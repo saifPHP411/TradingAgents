@@ -42,6 +42,7 @@ from pathlib import Path
 from .broker import (
     DECISION_SOURCE_CHOICES,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+    EXPERIMENT_SYMBOLS_ENV,
     MARKET_DATA_CHOICES,
     BrokerError,
 )
@@ -110,6 +111,38 @@ def _resolve_source(args, config: ExperimentConfig) -> SourceSelection:
         symbols=config.symbols,
         frozen_feed_factory=_frozen_source,
         fallback=fallback,
+    )
+
+
+def _parse_experiment_symbols(args) -> tuple[str, ...]:
+    """Parse the configured experiment symbols from CLI or environment.
+
+    Reads from --symbols CLI flag (if provided) or TRADINGAGENTS_EXPERIMENT_SYMBOLS
+    environment variable. Returns a tuple of canonical symbols.
+    Raises RunnerError if configuration is invalid or empty.
+    """
+    # Check CLI --symbols first
+    cli_symbols = getattr(args, "symbols", None)
+    if cli_symbols is not None:
+        if not cli_symbols:
+            raise RunnerError("--symbols cannot be empty; provide at least one symbol")
+        return tuple(str(s).strip().upper() for s in cli_symbols)
+
+    # Check environment variable
+    env_symbols = os.environ.get(EXPERIMENT_SYMBOLS_ENV, "").strip()
+    if env_symbols:
+        symbols = [s.strip().upper() for s in env_symbols.replace(",", " ").split() if s.strip()]
+        if not symbols:
+            raise RunnerError(f"{EXPERIMENT_SYMBOLS_ENV} is set but contains no valid symbols")
+        return tuple(symbols)
+
+    # Fall back to single --symbol for backward compatibility
+    if getattr(args, "symbol", None):
+        return (str(args.symbol).strip().upper(),)
+
+    raise RunnerError(
+        "no experiment symbols configured; provide --symbols, --symbol, or "
+        f"set {EXPERIMENT_SYMBOLS_ENV} environment variable"
     )
 
 
@@ -198,8 +231,9 @@ def _start(args) -> int:
         raise RunnerError(
             f"an experiment already exists at {root}; use `run` to resume it"
         )
+    symbols = _parse_experiment_symbols(args)
     config = ExperimentConfig.from_protocol(
-        symbols=(args.symbol,) if args.symbol else ("SPY",),
+        symbols=symbols,
         provider=args.provider,
         model=args.model,
         fallback_provider=getattr(args, "fallback_provider", None),
@@ -219,6 +253,7 @@ def _start(args) -> int:
     # than a `run` immediately spending a second call.
     _record_initial_fetch(root, selection.source)
     print(f"started experiment {experiment.experiment_id} at {root}")
+    print(f"  symbols: {', '.join(symbols)}")
     print(f"  source: {selection.source.name} (kind {getattr(selection.source, 'kind', '?')})")
     if selection.switched:
         print(f"  source switched: {selection.reason}")
@@ -234,8 +269,9 @@ def _run(args) -> int:
         experiment = PaperExperiment.load(root, source=source)
         experiment.inference = _make_inference(experiment.config, stub=args.stub)
     else:
+        symbols = _parse_experiment_symbols(args)
         config = ExperimentConfig.from_protocol(
-            symbols=(args.symbol,) if args.symbol else ("SPY",),
+            symbols=symbols,
             provider=args.provider,
             model=args.model,
         )
@@ -692,7 +728,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--root", default=None, help="experiment directory (required except for diagnose)"
     )
-    parser.add_argument("--symbol", default=None, help="symbol (default SPY)")
+    parser.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help=(
+            "one or more symbols for the experiment (e.g., BTC/USDT ETH/USDT). "
+            "Overrides --symbol and TRADINGAGENTS_EXPERIMENT_SYMBOLS. "
+            "Required for multi-symbol crypto experiments."
+        ),
+    )
+    parser.add_argument("--symbol", default=None, help="single symbol for backward compatibility (default SPY)")
     parser.add_argument("--provider", default="groq")
     parser.add_argument("--model", default="openai/gpt-oss-20b")
     parser.add_argument(
