@@ -137,6 +137,13 @@ MARKET_DATA_STATUSES = (
 
 PROVIDER_BAR_OPEN = "bar_open"
 PROVIDER_ALPACA_SNAPSHOT = "alpaca_snapshot"
+PROVIDER_BINANCE_SNAPSHOT = "binance_snapshot"
+"""A current *crypto* price from Binance's public market data (no key).
+
+The crypto counterpart of ``alpaca_snapshot``: it answers "what is the price
+now" from Binance's data-only host, validated for freshness before an order is
+sized. It is a market-data seam only and never reaches an order endpoint.
+"""
 PROVIDER_STATIC = "static"
 PROVIDER_UNKNOWN = "unknown"
 
@@ -221,9 +228,10 @@ order (submitted, or reconciled as already existing). Distinct from every
 ``NO_TRADE_REASONS`` because it is the *absence* of a no-trade reason, and a
 consumer that iterates the no-trade vocabulary must not read it as one."""
 
-MARKET_DATA_CHOICES = (PROVIDER_BAR_OPEN, PROVIDER_ALPACA_SNAPSHOT)
+MARKET_DATA_CHOICES = (PROVIDER_BAR_OPEN, PROVIDER_ALPACA_SNAPSHOT, PROVIDER_BINANCE_SNAPSHOT)
 """The price seams an operator may select. ``bar_open`` is the historical default;
-``alpaca_snapshot`` is the current-price opt-in."""
+``alpaca_snapshot`` is the equity current-price opt-in; ``binance_snapshot`` is the
+crypto current-price opt-in (no key)."""
 
 # -- which decision source the worker draws on -----------------------------------
 
@@ -250,11 +258,21 @@ consumed historical history, but its strategy is the TJR rule chain
 (``tradingagents.tjr``), which consults no model at all. Opt-in, so the default
 behaviour is unchanged.
 """
+DECISION_SOURCE_CRYPTO = "crypto"
+"""Opt-in: the deterministic TJR rule chain over current **crypto** intraday bars.
+
+The same ``TjrDecisionSource`` class as ``tjr`` — the rule chain is identical, so
+there is exactly one strategy — but wired with the crypto seams: Binance public
+1m/5m bars (no key) and the 24/7 crypto clock. One decision per symbol per UTC
+session, id ``tjr-<symbol>-<session>``. Opt-in and paper-only; the default is
+unchanged.
+"""
 
 DECISION_SOURCE_CHOICES = (
     DECISION_SOURCE_HISTORY,
     DECISION_SOURCE_CURRENT_MARKET,
     DECISION_SOURCE_TJR,
+    DECISION_SOURCE_CRYPTO,
 )
 """The decision sources an operator may select. ``history`` is the default."""
 
@@ -838,6 +856,210 @@ class AlpacaSnapshotMarketData:
         return _select_snapshot_observation(_snapshot_candidates(snapshot))
 
 
+class BinanceSnapshotMarketData:
+    """A *current* crypto price from Binance's public market data. No key.
+
+    The crypto counterpart of :class:`AlpacaSnapshotMarketData`, and the seam the
+    crypto paper path sizes an order against. It is deliberately separate from the
+    historical/reproducible dataset:
+
+    - the frozen dataset answers "what was the price at session T", point-in-time;
+    - this answers "what is the price now", from Binance's 24-hour ticker.
+
+    Binance's public data hosts need no key and no registration, so this seam reads
+    no credential at all — it can therefore never be pointed at an order endpoint,
+    because it has no order endpoint and no key to reach one with.
+
+    **Freshness.** The price is only useful if it is current, so the ticker's own
+    ``observed_at`` (Binance's ``closeTime``) is validated: a ticker older than
+    ``max_age_seconds`` (default :data:`DEFAULT_MAX_SNAPSHOT_AGE_SECONDS`), a
+    missing or unparseable timestamp, or one materially in the future is refused
+    with :class:`MarketDataError`, and the worker then places **no** order rather
+    than sizing from a stale or fabricated number. The price chosen is the *last
+    trade* when present, else the quote midpoint; both are current observations of
+    the same ticker and share its timestamp, so the freshness check is coherent.
+
+    The Binance client is injectable, so every branch is exercised offline.
+    """
+
+    provider_name = PROVIDER_BINANCE_SNAPSHOT
+    kind = MARKET_DATA_KIND_CURRENT
+
+    def __init__(
+        self,
+        symbols,
+        *,
+        client: Any | None = None,
+        max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+        future_tolerance_seconds: float = DEFAULT_SNAPSHOT_FUTURE_TOLERANCE_SECONDS,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        if max_age_seconds is not None and not (max_age_seconds > 0):
+            raise MarketDataError(
+                f"max_age_seconds must be positive or None, got {max_age_seconds!r}"
+            )
+        self.symbols = tuple(s.upper() for s in symbols)
+        self.max_age_seconds = max_age_seconds
+        self.future_tolerance_seconds = future_tolerance_seconds
+        self._client = client
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self.last_observation: SnapshotObservation | None = None
+        self.last_observed_at: str | None = None
+        self.last_status: str = MARKET_DATA_STATUS_NOT_STARTED
+        self.last_status_detail: str | None = None
+
+    # -- identity ---------------------------------------------------------
+
+    def describe(self) -> dict[str, Any]:
+        observation = self.last_observation
+        return {
+            "market_data_detail": (
+                "a current crypto price from Binance public market data (no key); "
+                "validated for freshness before any order is sized"
+            ),
+            "is_current_price": True,
+            "max_snapshot_age_seconds": self.max_age_seconds,
+            "last_snapshot_at": observation.as_of if observation else None,
+            "last_snapshot_price": observation.price if observation else None,
+            "last_snapshot_field": observation.field if observation else None,
+            "last_snapshot_age_seconds": self.last_snapshot_age_seconds(),
+            "last_snapshot_observed_at": self.last_observed_at,
+            "market_data_status": self.last_status,
+            "market_data_status_detail": self.last_status_detail,
+        }
+
+    def last_snapshot_age_seconds(self) -> float | None:
+        observation = self.last_observation
+        if observation is None or observation.as_of is None:
+            return None
+        parsed = _parse_utc(observation.as_of)
+        if parsed is None:
+            return None
+        return (self._clock() - parsed).total_seconds()
+
+    # -- reads ------------------------------------------------------------
+
+    def _client_or_build(self):
+        if self._client is None:
+            from tradingagents.crypto.binance import BinancePublicClient
+
+            self._client = BinancePublicClient()
+        return self._client
+
+    def available(self) -> bool:
+        """Whether a *fresh* current price can be read for every configured symbol."""
+        if not self.symbols:
+            return False
+        try:
+            tickers = self._client_or_build().ticker_24h(self.symbols)
+        except Exception:  # noqa: BLE001 - an unreachable source is "not available"
+            self._record_status(MARKET_DATA_STATUS_ERROR, "the ticker request failed")
+            return False
+        if not isinstance(tickers, dict):
+            self._record_status(MARKET_DATA_STATUS_MALFORMED, "the response was not an object")
+            return False
+        for symbol in self.symbols:
+            try:
+                self._observation_from(tickers.get(symbol))
+            except MarketDataError as exc:
+                self._record_status(_status_for(exc), str(exc))
+                return False
+        self._record_status(MARKET_DATA_STATUS_OK, None)
+        return True
+
+    def price(self, symbol: str) -> float:
+        """The current, fresh crypto price for ``symbol``, or raise."""
+        symbol = symbol.upper()
+        try:
+            tickers = self._client_or_build().ticker_24h([symbol])
+        except Exception as exc:  # noqa: BLE001 - a source failure is surfaced
+            detail = f"the Binance ticker request failed for {symbol!r}: {type(exc).__name__}"
+            self._record_status(MARKET_DATA_STATUS_ERROR, detail)
+            raise MarketDataError(detail) from None
+        if not isinstance(tickers, dict):
+            detail = "the Binance ticker response was not an object"
+            self._record_status(MARKET_DATA_STATUS_MALFORMED, detail)
+            raise MarketDataError(detail)
+        ticker = tickers.get(symbol)
+        if ticker is None:
+            detail = (
+                f"Binance returned no ticker for {symbol!r}; no current price is "
+                "available, so no order can be sized"
+            )
+            self._record_status(MARKET_DATA_STATUS_NO_DATA, detail)
+            raise MarketDataError(detail)
+        try:
+            observation = self._observation_from(ticker)
+        except MarketDataError as exc:
+            self._record_status(_status_for(exc), str(exc))
+            raise
+        self.last_observation = observation
+        self.last_observed_at = self._clock().isoformat()
+        self._record_status(MARKET_DATA_STATUS_OK, None)
+        return observation.price
+
+    # -- internals --------------------------------------------------------
+
+    def _record_status(self, status: str, detail: str | None) -> None:
+        self.last_status = status
+        self.last_status_detail = detail
+
+    def _observation_from(self, ticker: Any) -> SnapshotObservation:
+        observation = _crypto_observation(ticker)
+        if observation is None:
+            raise MarketDataError(
+                "Binance's ticker carried no usable current price (no last trade and "
+                "no coherent bid/ask)"
+            )
+        self._assert_fresh(observation)
+        return observation
+
+    def _assert_fresh(self, observation: SnapshotObservation) -> None:
+        if observation.as_of is None:
+            raise MarketDataError(
+                f"the ticker's {observation.field} carries no timestamp, so its age "
+                "cannot be verified; refusing to size an order from an unverifiable price"
+            )
+        parsed = _parse_utc(observation.as_of)
+        if parsed is None:
+            raise MarketDataError(
+                f"the ticker's {observation.field} timestamp {observation.as_of!r} is "
+                "malformed; refusing to size an order from an unverifiable price"
+            )
+        age = (self._clock() - parsed).total_seconds()
+        if age < -abs(self.future_tolerance_seconds):
+            raise MarketDataError(
+                f"the ticker's {observation.field} timestamp is {-age:.1f}s in the "
+                "future, beyond the allowed clock skew; refusing a future-dated price"
+            )
+        if self.max_age_seconds is not None and age > self.max_age_seconds:
+            raise MarketDataError(
+                f"the ticker is stale: the {observation.field} is {age:.1f}s old, beyond "
+                f"the {self.max_age_seconds:.0f}s maximum; refusing to size an order from "
+                "a stale price"
+            )
+
+
+def _crypto_observation(ticker: Any) -> SnapshotObservation | None:
+    """The current crypto price *and its own timestamp*, or ``None``.
+
+    The last trade is preferred when present; otherwise the quote midpoint is used
+    when the quote is coherent (``ask >= bid > 0``). Both fields share the ticker's
+    ``observed_at``, so the freshness check compares the price against the timestamp
+    of that same ticker. A non-finite or non-positive price is refused, so a NaN
+    cannot pass and later poison a sizing step.
+    """
+    observed_at = getattr(ticker, "observed_at", None)
+    as_of = None if observed_at is None else observed_at.isoformat()
+    last = getattr(ticker, "last", None)
+    if last is not None and math.isfinite(last) and last > 0:
+        return SnapshotObservation(price=float(last), as_of=as_of, field="lastPrice")
+    mid = getattr(ticker, "mid", None)
+    if mid is not None and math.isfinite(mid) and mid > 0:
+        return SnapshotObservation(price=float(mid), as_of=as_of, field="quoteMid")
+    return None
+
+
 def _stamp(value: Any) -> str | None:
     """A timestamp as its original string, or ``None`` when absent/blank."""
     if isinstance(value, str) and value.strip():
@@ -856,7 +1078,7 @@ def _status_for(exc: MarketDataError) -> str:
         return MARKET_DATA_STATUS_MALFORMED
     if "no usable current price" in text:
         return MARKET_DATA_STATUS_NO_DATA
-    if "no snapshot" in text:
+    if "no snapshot" in text or "no ticker" in text:
         return MARKET_DATA_STATUS_NO_DATA
     return MARKET_DATA_STATUS_ERROR
 

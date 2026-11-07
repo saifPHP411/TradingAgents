@@ -42,9 +42,14 @@ def _fmt_num(value, digits: int = 2) -> str:
     return "n/a" if value is None else f"{value:,.{digits}f}"
 
 
-def _value(metrics: dict, key: str):
+def _value(metrics: dict, key: str) -> str:
+    """One cell of the table, always a string.
+
+    Every branch returns text: a raw number would break the table's ``join`` and
+    a missing metric is ``n/a``, never a zero.
+    """
     if key == "_net_pnl":
-        return metrics["final_equity"] - metrics["initial_capital"]
+        return _fmt_num(metrics["final_equity"] - metrics["initial_capital"])
     if key == "_net_return":
         return _fmt_pct(metrics["total_return"])
     if key == "_win_rate":
@@ -56,6 +61,8 @@ def _value(metrics: dict, key: str):
     if key == "_benchmark":
         return _fmt_pct(metrics["benchmark_return"])
     raw = metrics.get(key)
+    if isinstance(raw, bool):
+        return str(raw)
     if isinstance(raw, float):
         return _fmt_num(raw)
     if isinstance(raw, str):

@@ -7,7 +7,8 @@ scenarios, and reports honest, reproducible metrics.
 
 What it reuses, rather than re-implements: the same :class:`~tradingagents.tjr.TjrBacktester`
 (the shared-book, next-bar-open intraday loop), the same :class:`~tradingagents.portfolio.Ledger`,
-the same :class:`~tradingagents.risk.RiskEngine` under ``paper_parity_limits()``,
+the same :class:`~tradingagents.risk.RiskEngine` under the study's own limits
+(``study_risk_limits()`` — the *shape* of the paper caps, sized to the book),
 the same :class:`~tradingagents.execution.costs.CostModel`, and the same
 :mod:`tradingagents.performance.metrics`. It changes no rule and no limit — if a
 change here would alter a decision, it belongs in ``tjr/rules.py`` and its tests.
@@ -37,7 +38,7 @@ import pandas as pd
 
 from tradingagents.execution.costs import CostModel
 from tradingagents.performance.metrics import compute_metrics
-from tradingagents.risk import RiskLimits, paper_parity_limits
+from tradingagents.risk import RiskLimits
 from tradingagents.tjr.engine import TjrBacktester, TjrConfig, TjrResult
 from tradingagents.tjr.frames import IntradaySeries
 from tradingagents.tjr.rules import TjrSettings
@@ -48,6 +49,46 @@ from ..symbols import parse_pair
 
 # The periods a study reports, in days. "max" is whatever the data covers.
 STANDARD_PERIODS: tuple[int, ...] = (7, 30, 90, 180)
+
+# The fraction of the book's equity one study position may use. This is a
+# *research* sizing rule, not the paper account's rule: the paper worker caps an
+# order at 25 USD because that is what the operator's paper account is meant to
+# trade, while a study over a 100,000 USD book has to size positions so the
+# strategy's returns are visible above the rounding.
+STUDY_POSITION_FRACTION = 0.10
+
+# The most equity all study positions may represent together.
+STUDY_PORTFOLIO_EXPOSURE = 0.95
+
+# The most distinct study positions open at once.
+STUDY_MAX_OPEN_POSITIONS = 5
+
+
+def study_risk_limits(*, initial_cash: float) -> RiskLimits:
+    """The risk limits a *study* runs under.
+
+    These are deliberately **not** :func:`paper_parity_limits`. The paper caps
+    (25 USD per order, 5 positions) are the operator's live paper-account
+    limits; applying them to a 100,000 USD research book would make every
+    position worth 0.025% of it, so the reported P/L would measure rounding
+    rather than the strategy.
+
+    The study's limits are the same *shape* as the paper ones — a per-position
+    fraction, a portfolio exposure cap, a position count, long-only, fractional
+    quantities — with the notional derived from the book's own equity. The
+    strategy rules are untouched; only the sizing changes, and the config
+    records it, so a run states the sizing it used.
+    """
+    return RiskLimits(
+        max_position_size=STUDY_POSITION_FRACTION,
+        max_portfolio_exposure=STUDY_PORTFOLIO_EXPOSURE,
+        max_open_positions=STUDY_MAX_OPEN_POSITIONS,
+        max_daily_orders=None,
+        target_order_value=None,
+        max_order_value=None,
+        long_only=True,
+        fractional_shares=True,
+    )
 
 REGIME_BULL = "bull"
 REGIME_BEAR = "bear"
@@ -65,7 +106,14 @@ class CryptoBacktestConfig:
     session_policy: SessionPolicy = field(default_factory=utc_day_session)
     """The 24/7 session definition. Crypto never closes, so the default is the UTC
     day; a study of London/New York/Asia hours passes ``policy_named("crypto_named")``."""
-    risk_limits: RiskLimits = field(default_factory=paper_parity_limits)
+    risk_limits: RiskLimits | None = None
+    """The limits the study runs under.
+
+    ``None`` means :func:`study_risk_limits` for this book: the paper account's
+    25-USD order cap is the *operator's* live limit and would make a research
+    book's returns invisible. A caller may pass explicit limits instead; the
+    config records whichever was used, so a result always states its sizing.
+    """
     costs: CostModel = field(default_factory=CostModel)
     settings: TjrSettings = field(default_factory=lambda: _crypto_settings())
     allow_short: bool = False
@@ -84,6 +132,12 @@ class CryptoBacktestConfig:
             raise ValueError("a study needs at least one symbol")
         if self.walk_forward_folds < 2:
             raise ValueError("walk_forward_folds must be at least 2")
+        if self.risk_limits is None:
+            object.__setattr__(
+                self,
+                "risk_limits",
+                study_risk_limits(initial_cash=self.initial_cash),
+            )
 
 
 def _crypto_settings() -> TjrSettings:
@@ -205,17 +259,24 @@ def intervals_for_window(
     serves 1m bars from partway through a day, so the first covered session is
     partial. Requiring a bar at the session's midnight would drop the 1m trigger
     from a window the 1m data in fact covers almost entirely.
+
+    The window's sessions are the ones the caller asked for, and a window that lies
+    entirely before or after the data has no covered session at all — that is a
+    period the data does not reach, and the run refuses it rather than reporting a
+    no-trade result.
     """
     if not window:
         return base
     start_date = window[0]
+    end_date = window[-1]
     has_one_minute = False
     for bundle in series.values():
         one = bundle.get("1m")
         if one is None or one.frame.empty:
             continue
-        first = one.frame.index[0].tz_convert("UTC").strftime("%Y-%m-%d")
-        if first <= start_date:
+        local = one.frame.index.tz_convert("UTC").strftime("%Y-%m-%d")
+        covered = [d for d in local if start_date <= d <= end_date]
+        if covered:
             has_one_minute = True
             break
     if has_one_minute:
@@ -453,6 +514,19 @@ def _window_sessions(sessions: list[str], days: int | None) -> list[str]:
     return [s for s in sessions if datetime.fromisoformat(s).date() >= cutoff]
 
 
+def _period_label(days: int, sessions: int) -> str:
+    """The period's label, honest about a shortfall.
+
+    A requested 90-day window that the data only covers for 30 days is labelled
+    ``90d_requested_30d`` — never plain ``90d``, which would read as though the
+    venue served 90 days. A window that got everything it asked for keeps the
+    short label.
+    """
+    if sessions >= days:
+        return f"{days}d"
+    return f"{days}d_requested_{sessions}d"
+
+
 def run_periods(
     series: Mapping[str, Mapping[str, IntradaySeries]],
     config: CryptoBacktestConfig,
@@ -490,7 +564,7 @@ def run_periods(
         )
         results.append(
             PeriodResult(
-                label=f"{days}d",
+                label=_period_label(days, len(window)),
                 days=days,
                 start=window[0],
                 end=window[-1],

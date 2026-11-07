@@ -34,6 +34,7 @@ from tradingagents.risk.paper_parity import WHOLE_SHARES
 
 from ..broker import (
     BANNER,
+    DECISION_SOURCE_CRYPTO,
     DECISION_SOURCE_CURRENT_MARKET,
     DECISION_SOURCE_HISTORY,
     DECISION_SOURCE_TJR,
@@ -137,6 +138,9 @@ class PaperTradingController:
         decision_data_factory: Callable[..., Any] | None = None,
         tjr_source_factory: Callable[..., Any] | None = None,
         tjr_data_factory: Callable[..., Any] | None = None,
+        crypto_source_factory: Callable[..., Any] | None = None,
+        crypto_data_factory: Callable[..., Any] | None = None,
+        crypto_market_hours_gate: Callable[[], Any] | None = None,
     ) -> None:
         self.root = Path(root)
         self.enabled = enabled
@@ -169,6 +173,9 @@ class PaperTradingController:
         self._decision_data_factory = decision_data_factory
         self._tjr_source_factory = tjr_source_factory
         self._tjr_data_factory = tjr_data_factory
+        self._crypto_source_factory = crypto_source_factory
+        self._crypto_data_factory = crypto_data_factory
+        self._crypto_market_hours_gate = crypto_market_hours_gate
         self._worker: PaperTradingWorker | None = None
         self._lock = threading.Lock()
 
@@ -258,6 +265,8 @@ class PaperTradingController:
             return self._build_current_source(experiment, holder)
         if self.decision_source_kind == DECISION_SOURCE_TJR:
             return self._build_tjr_source(experiment, holder)
+        if self.decision_source_kind == DECISION_SOURCE_CRYPTO:
+            return self._build_crypto_source(experiment, holder)
         return self._build_history_source(experiment, holder)
 
     def _build_history_source(self, experiment, holder: dict[str, PaperTradingWorker]):
@@ -369,6 +378,71 @@ class PaperTradingController:
         from ..tjr_intraday_data import AlpacaIntradayBars
 
         return AlpacaIntradayBars()
+
+    def _build_crypto_source(self, experiment, holder: dict[str, PaperTradingWorker]):
+        """The deterministic TJR rule chain over current **crypto** intraday bars.
+
+        This is the *same* ``TjrDecisionSource`` class the ``tjr`` path builds — the
+        rule chain is identical, so there is exactly one strategy — but wired with
+        the crypto seams: Binance public 1m/5m bars (no key) for the decision window
+        and a 24/7 crypto clock for the session. The RiskEngine gate and the book it
+        sizes against are the same read-only mirror of the worker's broker
+        account/positions, and the price it sizes at is the worker's own execution
+        seam (``--paper-market-data binance_snapshot``). Its per-session memory lives
+        in ``crypto_source_state.json`` — never the experiment's state and never the
+        equity TJR source's — so it is not a second writer to the experiment
+        directory. A test may inject the seams, so the path is exercisable offline.
+        """
+        from ..tjr_source import TjrBookSnapshot, TjrDecisionSource
+
+        market_hours = self._build_crypto_market_hours()
+        data = self._build_crypto_data()
+
+        def _book() -> TjrBookSnapshot:
+            worker = holder.get("worker")
+            if worker is None:
+                return TjrBookSnapshot(0.0)
+            return _book_snapshot_from_worker(worker)
+
+        def _price(symbol: str) -> float:
+            worker = holder.get("worker")
+            if worker is None:
+                return 0.0
+            try:
+                return float(worker.market_data.price(symbol))
+            except Exception:  # noqa: BLE001 - an unpriceable entry is no decision
+                return 0.0
+
+        kwargs: dict[str, Any] = {
+            "symbols": tuple(experiment.config.symbols),
+            "data": data,
+            "market_hours": market_hours,
+            "order_notional": self.order_notional,
+            "strategy_name": experiment.config.strategy_id,
+            "book_provider": _book,
+            "price_provider": _price,
+            "is_consumed": lambda decision_id: holder["worker"].has_order_for(decision_id),
+            "state_path": self.root / "crypto_source_state.json",
+        }
+        if self._crypto_source_factory is not None:
+            return self._crypto_source_factory(**kwargs)
+        return TjrDecisionSource(**kwargs)
+
+    def _build_crypto_data(self):
+        """The crypto decision-data seam: an injected one, else Binance 1m/5m bars."""
+        if self._crypto_data_factory is not None:
+            return self._crypto_data_factory()
+        from ..crypto_intraday_data import CryptoIntradayBars
+
+        return CryptoIntradayBars()
+
+    def _build_crypto_market_hours(self):
+        """The crypto market-hours gate: an injected one, else the 24/7 clock."""
+        if self._crypto_market_hours_gate is not None:
+            return self._crypto_market_hours_gate()
+        from ..crypto_market_hours import CryptoMarketHours
+
+        return CryptoMarketHours()
 
     def _build_market_hours(self):
         """The market-hours gate: an injected one, else Alpaca's paper clock."""

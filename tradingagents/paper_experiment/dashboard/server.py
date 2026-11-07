@@ -23,7 +23,9 @@ whose runtime is deliberately small.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import sys
 import threading
 import time
@@ -56,6 +58,7 @@ from ..market_data_wiring import (
     resolve_settings,
 )
 from .auth import DashboardAuthError, check_bearer, require_bindable, resolve_token
+from .crypto_view import CryptoViewService
 from .paper_control import PaperTradingController, PaperTradingDisabled
 from .state import DashboardStateError, ExperimentView
 
@@ -75,6 +78,14 @@ deliberate confirmation.
 
 ROOT_ENV = "TRADINGAGENTS_EXPERIMENT_ROOT"
 """Environment variable the module entry point reads ``--root`` from."""
+
+CRYPTO_SYMBOLS_ENV = "TRADINGAGENTS_CRYPTO_SYMBOLS"
+"""Environment variable naming the crypto pairs the live section shows.
+
+Space- or comma-separated, e.g. ``"BTC/USD ETH/USD"``. It selects what the
+dashboard *displays*; it never decides what can be traded — the venue's own
+listing and the risk engine do that.
+"""
 
 
 class Dashboard:
@@ -96,6 +107,8 @@ class Dashboard:
         paper_market_data_provider: str = PROVIDER_BAR_OPEN,
         paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
         paper_decision_source: str = DECISION_SOURCE_HISTORY,
+        crypto_engine=None,
+        crypto_symbols: tuple[str, ...] = (),
         refresh_policy=None,
         refresh_fetcher=None,
     ) -> None:
@@ -120,6 +133,15 @@ class Dashboard:
             market_data_provider=paper_market_data_provider,
             market_data_max_age_seconds=paper_market_data_max_age_seconds,
             decision_source_kind=paper_decision_source,
+        )
+        # The crypto half of the dashboard: a read-only view over the live crypto
+        # engine (Binance public market data) and the worker's recorded status.
+        # The engine is injected, so the dashboard reads the *same* engine the
+        # strategy and the worker read, and a test can drive it offline.
+        self.crypto = CryptoViewService(
+            engine=crypto_engine,
+            symbols=tuple(crypto_symbols),
+            worker_status=lambda: self.paper.status(),
         )
 
     def view(self) -> ExperimentView:
@@ -324,6 +346,14 @@ def make_handler(dashboard: Dashboard):
                     self._send_json(200, dashboard.positions())
                 elif path == "/api/trades":
                     self._send_json(200, dashboard.trades())
+                elif path == "/api/crypto/market":
+                    self._send_json(200, dashboard.crypto.market())
+                elif path == "/api/crypto/strategy":
+                    self._send_json(200, dashboard.crypto.strategy())
+                elif path == "/api/crypto/health":
+                    self._send_json(200, dashboard.crypto.health())
+                elif path == "/api/crypto":
+                    self._send_json(200, dashboard.crypto.snapshot())
                 else:
                     self._send_json(404, {"error": "not found"})
             except DashboardStateError as exc:
@@ -413,6 +443,19 @@ def make_handler(dashboard: Dashboard):
 
 
 
+def _crypto_symbols(args) -> tuple[str, ...]:
+    """The crypto pairs the live section shows, from the flag or the environment.
+
+    A pair that the venue does not list is *not* dropped here: the engine reports
+    it, so an operator sees which pair failed instead of a silently shorter list.
+    """
+    raw = getattr(args, "crypto_symbols", None)
+    if raw is None:
+        env = os.environ.get(CRYPTO_SYMBOLS_ENV, "")
+        raw = [part for part in env.replace(",", " ").split() if part]
+    return tuple(str(s) for s in raw)
+
+
 def _market_data_factory_for(choice: str, *, max_age_seconds: float | None = None):
     """The market-data factory the CLI's ``--paper-market-data`` selects.
 
@@ -428,6 +471,56 @@ def _market_data_factory_for(choice: str, *, max_age_seconds: float | None = Non
     return market_data_factory_for(choice, max_age_seconds=max_age_seconds)
 
 
+def _build_crypto_engine(symbols: tuple[str, ...]):
+    """The live crypto engine, with its REST refresh thread started.
+
+    The engine reads Binance's **public** market data — no key, no registration —
+    and the WebSocket tape is started alongside it, so the dashboard's live section
+    is fed by a real feed. The refresh thread is a daemon: it dies with the
+    process and never keeps it alive.
+
+    A failure to reach the venue is *not* fatal: the engine records the error and
+    the dashboard reports it as an error state, which is the honest outcome.
+    """
+    from tradingagents.crypto.engine import CryptoMarketDataEngine
+
+    engine = CryptoMarketDataEngine(symbols=symbols)
+    # A failure to reach the venue is not fatal: the engine records the error and
+    # the dashboard reports it as an error state, which is the honest outcome.
+    with contextlib.suppress(Exception):
+        engine.refresh_tickers()
+        for interval in engine.intervals:
+            engine.refresh_candles(interval)
+    # A stream failure leaves the REST path working.
+    with contextlib.suppress(Exception):
+        engine.start_stream()
+    _start_crypto_refresh(engine)
+    return engine
+
+
+def _start_crypto_refresh(engine, *, interval_seconds: float = 15.0) -> threading.Thread:
+    """A daemon thread that keeps the crypto engine's REST snapshot current.
+
+    The WebSocket tape carries the price; this thread refreshes the 24-hour
+    ticker and the candle windows, which the tape does not carry. It is a daemon,
+    so it never blocks shutdown.
+    """
+
+    def _loop() -> None:
+        while True:
+            try:
+                engine.refresh_tickers()
+                for interval in engine.intervals:
+                    engine.refresh_candles(interval)
+            except Exception:  # noqa: BLE001 - the engine records the failure
+                pass
+            time.sleep(interval_seconds)
+
+    thread = threading.Thread(target=_loop, name="crypto-refresh", daemon=True)
+    thread.start()
+    return thread
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the dashboard as ``python -m ...dashboard.server``.
 
@@ -437,7 +530,6 @@ def main(argv: list[str] | None = None) -> int:
     command can be as short as ``python -m ...dashboard.server``.
     """
     import argparse
-    import os
 
     parser = argparse.ArgumentParser(
         prog="python -m tradingagents.paper_experiment.dashboard.server",
@@ -500,8 +592,10 @@ def main(argv: list[str] | None = None) -> int:
             f"${MARKET_DATA_ENV}, else bar_open, the experiment's latest bar open). "
             "'alpaca_snapshot' reads a genuinely current price from Alpaca market "
             "data (feed=iex) and requires ALPACA_PAPER_API_KEY / "
-            "ALPACA_PAPER_API_SECRET. This changes only the price seam, never the "
-            "decision source or the strategy."
+            "ALPACA_PAPER_API_SECRET. 'binance_snapshot' reads a genuinely current "
+            "CRYPTO price from Binance's public market data (no API key, no "
+            "registration). These change only the price seam, never the decision "
+            "source or the strategy."
         ),
     )
     parser.add_argument(
@@ -526,7 +620,33 @@ def main(argv: list[str] | None = None) -> int:
             "reports HISTORY_EXHAUSTED once they are consumed). 'current_market' is an "
             "INDEPENDENT decision taken live over current Alpaca market data, gated on "
             "Alpaca's market clock; it is not blocked by a consumed history, and needs "
-            "ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET and an LLM credential."
+            "ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET and an LLM credential. "
+            "'tjr' is the deterministic TJR rule chain (no model) over current Alpaca "
+            "INTRADAY 1m/5m bars. 'crypto' is that same unchanged TJR rule chain over "
+            "current Binance public INTRADAY 1m/5m crypto bars (no API key), gated on "
+            "a 24/7 clock; pair it with --paper-market-data binance_snapshot."
+        ),
+    )
+    parser.add_argument(
+        "--crypto-symbols",
+        nargs="+",
+        default=None,
+        help=(
+            "the crypto pairs the live market section shows, e.g. BTC/USD ETH/USD "
+            "(default: $TRADINGAGENTS_CRYPTO_SYMBOLS, else none). The list is "
+            "operator-controlled and each pair must be listed by the venue; an "
+            "unsupported pair is reported, never substituted."
+        ),
+    )
+    parser.add_argument(
+        "--crypto-live",
+        action="store_true",
+        default=False,
+        help=(
+            "start the live crypto market-data engine (Binance PUBLIC market data: "
+            "no API key, no registration) so the dashboard's live section shows a "
+            "real feed. Off by default: with it off, the crypto section reports "
+            "'not started' instead of showing data it does not have."
         ),
     )
     parser.add_argument(
@@ -592,6 +712,7 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
     print(f"paper decision source: {describe_decision_source(decision_source)}", file=sys.stderr)
+    crypto_symbols = _crypto_symbols(args)
     try:
         serve(
             args.root,
@@ -609,6 +730,8 @@ def main(argv: list[str] | None = None) -> int:
             paper_market_data_provider=provider,
             paper_market_data_max_age_seconds=max_age,
             paper_decision_source=decision_source,
+            crypto_symbols=crypto_symbols,
+            crypto_live=bool(getattr(args, "crypto_live", False)),
         )
     except DashboardAuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -635,6 +758,8 @@ def serve(
     paper_market_data_provider: str = PROVIDER_BAR_OPEN,
     paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     paper_decision_source: str = DECISION_SOURCE_HISTORY,
+    crypto_symbols: tuple[str, ...] = (),
+    crypto_live: bool = False,
 ) -> None:
     """Run the dashboard until interrupted.
 
@@ -650,9 +775,18 @@ def serve(
     ``allow_paper_trading`` enables the START/STOP control for the Alpaca paper
     worker. It is off by default, so the dashboard cannot place a paper order
     unless the operator opts in; it never enables live trading.
+
+    ``crypto_symbols`` selects the crypto pairs the live market section shows.
+    ``crypto_live`` starts the Binance **public** market-data engine (no key, no
+    registration) so the dashboard's live section is fed by a real feed rather
+    than by an empty engine. It is off by default: with no symbols and no live
+    flag the crypto section reports *not started* instead of inventing data.
     """
     resolved = resolve_token(token)
     require_bindable(host, resolved)
+    crypto_engine = None
+    if crypto_live and crypto_symbols:
+        crypto_engine = _build_crypto_engine(crypto_symbols)
     dashboard = Dashboard(
         root,
         token=resolved,
@@ -667,6 +801,8 @@ def serve(
         paper_market_data_provider=paper_market_data_provider,
         paper_market_data_max_age_seconds=paper_market_data_max_age_seconds,
         paper_decision_source=paper_decision_source,
+        crypto_engine=crypto_engine,
+        crypto_symbols=tuple(crypto_symbols),
     )
     httpd = ThreadingHTTPServer((host, port), make_handler(dashboard))
     httpd.daemon_threads = True
@@ -917,6 +1053,7 @@ INDEX_HTML = """<!doctype html>
     </div>
     <nav id="nav" class="hide">
       <button data-t="overview" class="on">Overview</button>
+      <button data-t="crypto">Crypto</button>
       <button data-t="engine">Engine</button>
       <button data-t="decisions">Decisions</button>
       <button data-t="positions">Positions</button>
@@ -969,6 +1106,29 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="card" style="margin-top:12px">
         <h2>Readiness</h2><div id="readiness"></div>
+      </div>
+    </section>
+
+    <section id="crypto">
+      <div class="card">
+        <h2>Live crypto market <span class="spacer"></span>
+          <span class="tag" id="cx-status">—</span></h2>
+        <p class="muted" id="cx-detail" style="margin:0 0 12px"></p>
+        <div id="cx-market"></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h2>TJR strategy <span class="spacer"></span>
+          <span class="tag" id="cx-strategy-status">—</span></h2>
+        <p class="muted" style="margin:0 0 12px">
+          The stage the unchanged TJR rule chain reached. A BUY or SELL appears only
+          when every condition completed; otherwise the row shows the stage and the
+          reason it stopped.
+        </p>
+        <div id="cx-strategy"></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h2>System health</h2>
+        <div id="cx-health" class="kv"></div>
       </div>
     </section>
 
@@ -1073,6 +1233,7 @@ INDEX_HTML = """<!doctype html>
 const $ = (id) => document.getElementById(id);
 let TOKEN = localStorage.getItem("ta_token") || "";
 let timer = null;
+let cryptoTimer = null;
 let LAST = {};
 
 function esc(v){
@@ -1557,11 +1718,110 @@ async function doRun(){
   finally{ $("runbtn").disabled = false; }
 }
 
+// -- Crypto -----------------------------------------------------------------
+function cxCandleCell(c){
+  if(!c) return "N/A";
+  return `${num(c.close,4)} <span class="muted">(${esc(c.close_time||"")})</span>`;
+}
+function renderCryptoMarket(m){
+  const rows = (m && m.symbols) || [];
+  $("cx-status").textContent = (m && m.status) ? m.status : "not_started";
+  $("cx-detail").textContent = (m && m.detail)
+    ? m.detail
+    : (rows.length ? "Live Binance public market data." : "No crypto market data is configured.");
+  if(!rows.length){
+    $("cx-market").innerHTML = `<div class="card">${empty(
+      m && m.status === "error" ? ("Crypto market data error: " + (m.detail||"unknown"))
+                                 : "No crypto symbols are configured.")}</div>`;
+    return;
+  }
+  $("cx-market").innerHTML = `<div class="tablewrap"><table>
+    <thead><tr><th>Symbol</th><th class="num">Price</th><th class="num">24h %</th>
+      <th class="num">24h Volume</th><th class="num">Bid</th><th class="num">Ask</th>
+      <th class="num">Spread</th><th class="num">24h High</th><th class="num">24h Low</th>
+      <th class="num">1m close</th><th class="num">5m close</th><th>Freshness</th></tr></thead>
+    <tbody>${rows.map(r=>`<tr>
+      <td><b>${esc(r.symbol)}</b><div class="mono">${esc(r.status)}</div></td>
+      <td class="num">${r.price===null||r.price===undefined?"N/A":num(r.price,4)}</td>
+      <td class="num ${cls(r.change_percent_24h)}">${r.change_percent_24h===null||r.change_percent_24h===undefined?"N/A":pct(r.change_percent_24h)}</td>
+      <td class="num">${r.volume_24h===null||r.volume_24h===undefined?"N/A":Number(r.volume_24h).toLocaleString(undefined,{maximumFractionDigits:0})}</td>
+      <td class="num">${r.bid===null||r.bid===undefined?"N/A":num(r.bid,4)}</td>
+      <td class="num">${r.ask===null||r.ask===undefined?"N/A":num(r.ask,4)}</td>
+      <td class="num">${r.spread===null||r.spread===undefined?"N/A":num(r.spread,6)}</td>
+      <td class="num">${r.high_24h===null||r.high_24h===undefined?"N/A":num(r.high_24h,4)}</td>
+      <td class="num">${r.low_24h===null||r.low_24h===undefined?"N/A":num(r.low_24h,4)}</td>
+      <td class="num">${cxCandleCell((r.closed_candles||{})["1m"])}</td>
+      <td class="num">${cxCandleCell((r.closed_candles||{})["5m"])}</td>
+      <td>${r.fresh?`<span class="pill state-OK">live</span><div class="muted">${esc(rel(r.newest_event_at))}</div>`
+                  :`<span class="pill state-ERROR">stale</span><div class="muted">${esc(r.detail||"")}</div>`}</td>
+    </tr>`).join("")}</tbody></table></div>`;
+}
+function renderCryptoStrategy(s){
+  const rows = (s && s.symbols) || [];
+  $("cx-strategy-status").textContent = (s && s.status) ? s.status : "not_started";
+  if(!rows.length){
+    $("cx-strategy").innerHTML = `<div class="card">${empty(
+      s && s.status === "error" ? ("TJR evaluation error: " + (s.detail||"unknown"))
+                                 : "No TJR evaluation is available yet.")}</div>`;
+    return;
+  }
+  $("cx-strategy").innerHTML = rows.map(r=>`<div class="card">
+    <h2>${esc(r.symbol)} <span class="spacer"></span>
+      <span class="pill ${r.actionable?"state-OK":"state-STOPPED"}">${esc(r.stage||"NO_SIGNAL")}</span>
+      ${r.direction?`<span class="tag">${esc(r.direction)}</span>`:""}</h2>
+    <div class="kv">
+      <div class="k">Stage</div><div class="v">${esc(r.stage||"NO_SIGNAL")}</div>
+      <div class="k">Reason</div><div class="v">${esc(r.reason_code||"—")}</div>
+      <div class="k">Detail</div><div class="v">${esc(r.detail||"—")}</div>
+      <div class="k">Entry</div><div class="v">${r.entry===null||r.entry===undefined?"N/A":num(r.entry,4)}</div>
+      <div class="k">Stop loss</div><div class="v">${r.stop_loss===null||r.stop_loss===undefined?"N/A":num(r.stop_loss,4)}</div>
+      <div class="k">Take profit</div><div class="v">${r.take_profit===null||r.take_profit===undefined?"N/A":num(r.take_profit,4)}</div>
+      <div class="k">Risk / reward</div><div class="v">${r.risk_reward===null||r.risk_reward===undefined?"N/A":num(r.risk_reward,2)}</div>
+      <div class="k">Decision time</div><div class="v">${esc(when(r.evaluated_at))}</div>
+    </div>
+  </div>`).join("");
+}
+function renderCryptoHealth(h){
+  const rows = {
+    "Data provider": h.data_provider,
+    "Data status": h.data_status,
+    "Last successful update": h.data_last_refresh_at,
+    "Data latency (s)": h.market_status,
+    "Fresh symbols": (h.fresh_symbols===null||h.fresh_symbols===undefined)
+      ? null : `${h.fresh_symbols} / ${h.total_symbols}`,
+    "Worker status": h.worker_status,
+    "Broker status": h.broker_status,
+    "Decision source": h.decision_source_kind,
+    "Market data seam": h.market_data_provider,
+    "Market data status": h.market_data_status,
+    "Last cycle": h.last_cycle_at,
+    "Last order sync": h.last_order_sync_at,
+    "Error count": h.error_count,
+    "Last error": h.last_error,
+    "Stream state": h.stream ? (h.stream.state || "unknown") : null,
+    "Observed at": h.observed_at,
+  };
+  $("cx-health").innerHTML = kv(rows, (k,v)=>{
+    if(v===null||v===undefined) return "N/A";
+    if(k==="Last successful update"||k==="Last cycle"||k==="Last order sync"||k==="Observed at") return esc(when(v));
+    return esc(v);
+  });
+}
+async function refreshCrypto(){
+  try{
+    const c = await api("/api/crypto");
+    renderCryptoMarket(c.market);
+    renderCryptoStrategy(c.strategy);
+    renderCryptoHealth(c.health);
+  }catch(e){ showErr(e.message); }
+}
+
 // -- nav / boot -------------------------------------------------------------
 document.querySelectorAll("nav button").forEach(b=>{
   b.onclick = () => {
     document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("on", x===b));
     document.querySelectorAll("section").forEach(s=>s.classList.toggle("on", s.id===b.dataset.t));
+    if(b.dataset.t==="crypto") refreshCrypto();
     if(b.dataset.t==="engine") refreshEngine();
     if(b.dataset.t==="decisions") refreshDecisions();
     if(b.dataset.t==="positions") refreshPositions();
@@ -1618,6 +1878,10 @@ function boot(){
   refresh();
   if(timer) clearInterval(timer);
   timer = setInterval(refresh, 10000);
+  // The crypto market is live, so it polls faster than the 10-second summary
+  // refresh. The poll is the same read-only endpoint; it places no order.
+  if(cryptoTimer) clearInterval(cryptoTimer);
+  cryptoTimer = setInterval(refreshCrypto, 3000);
 }
 boot();
 </script>

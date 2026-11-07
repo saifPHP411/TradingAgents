@@ -21,6 +21,7 @@ from tradingagents.risk.paper_parity import FRACTIONAL_SHARES
 
 from .broker import (
     DECISION_SOURCE_CHOICES,
+    DECISION_SOURCE_CRYPTO,
     DECISION_SOURCE_CURRENT_MARKET,
     DECISION_SOURCE_HISTORY,
     DECISION_SOURCE_TJR,
@@ -28,6 +29,7 @@ from .broker import (
     MARKET_DATA_CHOICES,
     PROVIDER_ALPACA_SNAPSHOT,
     PROVIDER_BAR_OPEN,
+    PROVIDER_BINANCE_SNAPSHOT,
 )
 
 MARKET_DATA_ENV = "TRADINGAGENTS_PAPER_MARKET_DATA"
@@ -215,6 +217,10 @@ def market_data_factory_for(choice: str, *, max_age_seconds: float | None = None
         max_age_seconds = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS
 
     def factory(symbols):
+        if provider == PROVIDER_BINANCE_SNAPSHOT:
+            from .broker import BinanceSnapshotMarketData
+
+            return BinanceSnapshotMarketData(symbols, max_age_seconds=max_age_seconds)
         from .broker import AlpacaSnapshotMarketData
 
         return AlpacaSnapshotMarketData(symbols, max_age_seconds=max_age_seconds)
@@ -225,6 +231,12 @@ def market_data_factory_for(choice: str, *, max_age_seconds: float | None = None
 def describe_provider(choice: str) -> str:
     """A one-line, operator-facing description of a provider choice."""
     provider = resolve_provider(choice)
+    if provider == PROVIDER_BINANCE_SNAPSHOT:
+        return (
+            "binance_snapshot: a CURRENT crypto price from Binance public market data "
+            "(no API key, no registration); validated for freshness. Pair with "
+            "--paper-decision-source crypto."
+        )
     if provider == PROVIDER_ALPACA_SNAPSHOT:
         return (
             "alpaca_snapshot: a CURRENT price from Alpaca market data (feed=iex), "
@@ -254,6 +266,15 @@ def describe_decision_source(choice: str) -> str:
             "RiskEngine; requires ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET. "
             "One decision per symbol per session. Pair with --paper-market-data "
             "alpaca_snapshot so orders size at a current price."
+        )
+    if source == DECISION_SOURCE_CRYPTO:
+        return (
+            "crypto: the deterministic TJR rule chain (no model) over current Binance "
+            "INTRADAY 1m/5m market data (no API key), gated on a 24/7 crypto clock and "
+            "the RiskEngine. One decision per symbol per UTC session, id "
+            "tjr-<symbol>-<session>. Pair with --paper-market-data binance_snapshot so "
+            "orders size at a current crypto price. Requires a crypto-capable paper "
+            "broker; paper-only."
         )
     return (
         "history: the paper experiment's recorded, HISTORICAL decisions (the "

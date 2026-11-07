@@ -800,8 +800,10 @@ def _build_parser() -> argparse.ArgumentParser:
             f"(default: ${MARKET_DATA_ENV}, else bar_open, the experiment's latest "
             "bar open). 'alpaca_snapshot' reads a genuinely current price from "
             "Alpaca market data (feed=iex) and requires ALPACA_PAPER_API_KEY / "
-            "ALPACA_PAPER_API_SECRET. There is no silent fallback: if the snapshot "
-            "cannot be read or is stale, no order is placed."
+            "ALPACA_PAPER_API_SECRET. 'binance_snapshot' reads a genuinely current "
+            "CRYPTO price from Binance's public market data (no API key). There is "
+            "no silent fallback: if the snapshot cannot be read or is stale, no "
+            "order is placed."
         ),
     )
     parser.add_argument(
@@ -830,7 +832,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "'tjr' is the DETERMINISTIC TJR rule chain (no model) over current Alpaca "
             "INTRADAY 1m/5m data, gated on Alpaca's market clock and the RiskEngine; "
             "it needs ALPACA_PAPER_API_KEY / ALPACA_PAPER_API_SECRET and is best "
-            "paired with --paper-market-data alpaca_snapshot."
+            "paired with --paper-market-data alpaca_snapshot. "
+            "'crypto' is that same unchanged TJR rule chain over current Binance "
+            "public INTRADAY 1m/5m crypto bars (no API key), gated on a 24/7 clock "
+            "and the RiskEngine; pair it with --paper-market-data binance_snapshot."
         ),
     )
     parser.add_argument(
