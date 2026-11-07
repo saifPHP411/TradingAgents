@@ -31,10 +31,15 @@ RUN printf '%s\n' 'export PATH="/opt/venv/bin:$PATH"' > /etc/profile.d/10-venv-p
  && chmod 0644 /etc/profile.d/10-venv-path.sh
 
 RUN useradd --create-home appuser \
- && install -d -m 0755 -o appuser -g appuser /home/appuser/.tradingagents
+ && install -d -m 0755 -o appuser -g appuser /home/appuser/.tradingagents \
+ && install -d -m 0755 -o appuser -g appuser /home/appuser/app/data
 USER appuser
 WORKDIR /home/appuser/app
 
 COPY --from=builder --chown=appuser:appuser /build .
+
+# Health check for Railway - uses the dashboard's /healthz endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT:-8000}/healthz', timeout=5)" || exit 1
 
 ENTRYPOINT ["tradingagents"]
