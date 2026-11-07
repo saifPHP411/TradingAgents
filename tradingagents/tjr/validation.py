@@ -59,10 +59,19 @@ from .engine import TjrBacktester, TjrConfig
 from .frames import SESSION_TZ, IntradaySeries, resample, session_open_utc
 from .report import build_report, equal_weight_benchmark
 from .run import load_series
-from .strategy import TjrStrategy
+from .strategy import MemoTjrStrategy
 
 UNIVERSE: tuple[str, ...] = (
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "AVGO", "JPM",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "TSLA",
+    "AMD",
+    "AVGO",
+    "JPM",
 )
 """The ten symbols the study is fixed to, so a report names the same set every run."""
 
@@ -110,20 +119,9 @@ uses elsewhere; ``zero`` exists only as a comparison and is never a headline."""
 # ---------------------------------------------------------------------------
 
 
-class _MemoStrategy(TjrStrategy):
-    """A :class:`TjrStrategy` that caches its pure evaluations for one study run."""
-
-    def __init__(self, *, cache: dict, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._cache = cache
-
-    def evaluate(self, symbol: str, session: str, as_of: pd.Timestamp):
-        key = (symbol, session, as_of.isoformat())
-        hit = self._cache.get(key)
-        if hit is None:
-            hit = super().evaluate(symbol, session, as_of)
-            self._cache[key] = hit
-        return hit
+# The memoizing strategy lives in the strategy module so there is one
+# implementation; this alias keeps the harness's own name for it.
+_MemoStrategy = MemoTjrStrategy
 
 
 class _MemoBacktester(TjrBacktester):
@@ -300,9 +298,7 @@ def _rejection_tally(rejections: list[dict]) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
-def split_sessions(
-    sessions: list[str], *, fraction: float = 0.5
-) -> tuple[list[str], list[str]]:
+def split_sessions(sessions: list[str], *, fraction: float = 0.5) -> tuple[list[str], list[str]]:
     """Split an ordered session list into ``(development, test)``, chronologically.
 
     A contiguous cut at ``fraction``. With so few sessions the split is descriptive,
@@ -340,7 +336,9 @@ def period_view(
     equity_rebased = equity_p * (result.initial_cash / base) if base else equity_p
     exposure_p = result.exposure_series()[mask]
     trades_p = [t for t in result.trades if t.session in keep]
-    notional_p = sum(abs(t.quantity * t.entry_price) + abs(t.quantity * t.exit_price) for t in trades_p)
+    notional_p = sum(
+        abs(t.quantity * t.entry_price) + abs(t.quantity * t.exit_price) for t in trades_p
+    )
     fees_p = sum(t.fees for t in trades_p)
     realized_p = sum(t.net_pnl for t in trades_p)
     bench = equal_weight_benchmark(result)
@@ -366,7 +364,9 @@ def period_view(
     per_symbol: dict[str, dict] = {}
     for t in trades_p:
         reasons[t.exit_reason] = reasons.get(t.exit_reason, 0) + 1
-        bucket = per_symbol.setdefault(t.symbol, {"trades": 0, "net_pnl": 0.0, "wins": 0, "losses": 0})
+        bucket = per_symbol.setdefault(
+            t.symbol, {"trades": 0, "net_pnl": 0.0, "wins": 0, "losses": 0}
+        )
         bucket["trades"] += 1
         bucket["net_pnl"] += t.net_pnl
         if t.net_pnl > 0:
@@ -404,9 +404,7 @@ def _day_counts_for_equity(equity: pd.Series) -> tuple[int, int, int]:
 # ---------------------------------------------------------------------------
 
 
-def audit_frames(
-    data_dir: Path, symbols: tuple[str, ...]
-) -> dict:
+def audit_frames(data_dir: Path, symbols: tuple[str, ...]) -> dict:
     """Inspect the fetched frames: sessions, gaps, the ET clock, and 1m/5m agreement."""
     report: dict = {"symbols": {}, "checks": {}}
     one_all: dict[str, pd.DataFrame] = {}
@@ -471,8 +469,22 @@ def _audit_symbol(one: pd.DataFrame, five: pd.DataFrame) -> dict:
             "five_minute": int(five.index.duplicated().sum()),
         },
         "non_finite_prices": {
-            "one_minute": int((~one[["open", "high", "low", "close"]].apply(pd.to_numeric, errors="coerce").notna().all(axis=1)).sum()),
-            "five_minute": int((~five[["open", "high", "low", "close"]].apply(pd.to_numeric, errors="coerce").notna().all(axis=1)).sum()),
+            "one_minute": int(
+                (
+                    ~one[["open", "high", "low", "close"]]
+                    .apply(pd.to_numeric, errors="coerce")
+                    .notna()
+                    .all(axis=1)
+                ).sum()
+            ),
+            "five_minute": int(
+                (
+                    ~five[["open", "high", "low", "close"]]
+                    .apply(pd.to_numeric, errors="coerce")
+                    .notna()
+                    .all(axis=1)
+                ).sum()
+            ),
         },
     }
 
@@ -493,9 +505,11 @@ def _cross_checks(one_all: dict[str, pd.DataFrame], five_all: dict[str, pd.DataF
         for s, f in one_all.items()
     }
     union = sorted(set().union(*per_symbol_sessions.values())) if per_symbol_sessions else []
-    aligned = all(
-        sessions == union for sessions in per_symbol_sessions.values()
-    ) if per_symbol_sessions else False
+    aligned = (
+        all(sessions == union for sessions in per_symbol_sessions.values())
+        if per_symbol_sessions
+        else False
+    )
     return {
         "one_minute_vs_five_minute": per_symbol,
         "session_alignment_across_symbols": aligned,
@@ -518,18 +532,25 @@ def _aggregation_mismatch(one: pd.DataFrame, five: pd.DataFrame) -> dict:
     five.columns = [c.lower() for c in five.columns]
     local = one.index.tz_convert(SESSION_TZ)
     day = pd.Series(local.strftime("%Y-%m-%d"), index=one.index)
-    anchor = pd.DatetimeIndex([pd.Timestamp(d, tz=SESSION_TZ) for d in day]) + pd.Timedelta(hours=9, minutes=30)
+    anchor = pd.DatetimeIndex([pd.Timestamp(d, tz=SESSION_TZ) for d in day]) + pd.Timedelta(
+        hours=9, minutes=30
+    )
     offset = ((local - anchor).total_seconds() // 60).astype("int64")
     bucket = (anchor + pd.to_timedelta((offset // 5) * 5, unit="m")).tz_convert("UTC")
     grouped = one.groupby(bucket, sort=True)
-    agg = grouped.agg(open=("open", "first"), high=("high", "max"), low=("low", "min"), close=("close", "last"))
+    agg = grouped.agg(
+        open=("open", "first"), high=("high", "max"), low=("low", "min"), close=("close", "last")
+    )
     agg = agg[grouped.size() == 5]
     common = agg.index.intersection(five.index)
     if len(common) == 0:
         return {"compared_bars": 0}
     diffs = {}
     for column in ("open", "high", "low", "close"):
-        rel = ((agg.loc[common, column] - five.loc[common, column]).abs() / five.loc[common, column].abs()).abs()
+        rel = (
+            (agg.loc[common, column] - five.loc[common, column]).abs()
+            / five.loc[common, column].abs()
+        ).abs()
         diffs[column] = {
             "max_rel_diff": float(rel.max()),
             "mean_rel_diff": float(rel.mean()),
@@ -711,8 +732,12 @@ def _truncate_series(series: tuple, symbol: str, cut: str):
     """
     one, five, _hourly, _four = series
     cutoff = pd.Timestamp(cut)
-    out_five = {symbol: IntradaySeries(symbol, "5m", five[symbol].frame[five[symbol].frame.index < cutoff])}
-    out_one = {symbol: IntradaySeries(symbol, "1m", one[symbol].frame[one[symbol].frame.index < cutoff])}
+    out_five = {
+        symbol: IntradaySeries(symbol, "5m", five[symbol].frame[five[symbol].frame.index < cutoff])
+    }
+    out_one = {
+        symbol: IntradaySeries(symbol, "1m", one[symbol].frame[one[symbol].frame.index < cutoff])
+    }
     out_hourly: dict[str, IntradaySeries] = {}
     out_four: dict[str, IntradaySeries] = {}
     for interval, target in (("60m", out_hourly), ("4h", out_four)):
@@ -775,10 +800,14 @@ def _render_prior(lines: list[str], prior: list[dict]) -> None:
         "shown beside this study, not merged with it."
     )
     lines.append("")
-    lines.append("| report | window | trades | net return | win rate | profit factor | Sharpe | fees |")
+    lines.append(
+        "| report | window | trades | net return | win rate | profit factor | Sharpe | fees |"
+    )
     lines.append("|---|---|---|---|---|---|---|---|")
     for entry in prior:
-        window = f"{str(entry['start'])[:10]}..{str(entry['end'])[:10]}" if entry.get("start") else "n/a"
+        window = (
+            f"{str(entry['start'])[:10]}..{str(entry['end'])[:10]}" if entry.get("start") else "n/a"
+        )
         fees = "zero" if "costs" not in entry["file"] else "charged"
         lines.append(
             f"| {entry['file']} | {window} | {entry['trades']} | {_pct(entry['total_return'])} | "
@@ -810,9 +839,7 @@ def render_markdown(payload: dict) -> str:
 
     lines.append("## 1. Data window (what the vendor actually served)")
     lines.append("")
-    lines.append(
-        f"- Universe: {', '.join(payload['universe'])}"
-    )
+    lines.append(f"- Universe: {', '.join(payload['universe'])}")
     lines.append(
         f"- Sessions: **{window['sessions']}** ({window['first_session']} .. {window['last_session']}, ET)"
     )
@@ -832,9 +859,7 @@ def render_markdown(payload: dict) -> str:
         f"- Sessions aligned across all symbols: **{checks['session_alignment_across_symbols']}** "
         f"(union {checks['union_sessions']} sessions)"
     )
-    lines.append(
-        "- 1m vs 5m agreement (each 5m bar against the five 1m bars that build it):"
-    )
+    lines.append("- 1m vs 5m agreement (each 5m bar against the five 1m bars that build it):")
     for symbol, detail in sorted(checks["one_minute_vs_five_minute"].items()):
         if detail.get("compared_bars"):
             close = detail["per_column"]["close"]
@@ -847,9 +872,7 @@ def render_markdown(payload: dict) -> str:
         for s, v in audit["symbols"].items()
         if v.get("present") and v["one_minute"]["incomplete_sessions"]
     }
-    lines.append(
-        f"- Sessions with fewer than 390 one-minute bars: {incomplete or 'none'}"
-    )
+    lines.append(f"- Sessions with fewer than 390 one-minute bars: {incomplete or 'none'}")
     lines.append("")
 
     lines.append("## 2. Risk limits (unchanged, applied to the shared book)")
@@ -920,7 +943,9 @@ def render_markdown(payload: dict) -> str:
 
     lines.append("## 4. Per-symbol results (each symbol alone, project costs)")
     lines.append("")
-    lines.append("| symbol | trades | net P/L | net return | B&H return | win rate | avg planned R:R | avg realized R |")
+    lines.append(
+        "| symbol | trades | net P/L | net return | B&H return | win rate | avg planned R:R | avg realized R |"
+    )
     lines.append("|---|---|---|---|---|---|---|---|")
     for symbol in payload["universe"]:
         result = payload["per_symbol_standalone"].get(symbol)
@@ -940,7 +965,9 @@ def render_markdown(payload: dict) -> str:
     split = payload["split"]
     lines.append(f"Method: {split['method']}")
     lines.append("")
-    lines.append("| period | sessions | net P/L | net return | trades | win rate | profit factor | max DD | win/loss days |")
+    lines.append(
+        "| period | sessions | net P/L | net return | trades | win rate | profit factor | max DD | win/loss days |"
+    )
     lines.append("|---|---|---|---|---|---|---|---|---|")
     for key in ("development", "test"):
         view = split[key]
@@ -997,16 +1024,14 @@ def render_markdown(payload: dict) -> str:
         "short for a stable estimate of edge."
     )
     lines.append(
-        "2. **Regime.** One market regime, one season. A different regime may behave "
-        "differently."
+        "2. **Regime.** One market regime, one season. A different regime may behave differently."
     )
     lines.append(
         "3. **Costs.** The vendor's bars carry no quoted spread; the spread/slippage "
         "here are assumptions, not measurements. A wider real spread worsens the result."
     )
     lines.append(
-        "4. **Survivorship.** The universe is ten current large caps; delisted names "
-        "are absent."
+        "4. **Survivorship.** The universe is ten current large caps; delisted names are absent."
     )
     lines.append(
         "5. **Position cap.** A 25 USD order ceiling on a 100,000 USD book makes the "
@@ -1028,7 +1053,9 @@ def render_markdown(payload: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the TJR validation study over fetched frames.")
+    parser = argparse.ArgumentParser(
+        description="Run the TJR validation study over fetched frames."
+    )
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
     parser.add_argument("--symbols", nargs="+", default=list(UNIVERSE))
     parser.add_argument("--out", type=Path, required=True, help="write the JSON study here")
@@ -1055,9 +1082,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"re-rendered {args.markdown} from {args.out}")
         return 0
 
-    payload = run_study(
-        args.data, symbols=tuple(args.symbols), split_fraction=args.split_fraction
-    )
+    payload = run_study(args.data, symbols=tuple(args.symbols), split_fraction=args.split_fraction)
     if not args.no_lookahead_probe:
         payload["lookahead_probes"] = _default_lookahead_probes(
             args.data, payload["window"], tuple(args.symbols)
@@ -1067,7 +1092,9 @@ def main(argv: list[str] | None = None) -> int:
         for name in ("real_data_backtest.json", "real_data_backtest_costs.json")
     ]
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    args.out.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"
+    )
     print(f"wrote {args.out}")
     if args.markdown is not None:
         args.markdown.parent.mkdir(parents=True, exist_ok=True)
@@ -1086,8 +1113,7 @@ def _default_lookahead_probes(data_dir: Path, window: dict, symbols: tuple[str, 
     session = window["last_session"]
     cut = (session_open_utc(session) + pd.Timedelta(hours=3)).isoformat()
     return [
-        lookahead_probe(data_dir, symbol=symbol, session=session, cut=cut)
-        for symbol in symbols[:2]
+        lookahead_probe(data_dir, symbol=symbol, session=session, cut=cut) for symbol in symbols[:2]
     ]
 
 

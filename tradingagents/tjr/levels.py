@@ -22,7 +22,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from .frames import SESSION_TZ, IntradaySeries, session_close_utc, session_open_utc
+from .frames import IntradaySeries
+from .sessions import SessionPolicy
 from .structure import Swing, swing_points
 
 
@@ -62,7 +63,7 @@ def previous_session_levels(
     previous = prior_sessions[-1]
     bars = series.session_bars(previous, as_of)
     levels: list[LiquidityLevel] = []
-    formed = session_close_utc(previous)
+    formed = series.session.session_close_utc(previous)
     for kind, label in (("high", "prev_session_high"), ("low", "prev_session_low")):
         value = _session_extreme(bars, kind=kind)
         if value is not None:
@@ -110,7 +111,7 @@ def _sessions_before(series: IntradaySeries, session: str, as_of: pd.Timestamp) 
     frame = series.available(as_of)
     if frame.empty:
         return []
-    days = frame.index.tz_convert(SESSION_TZ).strftime("%Y-%m-%d")
+    days = frame.index.tz_convert(series.session.timezone).strftime("%Y-%m-%d")
     return sorted({d for d in days if d < session})
 
 
@@ -130,12 +131,18 @@ def completed_bar_levels(
     bar_close = last_start + pd.Timedelta(minutes=series.bar_minutes)
     row = frame.loc[last_start]
     return [
-        LiquidityLevel(label=f"{label_prefix}_high", kind="high", price=float(row["high"]), formed_at=bar_close),
-        LiquidityLevel(label=f"{label_prefix}_low", kind="low", price=float(row["low"]), formed_at=bar_close),
+        LiquidityLevel(
+            label=f"{label_prefix}_high", kind="high", price=float(row["high"]), formed_at=bar_close
+        ),
+        LiquidityLevel(
+            label=f"{label_prefix}_low", kind="low", price=float(row["low"]), formed_at=bar_close
+        ),
     ]
 
 
-def swing_levels(series: IntradaySeries, as_of: pd.Timestamp, *, lookback: int = 2) -> list[LiquidityLevel]:
+def swing_levels(
+    series: IntradaySeries, as_of: pd.Timestamp, *, lookback: int = 2
+) -> list[LiquidityLevel]:
     """Confirmed swing highs and lows, as liquidity levels."""
     frame = series.available(as_of)
     if frame.empty:
@@ -144,14 +151,14 @@ def swing_levels(series: IntradaySeries, as_of: pd.Timestamp, *, lookback: int =
     for swing in swing_points(frame, lookback=lookback):
         label = "swing_high" if swing.kind == "high" else "swing_low"
         out.append(
-            LiquidityLevel(label=label, kind=swing.kind, price=swing.price, formed_at=swing.confirmed_at)
+            LiquidityLevel(
+                label=label, kind=swing.kind, price=swing.price, formed_at=swing.confirmed_at
+            )
         )
     return out
 
 
-def equal_levels(
-    swings: list[Swing], *, tolerance: float
-) -> list[LiquidityLevel]:
+def equal_levels(swings: list[Swing], *, tolerance: float) -> list[LiquidityLevel]:
     """Equal highs / equal lows: swings whose prices line up within ``tolerance``.
 
     Objective by construction: two or more swings of the same kind whose prices sit
@@ -163,9 +170,7 @@ def equal_levels(
         raise ValueError("tolerance must be positive")
     out: list[LiquidityLevel] = []
     for kind, label in (("high", "equal_highs"), ("low", "equal_lows")):
-        points = sorted(
-            [s for s in swings if s.kind == kind], key=lambda s: s.price
-        )
+        points = sorted([s for s in swings if s.kind == kind], key=lambda s: s.price)
         cluster: list[Swing] = []
         for point in points:
             if cluster and abs(point.price - cluster[-1].price) <= tolerance * cluster[-1].price:
@@ -208,7 +213,9 @@ def liquidity_levels(
     if hourly is not None:
         levels += completed_bar_levels(hourly, label_prefix="prev_1h", session=session, as_of=as_of)
     if four_hour is not None:
-        levels += completed_bar_levels(four_hour, label_prefix="prev_4h", session=session, as_of=as_of)
+        levels += completed_bar_levels(
+            four_hour, label_prefix="prev_4h", session=session, as_of=as_of
+        )
     frame = base.available(as_of)
     swings = swing_points(frame, lookback=swing_lookback) if not frame.empty else []
     levels += swing_levels(base, as_of, lookback=swing_lookback)
@@ -237,6 +244,15 @@ def nearest_below(levels: list[LiquidityLevel], price: float) -> LiquidityLevel 
     return max(below, key=lambda level: level.price) if below else None
 
 
-def session_bounds(session: str) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """The session's 09:30 and 16:00 ET instants, in UTC."""
-    return session_open_utc(session), session_close_utc(session)
+def session_bounds(
+    session: str, policy: SessionPolicy | None = None
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """The session's open and close instants, in UTC, under ``policy``.
+
+    Defaults to the US equity regular session, so existing callers are unchanged;
+    a crypto caller passes its own :class:`~.sessions.SessionPolicy`.
+    """
+    from .sessions import EQUITY_SESSION
+
+    chosen = policy or EQUITY_SESSION
+    return chosen.session_open_utc(session), chosen.session_close_utc(session)

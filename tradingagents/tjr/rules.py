@@ -31,18 +31,20 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from .frames import SESSION_TZ, IntradaySeries
+from .frames import IntradaySeries
 from .levels import (
     LiquidityLevel,
     liquidity_levels,
     running_extreme_before,
 )
+from .sessions import SessionPolicy
 from .structure import (
     break_of_structure,
     equilibrium,
     fair_value_gaps,
     inverse_fair_value_gap,
     last_swing,
+    reset_frame_cache,
     swing_points,
 )
 
@@ -186,12 +188,20 @@ class TjrSettings:
             raise ValueError("min_reward_risk must be positive")
 
 
-def _local_time(stamp: pd.Timestamp) -> pd.Timestamp:
-    return pd.Timestamp(stamp).tz_convert(SESSION_TZ)
+def _local_time(stamp: pd.Timestamp, policy: SessionPolicy) -> pd.Timestamp:
+    return pd.Timestamp(stamp).tz_convert(policy.timezone)
 
 
-def _after_entry_window(as_of: pd.Timestamp, settings: TjrSettings) -> bool:
-    local = _local_time(as_of)
+def _after_entry_window(as_of: pd.Timestamp, settings: TjrSettings, policy: SessionPolicy) -> bool:
+    """Whether a new entry is barred because the session's entry window has closed.
+
+    On the equity policy this is the 15:30 ET cut the strategy has always used. On a
+    24/7 crypto policy there is no session close, so the same *local clock* cut
+    applies to the UTC day (or the policy's own timezone); a policy with no entry
+    cut would need a new, documented knob rather than a silent change, so the cut is
+    kept and stated.
+    """
+    local = _local_time(as_of, policy)
     hour, minute = settings.latest_entry_time
     return (local.hour, local.minute) >= (hour, minute)
 
@@ -247,7 +257,9 @@ def find_sweeps(
                 found.append(
                     Sweep(
                         level=_synthetic_level(label, "high", price, stamp),
-                        bar=stamp, extreme=float(row["high"]), direction="bearish",
+                        bar=stamp,
+                        extreme=float(row["high"]),
+                        direction="bearish",
                     )
                 )
         for price, label in lows:
@@ -255,7 +267,9 @@ def find_sweeps(
                 found.append(
                     Sweep(
                         level=_synthetic_level(label, "low", price, stamp),
-                        bar=stamp, extreme=float(row["low"]), direction="bullish",
+                        bar=stamp,
+                        extreme=float(row["low"]),
+                        direction="bullish",
                     )
                 )
     found.sort(key=lambda sweep: sweep.bar, reverse=True)
@@ -293,9 +307,7 @@ def _confirmation(
     """
     direction = "down" if sweep.direction == "bearish" else "up"
     swings = swing_points(frame_5m, lookback=settings.swing_lookback)
-    reference = last_swing(
-        swings, "high" if direction == "up" else "low", at=sweep.bar
-    )
+    reference = last_swing(swings, "high" if direction == "up" else "low", at=sweep.bar)
     if reference is not None:
         later = frame_5m[frame_5m.index > sweep.bar]
         if direction == "up":
@@ -364,7 +376,9 @@ def _after_bar(frame: pd.DataFrame, stamp: pd.Timestamp) -> pd.Timestamp:
     return later[0] if len(later) else stamp
 
 
-def _retrace_at(frame_5m: pd.DataFrame, zone: tuple[float, float], *, since: pd.Timestamp) -> pd.Timestamp | None:
+def _retrace_at(
+    frame_5m: pd.DataFrame, zone: tuple[float, float], *, since: pd.Timestamp
+) -> pd.Timestamp | None:
     """The first bar at or after ``since`` whose range overlaps ``zone``, or ``None``."""
     later = frame_5m[frame_5m.index >= since]
     if later.empty:
@@ -414,6 +428,7 @@ def evaluate(
     four_hour: IntradaySeries | None = None,
     settings: TjrSettings | None = None,
     allow_short: bool = False,
+    session_policy: SessionPolicy | None = None,
 ) -> TjrEvaluation:
     """Run the whole TJR chain at ``as_of`` and report the outcome.
 
@@ -426,42 +441,104 @@ def evaluate(
     most *progressed* setup wins — a completed entry beats a bare sweep, whatever
     their order. Ties go to the more recent sweep. This is what keeps a small sweep
     made during a retrace from replacing the sweep that is actually setting up.
+
+    ``session_policy`` labels the session day and bounds its window. It defaults to
+    the series' own policy (the US equity session for an equity series, the crypto
+    policy for a crypto one), so a caller that built its series with a policy need
+    not pass it again. It changes *which* bars a session's structure is read from,
+    never whether a rule fires.
     """
     settings = settings or TjrSettings()
+    policy = session_policy or series_5m.session
+    reset_frame_cache()
+    try:
+        return _evaluate_inner(
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            series_5m=series_5m,
+            series_1m=series_1m,
+            hourly=hourly,
+            four_hour=four_hour,
+            settings=settings,
+            allow_short=allow_short,
+            policy=policy,
+        )
+    finally:
+        reset_frame_cache()
+
+
+def _evaluate_inner(
+    *,
+    symbol: str,
+    session: str,
+    as_of: pd.Timestamp,
+    series_5m: IntradaySeries,
+    series_1m: IntradaySeries,
+    hourly: IntradaySeries | None,
+    four_hour: IntradaySeries | None,
+    settings: TjrSettings,
+    allow_short: bool,
+    policy: SessionPolicy,
+) -> TjrEvaluation:
     frame_5m = series_5m.session_bars(session, as_of)
     frame_1m = series_1m.session_bars(session, as_of)
     if frame_5m.empty or frame_1m.empty:
         return TjrEvaluation(
-            symbol=symbol, session=session, as_of=as_of, side=None,
-            stage=STAGE_NONE, reason_code=TJR_OUTSIDE_SESSION,
-            detail="no regular-session bars had closed yet",
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            side=None,
+            stage=STAGE_NONE,
+            reason_code=TJR_OUTSIDE_SESSION,
+            detail="no in-session bars had closed yet",
         )
-    if _after_entry_window(as_of, settings):
+    if _after_entry_window(as_of, settings, policy):
         return TjrEvaluation(
-            symbol=symbol, session=session, as_of=as_of, side=None,
-            stage=STAGE_NONE, reason_code=TJR_ENTRY_WINDOW_CLOSED,
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            side=None,
+            stage=STAGE_NONE,
+            reason_code=TJR_ENTRY_WINDOW_CLOSED,
             detail="the entry window for this session has closed",
         )
 
     levels = liquidity_levels(
-        session=session, as_of=as_of, base=series_5m, hourly=hourly, four_hour=four_hour,
-        swing_lookback=settings.swing_lookback, equal_tolerance=settings.equal_tolerance,
+        session=session,
+        as_of=as_of,
+        base=series_5m,
+        hourly=hourly,
+        four_hour=four_hour,
+        swing_lookback=settings.swing_lookback,
+        equal_tolerance=settings.equal_tolerance,
     )
     sweeps = find_sweeps(frame_5m, levels, as_of=as_of, settings=settings)
     if not sweeps:
         return TjrEvaluation(
-            symbol=symbol, session=session, as_of=as_of, side=None,
-            stage=STAGE_NONE, reason_code=TJR_NO_SWEEP,
-            detail="no level was swept and closed back through", levels=levels,
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            side=None,
+            stage=STAGE_NONE,
+            reason_code=TJR_NO_SWEEP,
+            detail="no level was swept and closed back through",
+            levels=levels,
         )
     # Ties in progress go to the earlier (more-established) sweep, so a sweep made
     # while price chops around a retrace cannot displace the one that is setting up.
     order = {id(sweep): index for index, sweep in enumerate(sweeps)}
     evaluations = [
         _evaluate_sweep(
-            symbol=symbol, session=session, as_of=as_of, sweep=sweep,
-            frame_5m=frame_5m, frame_1m=frame_1m, levels=levels,
-            settings=settings, allow_short=allow_short,
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            sweep=sweep,
+            frame_5m=frame_5m,
+            frame_1m=frame_1m,
+            levels=levels,
+            settings=settings,
+            allow_short=allow_short,
         )
         for sweep in sweeps
     ]
@@ -494,45 +571,80 @@ def _evaluate_sweep(
     confirmation, confirmed_at = _confirmation(frame_5m, sweep, as_of=as_of, settings=settings)
     if confirmation is None or confirmed_at is None:
         return TjrEvaluation(
-            symbol=symbol, session=session, as_of=as_of, side=None,
-            stage=STAGE_SWEPT, reason_code=TJR_NO_5M_CONFIRMATION,
-            detail="the sweep has no 5m BOS or IFVG yet", sweep=sweep, levels=levels,
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            side=None,
+            stage=STAGE_SWEPT,
+            reason_code=TJR_NO_5M_CONFIRMATION,
+            detail="the sweep has no 5m BOS or IFVG yet",
+            sweep=sweep,
+            levels=levels,
         )
 
-    zone, zone_label = _continuation_zone(frame_5m, sweep, confirmed_at=confirmed_at, settings=settings)
+    zone, zone_label = _continuation_zone(
+        frame_5m, sweep, confirmed_at=confirmed_at, settings=settings
+    )
     if zone is None:
         return TjrEvaluation(
-            symbol=symbol, session=session, as_of=as_of, side=None,
-            stage=STAGE_CONFIRMED, reason_code=TJR_NO_CONTINUATION,
-            detail="no 5m gap or equilibrium to retrace into", sweep=sweep,
-            confirmation=confirmation, levels=levels,
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            side=None,
+            stage=STAGE_CONFIRMED,
+            reason_code=TJR_NO_CONTINUATION,
+            detail="no 5m gap or equilibrium to retrace into",
+            sweep=sweep,
+            confirmation=confirmation,
+            levels=levels,
         )
     retrace = _retrace_at(frame_5m, zone, since=_after_bar(frame_5m, confirmed_at))
     if retrace is None:
         return TjrEvaluation(
-            symbol=symbol, session=session, as_of=as_of, side=None,
-            stage=STAGE_CONFIRMED, reason_code=TJR_NO_CONTINUATION,
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            side=None,
+            stage=STAGE_CONFIRMED,
+            reason_code=TJR_NO_CONTINUATION,
             detail=f"price has not retraced into the {zone_label} zone yet",
-            sweep=sweep, confirmation=confirmation, zone=zone, levels=levels,
+            sweep=sweep,
+            confirmation=confirmation,
+            zone=zone,
+            levels=levels,
         )
 
     direction = "down" if sweep.direction == "bearish" else "up"
     trigger = _entry_trigger(frame_1m, direction=direction, since=retrace, settings=settings)
     if trigger is None:
         return TjrEvaluation(
-            symbol=symbol, session=session, as_of=as_of, side=None,
-            stage=STAGE_IN_ZONE, reason_code=TJR_NO_1M_ENTRY,
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            side=None,
+            stage=STAGE_IN_ZONE,
+            reason_code=TJR_NO_1M_ENTRY,
             detail="price is in the zone but the 1m confirmation has not printed",
-            sweep=sweep, confirmation=confirmation, zone=zone, levels=levels,
+            sweep=sweep,
+            confirmation=confirmation,
+            zone=zone,
+            levels=levels,
         )
 
     side = "short" if sweep.direction == "bearish" else "long"
     if side == "short" and not allow_short:
         return TjrEvaluation(
-            symbol=symbol, session=session, as_of=as_of, side=None,
-            stage=STAGE_READY, reason_code=TJR_SHORT_SETUP_LONG_ONLY,
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            side=None,
+            stage=STAGE_READY,
+            reason_code=TJR_SHORT_SETUP_LONG_ONLY,
             detail="a complete bearish setup, but the book is long-only",
-            sweep=sweep, confirmation=confirmation, zone=zone, levels=levels,
+            sweep=sweep,
+            confirmation=confirmation,
+            zone=zone,
+            levels=levels,
         )
 
     stop, _ = _levels_and_stop(frame_5m, sweep, settings=settings)
@@ -544,39 +656,74 @@ def _evaluate_sweep(
     # order — the contract refuses it, and the strategy must refuse it first.
     if (side == "long" and stop >= entry) or (side == "short" and stop <= entry):
         return TjrEvaluation(
-            symbol=symbol, session=session, as_of=as_of, side=None,
-            stage=STAGE_IN_ZONE, reason_code=TJR_INVALID_GEOMETRY,
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            side=None,
+            stage=STAGE_IN_ZONE,
+            reason_code=TJR_INVALID_GEOMETRY,
             detail="the invalidation stop is on the wrong side of the entry",
-            sweep=sweep, confirmation=confirmation, zone=zone, levels=levels,
+            sweep=sweep,
+            confirmation=confirmation,
+            zone=zone,
+            levels=levels,
         )
     impulse = _impulse_extreme(frame_5m, sweep, confirmed_at)
     target = _target(
-        side, entry=entry, stop=stop, levels=levels, settings=settings,
-        formed_by=sweep.bar, impulse=impulse,
+        side,
+        entry=entry,
+        stop=stop,
+        levels=levels,
+        settings=settings,
+        formed_by=sweep.bar,
+        impulse=impulse,
     )
     if target is None:
         return TjrEvaluation(
-            symbol=symbol, session=session, as_of=as_of, side=None,
-            stage=STAGE_IN_ZONE, reason_code=TJR_NO_CONTINUATION,
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            side=None,
+            stage=STAGE_IN_ZONE,
+            reason_code=TJR_NO_CONTINUATION,
             detail="no draw on liquidity beyond the entry to target",
-            sweep=sweep, confirmation=confirmation, zone=zone, levels=levels,
+            sweep=sweep,
+            confirmation=confirmation,
+            zone=zone,
+            levels=levels,
         )
     risk = abs(entry - stop)
     reward = abs(target - entry)
     if risk <= 0 or reward / risk < settings.min_reward_risk:
         return TjrEvaluation(
-            symbol=symbol, session=session, as_of=as_of, side=None,
-            stage=STAGE_IN_ZONE, reason_code=TJR_NO_CONTINUATION,
+            symbol=symbol,
+            session=session,
+            as_of=as_of,
+            side=None,
+            stage=STAGE_IN_ZONE,
+            reason_code=TJR_NO_CONTINUATION,
             detail=f"the nearest draw gives only {reward / risk if risk else 0:.2f}R",
-            sweep=sweep, confirmation=confirmation, zone=zone, levels=levels,
+            sweep=sweep,
+            confirmation=confirmation,
+            zone=zone,
+            levels=levels,
         )
 
     return TjrEvaluation(
-        symbol=symbol, session=session, as_of=as_of, side=side,
-        stage=STAGE_READY, reason_code=TJR_READY,
+        symbol=symbol,
+        session=session,
+        as_of=as_of,
+        side=side,
+        stage=STAGE_READY,
+        reason_code=TJR_READY,
         detail=f"{sweep.direction} sweep confirmed by 5m {confirmation}, 1m {trigger}",
-        entry=entry, stop=stop, target=target,
-        sweep=sweep, confirmation=confirmation, zone=zone, levels=levels,
+        entry=entry,
+        stop=stop,
+        target=target,
+        sweep=sweep,
+        confirmation=confirmation,
+        zone=zone,
+        levels=levels,
     )
 
 

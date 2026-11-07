@@ -31,6 +31,35 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+_EVAL_CACHE: dict[tuple, tuple] = {}
+"""Per-evaluation memo of the pure frame primitives.
+
+The rule chain calls :func:`swing_points` and :func:`fair_value_gaps` once per
+candidate sweep at each instant, over the *same* frame object, so a session
+re-derives identical structure many times. The memo is keyed on the frame's
+identity and holds a reference to the frame itself, so an entry can only be reused
+for the very frame it was computed from (a recycled ``id`` cannot produce a stale
+hit, because the frame is kept alive while cached). It is cleared at the start and
+end of every :func:`~tradingagents.tjr.rules.evaluate`, so nothing is carried
+between evaluations and no look-ahead can leak through it.
+"""
+
+
+def reset_frame_cache() -> None:
+    """Drop the per-evaluation primitive cache. Called around each evaluation."""
+    _EVAL_CACHE.clear()
+
+
+def _cache_get(frame: pd.DataFrame, label: str, extra: tuple):
+    entry = _EVAL_CACHE.get((id(frame), label, extra))
+    if entry is not None and entry[0] is frame:
+        return entry[1]
+    return None
+
+
+def _cache_put(frame: pd.DataFrame, label: str, extra: tuple, value) -> None:
+    _EVAL_CACHE[(id(frame), label, extra)] = (frame, value)
+
 
 @dataclass(frozen=True)
 class Swing:
@@ -68,27 +97,55 @@ def swing_points(frame: pd.DataFrame, *, lookback: int = 2) -> list[Swing]:
     ``[i-lookback, i+lookback]`` and strictly greater than at least one neighbour,
     so a flat run does not manufacture a swing. The swing is stamped as confirmed
     at ``i + lookback``.
+
+    Computed with a centered rolling window rather than a Python loop: the result is
+    identical (the edges the loop skipped are the positions a centered window leaves
+    ``NaN``), and it is the hot path when a long 24/7 session is re-evaluated at
+    every bar.
     """
     if lookback < 1:
         raise ValueError("lookback must be at least 1")
-    highs = frame["high"].to_numpy()
-    lows = frame["low"].to_numpy()
+    cached = _cache_get(frame, "swing_points", (lookback,))
+    if cached is not None:
+        return cached
+    highs = frame["high"].to_numpy(dtype=float)
+    lows = frame["low"].to_numpy(dtype=float)
     index = frame.index
+    size = len(frame)
+    if size <= 2 * lookback:
+        return []
+    window = 2 * lookback + 1
+    high_max = pd.Series(highs).rolling(window, center=True).max().to_numpy()
+    high_min = pd.Series(highs).rolling(window, center=True).min().to_numpy()
+    low_min = pd.Series(lows).rolling(window, center=True).min().to_numpy()
+    low_max = pd.Series(lows).rolling(window, center=True).max().to_numpy()
+    # NaN at the edges makes these comparisons False, which is exactly the range
+    # the original loop skipped.
+    high_cond = (highs >= high_max) & (high_min < highs)
+    low_cond = (lows <= low_min) & (low_max > lows)
     swings: list[Swing] = []
-    for i in range(lookback, len(frame) - lookback):
-        window_high = highs[i - lookback : i + lookback + 1]
-        window_low = lows[i - lookback : i + lookback + 1]
-        if highs[i] >= window_high.max() and (window_high < highs[i]).any():
+    for i in range(lookback, size - lookback):
+        if high_cond[i]:
             swings.append(
-                Swing(index=index[i], price=float(highs[i]), kind="high",
-                      confirmed_at=index[i + lookback])
+                Swing(
+                    index=index[i],
+                    price=float(highs[i]),
+                    kind="high",
+                    confirmed_at=index[i + lookback],
+                )
             )
-        if lows[i] <= window_low.min() and (window_low > lows[i]).any():
+        if low_cond[i]:
             swings.append(
-                Swing(index=index[i], price=float(lows[i]), kind="low",
-                      confirmed_at=index[i + lookback])
+                Swing(
+                    index=index[i],
+                    price=float(lows[i]),
+                    kind="low",
+                    confirmed_at=index[i + lookback],
+                )
             )
-    return sorted(swings, key=lambda s: (s.index, s.kind))
+    result = sorted(swings, key=lambda s: (s.index, s.kind))
+    _cache_put(frame, "swing_points", (lookback,), result)
+    return result
 
 
 def last_swing(swings: list[Swing], kind: str, *, at: pd.Timestamp) -> Swing | None:
@@ -104,17 +161,25 @@ def fair_value_gaps(frame: pd.DataFrame, *, kind: str | None = None) -> list[Gap
     ``(high[i-2], low[i])``. A bearish gap is ``high[i] < low[i-2]``; the band is
     ``(high[i], low[i-2])``. ``kind`` filters to ``"bull"`` or ``"bear"``.
     """
+    cached = _cache_get(frame, "fair_value_gaps", (kind,))
+    if cached is not None:
+        return cached
     highs = frame["high"].to_numpy()
     lows = frame["low"].to_numpy()
     index = frame.index
     gaps: list[Gap] = []
     for i in range(2, len(frame)):
         if lows[i] > highs[i - 2]:
-            gaps.append(Gap(index=index[i], kind="bull", low=float(highs[i - 2]), high=float(lows[i])))
+            gaps.append(
+                Gap(index=index[i], kind="bull", low=float(highs[i - 2]), high=float(lows[i]))
+            )
         if highs[i] < lows[i - 2]:
-            gaps.append(Gap(index=index[i], kind="bear", low=float(highs[i]), high=float(lows[i - 2])))
+            gaps.append(
+                Gap(index=index[i], kind="bear", low=float(highs[i]), high=float(lows[i - 2]))
+            )
     if kind is not None:
         gaps = [g for g in gaps if g.kind == kind]
+    _cache_put(frame, "fair_value_gaps", (kind,), gaps)
     return gaps
 
 
@@ -146,7 +211,8 @@ def break_of_structure(
     # bar and then discarding it would drop the older structure that is still the
     # relevant one — the very bug that let a sweep's own micro-swing count.
     eligible = [
-        swing for swing in swings
+        swing
+        for swing in swings
         if swing.kind == kind
         and (swing_confirmed_before is None or swing.confirmed_at < swing_confirmed_before)
     ]

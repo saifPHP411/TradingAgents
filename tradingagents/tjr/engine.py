@@ -43,12 +43,11 @@ from tradingagents.risk import RiskEngine, RiskLimits, paper_parity_limits
 from tradingagents.signals.contract import SignalAction, TradingSignal
 
 from .frames import (
-    SESSION_TZ,
+    DEFAULT_SESSION_POLICY,
     IntradaySeries,
-    session_close_utc,
-    session_open_utc,
 )
 from .rules import TjrEvaluation, TjrSettings
+from .sessions import SessionPolicy
 from .strategy import TjrStrategy
 
 
@@ -129,6 +128,10 @@ class TjrConfig:
     """Kept False: the book is long-only, matching the live configuration."""
     flat_by_session_close: bool = True
     """Close any open position on the session's last bar. TJR is a day strategy."""
+    session_policy: SessionPolicy = DEFAULT_SESSION_POLICY
+    """How a session day is labelled and bounded. Defaults to the US equity
+    regular session, so every existing run is unchanged; a crypto run passes an
+    explicit 24/7 policy."""
 
     def __post_init__(self) -> None:
         if self.initial_cash <= 0:
@@ -220,6 +223,7 @@ class TjrBacktester:
         run_id: str = "tjr",
     ) -> None:
         self.config = config or TjrConfig()
+        self.session_policy = self.config.session_policy
         self.one_minute = {s.upper(): v for s, v in one_minute.items()}
         self.five_minute = {s.upper(): v for s, v in five_minute.items()}
         self.hourly = None if hourly is None else {s.upper(): v for s, v in hourly.items()}
@@ -239,8 +243,11 @@ class TjrBacktester:
         self.ledger = Ledger(initial_cash=self.config.initial_cash, currency=self.config.currency)
         self.risk = RiskEngine(self.config.risk_limits)
         self.result = TjrResult(
-            run_id=run_id, ledger=self.ledger, config=self.config,
-            initial_cash=self.config.initial_cash, symbols=self.symbols,
+            run_id=run_id,
+            ledger=self.ledger,
+            config=self.config,
+            initial_cash=self.config.initial_cash,
+            symbols=self.symbols,
             one_minute=self.one_minute,
         )
         self._open: dict[str, _OpenPosition] = {}
@@ -261,7 +268,7 @@ class TjrBacktester:
     def _sessions(self) -> list[str]:
         days: set[str] = set()
         for series in self.five_minute.values():
-            local = series.frame.index.tz_convert(SESSION_TZ)
+            local = series.frame.index.tz_convert(self.session_policy.timezone)
             days |= set(local.strftime("%Y-%m-%d"))
         return sorted(days)
 
@@ -278,7 +285,7 @@ class TjrBacktester:
             # carries. A day strategy must not carry a position overnight, and a
             # feed that stops short of 16:00 is still the end of the day's trading.
             if self.config.flat_by_session_close and (
-                instant >= session_close_utc(session) or instant == last_instant
+                instant >= self.session_policy.session_close_utc(session) or instant == last_instant
             ):
                 self._close_all(session, instant)
             self._mark(instant)
@@ -289,13 +296,13 @@ class TjrBacktester:
         A 5m bar that starts at ``t`` closes at ``t + 5m``; the timeline holds the
         close instants, because that is when the bar's information is usable.
         """
-        open_utc = session_open_utc(session)
-        close_utc = session_close_utc(session)
+        policy = self.session_policy
+        open_utc, close_utc = policy.session_bounds(session)
         instants: set[pd.Timestamp] = set()
         for series in self.five_minute.values():
-            local = series.frame.index.tz_convert(SESSION_TZ)
-            in_session = (local.strftime("%Y-%m-%d") == session)
-            for start in series.frame.index[in_session]:
+            for start in series.frame.index:
+                if not policy.contains(start, session):
+                    continue
                 close = start + pd.Timedelta(minutes=series.bar_minutes)
                 if open_utc < close <= close_utc:
                     instants.add(close)
@@ -381,7 +388,9 @@ class TjrBacktester:
 
     # --- Entries ------------------------------------------------------------
 
-    def _process_entries(self, session: str, instant: pd.Timestamp, day_start_equity: float) -> None:
+    def _process_entries(
+        self, session: str, instant: pd.Timestamp, day_start_equity: float
+    ) -> None:
         for symbol in self.symbols:
             if symbol in self._open:
                 continue
@@ -409,8 +418,12 @@ class TjrBacktester:
         next_bar = self._bar_starting_at(self.five_minute[symbol], instant)
         if next_bar is None:
             self.result.unfilled.append(
-                {"symbol": symbol, "session": session, "time": instant.isoformat(),
-                 "reason": "no next bar to execute in"}
+                {
+                    "symbol": symbol,
+                    "session": session,
+                    "time": instant.isoformat(),
+                    "reason": "no next bar to execute in",
+                }
             )
             return
         reference = float(next_bar["open"])
@@ -436,8 +449,13 @@ class TjrBacktester:
         quantity = self._affordable_quantity(decision.quantity, reference)
         if quantity <= 0:
             self.result.rejections.append(
-                {"symbol": symbol, "session": session, "time": instant.isoformat(),
-                 "reasons": ["INSUFFICIENT_CASH"], "detail": "cash cannot cover the order"}
+                {
+                    "symbol": symbol,
+                    "session": session,
+                    "time": instant.isoformat(),
+                    "reasons": ["INSUFFICIENT_CASH"],
+                    "detail": "cash cannot cover the order",
+                }
             )
             return
         fill_price = self._apply_slippage(reference, side="buy")
@@ -454,8 +472,13 @@ class TjrBacktester:
             )
         except Exception as exc:  # noqa: BLE001 - a ledger refusal is a rejection, not a crash
             self.result.rejections.append(
-                {"symbol": symbol, "session": session, "time": instant.isoformat(),
-                 "reasons": ["LEDGER_REFUSED"], "detail": type(exc).__name__}
+                {
+                    "symbol": symbol,
+                    "session": session,
+                    "time": instant.isoformat(),
+                    "reasons": ["LEDGER_REFUSED"],
+                    "detail": type(exc).__name__,
+                }
             )
             return
         self.result.traded_notional += abs(fill_price * quantity)

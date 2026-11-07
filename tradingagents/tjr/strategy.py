@@ -29,6 +29,7 @@ from .rules import (
     TjrSettings,
     evaluate,
 )
+from .sessions import SessionPolicy
 
 
 @dataclass
@@ -47,6 +48,10 @@ class TjrStrategy:
     four_hour: dict[str, IntradaySeries] | None = None
     settings: TjrSettings = TjrSettings()
     allow_short: bool = False
+    session_policy: SessionPolicy | None = None
+    """The session clock the chain reads. ``None`` uses the 5m series' own policy,
+    so an equity caller need not pass it and a crypto caller gets its policy from
+    the series it built."""
 
     def evaluate(self, symbol: str, session: str, as_of: pd.Timestamp) -> TjrEvaluation:
         return evaluate(
@@ -59,12 +64,42 @@ class TjrStrategy:
             four_hour=(self.four_hour or {}).get(symbol),
             settings=self.settings,
             allow_short=self.allow_short,
+            session_policy=self.session_policy,
         )
 
-    def signal(self, symbol: str, session: str, as_of: pd.Timestamp) -> tuple[TradingSignal, TjrEvaluation]:
+    def signal(
+        self, symbol: str, session: str, as_of: pd.Timestamp
+    ) -> tuple[TradingSignal, TjrEvaluation]:
         """The signal and the evaluation it came from, for one symbol and instant."""
         evaluation = self.evaluate(symbol, session, as_of)
         return _signal_from_evaluation(evaluation), evaluation
+
+
+class MemoTjrStrategy(TjrStrategy):
+    """A :class:`TjrStrategy` that caches its pure evaluations for one study run.
+
+    The rule chain is a pure function of the bars closed by an instant, so its
+    answer for a ``(symbol, session, instant)`` is identical in every scenario of a
+    study. Memoizing it is what makes a multi-scenario study of ten symbols finish
+    in minutes rather than hours, and the cache is exact — a miss calls the real
+    function — so a cached run and a cold run produce identical trades.
+
+    The cache key carries no book state because none of the rule chain reads the
+    book; memoizing anything that did would be wrong, so nothing that does is
+    memoized here.
+    """
+
+    def __init__(self, *, cache: dict, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._cache = cache
+
+    def evaluate(self, symbol: str, session: str, as_of: pd.Timestamp) -> TjrEvaluation:
+        key = (symbol, session, pd.Timestamp(as_of).isoformat())
+        hit = self._cache.get(key)
+        if hit is None:
+            hit = super().evaluate(symbol, session, as_of)
+            self._cache[key] = hit
+        return hit
 
 
 def _signal_from_evaluation(evaluation: TjrEvaluation) -> TradingSignal:

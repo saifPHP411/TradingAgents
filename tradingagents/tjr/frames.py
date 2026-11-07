@@ -24,11 +24,24 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from .sessions import EQUITY_SESSION, SessionPolicy
+
 SESSION_TZ = "America/New_York"
-"""US equities trade on Eastern time; the session day and the 9:30 open are its."""
+"""US equities trade on Eastern time; the session day and the 9:30 open are its.
+
+Kept as a module constant because it is the equity default the rest of the TJR
+package has always used. A crypto run passes its own :class:`SessionPolicy`
+instead, which carries its own timezone.
+"""
 
 REGULAR_OPEN = (9, 30)
 REGULAR_CLOSE = (16, 0)
+
+DEFAULT_SESSION_POLICY = EQUITY_SESSION
+"""The policy an :class:`IntradaySeries` uses unless one is supplied.
+
+The equity regular session, so every existing caller and every existing result is
+unchanged; a crypto series is built with an explicit policy."""
 
 _PRICE_COLUMNS = ("open", "high", "low", "close", "volume")
 
@@ -85,25 +98,22 @@ def normalize_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
 
 def session_of(stamp: pd.Timestamp) -> str:
-    """The US trading session (YYYY-MM-DD) a UTC bar-start belongs to."""
-    local = pd.Timestamp(stamp).tz_convert(SESSION_TZ)
-    return local.strftime("%Y-%m-%d")
+    """The US equity trading session (YYYY-MM-DD) a UTC bar-start belongs to.
+
+    The default policy's answer. A crypto caller uses
+    :meth:`SessionPolicy.session_of` with its own policy instead.
+    """
+    return DEFAULT_SESSION_POLICY.session_of(stamp)
 
 
 def session_open_utc(session: str) -> pd.Timestamp:
     """The 09:30 ET regular-session open of ``session``, as a UTC timestamp."""
-    local = pd.Timestamp(session, tz=SESSION_TZ).replace(
-        hour=REGULAR_OPEN[0], minute=REGULAR_OPEN[1], second=0, microsecond=0
-    )
-    return local.tz_convert("UTC")
+    return DEFAULT_SESSION_POLICY.session_open_utc(session)
 
 
 def session_close_utc(session: str) -> pd.Timestamp:
     """The 16:00 ET regular-session close of ``session``, as a UTC timestamp."""
-    local = pd.Timestamp(session, tz=SESSION_TZ).replace(
-        hour=REGULAR_CLOSE[0], minute=REGULAR_CLOSE[1], second=0, microsecond=0
-    )
-    return local.tz_convert("UTC")
+    return DEFAULT_SESSION_POLICY.session_close_utc(session)
 
 
 @dataclass(frozen=True)
@@ -113,11 +123,16 @@ class IntradaySeries:
     ``interval`` is the bar length label (``"1m"``, ``"5m"``); the frame's index is
     the bar start in UTC. ``available`` is the only reader, and it never returns a
     bar that had not closed by the instant asked for.
+
+    ``session`` is the :class:`~.sessions.SessionPolicy` that labels a bar's day
+    and bounds its trading window. It defaults to the US equity regular session, so
+    every existing series is unchanged; a crypto series passes an explicit policy.
     """
 
     symbol: str
     interval: str
     frame: pd.DataFrame
+    session: SessionPolicy = DEFAULT_SESSION_POLICY
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", self.symbol.upper())
@@ -140,23 +155,17 @@ class IntradaySeries:
         return self.frame[self.frame.index <= cutoff]
 
     def session_bars(self, session: str, as_of: pd.Timestamp) -> pd.DataFrame:
-        """The regular-session bars of ``session`` that had closed by ``as_of``.
+        """The session's bars that had closed by ``as_of``.
 
-        Restricted to the 09:30–16:00 ET window, so a pre-market print cannot enter
-        a session's structure — TJR is explicit that entries wait for the open.
+        Restricted to the session policy's windows, so a bar outside the session
+        cannot enter the session's structure — TJR is explicit that entries wait
+        for the session to be open. For the equity default this is the 09:30–16:00
+        ET window; for a 24/7 crypto policy it is the whole local day.
         """
         frame = self.available(as_of)
         if frame.empty:
             return frame
-        local = frame.index.tz_convert(SESSION_TZ)
-        open_local = session_open_utc(session).tz_convert(SESSION_TZ)
-        close_local = session_close_utc(session).tz_convert(SESSION_TZ)
-        in_session = (
-            (local.strftime("%Y-%m-%d") == session)
-            & (local >= open_local)
-            & (local < close_local)
-        )
-        return frame[in_session]
+        return frame[self.session.index_mask(frame.index, session)]
 
     def last_close(self, as_of: pd.Timestamp) -> float | None:
         frame = self.available(as_of)
@@ -171,6 +180,9 @@ def resample(series: IntradaySeries, interval: str) -> IntradaySeries:
     by its start, and a partially-formed bucket (a trailing bar whose source rows do
     not fill it) is dropped rather than emitted as a short bar, so the result never
     contains a bar that has not closed.
+
+    The buckets are anchored on the session policy's own open, so a 4h level is the
+    first 4h *of the session* rather than a bucket aligned to the UTC clock.
     """
     target_minutes = interval_minutes(interval)
     if target_minutes < series.bar_minutes:
@@ -178,13 +190,14 @@ def resample(series: IntradaySeries, interval: str) -> IntradaySeries:
     if target_minutes == series.bar_minutes:
         return series
     frame = series.frame
-    local = frame.index.tz_convert(SESSION_TZ)
+    policy = series.session
+    local = frame.index.tz_convert(policy.timezone)
     day = pd.Series(local.strftime("%Y-%m-%d"), index=frame.index)
-    anchor = pd.DatetimeIndex(
-        [pd.Timestamp(d, tz=SESSION_TZ) for d in day]
-    ) + pd.Timedelta(hours=REGULAR_OPEN[0], minutes=REGULAR_OPEN[1])
+    anchor = pd.DatetimeIndex([policy.anchor(d) for d in day])
     offset_minutes = ((local - anchor).total_seconds() // 60).astype("int64")
-    bucket_start = anchor + pd.to_timedelta((offset_minutes // target_minutes) * target_minutes, unit="m")
+    bucket_start = anchor + pd.to_timedelta(
+        (offset_minutes // target_minutes) * target_minutes, unit="m"
+    )
     expected = target_minutes // series.bar_minutes
 
     grouped = frame.groupby(bucket_start, sort=True)
@@ -199,4 +212,4 @@ def resample(series: IntradaySeries, interval: str) -> IntradaySeries:
     aggregated = aggregated[full.values]
     aggregated.index = pd.DatetimeIndex(aggregated.index).tz_convert("UTC")
     aggregated.index.name = frame.index.name
-    return IntradaySeries(symbol=series.symbol, interval=interval, frame=aggregated)
+    return IntradaySeries(symbol=series.symbol, interval=interval, frame=aggregated, session=policy)

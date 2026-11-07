@@ -125,7 +125,9 @@ def _resample_if_possible(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the TJR backtest over fetched frames.")
     parser.add_argument("--symbols", nargs="+", default=list(DEFAULT_SYMBOLS))
-    parser.add_argument("--data", type=Path, default=DEFAULT_OUT, help="directory of fetched frames")
+    parser.add_argument(
+        "--data", type=Path, default=DEFAULT_OUT, help="directory of fetched frames"
+    )
     parser.add_argument("--initial-cash", type=float, default=100_000.0)
     parser.add_argument("--out", type=Path, default=None, help="write the JSON report here")
     args = parser.parse_args(argv)
