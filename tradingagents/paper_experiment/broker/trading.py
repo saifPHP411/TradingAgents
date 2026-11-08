@@ -1618,6 +1618,19 @@ class PaperTradingConfig:
     (``NO_TRADE_EXECUTION_PRICE_UNAVAILABLE``); the market-data price is never
     used as a substitute.
     """
+    crypto: bool = False
+    """Whether this worker trades **crypto** on Alpaca.
+
+    Alpaca's crypto orders accept only the time-in-force values ``gtc`` and
+    ``ioc``; the equity vocabulary's ``day`` is refused with HTTP 422
+    ``invalid crypto time_in_force``. This flag selects the crypto order rules
+    for the order the worker submits, so the equity path keeps the time-in-force
+    it has always sent.
+
+    It is ``False`` by default, so every existing wiring is unchanged. It does
+    not select a strategy, a source, a seam or a risk limit — only the order
+    rules Alpaca applies to the asset class being traded.
+    """
 
     def __post_init__(self) -> None:
         if not (self.order_notional > 0):
@@ -2771,6 +2784,7 @@ class PaperTradingWorker:
                 order_type="limit" if decision.limit_price else "market",
                 allow_orders=True,
                 refresh=True,
+                crypto=self.config.crypto,
             )
         except (PaperRiskRejected, BrokerRejectedError, BrokerError) as exc:
             # A local refusal or a broker rejection is recorded, not hidden, and the
@@ -2991,6 +3005,7 @@ class PaperTradingWorker:
                     order_type="market",
                     allow_orders=True,
                     refresh=True,
+                    crypto=self.config.crypto,
                 )
             except (PaperRiskRejected, BrokerRejectedError, BrokerError) as exc:
                 self.state.last_error = f"{type(exc).__name__}: {exc}"

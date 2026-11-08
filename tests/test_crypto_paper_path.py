@@ -32,6 +32,7 @@ import pytest
 from tradingagents.paper_experiment.broker import (
     DECISION_SOURCE_CHOICES,
     DECISION_SOURCE_CRYPTO,
+    DECISION_SOURCE_HISTORY,
     DECISION_SOURCE_TJR,
     MARKET_DATA_CHOICES,
     NO_TRADE_MARKET_DATA_UNAVAILABLE,
@@ -563,6 +564,45 @@ class TestControllerCryptoWiring:
         status = controller.status()
         assert status["status"] == "STOPPED"
         assert status["decision_source_configured"] == DECISION_SOURCE_CRYPTO
+
+    def test_the_crypto_worker_trades_crypto_and_not_equity(self, tmp_path):
+        """The worker the controller builds must carry the crypto order rules.
+
+        Alpaca refuses a crypto order with the equity time-in-force ('day') and
+        answers HTTP 422. The controller is the *production* wiring — the
+        dashboard that runs on Railway — so it is the controller, not the
+        adapter, that has to select the crypto rules. This pins the flag at the
+        point where it is chosen.
+        """
+        from tradingagents.paper_experiment.dashboard.paper_control import (
+            PaperTradingController,
+        )
+
+        root = _experiment_root(tmp_path)
+        controller = PaperTradingController(
+            root,
+            enabled=True,
+            decision_source_kind=DECISION_SOURCE_CRYPTO,
+            crypto_market_hours_gate=lambda: _clock(),
+            crypto_data_factory=lambda: _data(),
+        )
+        config = controller._worker_config()  # noqa: SLF001
+        assert config.crypto is True
+
+    def test_an_equity_worker_is_not_marked_crypto(self, tmp_path):
+        """The equity path keeps the equity order rules."""
+        from tradingagents.paper_experiment.dashboard.paper_control import (
+            PaperTradingController,
+        )
+
+        root = _experiment_root(tmp_path)
+        controller = PaperTradingController(
+            root,
+            enabled=True,
+            decision_source_kind=DECISION_SOURCE_HISTORY,
+        )
+        config = controller._worker_config()  # noqa: SLF001
+        assert config.crypto is False
 
 
 class TestTheDashboardShowsTheChainsOwnEvaluation:

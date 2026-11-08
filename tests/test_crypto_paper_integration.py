@@ -284,6 +284,9 @@ def _worker(
         symbol_mappings=(_mapping(),),
         max_price_deviation=max_price_deviation,
         execution_price_seam=execution_seam,
+        # This worker trades crypto on Alpaca, so its orders carry Alpaca's
+        # crypto time-in-force ('gtc'/'ioc'), never the equity 'day'.
+        crypto=True,
     )
     broker = AlpacaPaperBroker(
         api_key="test-paper-key",
@@ -554,6 +557,53 @@ class TestCryptoOrderSubmission:
         finally:
             worker.stop()
 
+    def test_the_order_carries_gtc(self, tmp_path):
+        """Alpaca refuses a crypto order with 'day' (HTTP 422).
+
+        This is the end-to-end pin: the worker runs the *production* path — the
+        same ``submit_order`` call the paper worker makes — and the body that
+        would reach Alpaca carries ``gtc``, which Alpaca accepts for crypto.
+        """
+        seam, _ = _execution_seam()
+        transport = _BrokerTransport()
+        worker = _worker(tmp_path, execution_seam=seam, broker_transport=transport)
+        worker.start()
+        try:
+            result = worker.run_once()
+            assert result.ran is True, result.skipped_reason
+            assert transport.orders, "no order was submitted"
+            assert transport.orders[0]["time_in_force"] == "gtc"
+        finally:
+            worker.stop()
+
+    def test_the_order_carries_no_equity_only_time_in_force(self, tmp_path):
+        """The whole equity vocabulary is absent from the crypto order body."""
+        seam, _ = _execution_seam()
+        transport = _BrokerTransport()
+        worker = _worker(tmp_path, execution_seam=seam, broker_transport=transport)
+        worker.start()
+        try:
+            worker.run_once()
+            tif = transport.orders[0]["time_in_force"]
+            assert tif in ("gtc", "ioc")
+            assert tif not in ("day", "opg", "cls", "fok")
+        finally:
+            worker.stop()
+
+    def test_the_quantity_is_not_in_scientific_notation(self, tmp_path):
+        """A small crypto quantity is written out in full, not as '1e-06'."""
+        seam, _ = _execution_seam(price=50000.0)
+        transport = _BrokerTransport()
+        worker = _worker(tmp_path, execution_seam=seam, broker_transport=transport)
+        worker.start()
+        try:
+            worker.run_once()
+            qty = transport.orders[0]["qty"]
+            assert "e" not in qty.lower(), f"qty {qty!r} is in scientific notation"
+            assert float(qty) > 0
+        finally:
+            worker.stop()
+
 
 # ---------------------------------------------------------------------------
 # 3. The failure modes
@@ -768,6 +818,34 @@ class TestCryptoExit:
             result = worker.run_once()
             assert result.ran is False
             assert not transport.orders
+        finally:
+            worker.stop()
+
+    def test_the_exit_order_carries_gtc_too(self, tmp_path):
+        """The exit is a crypto order as well, so it carries 'gtc'.
+
+        The exit is the second of the two ``submit_order`` call sites, and it
+        omitted the time-in-force exactly as the entry did — so both were
+        sending 'day'. Both are pinned.
+        """
+        worker, transport = self._worker_with_position(
+            tmp_path,
+            price=53000.0,
+            positions=[
+                {
+                    "symbol": EXECUTION_SYMBOL,
+                    "qty": "0.0005",
+                    "avg_entry_price": "50000.0",
+                    "current_price": "53000.0",
+                    "unrealized_pl": "1.5",
+                }
+            ],
+        )
+        worker.start()
+        try:
+            worker.run_once()
+            assert transport.orders, "no exit order was placed"
+            assert transport.orders[0]["time_in_force"] == "gtc"
         finally:
             worker.stop()
 
@@ -992,11 +1070,10 @@ class TestAlpacaCryptoClientAssets:
         """assets() raises ProviderAuthError on HTTP 401."""
         from tradingagents.paper_experiment.providers.alpaca_crypto import (
             AlpacaCryptoClient,
-            AlpacaCryptoError,
         )
         from tradingagents.paper_experiment.providers.base import (
-            ProviderAuthError,
             HttpResponse,
+            ProviderAuthError,
         )
 
         class _FakeTransport:
@@ -1033,8 +1110,8 @@ class TestAlpacaCryptoClientAssets:
             AlpacaCryptoClient,
         )
         from tradingagents.paper_experiment.providers.base import (
-            ProviderUnsupportedError,
             HttpResponse,
+            ProviderUnsupportedError,
         )
 
         class _FakeTransport:
@@ -1069,11 +1146,9 @@ class TestAlpacaCryptoClientAssets:
         """assets() raises ProviderError on connection failure."""
         from tradingagents.paper_experiment.providers.alpaca_crypto import (
             AlpacaCryptoClient,
-            AlpacaCryptoError,
         )
         from tradingagents.paper_experiment.providers.base import (
             ProviderError,
-            HttpResponse,
         )
 
         class _FakeTransport:
@@ -1105,8 +1180,8 @@ class TestAlpacaCryptoClientAssets:
             AlpacaCryptoClient,
         )
         from tradingagents.paper_experiment.providers.base import (
-            ProviderError,
             HttpResponse,
+            ProviderError,
         )
 
         class _FakeTransport:

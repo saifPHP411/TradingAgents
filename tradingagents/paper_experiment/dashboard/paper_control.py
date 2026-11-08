@@ -292,6 +292,10 @@ class PaperTradingController:
             market_data_provider=self.market_data_provider,
             market_data_max_age_seconds=self.market_data_max_age_seconds,
             decision_source=self.decision_source_kind,
+            # The same asset class the worker itself runs with, so the status
+            # view reports the settings the worker enforces. Alpaca's crypto
+            # orders take only 'gtc'/'ioc'; the equity path keeps 'day'.
+            crypto=self.decision_source_kind == DECISION_SOURCE_CRYPTO,
         )
 
     def _reload_experiment(self):
@@ -411,13 +415,9 @@ class PaperTradingController:
 
         # Build the decision source from the persisted config, so the worker acts
         # on the same decisions the experiment recorded.
-        # For crypto path, use ONLY the accepted symbols so rejected symbols
-        # never reach the TJR decision source or the execution path.
-        crypto_symbols = (
-            tuple(configuration.accepted)
-            if self.decision_source_kind == DECISION_SOURCE_CRYPTO
-            else tuple(experiment.config.symbols)
-        )
+        # The crypto decision source takes its own symbol list — the accepted
+        # symbols only — so a rejected symbol never reaches the TJR chain or
+        # the execution path.
         config = PaperTradingConfig(
             strategy_id=experiment.config.strategy_id,
             order_notional=self.order_notional,
@@ -429,6 +429,11 @@ class PaperTradingController:
             symbol_mappings=symbol_mappings,
             execution_price_seam=execution_price_seam,
             max_price_deviation=self.max_price_deviation,
+            # Alpaca's crypto orders accept only 'gtc' and 'ioc'; the equity
+            # vocabulary's 'day' is refused with HTTP 422. The crypto branch
+            # above is the only wiring that trades crypto, so this flag is set
+            # there and only there.
+            crypto=self.decision_source_kind == DECISION_SOURCE_CRYPTO,
         )
         source = experiment.source
         sessions = source.sessions()

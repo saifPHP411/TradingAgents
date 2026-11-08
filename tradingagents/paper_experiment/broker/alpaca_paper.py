@@ -42,6 +42,7 @@ import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -68,6 +69,30 @@ EXPERIMENT_SYMBOLS_ENV = "TRADINGAGENTS_EXPERIMENT_SYMBOLS"
 Format: space-separated list of canonical BASE/QUOTE symbols, e.g., 'BTC/USDT ETH/USDT SOL/USDT'"""
 
 REQUEST_TIMEOUT = 30.0
+
+CRYPTO_TIME_IN_FORCE = "gtc"
+"""The time-in-force a **crypto** order carries unless the caller asks for another.
+
+Alpaca's crypto orders accept only ``gtc`` and ``ioc``; the equity vocabulary
+(``day``, ``opg``, ``cls``, ``fok``) is refused for them with HTTP 422
+``invalid crypto time_in_force``. ``gtc`` is the value Alpaca's own crypto
+documentation uses, so it is the one this adapter sends by default.
+"""
+
+CRYPTO_TIME_IN_FORCE_VALUES = ("gtc", "ioc")
+"""The complete set of time-in-force values Alpaca accepts for a crypto order.
+
+A closed vocabulary, taken from Alpaca's ``TimeInForce`` schema: *"Crypto
+trading: gtc, ioc."* Anything else is refused **before** the request, so an
+unsupported value is never sent and never answered with a 422.
+"""
+
+EQUITY_TIME_IN_FORCE = "day"
+"""The time-in-force an **equity** order carries unless the caller asks for another.
+
+Unchanged from this adapter's previous behaviour: Alpaca's equity orders accept
+``day``, ``gtc``, ``opg``, ``cls``, ``ioc`` and ``fok``.
+"""
 
 
 class BrokerError(RuntimeError):
@@ -945,9 +970,10 @@ class AlpacaPaperBroker:
         reference_price: float,
         client_order_id: str,
         order_type: str = "market",
-        time_in_force: str = "day",
+        time_in_force: str | None = None,
         allow_orders: bool = False,
         refresh: bool = False,
+        crypto: bool = False,
     ) -> BrokerOrder:
         """Submit a paper order, safely.
 
@@ -963,6 +989,13 @@ class AlpacaPaperBroker:
         *current* figures rather than a start-up snapshot. It defaults ``False`` to
         preserve the exact request sequence a caller already relies on; the trading
         worker passes ``True`` so every order is checked against live account state.
+
+        ``crypto`` selects the **crypto** order rules. Alpaca's crypto orders
+        accept only ``gtc`` and ``ioc``, so a crypto order never carries the
+        equity vocabulary's ``day``. ``time_in_force`` defaults to ``gtc`` for a
+        crypto order and to ``day`` for an equity one, and a value outside the
+        crypto vocabulary is refused here, before the request, rather than sent and
+        answered with HTTP 422.
         """
         if not allow_orders:
             raise PaperRiskRejected(
@@ -984,8 +1017,14 @@ class AlpacaPaperBroker:
             )
 
         # Idempotency: a client_order_id we already know is never re-submitted.
+        # A reconcile sends no time-in-force, so it is checked before the
+        # pre-flight validation below rather than being blocked by it.
         if client_order_id in self._state.orders:
             return self._reconcile(client_order_id)
+
+        # Pre-flight: an unsupported time-in-force is refused here, before the
+        # request, so it is never sent and never answered with an HTTP 422.
+        time_in_force = _resolve_time_in_force(time_in_force, crypto=crypto)
 
         if refresh:
             self.refresh_account()
@@ -1020,7 +1059,7 @@ class AlpacaPaperBroker:
 
         body = {
             "symbol": symbol,
-            "qty": str(quantity),
+            "qty": _format_quantity(quantity),
             "side": side.lower(),
             "type": order_type,
             "time_in_force": time_in_force,
@@ -1133,6 +1172,53 @@ def _as_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _resolve_time_in_force(time_in_force: str | None, *, crypto: bool) -> str:
+    """The time-in-force an order carries, validated against its asset class.
+
+    A **crypto** order may carry only ``gtc`` or ``ioc``; Alpaca answers anything
+    else with HTTP 422 ``invalid crypto time_in_force``. An **equity** order keeps
+    the vocabulary it always had (``day``, ``gtc``, ``opg``, ``cls``, ``ioc``,
+    ``fok``), so this adapter's existing equity behaviour is untouched.
+
+    ``None`` means "the default for this asset class": ``gtc`` for crypto and
+    ``day`` for equity. An unsupported value is refused with
+    :class:`PaperRiskRejected` **before** any request is made, so the broker is
+    never asked to reject it.
+    """
+    if time_in_force is None:
+        return CRYPTO_TIME_IN_FORCE if crypto else EQUITY_TIME_IN_FORCE
+    value = str(time_in_force).strip().lower()
+    if crypto and value not in CRYPTO_TIME_IN_FORCE_VALUES:
+        raise PaperRiskRejected(
+            f"time_in_force {time_in_force!r} is not supported for a crypto order; "
+            f"Alpaca accepts only {', '.join(CRYPTO_TIME_IN_FORCE_VALUES)} for crypto"
+        )
+    return value
+
+
+def _format_quantity(quantity: float) -> str:
+    """A quantity as a plain decimal string, never in scientific notation.
+
+    ``str()`` renders a small quantity in exponent form (``1e-06``), which Alpaca
+    does not accept as a ``qty``. A crypto order's quantity is routinely small, so
+    the value is written out in full.
+
+    The value itself is unchanged: it goes through :class:`~decimal.Decimal` on
+    the shortest string that ``float`` already gives, so no binary-float noise is
+    invented and no digits are lost. Only the *notation* changes, from ``1e-06``
+    to ``0.000001``.
+    """
+    value = float(quantity)
+    if not math.isfinite(value):
+        raise PaperRiskRejected(f"quantity {quantity!r} is not a finite number")
+    if value == 0.0:
+        return "0"
+    # ``str`` is the shortest representation that round-trips the float, so the
+    # decimal digits are exactly the ones the value has.
+    text = format(Decimal(str(value)), "f")
+    return text
 
 
 def _as_optional_float(value: Any) -> float | None:
