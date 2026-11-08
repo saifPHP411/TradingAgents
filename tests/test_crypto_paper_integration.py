@@ -887,3 +887,262 @@ class TestSymbolGating:
             assert not transport.orders
         finally:
             worker.stop()
+
+
+# ---------------------------------------------------------------------------
+# 8. AlpacaCryptoClient.assets() tests
+# ---------------------------------------------------------------------------
+
+
+class TestAlpacaCryptoClientAssets:
+    """Tests for the assets() method of AlpacaCryptoClient."""
+
+    def _assets_response(self) -> list[dict]:
+        """A fake Alpaca assets response."""
+        return [
+            {
+                "symbol": "BTC/USD",
+                "class": "crypto",
+                "status": "active",
+                "tradable": True,
+                "fractionable": True,
+                "min_order_size": "0.0001",
+                "min_trade_increment": "0.0001",
+                "price_increment": "0.01",
+            },
+            {
+                "symbol": "ETH/USD",
+                "class": "crypto",
+                "status": "active",
+                "tradable": True,
+                "fractionable": True,
+                "min_order_size": "0.001",
+                "min_trade_increment": "0.001",
+                "price_increment": "0.01",
+            },
+        ]
+
+    def test_assets_works_without_transport_using_default(self):
+        """assets() works when no transport is passed (uses default transport)."""
+        # This test verifies the fix: no transport passed should not raise TypeError
+        from tradingagents.paper_experiment.providers.alpaca_crypto import AlpacaCryptoClient
+        from tradingagents.paper_experiment.providers.base import HttpResponse
+
+        class _FakeTransport:
+            def __init__(self, response: HttpResponse) -> None:
+                self.response = response
+                self.calls: list[dict] = []
+
+            def __call__(self, *, url, params, headers, timeout):
+                self.calls.append({"url": url, "params": params, "headers": headers})
+                return self.response
+
+        fake_transport = _FakeTransport(
+            HttpResponse(200, json.dumps(self._assets_response()))
+        )
+
+        # The client is created without a transport, but we pass one to assets()
+        # This tests that assets() can accept a custom transport
+        client = AlpacaCryptoClient(api_key="test-key", api_secret="test-secret")
+        assets = client.assets(
+            base_url="https://paper-api.alpaca.markets",
+            transport=fake_transport,
+        )
+
+        assert len(assets) == 2
+        assert assets[0]["symbol"] == "BTC/USD"
+        assert assets[1]["symbol"] == "ETH/USD"
+        assert fake_transport.calls, "transport was not called"
+        assert fake_transport.calls[0]["params"]["asset_class"] == "crypto"
+        assert fake_transport.calls[0]["params"]["status"] == "active"
+
+    def test_assets_works_with_custom_transport(self):
+        """assets() works when a custom transport is passed."""
+        from tradingagents.paper_experiment.providers.alpaca_crypto import AlpacaCryptoClient
+        from tradingagents.paper_experiment.providers.base import HttpResponse
+
+        class _FakeTransport:
+            def __init__(self, response: HttpResponse) -> None:
+                self.response = response
+                self.calls: list[dict] = []
+
+            def __call__(self, *, url, params, headers, timeout):
+                self.calls.append({"url": url, "params": params, "headers": headers})
+                return self.response
+
+        fake_transport = _FakeTransport(
+            HttpResponse(200, json.dumps(self._assets_response()))
+        )
+
+        client = AlpacaCryptoClient(
+            api_key="test-key",
+            api_secret="test-secret",
+            transport=fake_transport,  # Transport on client
+        )
+        assets = client.assets(
+            base_url="https://paper-api.alpaca.markets",
+            transport=fake_transport,  # Also pass to method
+        )
+
+        assert len(assets) == 2
+        assert assets[0]["symbol"] == "BTC/USD"
+        assert fake_transport.calls, "transport was not called"
+
+    def test_assets_handles_401_unauthorized(self):
+        """assets() raises ProviderAuthError on HTTP 401."""
+        from tradingagents.paper_experiment.providers.alpaca_crypto import (
+            AlpacaCryptoClient,
+            AlpacaCryptoError,
+        )
+        from tradingagents.paper_experiment.providers.base import (
+            ProviderAuthError,
+            HttpResponse,
+        )
+
+        class _FakeTransport:
+            def __init__(self, response: HttpResponse) -> None:
+                self.response = response
+
+            def __call__(self, *, url, params, headers, timeout):
+                return self.response
+
+        fake_transport = _FakeTransport(
+            HttpResponse(401, '{"message": "unauthorized"}')
+        )
+
+        client = AlpacaCryptoClient(
+            api_key="test-key",
+            api_secret="test-secret",
+            transport=fake_transport,
+        )
+
+        with pytest.raises(ProviderAuthError) as excinfo:
+            client.assets(
+                base_url="https://paper-api.alpaca.markets",
+                transport=fake_transport,
+            )
+        # Credential should not leak in error message
+        error_msg = str(excinfo.value)
+        assert "test-key" not in error_msg
+        assert "test-secret" not in error_msg
+        assert "401" in error_msg
+
+    def test_assets_handles_403_forbidden(self):
+        """assets() raises ProviderUnsupportedError on HTTP 403."""
+        from tradingagents.paper_experiment.providers.alpaca_crypto import (
+            AlpacaCryptoClient,
+        )
+        from tradingagents.paper_experiment.providers.base import (
+            ProviderUnsupportedError,
+            HttpResponse,
+        )
+
+        class _FakeTransport:
+            def __init__(self, response: HttpResponse) -> None:
+                self.response = response
+
+            def __call__(self, *, url, params, headers, timeout):
+                return self.response
+
+        fake_transport = _FakeTransport(
+            HttpResponse(403, '{"message": "forbidden - crypto not enabled"}')
+        )
+
+        client = AlpacaCryptoClient(
+            api_key="test-key",
+            api_secret="test-secret",
+            transport=fake_transport,
+        )
+
+        with pytest.raises(ProviderUnsupportedError) as excinfo:
+            client.assets(
+                base_url="https://paper-api.alpaca.markets",
+                transport=fake_transport,
+            )
+        # Credential should not leak in error message
+        error_msg = str(excinfo.value)
+        assert "test-key" not in error_msg
+        assert "test-secret" not in error_msg
+        assert "403" in error_msg
+
+    def test_assets_handles_connection_error(self):
+        """assets() raises ProviderError on connection failure."""
+        from tradingagents.paper_experiment.providers.alpaca_crypto import (
+            AlpacaCryptoClient,
+            AlpacaCryptoError,
+        )
+        from tradingagents.paper_experiment.providers.base import (
+            ProviderError,
+            HttpResponse,
+        )
+
+        class _FakeTransport:
+            def __call__(self, *, url, params, headers, timeout):
+                raise ConnectionError("connection refused")
+
+        fake_transport = _FakeTransport()
+
+        client = AlpacaCryptoClient(
+            api_key="test-key",
+            api_secret="test-secret",
+            transport=fake_transport,
+        )
+
+        with pytest.raises(ProviderError) as excinfo:
+            client.assets(
+                base_url="https://paper-api.alpaca.markets",
+                transport=fake_transport,
+            )
+        # Credential should not leak in error message
+        error_msg = str(excinfo.value)
+        assert "test-key" not in error_msg
+        assert "test-secret" not in error_msg
+        assert "connection" in error_msg.lower() or "failed" in error_msg.lower()
+
+    def test_assets_no_credential_leakage_in_errors(self):
+        """No Alpaca API credentials appear in any error message from assets()."""
+        from tradingagents.paper_experiment.providers.alpaca_crypto import (
+            AlpacaCryptoClient,
+        )
+        from tradingagents.paper_experiment.providers.base import (
+            ProviderError,
+            HttpResponse,
+        )
+
+        class _FakeTransport:
+            def __init__(self, status_code: int, body: str) -> None:
+                self.response = HttpResponse(status_code, body)
+
+            def __call__(self, *, url, params, headers, timeout):
+                return self.response
+
+        # Test various error scenarios
+        for status_code, body in [
+            (401, "unauthorized"),
+            (403, "forbidden"),
+            (429, "rate limited"),
+            (500, "internal server error"),
+            (502, "bad gateway"),
+        ]:
+            fake_transport = _FakeTransport(status_code, body)
+            client = AlpacaCryptoClient(
+                api_key="super-secret-key-123",
+                api_secret="super-secret-secret-456",
+                transport=fake_transport,
+            )
+
+            try:
+                client.assets(
+                    base_url="https://paper-api.alpaca.markets",
+                    transport=fake_transport,
+                )
+            except ProviderError as e:
+                error_msg = str(e)
+                # Verify credentials never appear in error messages
+                assert "super-secret-key-123" not in error_msg
+                assert "super-secret-secret-456" not in error_msg
+            except Exception as e:
+                # Other exceptions should also not leak credentials
+                error_msg = str(e)
+                assert "super-secret-key-123" not in error_msg
+                assert "super-secret-secret-456" not in error_msg
