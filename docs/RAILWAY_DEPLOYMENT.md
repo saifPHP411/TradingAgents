@@ -41,32 +41,86 @@ it is not a trading surface. See "Monitoring dashboard" below.
 
 ## Start command
 
-Railway's start command defaults to the Dockerfile's `ENTRYPOINT`/`CMD`
-([Build and Start Commands](https://docs.railway.com/builds/build-and-start-commands)).
-The image's entrypoint is the `tradingagents` CLI, which is the *analysis* CLI,
-not the paper runner. Override the start command for the paper service, e.g.:
+### The exact effective command
+
+The **crypto dashboard** service runs this command. It is the value of
+`deploy.startCommand` in `railway.json` and the `start:` field in
+`.railway/railway.ts`; the two files carry the identical string.
 
 ```bash
-python -m tradingagents.paper_experiment run --root /data/paper-experiment --sessions 20
+/bin/sh -c "exec python -m tradingagents.paper_experiment.dashboard.server --root /home/appuser/app/data --host 0.0.0.0 --port $PORT --allow-paper-trading --paper-market-data binance_snapshot --paper-decision-source crypto --crypto-live"
 ```
 
-Note the `--root`: the paper runner has no default directory. State must point at
-the mounted volume (below), never at the container's ephemeral filesystem.
-
-Railway states that for a Dockerfile/image service "the start command **overrides
-the image's ENTRYPOINT in exec form**"
+**How it is composed.** The Dockerfile builds an image whose `ENTRYPOINT` is
+`python -m tradingagents.paper_experiment.dashboard.server`. Railway states that
+for a Dockerfile/image service "the start command **overrides the image's
+ENTRYPOINT in exec form**"
 ([Start command](https://docs.railway.com/deployments/start-command)), so the
-override above replaces `tradingagents` rather than being appended to it. If you
-need variable expansion in the command, wrap it in a shell —
-`/bin/sh -c "exec python -m tradingagents.paper_experiment run ..."` — because
-"commands ran in exec form do not support variable expansion".
+command above is the process that runs. The shell wrapper is required because
+"commands ran in exec form do not support variable expansion" — `$PORT` is
+expanded by `/bin/sh`, not by the platform. `exec` replaces the shell with the
+Python process so the platform's signals reach the server directly.
 
-Both forms were exercised against the built image with the volume mounted at
-`/data`, running as root (the effect of `RAILWAY_RUN_UID=0`): the run processed
-sessions, wrote `journal.json`, `session_state.json` and `snapshots/` to the
-mount, and a second invocation resumed. The same run on the image's default
-non-root user failed to write the mount with `PermissionError`, which is why
-`RAILWAY_RUN_UID=0` below is not optional.
+The image's own `ENTRYPOINT` is the dashboard for the same reason: a Dockerfile
+`ENTRYPOINT` is *prepended* to whatever a platform runs, so an entrypoint of
+`tradingagents` (the analysis CLI, a Typer app) would turn the command above
+into `tradingagents /bin/sh -c ...` and exit with *"No such command
+'/bin/sh'"*. The image's `HEALTHCHECK` probes `/healthz`, which only the
+dashboard serves, so the dashboard is also the only default process that can
+satisfy the image's own health check.
+
+### Every argument, and what it does
+
+| Argument | Effect | Why it is there | Enables market data / dashboard / paper execution? |
+|---|---|---|---|
+| `--root /home/appuser/app/data` | The experiment directory. | Must be the mounted volume, never the container's ephemeral filesystem. | State only. |
+| `--host 0.0.0.0` | Bind every interface, not loopback. | Railway reaches the service through its proxy; loopback is unreachable. | Dashboard access. |
+| `--port $PORT` | The port the platform assigned. | Railway injects `PORT`; hard-coding one would break the deployment. | Dashboard access. |
+| `--allow-paper-trading` | **Permits** the dashboard's START button to exist. | Off by default, so a deployment cannot trade unless it is asked to. | Neither. It permits; it does not start. |
+| `--paper-market-data binance_snapshot` | The price seam the worker sizes orders from: a genuinely current price from Binance's **public** market data (no key, no registration). | `bar_open` would size an order from a historical bar's open. | Market data (price only). |
+| `--paper-decision-source crypto` | The worker's decisions come from the deterministic TJR rule chain over current Binance 1m/5m bars. | `history` replays recorded decisions; `current_market` needs an LLM credential. | Neither — it chooses the *decision*, not the execution. |
+| `--crypto-live` | Starts the live crypto market-data engine so the dashboard's live section shows a real feed. | Off by default, the section reports "not started" rather than inventing data. | Market data (dashboard feed). |
+
+Not in the command, and deliberately:
+
+- `--allow-control` — advances the *simulation*. It is a different thing from
+  paper trading and is not part of this deployment.
+- `--auto-advance` — would run the experiment unattended. Not part of this
+  deployment.
+- `--stub` — the non-genuine fixture source. A deployment must not use it.
+- `--crypto-symbols` — supported by the CLI, but the deployment sets
+  `TRADINGAGENTS_CRYPTO_SYMBOLS` instead, so the operator changes the list in
+  one place (Railway's variables) without editing a command.
+
+Every argument above is checked against the **real** argument parser by
+`tests/test_crypto_deployment_wiring.py`, so a renamed or removed flag breaks
+the test rather than the deployment.
+
+### The four control layers
+
+They are separate, and the distinction is what makes the deployment safe:
+
+1. **Railway startup command** — runs the dashboard. Creates the experiment's
+   state file if it is missing. Starts the Binance market-data engine. **Does
+   not** start the paper worker, **does not** connect to Alpaca, **does not**
+   submit an order.
+2. **Dashboard startup** — the same thing: the HTTP server on `--host`/`--port`,
+   guarded by `TRADINGAGENTS_DASHBOARD_TOKEN` (a non-loopback bind without a
+   token is refused).
+3. **Paper Worker START** — an operator presses START in the dashboard. The
+   request needs the bearer token **and** the `X-Paper-Confirm: yes` header.
+   START runs a read-only preflight (connect, account status, buying power,
+   market data, risk config) and then starts the loop. The loop waits one poll
+   interval before its first cycle, so a STOP right after START prevents even
+   the first order. **START itself places no order.**
+4. **Actual Alpaca paper order submission** — happens only inside a worker
+   cycle, after the decision, the RiskEngine and the symbol/venue mapping have
+   all passed. The broker host is fixed to `paper-api.alpaca.markets`; every
+   live host is refused in code.
+
+To stop: press **Stop** (same token, same `X-Paper-Confirm: yes`). Stop closes
+no position and cancels no order — it prevents new orders and leaves the
+existing book visible.
 
 ## Python version and dependencies
 
@@ -126,10 +180,38 @@ venv path for login shells.
 | `TRADINGAGENTS_AUTO_ADVANCE_SESSIONS` | the optional dashboard | sessions per auto-advance tick; `0` (default) = monitor only |
 | `TRADINGAGENTS_AUTO_ADVANCE_INTERVAL` | the optional dashboard | seconds between ticks; default `60` |
 
+### The crypto dashboard service's variables
+
+These are the variables the **crypto dashboard** deployment sets (in
+`railway.json` and `.railway/railway.ts`). The first two must be set in
+Railway's dashboard; the rest are already set by the deployment files.
+
+| Variable | Mandatory? | Purpose |
+|---|---|---|
+| `TRADINGAGENTS_DASHBOARD_TOKEN` | **Yes** | The bearer token for every API call and for the control buttons. A non-loopback bind without it is refused outright, so the deployment cannot serve an unauthenticated control surface. |
+| `ALPACA_PAPER_API_KEY` | **Yes, to trade** | The Alpaca **paper** key id. Needed only when the operator presses START; the dashboard itself starts without it. |
+| `ALPACA_PAPER_API_SECRET` | **Yes, to trade** | The Alpaca **paper** secret. Same condition as the key. |
+| `TRADINGAGENTS_CRYPTO_SYMBOLS` | No (set by the deployment) | The pairs the live market section shows. A pair the venue does not serve is reported, never silently dropped or substituted. |
+| `TRADINGAGENTS_EXPERIMENT_SYMBOLS` | No (set by the deployment) | The pairs a *new* experiment is created with. It wins over the display list; an existing experiment's symbols are never changed. |
+| `TRADINGAGENTS_PAPER_MARKET_DATA` | No (set by the deployment) | The price seam: `binance_snapshot` = a genuinely current public price. |
+| `TRADINGAGENTS_PAPER_DECISION_SOURCE` | No (set by the deployment) | The decision seam: `crypto` = the deterministic TJR chain over current Binance bars. |
+| `TRADINGAGENTS_PAPER_ORDER_NOTIONAL` | No (set by the deployment) | Target cash per paper order. `25` — the risk cap. |
+| `TRADINGAGENTS_PAPER_MAX_PRICE_DEVIATION` | No (set by the deployment) | The largest tolerated gap between the decision price and the execution venue's price (`0.05` = 5%). A bigger gap means the two venues quote different markets or one is stale, and the order is refused. |
+| `TRADINGAGENTS_PAPER_SNAPSHOT_MAX_AGE_SECONDS` | No (set by the deployment) | How old a snapshot price may be before it is refused. A stale price never sizes an order. |
+| `RAILWAY_RUN_UID` | No (set by the deployment) | `0` runs the container as root, which is what makes the volume writable. The image's default user (`appuser`) cannot write a Railway volume mount and the first write fails with `PermissionError`. |
+| `PYTHONUNBUFFERED` / `PYTHONDONTWRITEBYTECODE` | No (set by the deployment) | Unbuffered logs, so the platform's log stream is complete. |
+
+`PORT` is supplied by Railway itself and must **not** be set by hand.
+
 Set these as Railway **service variables** (never in the repository). The code
 reads them from the environment by name only; it never prints, logs or stores a
 value. If a variable is missing, a decision is recorded as **blocked** rather
 than fabricated, and the run exits cleanly.
+
+The Alpaca credentials are **paper** credentials. The adapter refuses every live
+Alpaca host and refuses the live variable names (`APCA_API_KEY_ID`,
+`ALPACA_API_KEY`, …) rather than using them as a fallback, so a live key in the
+environment cannot be reached through the paper path.
 
 The two `ALPACA_PAPER_*` variables are used only by the read-only diagnostic
 below. They are the **paper** credentials — the adapter refuses every live Alpaca
@@ -299,9 +381,23 @@ server refuses to start on that bind.
 
 Railway volumes persist across deploys but are mounted at a path **you** choose
 ([Volumes](https://docs.railway.com/reference/volumes)). Mount one and point
-`--root` at it. The deployment in this repository mounts the volume at
-`/home/appuser/app/data` and points `--root` at the same path, so the experiment
-writes:
+`--root` at it.
+
+**The exact mount path for this deployment is `/home/appuser/app/data`.** It is
+declared in three places that must agree, and a test checks that they do:
+
+- `railway.json` → `deploy.requiredMountPath`
+- `.railway/railway.ts` → `volumeMounts: { "/home/appuser/app/data": data }`
+- the start command → `--root /home/appuser/app/data`
+
+The volume must persist because it holds the worker's
+`processed_decisions` / `ordered_decisions` sets — the two sets that stop a
+restart from placing an order for a decision that already produced one. On the
+container's ephemeral filesystem those sets are lost on every redeploy, so the
+same decision could be ordered again. The volume is what makes a restart
+idempotent.
+
+The experiment writes:
 
 ```
 /home/appuser/app/data/
@@ -513,6 +609,25 @@ enable live trading — it makes the paper path fail loudly instead.
    starts after that authenticated POST.
 5. Press **Stop New Entries** to halt new orders. Open positions and open
    orders are left alone: stopping does not close a position.
+
+The two control calls, if you prefer the API to the buttons:
+
+```bash
+# Start the worker (token + explicit confirmation).
+curl -X POST "$DASHBOARD_URL/api/paper/start" \
+  -H "Authorization: Bearer $TRADINGAGENTS_DASHBOARD_TOKEN" \
+  -H "X-Paper-Confirm: yes"
+
+# Stop new entries (same two headers).
+curl -X POST "$DASHBOARD_URL/api/paper/stop" \
+  -H "Authorization: Bearer $TRADINGAGENTS_DASHBOARD_TOKEN" \
+  -H "X-Paper-Confirm: yes"
+```
+
+Both are refused with **401** without the bearer token and with **403** without
+the `X-Paper-Confirm: yes` header, so a stray request cannot start trading.
+The confirmation header is deliberately distinct from the simulation's
+`X-Control-Confirm`, so one cannot stand in for the other.
 
 ### 4. What to check after the first deploy
 

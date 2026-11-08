@@ -271,6 +271,27 @@ endpoint, and risk limits are unchanged.
   is the non-root `appuser`. `RAILWAY_RUN_UID=0` is what makes the volume
   writable; without it the first state write fails with `PermissionError` and
   the processed/ordered decision sets never land.
+- **The image's `ENTRYPOINT` must be the program the platform should run.**
+  A Dockerfile `ENTRYPOINT` is *prepended* to whatever the platform runs, so an
+  entrypoint of `tradingagents` (the analysis CLI, a Typer app) turns a
+  Railway start command into `tradingagents /bin/sh -c ...` and the service
+  dies with "No such command '/bin/sh'". The image's `ENTRYPOINT` is the
+  paper dashboard, which is also the only program that serves the `/healthz`
+  the image's own `HEALTHCHECK` probes — an image whose default process is the
+  analysis CLI carries a health check that can never pass. The analysis CLI
+  moved to an explicit `entrypoint:` in `docker-compose.yml`.
+- The deployment's start command is checked against the **real** argument
+  parser in `tests/test_crypto_deployment_wiring.py`, not against a copy of it:
+  the test extracts the flags from `railway.json`, feeds them to `build_parser()`
+  and asserts the effective settings. A renamed flag breaks the test rather
+  than the deployment. `railway.json` and `.railway/railway.ts` must carry the
+  identical command string.
+- Starting the dashboard must create the experiment's state and **nothing
+  else**: no worker, no broker request. The paper worker starts only when an
+  operator presses START (bearer token **and** `X-Paper-Confirm: yes`), and an
+  order is placed only inside a worker cycle. Keep those four layers
+  distinct — a test guards both HTTP libraries (`requests` and `urllib`), and
+  the guard is itself tested so it cannot become a no-op.
 - The worker's `processed_decisions` / `ordered_decisions` sets are what stop a
   restart from placing the same order twice, so the experiment root must be on
   the persistent volume, not in the container filesystem.

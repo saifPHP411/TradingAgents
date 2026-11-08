@@ -42,4 +42,20 @@ COPY --from=builder --chown=appuser:appuser /build .
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT:-8000}/healthz', timeout=5)" || exit 1
 
-ENTRYPOINT ["tradingagents"]
+# The image's default process is the paper dashboard, which is the only program
+# in the image that serves /healthz (the HEALTHCHECK above) and the only one a
+# platform deployment wants to run.
+#
+# It is deliberately NOT the `tradingagents` analysis CLI. A Dockerfile
+# ENTRYPOINT is *prepended* to whatever command the platform runs, so an
+# entrypoint of `tradingagents` would turn a platform start command into
+# `tradingagents <start command>` — the analysis CLI is a Typer app, so it
+# would exit with "No such command" and the service would never come up.
+# Starting from the dashboard module also means the image's default is the
+# same program the deployment's start command names, so the container behaves
+# the same whether the platform replaces the command or appends to it.
+#
+# The analysis CLI is still reachable: `docker run ... python -m cli.main` or
+# the `tradingagents` console script, and docker-compose gives the analysis
+# services their own explicit entrypoint.
+ENTRYPOINT ["python", "-m", "tradingagents.paper_experiment.dashboard.server"]

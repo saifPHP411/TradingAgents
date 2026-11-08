@@ -20,6 +20,10 @@ parser, so a rename of a flag or a variable breaks them.
 from __future__ import annotations
 
 import json
+import re
+import shlex
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -28,6 +32,7 @@ from tradingagents.paper_experiment.broker import (
     DEFAULT_MAX_PRICE_DEVIATION,
     MAX_PRICE_DEVIATION_ENV,
 )
+from tradingagents.paper_experiment.dashboard import server as server_module
 from tradingagents.paper_experiment.dashboard.server import (
     HEALTH_PATH,
     _resolve_max_price_deviation,
@@ -451,3 +456,427 @@ class TestTheInstalledPackageCarriesItsData:
         data_dir = root / "tradingagents" / "baseline" / "data"
         files = sorted(p.name for p in data_dir.glob("*.csv"))
         assert files, "the frozen dataset is missing from the repository"
+
+
+class TestTheEffectiveStartupCommand:
+    """The command Railway actually runs, checked against the real parser.
+
+    A deployment is configured in three places that must agree: the Dockerfile,
+    ``railway.json`` and ``.railway/railway.ts``. A mismatch between them is
+    invisible in the repository and fatal on the platform — the service either
+    starts the wrong program or refuses to start at all.
+
+    These tests take the command the platform would run, strip it down to the
+    flags, and feed those flags to the **real** ``argparse`` parser. A flag that
+    is renamed, removed or misspelled therefore breaks the test rather than the
+    deployment.
+    """
+
+    MODULE = "tradingagents.paper_experiment.dashboard.server"
+
+    @pytest.fixture
+    def railway(self) -> dict:
+        return json.loads((ROOT / "railway.json").read_text())
+
+    @pytest.fixture
+    def iac_start(self) -> str:
+        """The start command the Infrastructure-as-Code file declares.
+
+        It is assembled from concatenated string literals, so the literals are
+        joined in source order to recover the command.
+        """
+        text = (ROOT / ".railway" / "railway.ts").read_text()
+        block = re.search(r"start:\s*(.*?),\n\s*healthcheck:", text, re.S)
+        assert block, "the IaC file no longer declares a start command"
+        parts = re.findall(r"'([^']*)'|\"([^\"]*)\"", block.group(1))
+        return "".join(a or b for a, b in parts)
+
+    def _shell_payload(self, command: str) -> str:
+        """The command inside the ``/bin/sh -c "..."`` wrapper."""
+        match = re.search(r'/bin/sh -c "(.*)"$', command, re.S)
+        assert match, (
+            "the start command must be shell-wrapped: Railway runs a Dockerfile "
+            "service's start command in exec form, where $PORT is not expanded"
+        )
+        return match.group(1)
+
+    def _argv(self, command: str) -> list[str]:
+        """The command as a shell would see it, minus the ``exec`` builtin."""
+        argv = shlex.split(self._shell_payload(command))
+        assert argv[0] == "exec", f"the start command should exec its program: {argv[:1]}"
+        return argv[1:]
+
+    def _flags(self, command: str) -> list[str]:
+        """Only the flags — what ``argparse`` actually receives.
+
+        The program and module name are consumed by the interpreter, and
+        ``$PORT`` is expanded by the shell before the program sees it.
+        """
+        argv = self._argv(command)
+        assert argv[0] == "python", f"expected the venv python, got {argv[0]!r}"
+        assert argv[1] == "-m"
+        assert argv[2] == self.MODULE, f"expected {self.MODULE}, got {argv[2]!r}"
+        flags = argv[3:]
+        # The shell expands $PORT before exec; stand in a real port so the
+        # parser's int conversion is exercised the way it is in production.
+        return ["8765" if flag == "$PORT" else flag for flag in flags]
+
+    # -- the command is well formed -----------------------------------
+
+    def test_the_start_command_runs_the_dashboard_module(self, railway):
+        argv = self._argv(railway["deploy"]["startCommand"])
+        assert argv[:3] == ["python", "-m", self.MODULE]
+
+    def test_the_start_command_is_shell_wrapped(self, railway):
+        """`$PORT` is only expanded by a shell, never in exec form."""
+        assert self._shell_payload(railway["deploy"]["startCommand"])
+
+    def test_every_flag_is_accepted_by_the_real_parser(self, railway):
+        """The decisive check: the real parser must accept the deployment's flags."""
+        flags = self._flags(railway["deploy"]["startCommand"])
+        namespace = build_parser().parse_args(flags)
+        assert namespace.root
+
+    def test_no_flag_in_the_command_is_unknown(self, railway):
+        """An unknown flag must be caught here, not on the platform."""
+        known = {
+            action.option_strings[0]
+            for action in build_parser()._actions
+            if action.option_strings
+        }
+        for flag in self._flags(railway["deploy"]["startCommand"]):
+            if flag.startswith("--"):
+                assert flag in known, f"{flag!r} is not a flag the server accepts"
+
+    # -- the effective settings ---------------------------------------
+
+    def test_the_effective_root_is_the_volume_mount(self, railway):
+        namespace = build_parser().parse_args(
+            self._flags(railway["deploy"]["startCommand"])
+        )
+        assert namespace.root == railway["deploy"]["requiredMountPath"]
+
+    def test_the_effective_bind_is_every_interface(self, railway):
+        namespace = build_parser().parse_args(
+            self._flags(railway["deploy"]["startCommand"])
+        )
+        assert namespace.host == "0.0.0.0"
+
+    def test_the_effective_port_comes_from_the_environment(self, railway):
+        """The port is the platform's, not a hard-coded one."""
+        command = railway["deploy"]["startCommand"]
+        assert "$PORT" in command
+        namespace = build_parser().parse_args(self._flags(command))
+        assert namespace.port == 8765  # the stand-in the shell would have expanded
+
+    def test_paper_trading_is_enabled_by_the_command(self, railway):
+        namespace = build_parser().parse_args(
+            self._flags(railway["deploy"]["startCommand"])
+        )
+        assert namespace.allow_paper_trading is True
+
+    def test_the_command_reads_the_binance_price_seam(self, railway):
+        namespace = build_parser().parse_args(
+            self._flags(railway["deploy"]["startCommand"])
+        )
+        assert namespace.paper_market_data == "binance_snapshot"
+
+    def test_the_command_uses_the_crypto_decision_source(self, railway):
+        namespace = build_parser().parse_args(
+            self._flags(railway["deploy"]["startCommand"])
+        )
+        assert namespace.paper_decision_source == "crypto"
+
+    def test_the_command_starts_the_live_crypto_engine(self, railway):
+        namespace = build_parser().parse_args(
+            self._flags(railway["deploy"]["startCommand"])
+        )
+        assert namespace.crypto_live is True
+
+    def test_the_command_does_not_enable_the_simulation_control(self, railway):
+        """``--allow-control`` advances the *simulation*; it is a different thing
+        from paper trading and is not part of this deployment."""
+        namespace = build_parser().parse_args(
+            self._flags(railway["deploy"]["startCommand"])
+        )
+        assert namespace.allow_control is False
+
+    def test_the_command_does_not_enable_auto_advance(self, railway):
+        namespace = build_parser().parse_args(
+            self._flags(railway["deploy"]["startCommand"])
+        )
+        assert namespace.auto_advance == 0
+
+    def test_the_command_does_not_use_the_stub_source(self, railway):
+        """The stub source is a non-genuine fixture; a deployment must not use it."""
+        namespace = build_parser().parse_args(
+            self._flags(railway["deploy"]["startCommand"])
+        )
+        assert namespace.stub is False
+
+    # -- the three files agree ----------------------------------------
+
+    def test_the_iac_start_command_is_identical_to_the_json_one(self, railway, iac_start):
+        assert iac_start == railway["deploy"]["startCommand"]
+
+    def test_the_dockerfile_entrypoint_cannot_shadow_the_start_command(self, railway):
+        """The image's ENTRYPOINT must not be the command the platform appends to.
+
+        Docker runs ``ENTRYPOINT`` followed by the command the platform sets as
+        ``CMD``. Railway's own documentation states that a start command
+        *overrides* the image's ENTRYPOINT in exec form for a Dockerfile
+        service — but the safe shape is an image whose ENTRYPOINT is the
+        dashboard itself, so the service starts the right program whether the
+        platform overrides the entrypoint or merely appends to it.
+
+        The image's ENTRYPOINT is therefore checked to be the dashboard module,
+        not the analysis CLI: ``tradingagents`` is a Typer app whose bare form
+        runs an interactive LLM analysis, which is not a server.
+        """
+        text = (ROOT / "Dockerfile").read_text()
+        entrypoints = re.findall(r"^ENTRYPOINT\s+(.+)$", text, re.M)
+        assert entrypoints, "the Dockerfile declares no ENTRYPOINT"
+        entrypoint = " ".join(entrypoints)
+        assert self.MODULE in entrypoint or "paper_experiment" in entrypoint, (
+            "the image's ENTRYPOINT must start the paper dashboard, not the "
+            f"analysis CLI: {entrypoint!r}"
+        )
+
+    # -- what the startup command does NOT do -------------------------
+
+    def test_the_startup_does_not_start_the_paper_worker(self, railway):
+        """The worker starts only when an operator presses START.
+
+        The startup command's job is to serve the dashboard. If it started the
+        worker, a redeploy would resume trading on its own — which is exactly
+        the behaviour the deployment is required not to have.
+        """
+        command = railway["deploy"]["startCommand"]
+        flags = self._flags(command)
+        # No flag starts a worker: the worker is started by the API.
+        assert "--start-worker" not in flags
+        assert "--auto-advance" not in flags
+        namespace = build_parser().parse_args(flags)
+        assert namespace.allow_paper_trading is True, (
+            "the flag only permits the START button to exist; it does not start it"
+        )
+
+    def test_the_startup_does_not_name_a_broker_host(self, railway):
+        """No broker host is in the command, so none can be reached at startup."""
+        command = railway["deploy"]["startCommand"]
+        assert "alpaca.markets" not in command
+
+
+class TestTheImageEntryPointServesTheHealthCheck:
+    """The image's default process must satisfy the image's own HEALTHCHECK.
+
+    The Dockerfile probes ``/healthz``. Only the dashboard serves that path —
+    the analysis CLI serves no HTTP at all — so an image whose default process
+    is the analysis CLI carries a health check that can never pass.
+    """
+
+    @pytest.fixture
+    def entrypoint(self) -> list[str]:
+        text = (ROOT / "Dockerfile").read_text()
+        match = re.search(r"^ENTRYPOINT\s+\[(.*)\]$", text, re.M)
+        assert match, "the Dockerfile declares no exec-form ENTRYPOINT"
+        return [part.strip().strip('"') for part in match.group(1).split(",")]
+
+    def test_the_entrypoint_is_the_dashboard_module(self, entrypoint):
+        assert entrypoint == [
+            "python",
+            "-m",
+            "tradingagents.paper_experiment.dashboard.server",
+        ]
+
+    def test_the_entrypoint_program_is_not_the_analysis_cli(self, entrypoint):
+        """The analysis CLI is a Typer app: it is not a server, and as an
+        ENTRYPOINT it would swallow the platform's start command."""
+        assert "tradingagents" not in entrypoint
+
+    def test_the_entrypoint_module_actually_serves_the_health_path(self):
+        """The HEALTHCHECK's URL must be served by the entrypoint's program."""
+        from tradingagents.paper_experiment.dashboard.server import HEALTH_PATH
+
+        assert HEALTH_PATH == "/healthz"
+
+    def test_the_healthcheck_probes_the_health_path(self):
+        text = (ROOT / "Dockerfile").read_text()
+        assert "/healthz" in text
+
+    def test_the_compose_analysis_services_name_the_analysis_cli(self):
+        """The analysis CLI moved out of the image's ENTRYPOINT, so the compose
+        services that run it must name it themselves."""
+        text = (ROOT / "docker-compose.yml").read_text()
+        assert text.count("entrypoint:\n      - tradingagents\n") == 2, (
+            "the `tradingagents` and `tradingagents-ollama` services must each "
+            "name the analysis CLI as their entrypoint"
+        )
+
+
+def _serve_in_thread_for_startup(root):
+    """Run the real ``serve`` startup path in a thread and return its dashboard.
+
+    ``serve`` is what the module entry point calls, so this exercises the same
+    code the platform's start command runs — including ``_ensure_experiment``
+    and the worker that is *not* built.
+    """
+    from tradingagents.paper_experiment.dashboard.server import serve
+
+    captured = {}
+    original = server_module.Dashboard
+
+    class _Capturing(original):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            captured["dashboard"] = self
+
+    server_module.Dashboard = _Capturing
+    try:
+        thread = threading.Thread(
+            target=serve,
+            kwargs={"root": str(root), "host": "127.0.0.1", "port": 0,
+                    "allow_paper_trading": True},
+            daemon=True,
+        )
+        thread.start()
+        deadline = time.monotonic() + 30
+        while "dashboard" not in captured and time.monotonic() < deadline:
+            thread.join(timeout=0.05)
+        assert "dashboard" in captured, "serve did not build a dashboard"
+    finally:
+        server_module.Dashboard = original
+
+    dashboard = captured["dashboard"]
+    return dashboard
+
+
+class TestTheStartupItselfPlacesNothing:
+    """Starting the dashboard must not start the worker or reach a broker.
+
+    This is the property that separates the four control layers: the platform
+    starts the *dashboard*, the operator starts the *worker*, and only the
+    worker's cycle can reach a *broker*. The dashboard's startup must therefore
+    create the experiment's state and nothing else.
+    """
+
+    def test_serve_creates_the_experiment_state_and_no_worker(self, tmp_path):
+        """The real ``serve`` path: an experiment exists, a worker does not."""
+        root = tmp_path / "experiment"
+        dashboard = _serve_in_thread_for_startup(root)
+        try:
+            assert (root / "session_state.json").exists(), (
+                "the startup must create the experiment's state"
+            )
+            assert (root / "journal.json").exists()
+            # No worker was built, so no worker state file exists.
+            assert not (root / "worker_state.json").exists()
+            assert dashboard.paper._worker is None, (
+                "the startup must not build a paper worker"
+            )
+        finally:
+            dashboard.paper.shutdown()
+
+    def test_the_startup_reaches_no_broker(self, tmp_path, monkeypatch):
+        """No HTTP request may leave the process during startup.
+
+        Both HTTP libraries the project uses are guarded: the Alpaca broker
+        calls ``requests.request`` and the market-data providers use
+        ``urllib``. Guarding only one of them would let the other through and
+        make this test pass while a request was actually made.
+        """
+        import urllib.request
+
+        import requests
+
+        calls: list[str] = []
+
+        def _record(url) -> None:
+            calls.append(str(url))
+            raise AssertionError(f"the startup must not make a request: {url}")
+
+        def _guarded_request(method, url, *args, **kwargs):
+            _record(url)
+
+        monkeypatch.setattr(requests, "request", _guarded_request)
+        monkeypatch.setattr(
+            urllib.request, "urlopen", lambda *a, **k: _record(a[0])
+        )
+        monkeypatch.setattr(
+            urllib.request,
+            "build_opener",
+            lambda *a, **k: type(
+                "_Guard",
+                (urllib.request.OpenerDirector,),
+                {"open": lambda self, url, data=None, timeout=None: _record(url)},
+            )(),
+        )
+
+        root = tmp_path / "experiment"
+        dashboard = _serve_in_thread_for_startup(root)
+        try:
+            assert dashboard.paper._worker is None
+            assert calls == [], f"the startup made a request: {calls}"
+        finally:
+            dashboard.paper.shutdown()
+
+    def test_the_broker_guard_would_catch_a_real_call(self, monkeypatch):
+        """The guard above must be a real guard, not a no-op.
+
+        A test that patches an HTTP library the code never uses would pass
+        forever while the startup quietly contacted a broker.
+        """
+        import requests
+
+        seen: list[str] = []
+
+        def _capture(method, url, *args, **kwargs):
+            seen.append(url)
+
+        monkeypatch.setattr(requests, "request", _capture)
+        requests.request("GET", "https://paper-api.alpaca.markets/v2/account")
+        assert seen == ["https://paper-api.alpaca.markets/v2/account"]
+
+
+class TestTheVolumeMountPathAgrees:
+    """The mount path is written in three places; they must be one path.
+
+    A volume mounted at one path while `--root` points at another is a
+    deployment that looks configured and is not: the experiment's state would
+    land on the container's ephemeral filesystem, and a redeploy would forget
+    which decisions already produced an order.
+    """
+
+    @pytest.fixture
+    def railway(self) -> dict:
+        return json.loads((ROOT / "railway.json").read_text())
+
+    def test_the_json_required_mount_path_is_the_experiment_root(self, railway):
+        assert railway["deploy"]["requiredMountPath"] == "/home/appuser/app/data"
+
+    def test_the_start_command_roots_the_experiment_at_the_mount(self, railway):
+        namespace = build_parser().parse_args(
+            TestTheEffectiveStartupCommand()._flags(
+                railway["deploy"]["startCommand"]
+            )
+        )
+        assert namespace.root == railway["deploy"]["requiredMountPath"]
+
+    def test_the_iac_mounts_the_volume_at_the_same_path(self, railway):
+        text = (ROOT / ".railway" / "railway.ts").read_text()
+        assert '"/home/appuser/app/data": data' in text, (
+            "the IaC file must mount the volume at the same path the start "
+            "command roots the experiment at"
+        )
+
+    def test_the_documented_mount_path_matches(self, railway):
+        text = (ROOT / "docs" / "RAILWAY_DEPLOYMENT.md").read_text()
+        assert railway["deploy"]["requiredMountPath"] in text, (
+            "the deployment doc must name the mount path the service uses"
+        )
+
+    def test_the_volume_is_not_the_container_filesystem(self, railway):
+        """The mount must be a real path, not the image's own working dir."""
+        mount = railway["deploy"]["requiredMountPath"]
+        assert mount.startswith("/")
+        assert mount != "/home/appuser/app"

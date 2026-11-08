@@ -1,6 +1,11 @@
 services:
   tradingagents:
     build: .
+    # The image's ENTRYPOINT is the paper dashboard (the only program in the
+    # image that serves /healthz). This service is the interactive analysis CLI,
+    # so it names that program explicitly.
+    entrypoint:
+      - tradingagents
     env_file:
       - .env
     volumes:
@@ -18,8 +23,8 @@ services:
     build: .
     env_file:
       - .env
-    # The image ENTRYPOINT is the `tradingagents` analysis CLI, so override it to
-    # run the paper runner's module directly.
+    # The image ENTRYPOINT is the paper dashboard; this service runs the paper
+    # runner's module directly instead.
     entrypoint:
       - python
       - -m
@@ -50,6 +55,8 @@ services:
 
   tradingagents-ollama:
     build: .
+    entrypoint:
+      - tradingagents
     env_file:
       - .env
     environment:
