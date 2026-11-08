@@ -44,6 +44,7 @@ from .alpaca_paper import (
     PaperRiskLimits,
     PaperRiskRejected,
     assert_paper_endpoint,
+    assert_paper_request_url,
     broker_status,
 )
 from .state import BrokerAccountState, BrokerStateError, BrokerStateStore
@@ -223,6 +224,7 @@ __all__ = [
     "WorkerStateError",
     "WorkerStateStore",
     "assert_paper_endpoint",
+    "assert_paper_request_url",
     "broker_status",
     "decision_source_identity",
     "market_data_identity",

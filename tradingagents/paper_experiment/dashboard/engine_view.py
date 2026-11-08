@@ -228,6 +228,13 @@ def engine_view(status: dict[str, Any]) -> dict[str, Any]:
         # source — its own last market state and last-fetched decision data. A
         # historical source contributes no extra fields, so the *configured* label
         # is what the view reports rather than a fabricated current state.
+        # The symbol validation state, straight from the controller's status.
+        # It reports whether the venues' own listings have been read and which
+        # symbols they refused, so an operator sees a rejected pair instead of a
+        # pair that silently never appears.
+        "symbols": {
+            "validation": status.get("symbol_validation"),
+        },
         "decision_source": {
             "configured": status.get("decision_source_configured"),
             "kind": status.get("decision_source_kind"),

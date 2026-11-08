@@ -277,6 +277,11 @@ class CryptoViewService:
             "market_detail": market.get("detail"),
             "fresh_symbols": market.get("fresh_count"),
             "total_symbols": market.get("count"),
+            # Whether the venues' own listings have been read, and which pairs
+            # they refused. The registries are read when the paper worker is
+            # built, so before that this is an explicit "not validated yet" —
+            # never an implied "everything is fine".
+            "symbol_validation": worker.get("symbol_validation"),
             "observed_at": self._clock().isoformat(),
         }
 

@@ -1,43 +1,59 @@
 # Railway deployment readiness
 
-This document states what deploying the **prospective paper experiment** to
-Railway requires, and what it does not. It describes a simulation-only workload:
-no order routing, no credential beyond a market-data and an LLM provider key plus
-the optional read-only Alpaca paper check, and no `ExecutionMode.LIVE` (which does
-not exist). The one broker-facing command is a **read-only** Alpaca paper account
-check that places no order.
+This document states what deploying this project to Railway requires, and what it
+does not. It covers two distinct workloads, and they must not be confused:
+
+| Workload | Shape | Places orders? |
+|---|---|---|
+| **Crypto dashboard** (the service this repository deploys) | a long-running web service | **Yes** — it can start the Alpaca **paper** worker |
+| **Paper experiment runner** (`paper_experiment run`) | a bounded batch that exits | No — it simulates against a price source |
+
+The deployed service is the **crypto dashboard**: a long-running HTTP server that
+shows live Binance market data, the TJR strategy state and the paper account, and
+that can start and stop the Alpaca **paper** trading worker.
+
+**What this project can and cannot do.** It can place orders against Alpaca's
+**paper** endpoint and nothing else. `ExecutionMode` has only `BACKTEST` and
+`PAPER`; there is no live mode, and the broker's endpoint gate refuses every
+live host, every non-HTTPS URL and every URL that is not exactly
+`https://paper-api.alpaca.markets`. There is no code path that reaches a live
+trading endpoint.
+
+**What has and has not been verified.** The code paths are covered by the
+offline test suite, and the deployment's start command was verified to serve
+`/healthz` from a clean wheel install. The **Railway deployment itself** and the
+**Alpaca paper account** have not been exercised: no Railway account and no
+Alpaca credentials were available, so neither the live deployment nor a real
+paper order has been observed. Every statement below about Railway or Alpaca
+behaviour is a statement about the *code*, not about a running deployment.
+See "What is not verified" at the end.
 
 ## What kind of service this is
 
-A **worker**, not a web service. The experiment has no HTTP surface, no port to
-listen on, and no request to serve. It runs a bounded batch of sessions and exits:
+The **crypto dashboard** is a **web service**. It binds a port, serves an HTML
+dashboard and a JSON API, and stays resident so a browser (or Railway's health
+check) can reach it:
 
 ```
-start  → create an experiment directory (journal creation entry + state)
-run    → process sessions, appending to the journal and state after each
-report → write a report JSON
-verify → recompute the journal hash chain
+start  → create the experiment directory if absent (journal entry + state)
+serve  → bind HTTP on $PORT, answer /healthz and /api/*
+paper  → on an operator's START, run the paper worker loop (orders, in paper)
 ```
 
-Because it exits, the right Railway shape is one of:
+Because it stays resident, the right Railway shape is a **web service**, not a
+cron job. The dashboard's own `HEALTHCHECK` probes `/healthz`, which only this
+process serves.
 
-- a **cron job** — a schedule runs `run` and the process exits, or
-- a **one-off / manual** service started on demand.
+> A cron job would be the wrong shape here: Railway cron services "are expected
+> to execute a task, and terminate as soon as that task is finished"
+> ([Cron Jobs](https://docs.railway.com/reference/cron-jobs)). The dashboard does
+> not terminate — it is a monitor and a control panel.
 
-A permanently-running web service is the wrong shape: nothing needs to stay
-resident between sessions, and a service that never exits would be restarted by
-Railway's restart policy for no benefit.
-
-> Railway cron services "are expected to execute a task, and terminate as soon as
-> that task is finished" and a previous execution still running causes the next
-> scheduled run to be **skipped**
-> ([Cron Jobs](https://docs.railway.com/reference/cron-jobs)). The runner exits on
-> its own, so it satisfies that requirement.
-
-An **optional dashboard service** is the one web-shaped service in this repo: a
-small standard-library HTTP server (`serve`) that reads the experiment directory
-and can advance the simulation. It is *not* required to run the experiment, and
-it is not a trading surface. See "Monitoring dashboard" below.
+The **paper experiment runner** is a separate, bounded batch workload
+(`python -m tradingagents.paper_experiment run`). It runs a fixed number of
+sessions against a price source and exits. It never reaches a venue, so it is
+still a valid cron job. The two are documented separately below, because they
+have different shapes, different flags and different credentials.
 
 ## Start command
 
@@ -172,8 +188,8 @@ venv path for login shells.
 | `GROQ_API_KEY` | genuine LLM inference | provider `groq`, model `openai/gpt-oss-20b` |
 | `ALPHA_VANTAGE_API_KEY` | `--source alpha_vantage` | free daily bars; 25 calls/day |
 | `FINNHUB_API_KEY` | `--source finnhub` | free current-day quote only |
-| `ALPACA_PAPER_API_KEY` | the read-only Alpaca **paper** diagnostic | paper key id; **no order is placed** |
-| `ALPACA_PAPER_API_SECRET` | the read-only Alpaca **paper** diagnostic | paper secret; **no order is placed** |
+| `ALPACA_PAPER_API_KEY` | the Alpaca **paper** trading credential | paper key id; orders are placed against the **paper** endpoint only |
+| `ALPACA_PAPER_API_SECRET` | the Alpaca **paper** trading credential | paper secret; orders are placed against the **paper** endpoint only |
 | `TRADINGAGENTS_DASHBOARD_TOKEN` | the optional dashboard | bearer token; **required** for any non-loopback bind |
 | `TRADINGAGENTS_EXPERIMENT_ROOT` | the optional dashboard (module form) | experiment dir; lets `--root` be omitted |
 | `TRADINGAGENTS_DASHBOARD_HOST` | the optional dashboard (module form) | bind interface; defaults to loopback |
@@ -239,14 +255,24 @@ message, no fallback) if a credential is missing, authentication fails, the
 request times out, or the paper environment cannot be proven. It never submits,
 modifies or cancels an order — there is no flag that does.
 
-## Monitoring dashboard (optional)
+## The dashboard
 
-A small dashboard can be run to monitor and — if explicitly enabled — advance the
-simulation. It is built from the standard library only (no extra dependency), and
-it is simulation-only: the one action it can take drives
-`PaperExperiment.process_session`, which never reaches a venue. There is no route
-that places, modifies or cancels a broker order, and no credential is ever
-returned to the browser.
+The dashboard is built from the standard library only (no extra dependency). It
+has two distinct kinds of action, and they must not be confused:
+
+| Route | Effect | Reaches a venue? |
+|---|---|---|
+| `POST /api/run` | advances the **simulation** (`PaperExperiment.process_session`) | **No** |
+| `POST /api/paper/start` | starts the **paper trading worker** | **Yes** — Alpaca **paper** only |
+| `POST /api/paper/stop` | stops the worker | No new orders after it returns |
+
+`POST /api/run` is the simulation advance and never reaches a venue.
+`POST /api/paper/start` is different: it starts the worker that submits **paper**
+orders to Alpaca — that is, it places **paper** orders to Alpaca. Both require the
+bearer token **and** an explicit confirmation header. No credential is ever returned to the browser, and the endpoint cannot
+change the broker's endpoint — the worker builds its broker from the server's own
+configuration, and the broker's gate refuses any host that is not
+`https://paper-api.alpaca.markets`.
 
 **The dashboard does not run the engine by itself.** `serve` binds an HTTP server
 and waits: it advances nothing until either a caller presses Run (`POST
@@ -645,4 +671,72 @@ Alpaca's crypto support is not universal: the account must be enabled for
 crypto, and the pair must be in Alpaca's own listing. The project reads
 Alpaca's asset registry and refuses a pair Alpaca does not serve, so the
 symptom is a clear refusal rather than a failed order. The dashboard reports
-the reason under **System Health**.
+the reason under **Symbol validation**.
+
+### Symbol validation: when it happens, and what it shows
+
+The venues' own listings are read **when the paper worker is built**, not at
+dashboard startup. That is deliberate: reading them at startup would make the
+deployment fail to come up whenever either exchange was briefly unreachable, and
+a deployment that cannot reach an exchange must still start and say so.
+
+The dashboard therefore reports one of these states under **Symbol validation**:
+
+| State | Meaning |
+|---|---|
+| `NOT_VALIDATED` | The worker has not been built yet, so no pair has been accepted or rejected. This is the state before an operator presses START. |
+| `VALIDATED` | Both venue registries were read. The accepted pairs and every rejected pair are listed, each rejection with the venue's own reason and a stable code. |
+| `MARKET_DATA_REGISTRY_UNAVAILABLE` | Binance's instrument registry could not be read. The detail carries the underlying error. |
+| `EXECUTION_REGISTRY_UNAVAILABLE` | Alpaca's asset registry could not be read (missing credentials, or the paper host was unreachable). |
+
+A rejected pair is **never silently dropped**: it is listed with a code from a
+closed vocabulary — `MARKET_DATA_UNAVAILABLE`, `MARKET_DATA_NOT_TRADABLE`,
+`EXECUTION_UNAVAILABLE`, `EXECUTION_NOT_TRADABLE`,
+`EXECUTION_NOT_FRACTIONABLE` or `EXECUTION_REGISTRY_UNAVAILABLE` — and the
+venue's own words. No order is ever placed for a rejected pair, and no rejected
+pair is ever substituted for a different one.
+
+## What is not verified
+
+This section is deliberately explicit, because a deployment document that
+implies everything works is worse than one that says what was not tried.
+
+**Not verified — no account or credential was available:**
+
+- **The Railway deployment itself.** No Railway account was accessible, so no
+  image was built and pushed to Railway, no service was created, and no
+  deployment was observed running. The start command, the `railway.json` and
+  `.railway/railway.ts` files, the Dockerfile entrypoint and the health check
+  were verified *locally* (a clean wheel install serving `/healthz` → 200), not
+  on Railway.
+- **Alpaca paper connectivity.** No Alpaca credentials were available, so the
+  paper account was never contacted, no account status was read, and **no real
+  paper order was ever placed**. The broker's request path, its risk limits and
+  its endpoint gate are covered by offline tests with a stub transport.
+- **Whether the account is enabled for crypto.** Alpaca's crypto eligibility is
+  per-account. If the account is not enabled, the worker fails with a refusal
+  from Alpaca and the dashboard shows the reason; the project does not work
+  around it and does not fall back to another venue.
+- **The exact live prices and the TJR signals on any given day.** Binance's
+  public feed was observed live during development (fresh quotes, sub-second
+  latency), but the *decisions* that follow depend on the market.
+
+**Verified locally:**
+
+- the full offline test suite passes;
+- `ruff` is clean across the repository;
+- the deployment's start command, run from a clean wheel install, serves
+  `/healthz` → 200;
+- the dashboard's startup makes **no** network call and starts **no** worker;
+- the auth gate returns 401 without a token and 403 without the confirmation
+  header;
+- the broker's endpoint gate refuses every live host, every non-HTTPS scheme,
+  every unexpected port, every URL with credentials in it, and every
+  host-suffix trick;
+- the risk limits (`max_order_notional = 25`, `max_open_positions = 5`,
+  `max_daily_orders = 10`, `allow_short = false`) are enforced in code and
+  covered by tests.
+
+**What the operator must supply:** a Railway account, an Alpaca **paper**
+credential pair (`ALPACA_PAPER_API_KEY` / `ALPACA_PAPER_API_SECRET`), and a
+dashboard token (`TRADINGAGENTS_DASHBOARD_TOKEN`).

@@ -121,13 +121,49 @@ class SymbolConfigurationError(ValueError):
     """The requested symbol configuration could not be resolved."""
 
 
+REJECTION_MARKET_DATA_UNAVAILABLE = "MARKET_DATA_UNAVAILABLE"
+"""The market-data venue does not list the requested pair."""
+
+REJECTION_MARKET_DATA_NOT_TRADABLE = "MARKET_DATA_NOT_TRADABLE"
+"""The market-data venue lists the pair but does not trade it."""
+
+REJECTION_EXECUTION_UNAVAILABLE = "EXECUTION_UNAVAILABLE"
+"""The execution venue does not list the pair (in any preferred quote)."""
+
+REJECTION_EXECUTION_NOT_TRADABLE = "EXECUTION_NOT_TRADABLE"
+"""The execution venue lists the pair but does not trade it."""
+
+REJECTION_EXECUTION_NOT_FRACTIONABLE = "EXECUTION_NOT_FRACTIONABLE"
+"""The execution venue lists the pair but refuses fractional quantities.
+
+This is only a rejection when fractional execution is actually required. A
+whole-unit order is still possible for such an instrument, so the check is
+made against the requirement, not assumed.
+"""
+
+REJECTION_EXECUTION_REGISTRY_UNAVAILABLE = "EXECUTION_REGISTRY_UNAVAILABLE"
+"""The execution venue's own listing could not be read.
+
+Unknown is not tradable: without the venue's listing, tradability on the
+execution side cannot be established, so the symbol is rejected rather than
+assumed to be fine.
+"""
+
+
 @dataclass(frozen=True)
 class SymbolRejection:
-    """One requested symbol that a venue will not accept, and why."""
+    """One requested symbol that a venue will not accept, and why.
+
+    ``code`` is a stable, machine-readable reason; ``market_data_reason`` and
+    ``execution_reason`` are the venues' own words. A dashboard shows the code
+    and the detail, so an operator sees *why* a pair was dropped without having
+    to read prose to tell two failure modes apart.
+    """
 
     symbol: str
     market_data_reason: str | None = None
     execution_reason: str | None = None
+    code: str = REJECTION_MARKET_DATA_UNAVAILABLE
 
     @property
     def reason(self) -> str:
@@ -142,6 +178,7 @@ class SymbolRejection:
     def to_dict(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
+            "code": self.code,
             "market_data_reason": self.market_data_reason,
             "execution_reason": self.execution_reason,
             "reason": self.reason,
@@ -255,12 +292,14 @@ def env_symbols(name: str) -> tuple[str, ...]:
 def _execution_symbol_for(
     base: str,
     execution_registry: InstrumentRegistry,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, str]:
     """The execution venue's own symbol for ``base``, and the reason if there is none.
 
     The quote is chosen from the execution registry's own listings, in a fixed
     preference order, so no quote is assumed and no USDT-to-USD conversion is
     implied. The venue's symbol is returned verbatim.
+
+    Returns the symbol, the prose reason and the stable rejection code.
     """
     for quote in QUOTE_PREFERENCE:
         candidate = f"{base}/{quote}"
@@ -268,9 +307,11 @@ def _execution_symbol_for(
         if rules is None:
             continue
         if not rules.tradable:
-            return None, f"status={rules.status} on execution venue"
-        return candidate, None
-    return None, "not listed on execution venue"
+            return None, f"status={rules.status} on execution venue", (
+                REJECTION_EXECUTION_NOT_TRADABLE
+            )
+        return candidate, None, ""
+    return None, "not listed on execution venue", REJECTION_EXECUTION_UNAVAILABLE
 
 
 def resolve_symbol_configuration(
@@ -278,6 +319,7 @@ def resolve_symbol_configuration(
     *,
     market_data_registry: InstrumentRegistry,
     execution_registry: InstrumentRegistry | None = None,
+    require_fractional: bool = True,
 ) -> CryptoSymbolConfiguration:
     """Validate every requested symbol against **both** venue registries.
 
@@ -289,6 +331,12 @@ def resolve_symbol_configuration(
     explicit "execution venue registry not available" reason: without the venue's
     own listing, tradability on the execution side is unknown, and unknown is not
     tradable.
+
+    ``require_fractional`` says whether a fractional quantity is actually
+    needed. It is a rejection only when it is: a venue that refuses fractional
+    quantities can still take a whole-unit order, so the requirement — not an
+    assumption — decides. A venue that does not *state* fractionability is not
+    refused for it; an unstated answer is unknown, not a refusal.
     """
     symbols = parse_symbol_list(tuple(requested))
     accepted: list[str] = []
@@ -298,19 +346,35 @@ def resolve_symbol_configuration(
     for canonical in symbols:
         md_rules = market_data_registry.get(canonical)
         md_reason: str | None = None
+        md_code = ""
         if md_rules is None:
             md_reason = "not listed on market-data venue"
+            md_code = REJECTION_MARKET_DATA_UNAVAILABLE
         elif not md_rules.tradable:
             md_reason = f"status={md_rules.status} on market-data venue"
+            md_code = REJECTION_MARKET_DATA_NOT_TRADABLE
 
         if execution_registry is None:
             exec_reason: str | None = "execution venue registry not available"
+            exec_code = REJECTION_EXECUTION_REGISTRY_UNAVAILABLE
             exec_symbol: str | None = None
             exec_rules: TradingRules | None = None
         else:
             base = parse_pair(canonical).base
-            exec_symbol, exec_reason = _execution_symbol_for(base, execution_registry)
+            exec_symbol, exec_reason, exec_code = _execution_symbol_for(
+                base, execution_registry
+            )
             exec_rules = execution_registry.get(exec_symbol) if exec_symbol else None
+            # Only a venue that *states* it refuses fractional quantities is
+            # refused. An unstated answer is unknown, not a refusal.
+            if (
+                exec_symbol
+                and require_fractional
+                and exec_rules is not None
+                and exec_rules.fractionable is False
+            ):
+                exec_reason = "execution venue does not accept fractional quantities"
+                exec_code = REJECTION_EXECUTION_NOT_FRACTIONABLE
 
         if md_reason or exec_reason:
             rejections.append(
@@ -318,6 +382,7 @@ def resolve_symbol_configuration(
                     symbol=canonical,
                     market_data_reason=md_reason,
                     execution_reason=exec_reason,
+                    code=md_code or exec_code or REJECTION_MARKET_DATA_UNAVAILABLE,
                 )
             )
             continue
@@ -356,6 +421,12 @@ __all__ = [
     "DEFAULT_MARKET_DATA_SYMBOLS",
     "EXPERIMENT_SYMBOLS_ENV",
     "QUOTE_PREFERENCE",
+    "REJECTION_EXECUTION_NOT_FRACTIONABLE",
+    "REJECTION_EXECUTION_NOT_TRADABLE",
+    "REJECTION_EXECUTION_REGISTRY_UNAVAILABLE",
+    "REJECTION_EXECUTION_UNAVAILABLE",
+    "REJECTION_MARKET_DATA_NOT_TRADABLE",
+    "REJECTION_MARKET_DATA_UNAVAILABLE",
     "CryptoSymbolConfiguration",
     "SymbolConfigurationError",
     "SymbolRejection",

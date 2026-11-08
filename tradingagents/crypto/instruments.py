@@ -121,6 +121,14 @@ class TradingRules:
     """Decimal places a price may carry (derived from the price tick)."""
     base_precision: int = 0
     """Decimal places a quantity may carry (derived from the quantity step)."""
+    fractionable: bool | None = None
+    """Whether the venue accepts a fractional quantity for this instrument.
+
+    ``None`` means the venue did not state it — which is different from
+    ``False``. An unstated answer is *unknown*, not "not fractionable", so a
+    caller must not read it as a refusal. A venue that does state it (Alpaca's
+    assets API carries ``fractionable``) states it either way.
+    """
 
     @property
     def tradable(self) -> bool:
@@ -315,7 +323,22 @@ def _rules_from_binance(entry: dict) -> TradingRules | None:
         order_types=order_types,
         quote_precision=_decimals(tick) if tick else 0,
         base_precision=_decimals(step) if step else 0,
+        # Binance spot trades fractional quantities whenever the lot step is
+        # smaller than one unit; an integral step means whole units only.
+        fractionable=_fractionable_from_step(step),
     )
+
+
+def _fractionable_from_step(step: str | None) -> bool | None:
+    """Whether a lot step permits a fractional quantity, or ``None`` if unstated.
+
+    A step of ``0`` or a missing step says nothing, so the answer is ``None``
+    (unknown) rather than a guess.
+    """
+    value = _as_float(step) if step else None
+    if value is None or value <= 0:
+        return None
+    return value < 1
 
 
 def parse_exchange_info(payload: dict) -> dict[str, TradingRules]:

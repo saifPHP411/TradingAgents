@@ -49,6 +49,7 @@ from ..broker import (
     MAX_PRICE_DEVIATION_ENV,
     PROVIDER_BAR_OPEN,
     BrokerError,
+    BrokerNotConfiguredError,
 )
 from ..crypto_symbol_config import (
     DEFAULT_MARKET_DATA_SYMBOLS,
@@ -67,6 +68,7 @@ from ..market_data_wiring import (
     resolve_paper_settings,
     resolve_settings,
 )
+from ..providers.base import ProviderNotConfiguredError
 from .auth import DashboardAuthError, check_bearer, require_bindable, resolve_token
 from .crypto_view import CryptoViewService
 from .paper_control import PaperTradingController, PaperTradingDisabled
@@ -153,9 +155,19 @@ def _ensure_experiment(root: Path, *, crypto_symbols: tuple[str, ...] = ()) -> N
     The symbol list comes from ``TRADINGAGENTS_EXPERIMENT_SYMBOLS`` when it is
     set, and from the *live-section* list (``crypto_symbols``) otherwise, so the
     experiment's persisted pairs and the dashboard's displayed pairs agree by
-    default. The list is a request: every pair is validated against both venue
-    registries before the experiment is created, so a pair one venue does not
-    serve is reported and excluded rather than persisted as if it were tradeable.
+    default.
+
+    The list is a **request**, and only its *syntax* is checked here. The
+    venues' own listings are **not** read at this point, deliberately: reading
+    them would make the dashboard's startup depend on both exchanges being
+    reachable, and a deployment that cannot reach an exchange must still come
+    up and say so. Tradability is therefore established later, when the paper
+    worker is built (see
+    :meth:`~.paper_control.PaperTradingController._build_worker`), which reads
+    both venue registries and rejects every pair a venue will not trade with
+    that venue's own reason. The result is reported in the controller's
+    ``symbol_validation`` status, so a pair one venue does not serve is shown
+    as rejected rather than silently missing.
 
     Args:
         root: Experiment root directory.
@@ -571,6 +583,18 @@ def make_handler(dashboard: Dashboard):
                     self._send_json(200, {"stopped": True, **result})
             except PaperTradingDisabled as exc:
                 self._send_json(403, {"error": str(exc)})
+            except (BrokerNotConfiguredError, ProviderNotConfiguredError) as exc:
+                # A missing credential is a deployment misconfiguration, not a
+                # fault in the request or in the server. It is reported as 503
+                # with the same secret-free detail the worker recorded, so the
+                # operator sees exactly which variable to set.
+                self._send_json(
+                    503,
+                    {
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "reason": "the paper venue's credentials are not configured",
+                    },
+                )
             except BrokerError as exc:
                 # A preflight/broker failure is a safe, secret-free 502; the
                 # worker has recorded ERROR and is not running.
@@ -1322,6 +1346,16 @@ INDEX_HTML = """<!doctype html>
         <div id="cx-strategy"></div>
       </div>
       <div class="card" style="margin-top:12px">
+        <h2>Symbol validation</h2>
+        <p class="muted" style="margin:0 0 12px">
+          Which pairs the market-data venue and the execution venue each accept.
+          The venues' own listings are read when the paper worker starts, so a
+          rejected pair is shown with the venue's reason instead of silently
+          missing.
+        </p>
+        <div id="cx-symbols"></div>
+      </div>
+      <div class="card" style="margin-top:12px">
         <h2>System health</h2>
         <div id="cx-health" class="kv"></div>
       </div>
@@ -1438,6 +1472,10 @@ function esc(v){
 const money = (v) => (v===null||v===undefined||isNaN(v)) ? "N/A"
   : Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const pct = (v) => (v===null||v===undefined||isNaN(v)) ? "N/A" : (Number(v)*100).toFixed(2)+"%";
+// Some feeds (Binance's priceChangePercent, for one) report a change as a
+// percentage already -- 0.091 means 0.091%, not 9.1%. Scaling that with pct()
+// would print it 100x too large, so it gets its own formatter.
+const pctAlready = (v) => (v===null||v===undefined||isNaN(v)) ? "N/A" : Number(v).toFixed(2)+"%";
 const num = (v,d) => (v===null||v===undefined||isNaN(v)) ? "N/A" : Number(v).toFixed(d===undefined?2:d);
 const when = (v) => v ? new Date(v).toLocaleString() : "—";
 const rel = (v) => {
@@ -1938,7 +1976,7 @@ function renderCryptoMarket(m){
     <tbody>${rows.map(r=>`<tr>
       <td><b>${esc(r.symbol)}</b><div class="mono">${esc(r.status)}</div></td>
       <td class="num">${r.price===null||r.price===undefined?"N/A":num(r.price,4)}</td>
-      <td class="num ${cls(r.change_percent_24h)}">${r.change_percent_24h===null||r.change_percent_24h===undefined?"N/A":pct(r.change_percent_24h)}</td>
+      <td class="num ${cls(r.change_percent_24h)}">${r.change_percent_24h===null||r.change_percent_24h===undefined?"N/A":pctAlready(r.change_percent_24h)}</td>
       <td class="num">${r.volume_24h===null||r.volume_24h===undefined?"N/A":Number(r.volume_24h).toLocaleString(undefined,{maximumFractionDigits:0})}</td>
       <td class="num">${r.bid===null||r.bid===undefined?"N/A":num(r.bid,4)}</td>
       <td class="num">${r.ask===null||r.ask===undefined?"N/A":num(r.ask,4)}</td>
@@ -1977,6 +2015,7 @@ function renderCryptoStrategy(s){
   </div>`).join("");
 }
 function renderCryptoHealth(h){
+  const sv = h.symbol_validation || null;
   const rows = {
     "Data provider": h.data_provider,
     "Data status": h.data_status,
@@ -1994,6 +2033,7 @@ function renderCryptoHealth(h){
     "Error count": h.error_count,
     "Last error": h.last_error,
     "Stream state": h.stream ? (h.stream.state || "unknown") : null,
+    "Symbol validation": sv ? (sv.state || "unknown") : null,
     "Observed at": h.observed_at,
   };
   $("cx-health").innerHTML = kv(rows, (k,v)=>{
@@ -2001,6 +2041,28 @@ function renderCryptoHealth(h){
     if(k==="Last successful update"||k==="Last cycle"||k==="Last order sync"||k==="Observed at") return esc(when(v));
     return esc(v);
   });
+  // The rejected pairs, each with the venue's own reason. A pair that was
+  // dropped must be visible with its reason — never silently missing.
+  const svBox = $("cx-symbols");
+  if(!svBox) return;
+  if(!sv){
+    svBox.innerHTML = `<div class="muted">Symbol validation: not run yet.</div>`;
+    return;
+  }
+  const rejected = Array.isArray(sv.rejected) ? sv.rejected : [];
+  const accepted = Array.isArray(sv.accepted) ? sv.accepted : [];
+  let html = `<div class="muted">${esc(sv.state||"unknown")} — ${esc(sv.detail||"")}</div>`;
+  if(accepted.length){
+    html += `<div class="mono" style="margin-top:6px">Accepted: ${esc(accepted.join(", "))}</div>`;
+  }
+  if(rejected.length){
+    html += `<table class="tbl" style="margin-top:8px"><thead><tr><th>Symbol</th><th>Code</th><th>Reason</th></tr></thead><tbody>`;
+    for(const r of rejected){
+      html += `<tr><td><b>${esc(r.symbol)}</b></td><td class="mono">${esc(r.code||"")}</td><td>${esc(r.reason||"")}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+  svBox.innerHTML = html;
 }
 async function refreshCrypto(){
   try{

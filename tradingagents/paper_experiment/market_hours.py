@@ -37,6 +37,7 @@ from .broker.alpaca_paper import (
     API_SECRET_ENV,
     PAPER_BASE_URL,
     assert_paper_endpoint,
+    assert_paper_request_url,
 )
 from .providers.base import ProviderError, fetch_json
 
@@ -172,9 +173,12 @@ class AlpacaMarketClock:
                 f"no Alpaca paper credentials: set {API_KEY_ENV} and {API_SECRET_ENV} "
                 "so the market clock can be read"
             )
+        # The full request URL is re-checked against the approved paper host
+        # before it is sent, so a request can never leave for another host.
+        url = assert_paper_request_url(f"{self._base_url}/v2/clock")
         try:
             payload = fetch_json(
-                url=f"{self._base_url}/v2/clock",
+                url=url,
                 params={},
                 timeout=self._timeout,
                 secrets=(self._key, self._secret),

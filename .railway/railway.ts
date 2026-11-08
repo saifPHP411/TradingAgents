@@ -11,10 +11,12 @@ import { defineRailway, project, service, volume } from "railway/iac";
  * a start command or a health check that differs between them is a deployment
  * that behaves differently from what the repository says it does.
  *
- * Nothing here places an order. `--allow-paper-trading` only *permits* the
- * dashboard's START button to build a paper worker; the worker starts only when
- * an authenticated operator presses it, and the broker it may reach is Alpaca's
- * **paper** endpoint (the live host is refused in code).
+ * `--allow-paper-trading` only *permits* the dashboard's START button to build
+ * a paper worker; the worker starts only when an authenticated operator presses
+ * it, and the broker it may reach is Alpaca's **paper** endpoint (the live host
+ * is refused in code). Once the operator presses START, that worker does place
+ * paper orders — this configuration enables that path rather than merely
+ * describing a simulation.
  */
 export default defineRailway(() => {
   // The worker's durable state — the processed/ordered decision sets, the

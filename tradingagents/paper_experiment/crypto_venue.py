@@ -88,12 +88,38 @@ def build_execution_registry(
             order_types=("market", "limit", "stop_limit"),
             base_precision=_decimals(step),
             quote_precision=_decimals(tick),
+            # Alpaca's assets API states fractionability directly. A missing
+            # field is *unstated* (None), which is not the same as "not
+            # fractionable" — the caller must not read it as a refusal.
+            fractionable=_as_bool(asset.get("fractionable")),
         )
     return InstrumentRegistry(
         rules=rules,
         venue=venue,
         fetched_at=fetched_at or datetime.now(UTC).isoformat(),
     )
+
+
+def _as_bool(value: Any) -> bool | None:
+    """A venue's boolean field, or ``None`` when the venue did not state it.
+
+    A missing field is unknown, not ``False``: reading an unstated value as a
+    refusal would reject an instrument the venue may well accept.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes"):
+            return True
+        if lowered in ("false", "0", "no"):
+            return False
+        return None
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return None
 
 
 def _decimals(step: float | None) -> int:

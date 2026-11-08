@@ -99,26 +99,184 @@ def _today() -> str:
     return datetime.now(UTC).date().isoformat()
 
 
+_APPROVED_SCHEME = "https"
+_APPROVED_HOST = "paper-api.alpaca.markets"
+_APPROVED_PORT = 443
+
+
+def assert_paper_request_url(url: str) -> str:
+    """Return ``url`` if it is an approved paper URL, else raise.
+
+    This is the request-layer counterpart of :func:`assert_paper_endpoint`. The
+    base endpoint check asks "is this the approved *base* URL?"; this one asks
+    "does this full request URL point at the approved paper host?".
+
+    The difference matters: a request URL legitimately carries a path
+    (``/v2/account``), while the base URL must not. Reusing the base check for
+    a request URL would refuse every real request; skipping the check would
+    leave the request layer unguarded. So this checks the parts that identify
+    the *host* — scheme, hostname, port and userinfo — and allows a path,
+    query or fragment, which only ever select a resource on the already
+    approved host.
+
+    A URL whose host is not the approved paper host is refused exactly as the
+    base check refuses it.
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise LiveEndpointRefusedError(
+            f"{url!r} is not a usable URL; the approved Alpaca paper endpoint is "
+            f"{PAPER_BASE_URL}"
+        )
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError as exc:
+        raise LiveEndpointRefusedError(
+            f"{url!r} is not a valid URL ({exc}); the approved Alpaca paper endpoint is "
+            f"{PAPER_BASE_URL}"
+        ) from None
+
+    host = (parts.hostname or "").lower()
+    if host in _LIVE_HOSTS:
+        raise LiveEndpointRefusedError(
+            f"{url!r} is an Alpaca LIVE endpoint; this adapter is paper-only and "
+            f"refuses every live endpoint. Use {PAPER_BASE_URL}."
+        )
+    if parts.scheme.lower() != _APPROVED_SCHEME:
+        raise LiveEndpointRefusedError(
+            f"{url!r} does not use https; the approved Alpaca paper endpoint is "
+            f"{PAPER_BASE_URL}"
+        )
+    if host != _APPROVED_HOST:
+        raise LiveEndpointRefusedError(
+            f"{url!r} is not on the approved Alpaca paper host ({_APPROVED_HOST}); "
+            "refusing to send a request to an unapproved host"
+        )
+    try:
+        port = parts.port
+    except ValueError:
+        raise LiveEndpointRefusedError(
+            f"{url!r} has a malformed port; the approved Alpaca paper endpoint is "
+            f"{PAPER_BASE_URL}"
+        ) from None
+    if port is not None and port != _APPROVED_PORT:
+        raise LiveEndpointRefusedError(
+            f"{url!r} names port {port}; the approved Alpaca paper endpoint is "
+            f"{PAPER_BASE_URL} (the default HTTPS port)"
+        )
+    if parts.username is not None or parts.password is not None:
+        raise LiveEndpointRefusedError(
+            f"{url!r} carries a username or password; the approved Alpaca paper "
+            f"endpoint is {PAPER_BASE_URL}"
+        )
+    return url
+
+
 def assert_paper_endpoint(base_url: str) -> str:
     """Return ``base_url`` if it is the approved paper endpoint, else raise.
 
-    Accepts the paper host exactly. Any live host is refused with
-    :class:`LiveEndpointRefusedError`; any other host is refused as unapproved.
-    This is the single gate every request passes through, so a live call cannot
-    be reached by a configuration mistake.
+    Exactly one URL is accepted: ``https://paper-api.alpaca.markets``. This is
+    the single gate every request passes through, so no configuration mistake
+    can reach a live call, a plain-HTTP call, or any other host.
+
+    The whole URL is checked, not just the hostname. A hostname-only check
+    accepts ``http://paper-api.alpaca.markets`` (a cleartext downgrade),
+    ``https://user:pass@paper-api.alpaca.markets`` (credentials in the URL) and
+    ``https://paper-api.alpaca.markets:8080`` (a different service), none of
+    which is the approved endpoint.
+
+    The check is deliberately strict:
+
+    * the scheme must be ``https`` — no plain HTTP, no other scheme;
+    * the hostname must be exactly ``paper-api.alpaca.markets`` — a suffix or
+      subdomain (``...paper-api.alpaca.markets``, ``paper-api.alpaca.markets.evil.com``)
+      is a different host;
+    * the port must be absent, or the default HTTPS port ``443``;
+    * there must be no username or password;
+    * there must be no path, query or fragment.
+
+    A URL that names an Alpaca *live* host is refused with the dedicated
+    live-host message; every other rejection says the endpoint is not the
+    approved one. Both raise :class:`LiveEndpointRefusedError`, so a caller
+    cannot mistake one for the other by exception type.
     """
-    host = _host_of(base_url)
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise LiveEndpointRefusedError(
+            f"{base_url!r} is not a usable URL; the approved Alpaca paper endpoint is "
+            f"{PAPER_BASE_URL}"
+        )
+
+    # A URL with surrounding whitespace is not the approved URL, and silently
+    # trimming it would let a differently-written string through.
+    candidate = base_url
+    if candidate != candidate.strip():
+        raise LiveEndpointRefusedError(
+            f"{base_url!r} has leading or trailing whitespace; the approved Alpaca "
+            f"paper endpoint is {PAPER_BASE_URL}"
+        )
+
+    try:
+        parts = urllib.parse.urlsplit(candidate)
+    except ValueError as exc:
+        raise LiveEndpointRefusedError(
+            f"{base_url!r} is not a valid URL ({exc}); the approved Alpaca paper "
+            f"endpoint is {PAPER_BASE_URL}"
+        ) from None
+
+    # A live host is named explicitly, so the operator sees the real reason
+    # rather than a generic "unapproved host".
+    host = (parts.hostname or "").lower()
     if host in _LIVE_HOSTS:
         raise LiveEndpointRefusedError(
             f"{base_url!r} is an Alpaca LIVE endpoint; this adapter is paper-only and "
             f"refuses every live endpoint. Use {PAPER_BASE_URL}."
         )
-    if host != _host_of(PAPER_BASE_URL):
+
+    scheme = parts.scheme.lower()
+    if scheme != _APPROVED_SCHEME:
+        raise LiveEndpointRefusedError(
+            f"{base_url!r} does not use https; the approved Alpaca paper endpoint is "
+            f"{PAPER_BASE_URL} and a plain-HTTP or other-scheme URL is refused"
+        )
+
+    if host != _APPROVED_HOST:
         raise LiveEndpointRefusedError(
             f"{base_url!r} is not the approved Alpaca paper endpoint ({PAPER_BASE_URL}); "
             "refusing to send a request to an unapproved host"
         )
-    return base_url
+
+    # ``parts.port`` raises for a malformed port, which is itself a refusal.
+    try:
+        port = parts.port
+    except ValueError:
+        raise LiveEndpointRefusedError(
+            f"{base_url!r} has a malformed port; the approved Alpaca paper endpoint is "
+            f"{PAPER_BASE_URL}"
+        ) from None
+    if port is not None and port != _APPROVED_PORT:
+        raise LiveEndpointRefusedError(
+            f"{base_url!r} names port {port}; the approved Alpaca paper endpoint is "
+            f"{PAPER_BASE_URL} (the default HTTPS port)"
+        )
+
+    if parts.username is not None or parts.password is not None:
+        raise LiveEndpointRefusedError(
+            f"{base_url!r} carries a username or password; the approved Alpaca paper "
+            f"endpoint is {PAPER_BASE_URL} and credentials belong in the environment"
+        )
+
+    if parts.path not in ("", "/"):
+        raise LiveEndpointRefusedError(
+            f"{base_url!r} carries a path; the approved Alpaca paper endpoint is "
+            f"{PAPER_BASE_URL}"
+        )
+
+    if parts.query or parts.fragment:
+        raise LiveEndpointRefusedError(
+            f"{base_url!r} carries a query or fragment; the approved Alpaca paper "
+            f"endpoint is {PAPER_BASE_URL}"
+        )
+
+    return candidate
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +665,9 @@ class AlpacaPaperBroker:
     ) -> Any:
         """One bounded request. A transport timeout is surfaced, not blind-retried."""
         url = f"{self.base_url}{path}"
-        assert_paper_endpoint(url)  # belt and braces: the URL is re-checked
+        # Belt and braces: the full request URL is re-checked against the
+        # approved paper host before it is sent.
+        assert_paper_request_url(url)
         try:
             response = self._transport(
                 method=method,

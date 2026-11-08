@@ -28,6 +28,7 @@ import contextlib
 import json
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -236,6 +237,22 @@ class PaperTradingController:
         # rejected, so a status view can report both without re-reading the
         # registries (which would be a network call).
         self.symbol_configuration: Any | None = None
+        # The *validation state* itself: whether both venue registries have been
+        # checked yet, when, and why not. The registries are read when the
+        # worker is built (deferred, so the dashboard's startup does not depend
+        # on either exchange being reachable), so before that point the honest
+        # answer is "not validated yet" — not "everything is fine".
+        self.symbol_validation: dict[str, Any] = {
+            "state": "NOT_VALIDATED",
+            "detail": (
+                "the venue registries are read when the paper worker starts; "
+                "no symbol has been accepted or rejected yet"
+            ),
+            "validated_at": None,
+            "requested": [],
+            "accepted": [],
+            "rejected": [],
+        }
         self._worker: PaperTradingWorker | None = None
         self._lock = threading.Lock()
 
@@ -301,17 +318,45 @@ class PaperTradingController:
 
             # Build Binance instrument registry from exchange info
             from ..crypto_intraday_data import BinancePublicClient
-            binance_client = BinancePublicClient()
-            binance_registry = binance_client.exchange_info()
+            try:
+                binance_client = BinancePublicClient()
+                binance_registry = binance_client.exchange_info()
+            except Exception as exc:  # noqa: BLE001 - reported, never hidden
+                self.symbol_validation = {
+                    "state": "MARKET_DATA_REGISTRY_UNAVAILABLE",
+                    "detail": (
+                        "the market-data venue's instrument registry could not be "
+                        f"read: {type(exc).__name__}: {exc}"
+                    ),
+                    "validated_at": datetime.now(UTC).isoformat(),
+                    "requested": list(experiment.config.symbols),
+                    "accepted": [],
+                    "rejected": [],
+                }
+                raise
 
             # Get Alpaca registry - REQUIRED for crypto paper execution. It is read
             # from the PAPER host's own asset list, through the paper endpoint gate,
             # so a live host can never be reached from here.
             from ..crypto_venue import read_alpaca_execution_registry
 
-            alpaca_registry = read_alpaca_execution_registry(
-                base_url=PaperTradingConfig().base_url
-            )
+            try:
+                alpaca_registry = read_alpaca_execution_registry(
+                    base_url=PaperTradingConfig().base_url
+                )
+            except Exception as exc:  # noqa: BLE001 - reported, never hidden
+                self.symbol_validation = {
+                    "state": "EXECUTION_REGISTRY_UNAVAILABLE",
+                    "detail": (
+                        "the execution venue's instrument registry could not be "
+                        f"read: {type(exc).__name__}: {exc}"
+                    ),
+                    "validated_at": datetime.now(UTC).isoformat(),
+                    "requested": list(experiment.config.symbols),
+                    "accepted": [],
+                    "rejected": [],
+                }
+                raise
 
             # Validate every experiment symbol against BOTH venue registries. A
             # symbol only one venue serves is rejected with that venue's reason and
@@ -334,13 +379,24 @@ class PaperTradingController:
                     )
 
             symbol_mappings = tuple(configuration.mappings)
+            self.symbol_configuration = configuration
+            self.symbol_validation = {
+                "state": "VALIDATED",
+                "detail": (
+                    f"{len(configuration.accepted)} accepted, "
+                    f"{len(configuration.rejected)} rejected"
+                ),
+                "validated_at": datetime.now(UTC).isoformat(),
+                "requested": list(configuration.requested),
+                "accepted": list(configuration.accepted),
+                "rejected": [r.to_dict() for r in configuration.rejected],
+            }
             if not symbol_mappings:
                 raise RuntimeError(
                     "No valid symbol mappings for crypto paper trading. "
                     "All configured symbols were rejected. Check Alpaca credentials "
                     "and ensure symbols are tradable on both Binance and Alpaca Paper."
                 )
-            self.symbol_configuration = configuration
 
             # The execution-side price seam. The strategy analyses Binance's
             # BTC/USDT and the order is placed on Alpaca's BTC/USD, so the order
@@ -691,6 +747,11 @@ class PaperTradingController:
             "enabled": self.enabled,
             "mode": "ALPACA_PAPER",
             "live": False,
+            # The symbol validation state, reported whether or not a worker was
+            # ever built. It says whether the venues' own listings have been
+            # read and which symbols they refused — an explicit "not validated
+            # yet" rather than a silent absence.
+            "symbol_validation": dict(self.symbol_validation),
         }
         if not self.enabled:
             base.update({"status": "DISABLED", "reason": "paper trading is not enabled"})

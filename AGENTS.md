@@ -425,3 +425,38 @@ make one source do another's job, and do not route TJR through the LLM.
   paper-only, and changes no risk limit. Best paired with
   `--paper-market-data alpaca_snapshot` so an order sizes at a current price.
   `tests/test_phase30_tjr_paper_source.py` drives the whole chain offline.
+
+## Deployment and venue endpoints
+
+- `assert_paper_endpoint()` accepts **one** URL: `https://paper-api.alpaca.markets`.
+  It checks the whole URL — scheme, exact hostname, port, userinfo, path, query,
+  fragment — not just the hostname. A hostname-only check accepted an HTTP
+  downgrade, a credential-bearing URL and a different port, each of which is a
+  different destination from the approved one. `assert_paper_request_url()` is
+  the request-layer counterpart: it allows a path (a request URL needs one) but
+  re-checks scheme, host, port and userinfo, so the request layer is guarded
+  too. See `tests/test_endpoint_security.py`.
+- A missing venue credential is a **configuration** problem, so the dashboard's
+  START path answers `503`, not `500` (a server fault) or `502` (a broker
+  fault). `BrokerNotConfiguredError` and `ProviderNotConfiguredError` both map
+  to `503` with a secret-free message; every other `BrokerError` stays `502`.
+- A venue that does not *state* whether an instrument is fractionable leaves the
+  answer **unknown** (`TradingRules.fractionable is None`), which is not a
+  refusal. Only an explicit `False` rejects a symbol, and only when a
+  fractional quantity is actually required.
+- Symbol rejection carries a stable `code` from a closed vocabulary
+  (`crypto_symbol_config.py`), so the dashboard can tell a venue that does not
+  list a pair from one whose registry could not be read at all. The execution
+  registry being unavailable is its own state
+  (`EXECUTION_REGISTRY_UNAVAILABLE`) — it must not be reported as "no symbols
+  rejected".
+- A dashboard percentage has **two scales**. A ratio (`total_return = 0.05`
+  means 5%) is scaled by 100; a feed's own percentage (Binance's
+  `priceChangePercent = 0.091` means 0.091%) is not. Printing the second kind
+  with the first kind's formatter shows it 100x too large. `pctAlready()` is
+  the formatter for an already-a-percentage value; see
+  `tests/test_dashboard_percentage_semantics.py`, which evaluates the page's
+  real JavaScript.
+- The dashboard refuses to bind `0.0.0.0` without an access token, and every
+  mutating paper route needs both the token and a confirmation header. The
+  token is stored only in the browser, never echoed into a log or a response.
