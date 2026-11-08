@@ -307,6 +307,21 @@ endpoint, and risk limits are unchanged.
   itself rather than trusting the caller to have done it. A new provider that
   takes a `base_url` must do the same — the equity adapter's single gate is not
   automatically inherited by a new client.
+- Alpaca's **time-in-force vocabulary is per asset class**. Equity orders take
+  `day`/`gtc`/`opg`/`cls`/`ioc`/`fok`; **crypto orders take only `gtc` and `ioc`**,
+  and anything else is refused with HTTP 422 `invalid crypto time_in_force`. The
+  adapter therefore resolves the time-in-force from an explicit `crypto` flag
+  (`_resolve_time_in_force`), and refuses an unsupported value **before** the
+  request. The flag travels from the controller's crypto branch through
+  `PaperTradingConfig.crypto` to both `submit_order` call sites (the entry and
+  the exit). Do not infer the asset class from a symbol string — `BTC/USD` and
+  `AAPL` are both strings, so that would be a guess. The controller's
+  `_worker_config()` and `_build_worker()` must agree on the flag, or the status
+  view reports settings the worker does not enforce.
+- A crypto order's **quantity is small**, and `str()` renders a small float in
+  scientific notation (`1e-06`), which Alpaca does not accept as a `qty`. The
+  adapter formats it with `Decimal(str(value))` (`_format_quantity`): the
+  notation changes, the value does not. Do not reintroduce `str(quantity)` here.
 
 ## Known limitation
 
