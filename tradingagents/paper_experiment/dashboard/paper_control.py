@@ -411,6 +411,13 @@ class PaperTradingController:
 
         # Build the decision source from the persisted config, so the worker acts
         # on the same decisions the experiment recorded.
+        # For crypto path, use ONLY the accepted symbols so rejected symbols
+        # never reach the TJR decision source or the execution path.
+        crypto_symbols = (
+            tuple(configuration.accepted)
+            if self.decision_source_kind == DECISION_SOURCE_CRYPTO
+            else tuple(experiment.config.symbols)
+        )
         config = PaperTradingConfig(
             strategy_id=experiment.config.strategy_id,
             order_notional=self.order_notional,
@@ -609,8 +616,16 @@ class PaperTradingController:
             except Exception:  # noqa: BLE001 - an unpriceable entry is no decision
                 return 0.0
 
+        # Use ONLY accepted symbols from the validated configuration.
+        # Rejected symbols must not reach the TJR decision source.
+        crypto_symbols = tuple(
+            self.symbol_configuration.accepted
+            if self.symbol_configuration is not None
+            else experiment.config.symbols
+        )
+
         kwargs: dict[str, Any] = {
-            "symbols": tuple(experiment.config.symbols),
+            "symbols": crypto_symbols,
             "data": data,
             "market_hours": market_hours,
             "order_notional": self.order_notional,
@@ -674,7 +689,16 @@ class PaperTradingController:
             return (
                 SourceMarketData(source, sessions[-1]) if sessions else StaticMarketData({})
             )
-        return self._market_data_factory(tuple(experiment.config.symbols))
+        # For crypto path, use ONLY accepted symbols from validated configuration.
+        if self.decision_source_kind == DECISION_SOURCE_CRYPTO:
+            symbols = tuple(
+                self.symbol_configuration.accepted
+                if self.symbol_configuration is not None
+                else experiment.config.symbols
+            )
+        else:
+            symbols = tuple(experiment.config.symbols)
+        return self._market_data_factory(symbols)
 
     def _ensure_worker(self) -> PaperTradingWorker:
         if self._worker is None:

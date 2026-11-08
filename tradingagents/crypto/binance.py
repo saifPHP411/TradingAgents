@@ -199,22 +199,30 @@ class BinancePublicClient:
     # -- live views -------------------------------------------------------
 
     def ticker_24h(self, symbols: Iterable[str]) -> dict[str, Ticker]:
-        """The rolling 24-hour ticker for each symbol, keyed by canonical symbol."""
+        """The rolling 24-hour ticker for each symbol, keyed by canonical symbol.
+
+        Binance's batch endpoint rejects the entire request (HTTP 400) if ANY symbol
+        in the batch is invalid. To handle partial symbol sets robustly, this method
+        requests each symbol individually and returns only those that succeed. This
+        ensures that a single unknown symbol does not lose all tickers.
+        """
         from .symbols import parse_pair
 
-        markets = [binance_symbol(s) for s in symbols]
-        if not markets:
-            return {}
-        payload = self._get("/api/v3/ticker/24hr", {"symbols": _json_symbols(markets)})
-        if isinstance(payload, dict):
-            payload = [payload]
-        if not isinstance(payload, list):
-            raise CryptoDataError("the 24h ticker was not a JSON array")
         out: dict[str, Ticker] = {}
-        for row in payload:
-            if not isinstance(row, dict):
+        for symbol in symbols:
+            market = binance_symbol(symbol)
+            try:
+                payload = self._get("/api/v3/ticker/24hr", {"symbol": market})
+            except CryptoDataError as exc:
+                # Symbol not found or other venue error: skip this symbol but continue
+                # with the rest. The caller's available()/price() will report the
+                # missing ticker for the specific symbol, not fail the whole batch.
+                self.last_error = f"ticker_24h skipped {symbol}: {exc}"
                 continue
-            ticker = Ticker.from_binance(row)
+            if not isinstance(payload, dict):
+                # Unexpected response format for this symbol; skip
+                continue
+            ticker = Ticker.from_binance(payload)
             pair = parse_pair(ticker.symbol)
             out[pair.canonical] = ticker
         return out

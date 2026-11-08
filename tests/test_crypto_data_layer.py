@@ -445,3 +445,99 @@ class TestBinanceClient:
         with pytest.raises(CryptoDataError):
             client.klines("BTC/USD", "3m")
         assert calls == []
+
+    def test_ticker_24h_handles_mix_of_valid_and_invalid_symbols(self):
+        """When some symbols are invalid, valid ones should still be returned."""
+        # Mock transport that returns 200 for BTC/USDT and ETH/USDT, but 400 for INVALID/USDT
+        def transport(*, url, params, headers, timeout):
+            if "ticker/24hr" in url:
+                # Check which symbol was requested
+                if params.get("symbol") == "BTCUSDT":
+                    payload = {
+                        "symbol": "BTCUSDT",
+                        "lastPrice": "50000.0",
+                        "bidPrice": "49999.0",
+                        "askPrice": "50001.0",
+                        "volume": "100",
+                        "quoteVolume": "5000000",
+                        "highPrice": "51000",
+                        "lowPrice": "49000",
+                        "priceChange": "100",
+                        "priceChangePercent": "0.2",
+                        "closeTime": 1_700_000_000_000,
+                    }
+                    return HttpResponse(200, __import__("json").dumps(payload))
+                elif params.get("symbol") == "ETHUSDT":
+                    payload = {
+                        "symbol": "ETHUSDT",
+                        "lastPrice": "3000.0",
+                        "bidPrice": "2999.5",
+                        "askPrice": "3000.5",
+                        "volume": "500",
+                        "quoteVolume": "1500000",
+                        "highPrice": "3100",
+                        "lowPrice": "2900",
+                        "priceChange": "50",
+                        "priceChangePercent": "1.7",
+                        "closeTime": 1_700_000_000_000,
+                    }
+                    return HttpResponse(200, __import__("json").dumps(payload))
+                elif params.get("symbol") == "INVALIDUSDT":
+                    return HttpResponse(400, '{"code":-1121,"msg":"Invalid symbol."}')
+            return HttpResponse(404, "not found")
+
+        client = BinancePublicClient(transport=transport)
+        tickers = client.ticker_24h(["BTC/USDT", "ETH/USDT", "INVALID/USDT"])
+
+        # Valid symbols should be returned
+        assert "BTC/USDT" in tickers
+        assert "ETH/USDT" in tickers
+        assert tickers["BTC/USDT"].last == pytest.approx(50000.0)
+        assert tickers["ETH/USDT"].last == pytest.approx(3000.0)
+
+        # Invalid symbol should be skipped (not in result)
+        assert "INVALID/USDT" not in tickers
+
+    def test_ticker_24h_returns_empty_for_all_invalid(self):
+        """When all symbols are invalid, empty dict is returned."""
+        def transport(*, url, params, headers, timeout):
+            if "ticker/24hr" in url:
+                return HttpResponse(400, '{"code":-1121,"msg":"Invalid symbol."}')
+            return HttpResponse(404, "not found")
+
+        client = BinancePublicClient(transport=transport)
+        tickers = client.ticker_24h(["INVALID1/USDT", "INVALID2/USDT"])
+        assert tickers == {}
+
+    def test_ticker_24h_handles_connection_error_for_one_symbol(self):
+        """A connection error for one symbol should not fail the others."""
+        def transport(*, url, params, headers, timeout):
+            if "ticker/24hr" in url:
+                symbol = params.get("symbol")
+                if symbol == "BTCUSDT":
+                    payload = {
+                        "symbol": "BTCUSDT",
+                        "lastPrice": "50000.0",
+                        "bidPrice": "49999.0",
+                        "askPrice": "50001.0",
+                        "volume": "100",
+                        "quoteVolume": "5000000",
+                        "highPrice": "51000",
+                        "lowPrice": "49000",
+                        "priceChange": "100",
+                        "priceChangePercent": "0.2",
+                        "closeTime": 1_700_000_000_000,
+                    }
+                    return HttpResponse(200, __import__("json").dumps(payload))
+                elif symbol == "ETHUSDT":
+                    raise ConnectionError("connection refused")
+            return HttpResponse(404, "not found")
+
+        client = BinancePublicClient(transport=transport)
+        tickers = client.ticker_24h(["BTC/USDT", "ETH/USDT"])
+
+        # Valid symbol should still be returned
+        assert "BTC/USDT" in tickers
+        assert tickers["BTC/USDT"].last == pytest.approx(50000.0)
+        # Error symbol should be skipped
+        assert "ETH/USDT" not in tickers
