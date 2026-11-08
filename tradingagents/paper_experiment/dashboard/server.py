@@ -23,8 +23,10 @@ whose runtime is deliberately small.
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
+import math
 import os
 import sys
 import threading
@@ -41,10 +43,16 @@ from ..broker import (
     BANNER,
     DECISION_SOURCE_CHOICES,
     DECISION_SOURCE_HISTORY,
+    DEFAULT_MAX_PRICE_DEVIATION,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     MARKET_DATA_CHOICES,
+    MAX_PRICE_DEVIATION_ENV,
     PROVIDER_BAR_OPEN,
     BrokerError,
+)
+from ..crypto_symbol_config import (
+    DEFAULT_MARKET_DATA_SYMBOLS,
+    parse_symbol_list,
 )
 from ..experiment import ExperimentConfig, PaperExperiment
 from ..market_data_wiring import (
@@ -81,10 +89,18 @@ deliberate confirmation.
 ROOT_ENV = "TRADINGAGENTS_EXPERIMENT_ROOT"
 """Environment variable the module entry point reads ``--root`` from."""
 
+HEALTH_PATH = "/healthz"
+"""The unauthenticated liveness probe.
+
+The deployment's health check names this path, so it is a named constant rather
+than a literal in the handler: a rename must not silently break the platform's
+probe.
+"""
+
 CRYPTO_SYMBOLS_ENV = "TRADINGAGENTS_CRYPTO_SYMBOLS"
 """Environment variable naming the crypto pairs the live section shows.
 
-Space- or comma-separated, e.g. ``"BTC/USD ETH/USD"``. It selects what the
+Space- or comma-separated, e.g. ``"BTC/USDT ETH/USDT"``. It selects what the
 dashboard *displays*; it never decides what can be traded — the venue's own
 listing and the risk engine do that.
 """
@@ -96,8 +112,34 @@ Space- or comma-separated, e.g. ``"BTC/USDT ETH/USDT"``. Used to create the
 experiment idempotently on first startup.
 """
 
-DEFAULT_CRYPTO_SYMBOLS = ("BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT",
-                          "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "LTC/USDT", "BCH/USDT")
+DEFAULT_CRYPTO_SYMBOLS = DEFAULT_MARKET_DATA_SYMBOLS
+"""The default live-section pairs: the liquid majors in Binance's USDT pairs.
+
+Every pair here is a *request*. It is validated against both venue registries
+before it is used, so a pair one venue does not serve is reported and excluded
+rather than assumed. The list is deliberately **not** mixed: the market-data
+venue quotes USDT pairs and the execution venue quotes USD pairs, and a single
+list cannot be correct for both.
+"""
+
+
+def _experiment_symbols(crypto_symbols: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """The symbols a *new* experiment is created with.
+
+    ``TRADINGAGENTS_EXPERIMENT_SYMBOLS`` wins when it is set, because the
+    experiment's persisted pair list is the deployment's own choice and must not
+    be silently replaced by the dashboard's display list. The display list is the
+    fallback, and the default list is the last resort.
+
+    A symbol that is not a pair is a loud error: a malformed entry in the
+    deployment's configuration must be reported, not persisted and not skipped.
+    """
+    configured = os.environ.get(EXPERIMENT_SYMBOLS_ENV, "").strip()
+    if configured:
+        return parse_symbol_list(configured)
+    if crypto_symbols:
+        return parse_symbol_list(tuple(crypto_symbols))
+    return parse_symbol_list(DEFAULT_CRYPTO_SYMBOLS)
 
 
 def _ensure_experiment(root: Path, *, crypto_symbols: tuple[str, ...] = ()) -> None:
@@ -107,6 +149,13 @@ def _ensure_experiment(root: Path, *, crypto_symbols: tuple[str, ...] = ()) -> N
     directory has a valid `session_state.json` before any dashboard component
     tries to read it. It never overwrites an existing experiment, never resets
     state, never auto-starts the worker, and never submits orders.
+
+    The symbol list comes from ``TRADINGAGENTS_EXPERIMENT_SYMBOLS`` when it is
+    set, and from the *live-section* list (``crypto_symbols``) otherwise, so the
+    experiment's persisted pairs and the dashboard's displayed pairs agree by
+    default. The list is a request: every pair is validated against both venue
+    registries before the experiment is created, so a pair one venue does not
+    serve is reported and excluded rather than persisted as if it were tradeable.
 
     Args:
         root: Experiment root directory.
@@ -123,7 +172,7 @@ def _ensure_experiment(root: Path, *, crypto_symbols: tuple[str, ...] = ()) -> N
         return
 
     # No experiment exists - create one using symbols from env or defaults
-    symbols = tuple(crypto_symbols) if crypto_symbols else DEFAULT_CRYPTO_SYMBOLS
+    symbols = _experiment_symbols(crypto_symbols)
 
     # Validate symbols are well-formed pairs
     for sym in symbols:
@@ -194,6 +243,7 @@ class Dashboard:
         paper_market_data_provider: str = PROVIDER_BAR_OPEN,
         paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
         paper_decision_source: str = DECISION_SOURCE_HISTORY,
+        paper_max_price_deviation: float = DEFAULT_MAX_PRICE_DEVIATION,
         crypto_engine=None,
         crypto_symbols: tuple[str, ...] = (),
         refresh_policy=None,
@@ -220,6 +270,7 @@ class Dashboard:
             market_data_provider=paper_market_data_provider,
             market_data_max_age_seconds=paper_market_data_max_age_seconds,
             decision_source_kind=paper_decision_source,
+            max_price_deviation=paper_max_price_deviation,
         )
         # The crypto half of the dashboard: a read-only view over the live crypto
         # engine (Binance public market data) and the worker's recorded status.
@@ -229,6 +280,7 @@ class Dashboard:
             engine=crypto_engine,
             symbols=tuple(crypto_symbols),
             worker_status=lambda: self.paper.status(),
+            strategy_evaluations=lambda: self.paper.strategy_evaluations(),
         )
 
     def view(self) -> ExperimentView:
@@ -396,7 +448,7 @@ def make_handler(dashboard: Dashboard):
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib name
             path = urlsplit(self.path).path
-            if path == "/healthz":
+            if path == HEALTH_PATH:
                 self._send_json(200, {"status": "ok"})
                 return
             if path == "/":
@@ -535,12 +587,38 @@ def _crypto_symbols(args) -> tuple[str, ...]:
 
     A pair that the venue does not list is *not* dropped here: the engine reports
     it, so an operator sees which pair failed instead of a silently shorter list.
+    A symbol that is not a pair at all is a loud error, never a silently ignored
+    entry.
     """
     raw = getattr(args, "crypto_symbols", None)
     if raw is None:
-        env = os.environ.get(CRYPTO_SYMBOLS_ENV, "")
-        raw = [part for part in env.replace(",", " ").split() if part]
-    return tuple(str(s) for s in raw)
+        raw = os.environ.get(CRYPTO_SYMBOLS_ENV, "")
+    return parse_symbol_list(raw)
+
+
+def _resolve_max_price_deviation(args) -> float:
+    """The largest gap tolerated between the decision price and the execution price.
+
+    The flag wins, then the environment variable, then the default. A value that
+    is not a finite, non-negative fraction is a loud error: a misconfigured guard
+    must not silently become "refuse everything" or "refuse nothing".
+    """
+    raw = getattr(args, "paper_max_price_deviation", None)
+    if raw is None:
+        raw = os.environ.get(MAX_PRICE_DEVIATION_ENV, "").strip()
+    if raw == "" or raw is None:
+        return DEFAULT_MAX_PRICE_DEVIATION
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise MarketDataWiringError(
+            f"{MAX_PRICE_DEVIATION_ENV} must be a number (a fraction, e.g. 0.05): {raw!r}"
+        ) from exc
+    if not math.isfinite(value) or value < 0:
+        raise MarketDataWiringError(
+            f"{MAX_PRICE_DEVIATION_ENV} must be a finite, non-negative fraction: {raw!r}"
+        )
+    return value
 
 
 def _market_data_factory_for(choice: str, *, max_age_seconds: float | None = None):
@@ -608,16 +686,14 @@ def _start_crypto_refresh(engine, *, interval_seconds: float = 15.0) -> threadin
     return thread
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run the dashboard as ``python -m ...dashboard.server``.
+def build_parser() -> argparse.ArgumentParser:
+    """The module entry point's argument parser.
 
-    A thin wrapper over :func:`serve` for a platform (Railway, Docker) that runs
-    a module directly rather than the ``serve`` subcommand. ``--root`` falls back
-    to ``TRADINGAGENTS_EXPERIMENT_ROOT`` and the port to ``$PORT``, so the start
-    command can be as short as ``python -m ...dashboard.server``.
+    Built by a named function so a deployment's *defaults* can be inspected
+    without starting a server: the safety-critical defaults — paper trading off,
+    the live crypto engine off, the risk cap at $25 — are properties of the
+    deployment, and a test must be able to read them.
     """
-    import argparse
-
     parser = argparse.ArgumentParser(
         prog="python -m tradingagents.paper_experiment.dashboard.server",
         description=(
@@ -715,6 +791,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--paper-max-price-deviation",
+        type=float,
+        default=None,
+        help=(
+            "the largest relative gap tolerated between the decision price and the "
+            "execution venue's price before the order is refused (default: "
+            f"${MAX_PRICE_DEVIATION_ENV}, else {DEFAULT_MAX_PRICE_DEVIATION * 100:.1f}%%). "
+            "A larger gap means the two venues are quoting different markets or one "
+            "is stale; the order is refused rather than sized from the wrong price. "
+            "A fraction, not a percentage: 0.05 means five percent."
+        ),
+    )
+    parser.add_argument(
         "--crypto-symbols",
         nargs="+",
         default=None,
@@ -773,6 +862,18 @@ def main(argv: list[str] | None = None) -> int:
         default=float(os.environ.get("TRADINGAGENTS_AUTO_ADVANCE_INTERVAL", "60") or 60),
         help="seconds between auto-advance ticks (default: 60)",
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the dashboard as ``python -m ...dashboard.server``.
+
+    A thin wrapper over :func:`serve` for a platform (Railway, Docker) that runs
+    a module directly rather than the ``serve`` subcommand. ``--root`` falls back
+    to ``TRADINGAGENTS_EXPERIMENT_ROOT`` and the port to ``$PORT``, so the start
+    command can be as short as ``python -m ...dashboard.server``.
+    """
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     if not args.root:
@@ -787,6 +888,7 @@ def main(argv: list[str] | None = None) -> int:
         decision_source = resolve_paper_settings(
             decision_source=args.paper_decision_source,
         )[3]
+        max_price_deviation = _resolve_max_price_deviation(args)
     except MarketDataWiringError as exc:
         parser.error(str(exc))
     print(
@@ -817,6 +919,7 @@ def main(argv: list[str] | None = None) -> int:
             paper_market_data_provider=provider,
             paper_market_data_max_age_seconds=max_age,
             paper_decision_source=decision_source,
+            paper_max_price_deviation=max_price_deviation,
             crypto_symbols=crypto_symbols,
             crypto_live=bool(getattr(args, "crypto_live", False)),
         )
@@ -845,6 +948,7 @@ def serve(
     paper_market_data_provider: str = PROVIDER_BAR_OPEN,
     paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     paper_decision_source: str = DECISION_SOURCE_HISTORY,
+    paper_max_price_deviation: float = DEFAULT_MAX_PRICE_DEVIATION,
     crypto_symbols: tuple[str, ...] = (),
     crypto_live: bool = False,
 ) -> None:
@@ -891,6 +995,7 @@ def serve(
         paper_market_data_provider=paper_market_data_provider,
         paper_market_data_max_age_seconds=paper_market_data_max_age_seconds,
         paper_decision_source=paper_decision_source,
+        paper_max_price_deviation=paper_max_price_deviation,
         crypto_engine=crypto_engine,
         crypto_symbols=tuple(crypto_symbols),
     )

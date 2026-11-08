@@ -25,11 +25,13 @@ dashboard never sees them.
 from __future__ import annotations
 
 import contextlib
+import json
 import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from tradingagents.crypto.tjr_settings import crypto_tjr_settings
 from tradingagents.risk.paper_parity import WHOLE_SHARES
 
 from ..broker import (
@@ -38,6 +40,7 @@ from ..broker import (
     DECISION_SOURCE_CURRENT_MARKET,
     DECISION_SOURCE_HISTORY,
     DECISION_SOURCE_TJR,
+    DEFAULT_MAX_PRICE_DEVIATION,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     PROVIDER_BAR_OPEN,
     STATUS_STOPPED,
@@ -51,12 +54,56 @@ from ..broker import (
 )
 from ..symbol_mapping import (
     SymbolMapping,
-    map_binance_to_alpaca,
 )
 
 
 class PaperTradingDisabled(RuntimeError):
     """The dashboard was not started with paper trading enabled."""
+
+
+def _strategy_row_from_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Map a decision source's persisted record onto the strategy row.
+
+    The source records what the chain concluded in its own vocabulary (``side``,
+    ``stop``, ``target``, ``reference_price``); the dashboard row uses the
+    trading vocabulary (``direction``, ``stop_loss``, ``take_profit``, ``entry``).
+    The mapping is one way and loses nothing: a record with no side is a
+    no-trade, and its levels stay ``None`` rather than being invented.
+
+    The risk/reward is derived here rather than stored, because the source
+    records the two levels and not their ratio. It is ``None`` when either level
+    is missing or the risk is not positive, so an undefined ratio is never
+    reported as zero.
+    """
+    side = record.get("side")
+    direction = None
+    if side == "buy":
+        direction = "long"
+    elif side == "sell":
+        direction = "short"
+
+    entry = record.get("reference_price")
+    stop = record.get("stop")
+    target = record.get("target")
+    risk_reward = None
+    if entry is not None and stop is not None and target is not None:
+        risk = abs(entry - stop)
+        reward = abs(target - entry)
+        if risk > 0:
+            risk_reward = reward / risk
+
+    return {
+        "stage": record.get("stage") or "NO_SIGNAL",
+        "reason_code": record.get("reason_code"),
+        "detail": record.get("detail"),
+        "direction": direction,
+        "entry": entry,
+        "stop_loss": stop,
+        "take_profit": target,
+        "risk_reward": risk_reward,
+        "evaluated_at": record.get("evaluated_at"),
+        "actionable": side is not None,
+    }
 
 
 def _book_snapshot_from_worker(worker: Any) -> Any:
@@ -145,6 +192,7 @@ class PaperTradingController:
         crypto_source_factory: Callable[..., Any] | None = None,
         crypto_data_factory: Callable[..., Any] | None = None,
         crypto_market_hours_gate: Callable[[], Any] | None = None,
+        max_price_deviation: float = DEFAULT_MAX_PRICE_DEVIATION,
     ) -> None:
         self.root = Path(root)
         self.enabled = enabled
@@ -180,10 +228,36 @@ class PaperTradingController:
         self._crypto_source_factory = crypto_source_factory
         self._crypto_data_factory = crypto_data_factory
         self._crypto_market_hours_gate = crypto_market_hours_gate
+        # The largest permitted gap between the decision price (market-data venue)
+        # and the execution price (execution venue). Beyond it, no order is placed.
+        self.max_price_deviation = max_price_deviation
+        # The resolved symbol configuration, once the worker has been built. It
+        # records which symbols were accepted on both venues and which were
+        # rejected, so a status view can report both without re-reading the
+        # registries (which would be a network call).
+        self.symbol_configuration: Any | None = None
         self._worker: PaperTradingWorker | None = None
         self._lock = threading.Lock()
 
     # -- worker construction ---------------------------------------------
+
+    def _load_experiment(self):
+        """Load the persisted experiment with its price source restored.
+
+        The source is rebuilt by the runner's shared helper, which handles both
+        cases honestly: a frame-backed source resumes on the *same* persisted
+        bars (no second vendor call), and the frozen dataset reloads from disk
+        with its recorded window checked. A source that can persist neither is
+        refused rather than silently swapped for another.
+
+        Loading without a source fails for the frozen dataset — it carries no
+        persisted bars — which would make the paper status an error even though
+        the experiment is perfectly resumable.
+        """
+        from ..__main__ import _restored_source
+        from ..experiment import PaperExperiment
+
+        return PaperExperiment.load(self.root, source=_restored_source(self.root), inference=None)
 
     def _worker_config(self) -> PaperTradingConfig:
         """The config the worker runs with, from the persisted experiment config.
@@ -192,9 +266,7 @@ class PaperTradingController:
         status view reports the same limits the worker would enforce without
         building — and therefore without freezing — a worker.
         """
-        from ..experiment import PaperExperiment
-
-        experiment = PaperExperiment.load(self.root, inference=None)
+        experiment = self._load_experiment()
         return PaperTradingConfig(
             strategy_id=experiment.config.strategy_id,
             order_notional=self.order_notional,
@@ -212,21 +284,18 @@ class PaperTradingController:
         decided) and returns it, so the source sees decisions another writer has
         recorded since the worker was built. Loading never mutates the experiment.
         """
-        from ..experiment import PaperExperiment
-
-        return PaperExperiment.load(self.root, inference=None)
+        return self._load_experiment()
 
     def _build_worker(self) -> PaperTradingWorker:
-        from ..experiment import PaperExperiment
-
-        experiment = PaperExperiment.load(self.root, inference=None)
+        experiment = self._load_experiment()
 
         # Build symbol mappings for crypto TJR path
         # Market data comes from Binance (USDT-quoted), execution on Alpaca (USD-quoted)
         symbol_mappings: tuple[SymbolMapping, ...] = ()
+        execution_price_seam = None
         if self.decision_source_kind == DECISION_SOURCE_CRYPTO:
-            # For crypto paper trading, Alpaca execution registry is REQUIRED.
-            # Missing credentials, network errors, malformed responses, and
+            # For crypto paper trading, BOTH venue registries are required.
+            # Missing credentials, network errors, malformed responses, and an
             # unavailable registry must fail closed - never interpret an unavailable
             # registry as proof that a symbol is tradable.
 
@@ -235,58 +304,54 @@ class PaperTradingController:
             binance_client = BinancePublicClient()
             binance_registry = binance_client.exchange_info()
 
-            # Get Alpaca registry - REQUIRED for crypto paper execution
-            from ..alpaca_paper import AlpacaPaperBroker
-            broker = AlpacaPaperBroker(
-                base_url=PaperTradingConfig().base_url,
-                limits=PaperTradingConfig().limits,
-            )
-            broker.connect()
-            alpaca_assets = broker.list_assets()
-            # Build a simple registry from assets
-            from datetime import UTC, datetime
+            # Get Alpaca registry - REQUIRED for crypto paper execution. It is read
+            # from the PAPER host's own asset list, through the paper endpoint gate,
+            # so a live host can never be reached from here.
+            from ..crypto_venue import read_alpaca_execution_registry
 
-            from ..crypto.instruments import InstrumentRegistry, TradingRules
-            alpaca_rules = {}
-            for asset in alpaca_assets:
-                if asset.get("class") == "crypto" and asset.get("tradable"):
-                    symbol = asset.get("symbol", "")
-                    if "/" in symbol:
-                        alpaca_rules[symbol] = TradingRules(
-                            symbol=symbol,
-                            tradable=True,
-                            min_qty=float(asset.get("min_order_size", "0.00001")),
-                            step_qty=float(asset.get("qty_increment", "0.00001")),
-                            min_notional=float(asset.get("min_notional", "1")),
-                            price_increment=float(asset.get("price_increment", "0.01")),
-                            status="TRADING",
-                        )
-            alpaca_registry = InstrumentRegistry(
-                rules=alpaca_rules,
-                venue="alpaca_paper",
-                fetched_at=datetime.now(UTC).isoformat(),
+            alpaca_registry = read_alpaca_execution_registry(
+                base_url=PaperTradingConfig().base_url
             )
 
-            # Build mappings from experiment config symbols
-            mappings, rejected = map_binance_to_alpaca(
-                canonical_symbols=list(experiment.config.symbols),
-                binance_registry=binance_registry,
-                alpaca_registry=alpaca_registry,
+            # Validate every experiment symbol against BOTH venue registries. A
+            # symbol only one venue serves is rejected with that venue's reason and
+            # is never substituted for a different pair.
+            from ..crypto_symbol_config import resolve_symbol_configuration
+
+            configuration = resolve_symbol_configuration(
+                list(experiment.config.symbols),
+                market_data_registry=binance_registry,
+                execution_registry=alpaca_registry,
             )
-            if rejected:
-                # Log rejected symbols but continue with valid ones
+            if configuration.rejected:
                 import logging
                 logger = logging.getLogger(__name__)
-                for sym, reason in rejected.items():
-                    logger.warning(f"Symbol {sym} rejected for paper trading: {reason}")
+                for rejection in configuration.rejected:
+                    logger.warning(
+                        "Symbol %s rejected for crypto paper trading: %s",
+                        rejection.symbol,
+                        rejection.reason,
+                    )
 
-            symbol_mappings = tuple(mappings)
+            symbol_mappings = tuple(configuration.mappings)
             if not symbol_mappings:
                 raise RuntimeError(
                     "No valid symbol mappings for crypto paper trading. "
                     "All configured symbols were rejected. Check Alpaca credentials "
                     "and ensure symbols are tradable on both Binance and Alpaca Paper."
                 )
+            self.symbol_configuration = configuration
+
+            # The execution-side price seam. The strategy analyses Binance's
+            # BTC/USDT and the order is placed on Alpaca's BTC/USD, so the order
+            # must be sized from a price of the pair that will actually trade,
+            # read from the execution venue itself.
+            from ..broker import AlpacaCryptoExecutionPrice
+
+            execution_price_seam = AlpacaCryptoExecutionPrice(
+                [m.execution_symbol for m in symbol_mappings],
+                max_age_seconds=self.market_data_max_age_seconds,
+            )
 
         # Build the decision source from the persisted config, so the worker acts
         # on the same decisions the experiment recorded.
@@ -299,6 +364,8 @@ class PaperTradingController:
             market_data_max_age_seconds=self.market_data_max_age_seconds,
             decision_source=self.decision_source_kind,
             symbol_mappings=symbol_mappings,
+            execution_price_seam=execution_price_seam,
+            max_price_deviation=self.max_price_deviation,
         )
         source = experiment.source
         sessions = source.sessions()
@@ -496,6 +563,11 @@ class PaperTradingController:
             "price_provider": _price,
             "is_consumed": lambda decision_id: holder["worker"].has_order_for(decision_id),
             "state_path": self.root / "crypto_source_state.json",
+            # The same settings the crypto backtest measured. Without this the
+            # live path would use the equity 15:30 ET entry cut and stop taking
+            # entries eight hours before the session ends, so the backtest's
+            # numbers would describe a system that does not exist.
+            "settings": crypto_tjr_settings(),
         }
         if self._crypto_source_factory is not None:
             return self._crypto_source_factory(**kwargs)
@@ -554,6 +626,55 @@ class PaperTradingController:
         return self._worker
 
     # -- control ----------------------------------------------------------
+
+    def strategy_evaluations(self) -> dict[str, Any]:
+        """The TJR evaluation per symbol, from the decision source's own state.
+
+        Read from the source's persisted records, so the dashboard's strategy
+        section shows what the chain actually concluded — the stage it reached,
+        the reason it stopped and the levels it derived — without building the
+        worker and without evaluating the chain a second time.
+
+        The evaluation is **not** re-run here: a second evaluation would fetch a
+        second window and could disagree with the one the worker acted on. The
+        persisted record is the chain's own answer, so it is the only honest
+        source for the view.
+
+        Returns ``{}`` when the source has not evaluated anything yet, which the
+        view reports as "no evaluation" rather than as a no-signal with a reason
+        invented for it.
+        """
+        state_path = self.root / self._source_state_filename()
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        records = payload.get("records")
+        if not isinstance(records, dict):
+            return {}
+        out: dict[str, Any] = {}
+        for symbol, record in records.items():
+            if isinstance(record, dict):
+                out[str(symbol)] = _strategy_row_from_record(record)
+        return out
+
+    def _source_state_filename(self) -> str:
+        """The decision source's own state file, per the configured source kind.
+
+        Each source keeps its memory in its own file so it is not a second writer
+        to the experiment directory. The view reads the file of the source the
+        worker is actually configured to use, so it cannot show another source's
+        evaluation.
+        """
+        if self.decision_source_kind == DECISION_SOURCE_CRYPTO:
+            return "crypto_source_state.json"
+        if self.decision_source_kind == DECISION_SOURCE_TJR:
+            return "tjr_source_state.json"
+        if self.decision_source_kind == DECISION_SOURCE_CURRENT_MARKET:
+            return "current_source_state.json"
+        return "session_state.json"
 
     def status(self) -> dict[str, Any]:
         """A secret-free status view. Never raises for a disabled controller.

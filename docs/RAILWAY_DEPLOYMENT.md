@@ -298,15 +298,23 @@ server refuses to start on that bind.
 ## Persistent volume and where state lives
 
 Railway volumes persist across deploys but are mounted at a path **you** choose
-([Volumes](https://docs.railway.com/reference/volumes)). Mount one at `/data` and
-point `--root` at a directory under it. The experiment writes:
+([Volumes](https://docs.railway.com/reference/volumes)). Mount one and point
+`--root` at it. The deployment in this repository mounts the volume at
+`/home/appuser/app/data` and points `--root` at the same path, so the experiment
+writes:
 
 ```
-/data/paper-experiment/
+/home/appuser/app/data/
   journal.json          append-only, hash-chained, atomic writes
   session_state.json    versioned recovery state (includes the source's bars)
   snapshots/            one verifiable snapshot per decision
+  worker_state.json     the worker's processed/ordered decision sets
+  crypto_source_state.json
 ```
+
+The worker's `processed_decisions` / `ordered_decisions` sets are what stop a
+restart from placing an order for a decision that already produced one. They are
+files in this directory, so **the volume is what makes a redeploy idempotent**.
 
 These three are the durable state. **They must be on the volume.** A `--root` on
 the container filesystem is lost on redeploy, which would discard the journal and
@@ -370,19 +378,74 @@ timer, no polling loop, and no per-tick vendor call. A scheduled (cron) service
 should be given a cadence well inside the daily quota — e.g. at most one new
 Alpha Vantage fetch per day on the free plan.
 
-## Config files: why none are added
+## Config files: what is committed and why
 
-- **No `railway.toml` / `railway.json`.** Railway has deprecated Config as Code;
-  it is no longer read for new services and stops being read on **2026-12-01**;
-  the replacement is Infrastructure as Code (`.railway/railway.ts`)
-  ([Infrastructure as Code](https://docs.railway.com/infrastructure-as-code)).
-  Committing a soon-dead config file would be a trap, not a convenience.
+- **`.railway/railway.ts`** is the deployment's Infrastructure as Code. It is
+  the file Railway reads going forward, and it describes the crypto dashboard
+  service: the start command, the `/healthz` health check and the non-secret
+  service variables
+  ([Infrastructure as Code](https://docs.railway.com/infrastructure-as-code/reference)).
+- **`railway.json`** is the deprecated Config as Code. Railway still reads it
+  for existing services but stops reading it on **2026-12-01**
+  ([Config as Code](https://docs.railway.com/reference/config-as-code)), so it
+  is kept as a short-lived bridge for a service that has not yet migrated. The
+  two files describe the **same** service, and
+  `tests/test_crypto_deployment_wiring.py` fails if they drift apart.
 - **No `Procfile`.** Railpack reads one, but it is "not recommended" and is
   ignored entirely when a Dockerfile is present — and this repo has a Dockerfile
   ([Build Configuration](https://docs.railway.com/builds/build-configuration)).
 - **No startup script.** The two things that must be configured — the start
   command and the volume mount path — are service settings, set in the dashboard
   or via IaC, not files in the repository.
+
+### The start command must be shell-wrapped
+
+Railway runs a Dockerfile service's start command in **exec form**, where
+`$PORT` is not expanded, so the command is wrapped:
+
+```
+/bin/sh -c "exec python -m tradingagents.paper_experiment.dashboard.server --root /home/appuser/app/data --host 0.0.0.0 --port $PORT ..."
+```
+
+Without the wrapper the server would receive the literal string `$PORT` and
+fail to bind ([Start command](https://docs.railway.com/deployments/start-command)).
+
+### `--allow-paper-trading` permits, it does not start
+
+The flag **permits** the dashboard's START button to build a paper worker. The
+worker itself starts only on an authenticated `POST /api/paper/start`, and the
+broker it may reach is Alpaca's **paper** endpoint — the live host is refused in
+code. A deployment that is never pressed therefore places no order.
+
+## The crypto dashboard service
+
+The committed configuration serves the **crypto dashboard**: the live crypto
+market section (Binance public market data, no API key), the TJR strategy view
+over the same live feed, and the Alpaca **paper** worker controls.
+
+| Setting | Value | Notes |
+|---|---|---|
+| Start command | the module form, shell-wrapped | see above |
+| Health check | `/healthz` | unauthenticated liveness probe; returns no experiment data |
+| Decision source | `crypto` | the unchanged TJR rule chain over Binance 1m/5m bars, no model |
+| Market data | `binance_snapshot` | Binance public REST; no key, no registration |
+| Order notional | `25` | the shared portfolio's hard cap |
+| Price deviation | `0.05` | the largest tolerated gap between the decision and execution prices |
+| Snapshot max age | `15` | a price older than this is refused, not used |
+| Volume | `/home/appuser/app/data` | the durable state; without it a redeploy can repeat an order |
+| `RAILWAY_RUN_UID` | `0` | the image's non-root user cannot write to the volume |
+
+The Alpaca **paper** credentials, the dashboard token and any LLM key are **not**
+in the repository. They are Railway service variables, set in the dashboard.
+
+### The two symbol lists are not the same list
+
+`TRADINGAGENTS_CRYPTO_SYMBOLS` is what the live section *displays*;
+`TRADINGAGENTS_EXPERIMENT_SYMBOLS` is what the *experiment* is created with.
+Both are requests, and both are validated against the venues' own registries
+before use. The committed values are Binance's USDT pairs — the market-data
+venue's own spelling — and the execution venue's USD pair is resolved from
+Alpaca's own listing rather than assumed.
 
 ## What is not ready without live credentials
 
@@ -391,3 +454,80 @@ inference needs the keys above set in the Railway service. Without them, the
 experiment runs on the frozen dataset and records blocked decisions — a valid,
 offline, reproducible state, but not a live paper run. See
 `docs/MARKET_DATA_PROVIDERS.md` for what each vendor can and cannot serve.
+
+## Operator checklist
+
+The steps below are the ones that need a Railway account and an Alpaca account.
+They are written here because the agent that prepared this deployment had
+neither account, so **nothing in this repository has been deployed and no
+broker command has been executed**. Everything that *could* be verified offline
+was verified: the image builds, the start command boots, `/healthz` answers, the
+Binance WebSocket connects and streams, the TJR chain evaluates live bars, and
+the paper-only guards refuse the live host.
+
+### 1. Create the service
+
+1. Push this branch and create a Railway service from it. Railway finds the
+   repository `Dockerfile` automatically; the committed `railway.json` and
+   `.railway/railway.ts` describe the same build.
+2. Add a **volume** to the service and mount it at `/home/appuser/app/data`.
+   This is the step that makes a redeploy safe: without it the worker's
+   processed/ordered decision sets are lost and a decision that already produced
+   an order could be placed again.
+3. Set `RAILWAY_RUN_UID=0` on the service. The image's default user is the
+   non-root `appuser`, which cannot write to a Railway volume mount; the first
+   write fails with `PermissionError` and the state never lands.
+
+### 2. Set the variables
+
+Set these as Railway service variables. None of them is in the repository, and
+no secret was committed.
+
+| Variable | Required | Value |
+|---|---|---|
+| `TRADINGAGENTS_DASHBOARD_TOKEN` | yes | `openssl rand -hex 32` — the dashboard is unauthenticated without it |
+| `ALPACA_PAPER_API_KEY` | for paper trading | from <https://app.alpaca.markets/signup>, the **paper** account |
+| `ALPACA_PAPER_API_SECRET` | for paper trading | the paper secret, not the live one |
+| `TRADINGAGENTS_CRYPTO_SYMBOLS` | no | the pairs the live section displays; the committed default is fine |
+| `TRADINGAGENTS_EXPERIMENT_SYMBOLS` | no | the pairs the experiment is created with; the committed default is fine |
+
+The Alpaca **paper** keys are not the live keys. The project refuses live hosts
+and live-sounding credential names outright, so a live key set here does not
+enable live trading — it makes the paper path fail loudly instead.
+
+### 3. Open the dashboard and start paper trading
+
+1. Open the Railway-generated domain. The dashboard shows an **Access token**
+   field: paste `TRADINGAGENTS_DASHBOARD_TOKEN` there. The page keeps it in the
+   browser's local storage and sends it as `Authorization: Bearer <token>` on
+   every API call, so it is entered once per browser. There is no token in the
+   URL — the dashboard serves the shell without a token and refuses every API
+   call until one is entered.
+2. The **Live Market** section fills from Binance's public WebSocket. It needs
+   no key and no registration.
+3. The **TJR Strategy** section shows the chain's own evaluation per pair. It
+   reads the decision source's persisted records, so it says `NO SIGNAL` with
+   the chain's real reason until a cycle has run.
+4. Paper trading is **off** until someone presses START. The button requires
+   an explicit confirmation (`X-Paper-Confirm: yes`), and the worker only
+   starts after that authenticated POST.
+5. Press **Stop New Entries** to halt new orders. Open positions and open
+   orders are left alone: stopping does not close a position.
+
+### 4. What to check after the first deploy
+
+- `GET /healthz` returns `{"status": "ok"}`.
+- The service logs show the Binance stream connected, with a rising message
+  count and `duplicates: 0`.
+- `journal.json`, `worker_state.json` and `crypto_source_state.json` appear
+  under `/home/appuser/app/data` — their presence proves the volume is writable.
+- A redeploy keeps those files, and the worker does not re-place an order for a
+  decision that already produced one.
+
+### 5. If crypto paper trading is refused
+
+Alpaca's crypto support is not universal: the account must be enabled for
+crypto, and the pair must be in Alpaca's own listing. The project reads
+Alpaca's asset registry and refuses a pair Alpaca does not serve, so the
+symptom is a clear refusal rather than a failed order. The dashboard reports
+the reason under **System Health**.

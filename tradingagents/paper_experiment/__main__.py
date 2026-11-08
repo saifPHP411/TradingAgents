@@ -78,6 +78,16 @@ class RunnerError(RuntimeError):
     """A command could not proceed."""
 
 
+DEFAULT_EXPERIMENT_SYMBOL = "SPY"
+"""The symbol an experiment uses when nothing names one.
+
+The frozen dataset — the default source — carries exactly this one symbol. A
+crypto deployment names its own pairs through ``--symbols`` or
+``TRADINGAGENTS_EXPERIMENT_SYMBOLS``, so this default never silently applies to
+a crypto run.
+"""
+
+
 def _root(args) -> Path:
     root = getattr(args, "root", None)
     if not root:
@@ -119,6 +129,13 @@ def _parse_experiment_symbols(args) -> tuple[str, ...]:
 
     Reads from --symbols CLI flag (if provided) or TRADINGAGENTS_EXPERIMENT_SYMBOLS
     environment variable. Returns a tuple of canonical symbols.
+
+    With nothing configured, the single default symbol is used, exactly as before
+    the multi-symbol option existed: an experiment needs *some* symbol, and the
+    default source (the frozen dataset) carries exactly one. A crypto deployment
+    names its own pairs through ``--symbols`` or the environment variable, so the
+    default never silently applies to a crypto run.
+
     Raises RunnerError if configuration is invalid or empty.
     """
     # Check CLI --symbols first
@@ -140,10 +157,9 @@ def _parse_experiment_symbols(args) -> tuple[str, ...]:
     if getattr(args, "symbol", None):
         return (str(args.symbol).strip().upper(),)
 
-    raise RunnerError(
-        "no experiment symbols configured; provide --symbols, --symbol, or "
-        f"set {EXPERIMENT_SYMBOLS_ENV} environment variable"
-    )
+    # The frozen dataset carries exactly one symbol, so an unconfigured experiment
+    # uses it. A crypto deployment always names its own pairs.
+    return (DEFAULT_EXPERIMENT_SYMBOL,)
 
 
 def _restored_source(root: Path) -> PriceSource:

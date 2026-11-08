@@ -117,6 +117,30 @@ DEFAULT_SNAPSHOT_FUTURE_TOLERANCE_SECONDS = 5.0
 refused as future-dated. A small tolerance absorbs clock skew between this host
 and the vendor; anything beyond it is a timestamp we cannot trust."""
 
+DEFAULT_MAX_PRICE_DEVIATION = 0.05
+"""The largest permitted gap between the decision price and the execution price,
+as a fraction (5%).
+
+The strategy decides on the market-data venue's price (``BTC/USDT``); the order
+is priced on the execution venue's (``BTC/USD``). Those two are the same coin
+quoted in different currencies on different venues, so they differ by the
+quote-asset basis, the venue's own spread, and whatever the market did between
+the decision and the order. A gap within this bound is ordinary market movement
+and the trade is still the trade the strategy decided on; a gap beyond it means
+the sizing would be materially different from the decision, so the order is
+refused rather than placed at an unexpected notional.
+
+Configurable per deployment (``max_price_deviation``); a value of zero would
+require the two prices to be identical, which two different venues never are.
+"""
+
+MAX_PRICE_DEVIATION_ENV = "TRADINGAGENTS_PAPER_MAX_PRICE_DEVIATION"
+"""The environment variable naming the permitted decision-to-execution gap.
+
+A fraction (``0.05`` = 5%), not a percentage. The deployment's own value; the
+default is :data:`DEFAULT_MAX_PRICE_DEVIATION`.
+"""
+
 MARKET_DATA_KIND_HISTORICAL = "historical"
 MARKET_DATA_KIND_CURRENT = "current"
 MARKET_DATA_KIND_TEST = "test"
@@ -147,6 +171,13 @@ PROVIDER_BINANCE_SNAPSHOT = "binance_snapshot"
 The crypto counterpart of ``alpaca_snapshot``: it answers "what is the price
 now" from Binance's data-only host, validated for freshness before an order is
 sized. It is a market-data seam only and never reaches an order endpoint.
+"""
+PROVIDER_ALPACA_CRYPTO = "alpaca_crypto"
+"""A current price on the **execution** venue (Alpaca crypto), for the pair traded.
+
+The cross-venue price seam: the strategy analyses Binance's ``BTC/USDT`` and the
+order is placed on Alpaca's ``BTC/USD``, so the order must be sized from a price
+of the *execution* pair, read from the execution venue itself.
 """
 PROVIDER_STATIC = "static"
 PROVIDER_UNKNOWN = "unknown"
@@ -201,6 +232,24 @@ Distinct from ``NO_POSITION``: that means "the book holds none", which is a fact
 this means "the broker could not be asked", which is a failure. Kept apart so a
 real broker error is never misreported as "nothing to close".
 """
+NO_TRADE_EXECUTION_PRICE_UNAVAILABLE = "EXECUTION_PRICE_UNAVAILABLE"
+"""No fresh price could be read on the **execution** venue for the order's pair.
+
+The decision's own price came from the market-data venue (Binance), and it is not
+the price the broker will trade at: the two venues quote different instruments
+(``BTC/USDT`` vs ``BTC/USD``). Sizing an order from the market-data price would
+commit a notional computed from the wrong instrument, so an execution-side price
+is required. When it cannot be read, **no order is placed**.
+"""
+NO_TRADE_PRICE_DEVIATION = "PRICE_DEVIATION"
+"""The execution-venue price differs from the decision price by more than allowed.
+
+The decision was taken on the market-data venue's price; the order is priced on
+the execution venue's. The two are allowed to differ by a bounded amount (the
+venue's own spread, market movement, and the different quote asset), but a larger
+gap means the trade would no longer be the trade the strategy decided on, so the
+order is refused rather than placed at an unexpected notional.
+"""
 
 NO_TRADE_REASONS = (
     NO_TRADE_NO_DECISION_DUE,
@@ -221,6 +270,8 @@ NO_TRADE_REASONS = (
     NO_TRADE_TJR_NO_NEW_DATA,
     NO_TRADE_NO_POSITION,
     NO_TRADE_POSITION_UNAVAILABLE,
+    NO_TRADE_EXECUTION_PRICE_UNAVAILABLE,
+    NO_TRADE_PRICE_DEVIATION,
 )
 """The closed vocabulary of reasons a RUNNING worker placed no order. A reason is
 ``None`` only when the cycle actually placed an order."""
@@ -1044,6 +1095,205 @@ class BinanceSnapshotMarketData:
             )
 
 
+class AlpacaCryptoExecutionPrice:
+    """A current price on the **execution** venue, for the pair that will be traded.
+
+    The crypto path analyses one market and trades another: the TJR chain reads
+    Binance's ``BTC/USDT``, and the order is placed on Alpaca's ``BTC/USD``. A
+    price from one is not the price of the other — different quote asset, different
+    venue, and the two can drift apart. This seam is the *execution-side* price:
+    it reads Alpaca's own crypto snapshot for the **execution** symbol and refuses
+    anything that is not current.
+
+    It therefore:
+
+    - reads the execution venue's price for the execution pair, never the
+      market-data pair;
+    - validates freshness on the timestamp of the *same* field the price came
+      from, exactly as the other snapshot seams do;
+    - raises :class:`MarketDataError` when no usable, fresh execution price exists,
+      so the worker places **no** order rather than sizing from the market-data
+      venue's price.
+
+    The client is injectable, so every branch is exercised offline.
+    """
+
+    provider_name = PROVIDER_ALPACA_CRYPTO
+    kind = MARKET_DATA_KIND_CURRENT
+
+    def __init__(
+        self,
+        symbols,
+        *,
+        client: Any | None = None,
+        max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+        future_tolerance_seconds: float = DEFAULT_SNAPSHOT_FUTURE_TOLERANCE_SECONDS,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.symbols = tuple(s.upper() for s in symbols)
+        self._client = client
+        self.max_age_seconds = max_age_seconds
+        self.future_tolerance_seconds = future_tolerance_seconds
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self.last_observation: SnapshotObservation | None = None
+        self.last_observed_at: str | None = None
+        self.last_status: str = MARKET_DATA_STATUS_NOT_STARTED
+        self.last_status_detail: str | None = None
+
+    def _client_or_build(self):
+        if self._client is None:
+            from ..providers.alpaca_crypto import AlpacaCryptoClient
+
+            self._client = AlpacaCryptoClient()
+        return self._client
+
+    # -- identity ---------------------------------------------------------
+
+    def describe(self) -> dict[str, Any]:
+        observation = self.last_observation
+        return {
+            "market_data_detail": (
+                "a current price on the EXECUTION venue (Alpaca crypto), read for the "
+                "pair the order will actually trade; validated for freshness"
+            ),
+            "is_current_price": True,
+            "execution_data_provider": self.provider_name,
+            "execution_data_max_snapshot_age_seconds": self.max_age_seconds,
+            "execution_data_last_snapshot_at": observation.as_of if observation else None,
+            "execution_data_last_snapshot_price": observation.price if observation else None,
+            "execution_data_last_snapshot_field": observation.field if observation else None,
+            "execution_data_last_observed_at": self.last_observed_at,
+            "execution_data_status": self.last_status,
+            "execution_data_status_detail": self.last_status_detail,
+        }
+
+    def last_snapshot_age_seconds(self) -> float | None:
+        observation = self.last_observation
+        if observation is None or observation.as_of is None:
+            return None
+        parsed = _parse_utc(observation.as_of)
+        if parsed is None:
+            return None
+        return (self._clock() - parsed).total_seconds()
+
+    def available(self) -> bool:
+        """Whether a fresh execution price can be read for every configured symbol."""
+        if not self.symbols:
+            return False
+        try:
+            snapshots = self._client_or_build().latest_snapshot(self.symbols)
+        except Exception:  # noqa: BLE001 - an unreachable source is "not available"
+            self._record_status(MARKET_DATA_STATUS_ERROR, "the execution price request failed")
+            return False
+        for symbol in self.symbols:
+            try:
+                self._observation_from(snapshots.get(symbol))
+            except MarketDataError as exc:
+                self._record_status(_status_for(exc), str(exc))
+                return False
+        self._record_status(MARKET_DATA_STATUS_OK, None)
+        return True
+
+    def price(self, symbol: str) -> float:
+        """The current, fresh execution-venue price for ``symbol``.
+
+        Raises :class:`MarketDataError` when the execution venue cannot serve a
+        usable, fresh price. The worker then places **no** order: a market-data
+        price is never used as a substitute for the execution price.
+        """
+        from ..providers.alpaca_crypto import snapshot_price_and_time
+
+        symbol = symbol.upper()
+        try:
+            snapshots = self._client_or_build().latest_snapshot((symbol,))
+        except MarketDataError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a source failure is surfaced
+            detail = (
+                f"the Alpaca execution-price request failed for {symbol!r}: "
+                f"{type(exc).__name__}"
+            )
+            self._record_status(MARKET_DATA_STATUS_ERROR, detail)
+            raise MarketDataError(detail) from None
+        snapshot = snapshots.get(symbol)
+        if snapshot is None:
+            detail = (
+                f"Alpaca returned no execution snapshot for {symbol!r}; no current "
+                "price is available on the execution venue, so no order can be sized"
+            )
+            self._record_status(MARKET_DATA_STATUS_NO_DATA, detail)
+            raise MarketDataError(detail)
+        price, observed_at, field = snapshot_price_and_time(snapshot)
+        if price is None:
+            detail = (
+                f"Alpaca's execution snapshot for {symbol!r} carried no usable price "
+                "(no latest trade, quote, or minute bar)"
+            )
+            self._record_status(MARKET_DATA_STATUS_NO_DATA, detail)
+            raise MarketDataError(detail)
+        observation = SnapshotObservation(
+            price=float(price),
+            as_of=observed_at.isoformat() if observed_at is not None else None,
+            field=field or "latestTrade",
+        )
+        self._assert_fresh(observation)
+        self.last_observation = observation
+        self.last_observed_at = self._clock().isoformat()
+        self._record_status(MARKET_DATA_STATUS_OK, None)
+        return observation.price
+
+    # -- internals --------------------------------------------------------
+
+    def _record_status(self, status: str, detail: str | None) -> None:
+        self.last_status = status
+        self.last_status_detail = detail
+
+    def _observation_from(self, snapshot: Any) -> SnapshotObservation:
+        from ..providers.alpaca_crypto import snapshot_price_and_time
+
+        price, observed_at, field = snapshot_price_and_time(snapshot)
+        if price is None:
+            raise MarketDataError(
+                "Alpaca's execution snapshot carried no usable current price"
+            )
+        observation = SnapshotObservation(
+            price=float(price),
+            as_of=observed_at.isoformat() if observed_at is not None else None,
+            field=field or "latestTrade",
+        )
+        self._assert_fresh(observation)
+        return observation
+
+    def _assert_fresh(self, observation: SnapshotObservation) -> None:
+        """Refuse an execution price whose timestamp is missing, stale or future-dated."""
+        if observation.as_of is None:
+            raise MarketDataError(
+                f"the execution snapshot's {observation.field} carries no timestamp, so "
+                "its age cannot be verified; refusing to size an order from an "
+                "unverifiable execution price"
+            )
+        parsed = _parse_utc(observation.as_of)
+        if parsed is None:
+            raise MarketDataError(
+                f"the execution snapshot's {observation.field} timestamp "
+                f"{observation.as_of!r} is malformed; refusing to size an order from an "
+                "unverifiable execution price"
+            )
+        age = (self._clock() - parsed).total_seconds()
+        if age < -abs(self.future_tolerance_seconds):
+            raise MarketDataError(
+                f"the execution snapshot's {observation.field} timestamp is {-age:.1f}s "
+                "in the future, beyond the allowed clock skew; refusing a future-dated "
+                "execution price"
+            )
+        if self.max_age_seconds is not None and age > self.max_age_seconds:
+            raise MarketDataError(
+                f"the execution price is stale: the {observation.field} is {age:.1f}s "
+                f"old, beyond the {self.max_age_seconds:.0f}s maximum; refusing to size "
+                "an order from a stale execution price"
+            )
+
+
 def _crypto_observation(ticker: Any) -> SnapshotObservation | None:
     """The current crypto price *and its own timestamp*, or ``None``.
 
@@ -1290,6 +1540,30 @@ class PaperTradingConfig:
     and no additional symbol validation is performed beyond the existing
     ``allowed_symbols`` check.
     """
+    max_price_deviation: float = DEFAULT_MAX_PRICE_DEVIATION
+    """The largest permitted gap between the decision price and the execution
+    price, as a fraction.
+
+    The decision price comes from the market-data venue and the order is priced
+    on the execution venue, so the two are different instruments' prices. A gap
+    within this bound is ordinary market movement; a gap beyond it means the
+    order would no longer be the trade the strategy decided on, and it is refused
+    (``NO_TRADE_PRICE_DEVIATION``) rather than placed.
+    """
+    execution_price_seam: Any | None = None
+    """The **execution-side** price seam, for the cross-venue crypto path.
+
+    ``None`` means "no separate execution price": the worker's own market-data
+    seam prices the order, which is correct for the single-venue paths (the
+    equity ``alpaca_snapshot`` seam already reads the venue that will execute).
+    When it is set, an order is sized and priced from this seam, in the
+    *execution* symbol, and the market-data price is used only as the reference
+    the deviation is measured against.
+
+    A configured seam that cannot produce a fresh price refuses the order
+    (``NO_TRADE_EXECUTION_PRICE_UNAVAILABLE``); the market-data price is never
+    used as a substitute.
+    """
 
     def __post_init__(self) -> None:
         if not (self.order_notional > 0):
@@ -1315,6 +1589,11 @@ class PaperTradingConfig:
             self.market_data_max_age_seconds > 0
         ):
             raise WorkerError("market_data_max_age_seconds must be positive or None")
+        if not math.isfinite(self.max_price_deviation) or self.max_price_deviation < 0:
+            raise WorkerError(
+                "max_price_deviation must be a finite, non-negative fraction, got "
+                f"{self.max_price_deviation!r}"
+            )
         # The endpoint is validated at configuration time, so a live host is
         # refused before a broker is ever constructed.
         assert_paper_endpoint(self.base_url)
@@ -1811,6 +2090,16 @@ class PaperTradingWorker:
         self._symbol_map: dict[str, SymbolMapping] = {
             m.canonical: m for m in config.symbol_mappings
         }
+        # The reverse index (execution symbol -> market-data symbol) is what the
+        # exit policy needs: a position is held and exited under the *execution*
+        # symbol (``BTC/USD``), while the stop/target is monitored against the
+        # *market-data* symbol (``BTCUSDT``). Built once, from the same validated
+        # mappings, so the two can never disagree.
+        self._execution_to_market_data: dict[str, str] = {
+            m.execution_symbol.upper(): m.market_data_symbol.upper()
+            for m in config.symbol_mappings
+            if m.execution_symbol and m.market_data_symbol
+        }
         # The loop. `_lock` serialises control transitions (start/stop) and is the
         # same lock a cycle holds while it runs, so a stop cannot interleave a
         # start with a cycle mid-flight. `_stop_event` is the loop's stop signal.
@@ -2223,17 +2512,41 @@ class PaperTradingWorker:
             # The decision carries the canonical symbol (e.g., BTC/USDT); broker needs execution symbol (e.g., BTC/USD)
             execution_symbol = decision.symbol
             market_data_symbol = decision.symbol
+            mapping: SymbolMapping | None = None
 
             if self._symbol_map and decision.symbol in self._symbol_map:
                 mapping = self._symbol_map[decision.symbol]
                 execution_symbol = mapping.execution_symbol
                 market_data_symbol = mapping.market_data_symbol
             elif self._symbol_map:
-                # Decision symbol not in mappings - reject
-                raise WorkerError(
+                # The decision names a pair the validated mappings do not cover. It
+                # is refused here — never translated to a different pair and never
+                # sent to the broker — and the refusal is a *cycle outcome*, not an
+                # exception: an unmapped symbol must not stop the worker.
+                detail = (
                     f"decision symbol {decision.symbol!r} has no valid symbol mapping; "
-                    f"available mappings: {list(self._symbol_map.keys())}"
+                    f"available mappings: {sorted(self._symbol_map)}"
                 )
+                self.state.last_error = detail
+                self.state.last_no_decision_reason = detail
+                self.state.last_no_trade_code = NO_TRADE_MARKET_DATA_UNAVAILABLE
+                self._remember_no_trade(
+                    decision.decision_id, NO_TRADE_MARKET_DATA_UNAVAILABLE
+                )
+                self._save()
+                result = CycleResult(
+                    ran=False,
+                    decision_id=decision.decision_id,
+                    error=detail,
+                    skipped_reason=(
+                        "the decision's symbol is not tradable on the configured "
+                        "venues, so no order was placed"
+                    ),
+                    reason_code=NO_TRADE_MARKET_DATA_UNAVAILABLE,
+                    **self._market_data_fields(),
+                )
+                self.last_cycle = result
+                return result
 
             reference_price = self.market_data.price(market_data_symbol)
         except MarketDataError as exc:
@@ -2250,8 +2563,93 @@ class PaperTradingWorker:
             self.last_cycle = result
             return result
 
+        # The execution price. With a separate execution seam configured, the order
+        # is priced on the venue that will trade it, in the execution pair; the
+        # market-data price above is only the reference the deviation is measured
+        # against. Without a seam the market-data price *is* the execution price
+        # (the single-venue paths read the venue that will execute).
+        execution_price = reference_price
+        if self.config.execution_price_seam is not None:
+            try:
+                execution_price = float(
+                    self.config.execution_price_seam.price(execution_symbol)
+                )
+            except MarketDataError as exc:
+                # Fail closed: the market-data price is never used as a substitute
+                # for the execution price, because they are different instruments.
+                self.state.last_error = f"MarketDataError: {exc}"
+                self.state.last_no_decision_reason = str(exc)
+                self.state.last_no_trade_code = NO_TRADE_EXECUTION_PRICE_UNAVAILABLE
+                self._remember_no_trade(
+                    decision.decision_id, NO_TRADE_EXECUTION_PRICE_UNAVAILABLE
+                )
+                self._save()
+                result = CycleResult(
+                    ran=False,
+                    decision_id=decision.decision_id,
+                    error=str(exc),
+                    skipped_reason=(
+                        "no fresh price was available on the execution venue, so no "
+                        "order was sized"
+                    ),
+                    reason_code=NO_TRADE_EXECUTION_PRICE_UNAVAILABLE,
+                    reference_price=reference_price,
+                    **self._market_data_fields(),
+                )
+                self.last_cycle = result
+                return result
+            if not math.isfinite(execution_price) or execution_price <= 0:
+                detail = (
+                    f"the execution venue returned an unusable price {execution_price!r} "
+                    f"for {execution_symbol}; no order was sized"
+                )
+                self.state.last_error = detail
+                self.state.last_no_decision_reason = detail
+                self.state.last_no_trade_code = NO_TRADE_EXECUTION_PRICE_UNAVAILABLE
+                self._remember_no_trade(
+                    decision.decision_id, NO_TRADE_EXECUTION_PRICE_UNAVAILABLE
+                )
+                self._save()
+                result = CycleResult(
+                    ran=False,
+                    decision_id=decision.decision_id,
+                    error=detail,
+                    skipped_reason=detail,
+                    reason_code=NO_TRADE_EXECUTION_PRICE_UNAVAILABLE,
+                    reference_price=reference_price,
+                    **self._market_data_fields(),
+                )
+                self.last_cycle = result
+                return result
+            deviation = self._price_deviation(reference_price, execution_price)
+            if deviation > self.config.max_price_deviation:
+                detail = (
+                    f"the execution price {execution_price:.8g} for {execution_symbol} "
+                    f"differs from the decision price {reference_price:.8g} by "
+                    f"{deviation:.2%}, beyond the permitted "
+                    f"{self.config.max_price_deviation:.2%}; no order was placed"
+                )
+                self.state.last_error = detail
+                self.state.last_no_decision_reason = detail
+                self.state.last_no_trade_code = NO_TRADE_PRICE_DEVIATION
+                self._remember_no_trade(decision.decision_id, NO_TRADE_PRICE_DEVIATION)
+                self._save()
+                result = CycleResult(
+                    ran=False,
+                    decision_id=decision.decision_id,
+                    error=detail,
+                    skipped_reason=detail,
+                    reason_code=NO_TRADE_PRICE_DEVIATION,
+                    reference_price=execution_price,
+                    **self._market_data_fields(),
+                )
+                self.last_cycle = result
+                return result
+
         try:
-            quantity = self._size(decision, reference_price)
+            quantity = self._size(
+                decision, execution_price, execution_symbol=execution_symbol
+            )
         except NoPositionError as exc:
             # A SELL with nothing to close is not a defect and not a risk breach:
             # on this long-only book it is simply not a trade. Recorded with its
@@ -2314,7 +2712,7 @@ class PaperTradingWorker:
                 symbol=execution_symbol,
                 quantity=quantity,
                 side=decision.side,
-                reference_price=reference_price,
+                reference_price=execution_price,
                 client_order_id=client_order_id,
                 order_type="limit" if decision.limit_price else "market",
                 allow_orders=True,
@@ -2392,6 +2790,10 @@ class PaperTradingWorker:
             "take_profit": decision.take_profit,
             "decision_id": decision.decision_id,
             "recorded_at": datetime.now(UTC).isoformat(),
+            # The canonical decision symbol, so a reader can tell *which* market
+            # the levels came from (``BTC/USDT``) from the execution symbol the
+            # position is held under (``BTC/USD``). Additive and optional.
+            "canonical_symbol": decision.symbol,
         }
         self._save()
 
@@ -2439,14 +2841,11 @@ class PaperTradingWorker:
             if stop_loss is None and take_profit is None:
                 continue
 
-            # Translate execution symbol to market data symbol for pricing
-            market_data_symbol = symbol
-            if self._symbol_map:
-                # Find mapping by execution symbol
-                for _canonical, mapping in self._symbol_map.items():
-                    if mapping.execution_symbol == symbol:
-                        market_data_symbol = mapping.market_data_symbol
-                        break
+            # The stop/target is monitored against the **market-data** price (the
+            # market the strategy analysed), while the exit *order* is placed under
+            # the **execution** symbol the position is held under. The two come
+            # from the same validated mapping, so they cannot drift apart.
+            market_data_symbol = self._execution_to_market_data.get(symbol, symbol)
 
             try:
                 price = self.market_data.price(market_data_symbol)
@@ -2483,12 +2882,57 @@ class PaperTradingWorker:
                     reference_price=price,
                     **self._market_data_fields(),
                 )
+            # The exit order is priced on the **execution** venue, in the execution
+            # symbol the position is held under — the same pair the entry used.
+            # The market-data price above only *decided* that the level was crossed.
+            exit_price = price
+            if self.config.execution_price_seam is not None:
+                try:
+                    exit_price = float(
+                        self.config.execution_price_seam.price(symbol)
+                    )
+                except MarketDataError as exc:
+                    detail = (
+                        f"no fresh execution price was available for the {symbol} exit: "
+                        f"{exc}"
+                    )
+                    self.state.last_error = detail
+                    self.state.last_no_decision_reason = detail
+                    self.state.last_no_trade_code = NO_TRADE_EXECUTION_PRICE_UNAVAILABLE
+                    self._save()
+                    return CycleResult(
+                        ran=False,
+                        client_order_id=exit_id,
+                        error=detail,
+                        skipped_reason=detail,
+                        reason_code=NO_TRADE_EXECUTION_PRICE_UNAVAILABLE,
+                        reference_price=price,
+                        **self._market_data_fields(),
+                    )
+                if not math.isfinite(exit_price) or exit_price <= 0:
+                    detail = (
+                        f"the execution venue returned an unusable price "
+                        f"{exit_price!r} for the {symbol} exit; no exit was placed"
+                    )
+                    self.state.last_error = detail
+                    self.state.last_no_decision_reason = detail
+                    self.state.last_no_trade_code = NO_TRADE_EXECUTION_PRICE_UNAVAILABLE
+                    self._save()
+                    return CycleResult(
+                        ran=False,
+                        client_order_id=exit_id,
+                        error=detail,
+                        skipped_reason=detail,
+                        reason_code=NO_TRADE_EXECUTION_PRICE_UNAVAILABLE,
+                        reference_price=price,
+                        **self._market_data_fields(),
+                    )
             try:
                 order = broker.submit_order(
                     symbol=symbol,
                     quantity=held,
                     side="sell",
-                    reference_price=price,
+                    reference_price=exit_price,
                     client_order_id=exit_id,
                     order_type="market",
                     allow_orders=True,
@@ -2505,7 +2949,7 @@ class PaperTradingWorker:
                     error=str(exc),
                     skipped_reason=f"the exit for {symbol} was refused",
                     reason_code=NO_TRADE_EXIT_REFUSED,
-                    reference_price=price,
+                    reference_price=exit_price,
                     **self._market_data_fields(),
                 )
             self.state.exits[symbol] = {
@@ -2542,7 +2986,27 @@ class PaperTradingWorker:
             "market_data_status": identity.get("market_data_status"),
         }
 
-    def _size(self, decision: TradingDecision, reference_price: float) -> float:
+    def _price_deviation(self, decision_price: float, execution_price: float) -> float:
+        """The fractional gap between the decision price and the execution price.
+
+        Measured against the **decision** price — the price the strategy acted on —
+        so the number is "how far the price moved since the decision", which is what
+        the threshold is about. A non-finite or non-positive price on either side is
+        an infinite deviation: an unusable price is never within tolerance.
+        """
+        if not math.isfinite(decision_price) or decision_price <= 0:
+            return float("inf")
+        if not math.isfinite(execution_price) or execution_price <= 0:
+            return float("inf")
+        return abs(execution_price - decision_price) / decision_price
+
+    def _size(
+        self,
+        decision: TradingDecision,
+        reference_price: float,
+        *,
+        execution_symbol: str | None = None,
+    ) -> float:
         """Convert a decision into a share quantity.
 
         **BUY** is sized from the *notional* at the current price, exactly as
@@ -2563,9 +3027,18 @@ class PaperTradingWorker:
         own positions, refreshed here, so a stale local view cannot size the
         close. A SELL with nothing held raises :class:`NoPositionError`, which the
         caller reports as ``NO_TRADE_NO_POSITION`` and never turns into a short.
+
+        ``execution_symbol`` is the symbol the **broker** knows the position by
+        (``BTC/USD`` on Alpaca), which is not the decision's canonical symbol
+        (``BTC/USDT``) on the cross-venue crypto path. The holding is looked up by
+        the execution symbol, so a close finds the position it is meant to close.
+        It defaults to the decision's own symbol, which is correct on every
+        single-venue path where the two are the same.
         """
         if decision.side.lower() == "sell":
-            return self._size_sell(decision)
+            return self._size_sell(
+                decision, execution_symbol=execution_symbol or decision.symbol
+            )
         return self._size_buy(decision, reference_price)
 
     def _size_buy(self, decision: TradingDecision, reference_price: float) -> float:
@@ -2592,7 +3065,7 @@ class PaperTradingWorker:
             )
         return float(quantity)
 
-    def _size_sell(self, decision: TradingDecision) -> float:
+    def _size_sell(self, decision: TradingDecision, *, execution_symbol: str) -> float:
         """The SELL quantity: the held long, clamped to it. Never the notional.
 
         The holding is read from the broker (refreshed), so the close is sized from
@@ -2602,10 +3075,10 @@ class PaperTradingWorker:
         never exceed what is held (and so can never open a short). With no explicit
         quantity the whole position is closed.
         """
-        held = self._held_quantity(decision.symbol)
+        held = self._held_quantity(execution_symbol)
         if held <= 0:
             raise NoPositionError(
-                f"there is no position in {decision.symbol} to sell; a SELL closes a "
+                f"there is no position in {execution_symbol} to sell; a SELL closes a "
                 "held long and this book will not open a short"
             )
         requested = decision.quantity

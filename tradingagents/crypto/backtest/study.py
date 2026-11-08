@@ -46,6 +46,7 @@ from tradingagents.tjr.sessions import SessionPolicy, policy_named, utc_day_sess
 from tradingagents.tjr.strategy import MemoTjrStrategy
 
 from ..symbols import parse_pair
+from ..tjr_settings import CRYPTO_ENTRY_CUT, crypto_tjr_settings
 
 # The periods a study reports, in days. "max" is whatever the data covers.
 STANDARD_PERIODS: tuple[int, ...] = (7, 30, 90, 180)
@@ -141,15 +142,14 @@ class CryptoBacktestConfig:
 
 
 def _crypto_settings() -> TjrSettings:
-    """TJR settings adapted for a 24/7 market, with the change documented.
+    """TJR settings adapted for a 24/7 market.
 
-    The only adaptation is the **entry-window cut**. On equities TJR stops taking
-    new entries at 15:30 ET, leaving the last 30 minutes of the session alone. A
-    crypto session has no bell; its "close" is the end of the UTC day, so the
-    equivalent cut is 23:30 UTC — the last 30 minutes before the session rolls. Every
-    other rule and default is unchanged.
+    The adaptation itself lives in :mod:`tradingagents.crypto.tjr_settings`, so
+    the live paper path and this study trade on the *same* rules: a backtest
+    that measured a different rule than the one deployed would describe a
+    system that does not exist.
     """
-    return TjrSettings(latest_entry_time=(23, 30))
+    return crypto_tjr_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -812,10 +812,18 @@ def sensitivity_variants(config: CryptoBacktestConfig) -> dict[str, dict]:
     """
     return {
         "baseline": {},
-        "swing_lookback_1": {"settings": TjrSettings(swing_lookback=1, latest_entry_time=(23, 30))},
-        "swing_lookback_3": {"settings": TjrSettings(swing_lookback=3, latest_entry_time=(23, 30))},
-        "min_rr_1.5": {"settings": TjrSettings(min_reward_risk=1.5, latest_entry_time=(23, 30))},
-        "min_rr_0.5": {"settings": TjrSettings(min_reward_risk=0.5, latest_entry_time=(23, 30))},
+        "swing_lookback_1": {
+            "settings": TjrSettings(swing_lookback=1, latest_entry_time=CRYPTO_ENTRY_CUT)
+        },
+        "swing_lookback_3": {
+            "settings": TjrSettings(swing_lookback=3, latest_entry_time=CRYPTO_ENTRY_CUT)
+        },
+        "min_rr_1.5": {
+            "settings": TjrSettings(min_reward_risk=1.5, latest_entry_time=CRYPTO_ENTRY_CUT)
+        },
+        "min_rr_0.5": {
+            "settings": TjrSettings(min_reward_risk=0.5, latest_entry_time=CRYPTO_ENTRY_CUT)
+        },
         "session_named": {"session_policy": policy_named("crypto_named")},
         "entry_cut_22_30": {"settings": TjrSettings(latest_entry_time=(22, 30))},
         "no_entry_cut": {"settings": TjrSettings(latest_entry_time=(24, 0))},

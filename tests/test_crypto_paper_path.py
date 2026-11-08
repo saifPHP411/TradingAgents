@@ -32,6 +32,7 @@ import pytest
 from tradingagents.paper_experiment.broker import (
     DECISION_SOURCE_CHOICES,
     DECISION_SOURCE_CRYPTO,
+    DECISION_SOURCE_TJR,
     MARKET_DATA_CHOICES,
     NO_TRADE_MARKET_DATA_UNAVAILABLE,
     PROVIDER_BINANCE_SNAPSHOT,
@@ -491,43 +492,47 @@ class TestCryptoIsPaperOnly:
 
 
 @pytest.mark.unit
+def _experiment_root(tmp_path):
+    """A persisted experiment with a frame-backed (restorable) price source."""
+    from tradingagents.paper_experiment.inference import StubInference
+    from tradingagents.paper_experiment.sources import StaticPriceSource
+
+    root = tmp_path / "exp"
+    index = pd.date_range(end="2026-10-29", periods=6, freq="B")
+    frame = pd.DataFrame(
+        {
+            "open": [100.0 + i for i in range(6)],
+            "high": [102.0 + i for i in range(6)],
+            "low": [99.0 + i for i in range(6)],
+            "close": [101.0 + i for i in range(6)],
+            "volume": [1_000_000.0] * 6,
+        },
+        index=index,
+    )
+    config = ExperimentConfig.from_protocol(
+        symbols=(SYMBOL,), decision_frequency_sessions=1, evaluation_lag_sessions=1
+    )
+    source = StaticPriceSource({SYMBOL: frame}, name="static_test")
+    experiment = PaperExperiment(
+        source=source,
+        config=config,
+        root=root,
+        inference=StubInference(),
+    )
+    experiment.ensure_created()
+    for session in list(source.sessions())[:1]:
+        experiment.process_session(session)
+    return root
+
+
 class TestControllerCryptoWiring:
-    def _experiment_root(self, tmp_path):
-        from tradingagents.paper_experiment.inference import StubInference
-        from tradingagents.paper_experiment.sources import StaticPriceSource
-        root = tmp_path / "exp"
-        index = pd.date_range(end="2026-10-29", periods=6, freq="B")
-        frame = pd.DataFrame(
-            {
-                "open": [100.0 + i for i in range(6)],
-                "high": [102.0 + i for i in range(6)],
-                "low": [99.0 + i for i in range(6)],
-                "close": [101.0 + i for i in range(6)],
-                "volume": [1_000_000.0] * 6,
-            },
-            index=index,
-        )
-        config = ExperimentConfig.from_protocol(
-            symbols=(SYMBOL,), decision_frequency_sessions=1, evaluation_lag_sessions=1
-        )
-        source = StaticPriceSource({SYMBOL: frame}, name="static_test")
-        experiment = PaperExperiment(
-            source=source,
-            config=config,
-            root=root,
-            inference=StubInference(),
-        )
-        experiment.ensure_created()
-        for session in list(source.sessions())[:1]:
-            experiment.process_session(session)
-        return root
 
     def test_the_controller_builds_a_crypto_source_with_injected_seams(self, tmp_path):
         from tradingagents.paper_experiment.dashboard.paper_control import (
             PaperTradingController,
         )
 
-        root = self._experiment_root(tmp_path)
+        root = _experiment_root(tmp_path)
         controller = PaperTradingController(
             root,
             enabled=True,
@@ -549,7 +554,7 @@ class TestControllerCryptoWiring:
             PaperTradingController,
         )
 
-        root = self._experiment_root(tmp_path)
+        root = _experiment_root(tmp_path)
         controller = PaperTradingController(
             root,
             enabled=True,
@@ -558,3 +563,188 @@ class TestControllerCryptoWiring:
         status = controller.status()
         assert status["status"] == "STOPPED"
         assert status["decision_source_configured"] == DECISION_SOURCE_CRYPTO
+
+
+class TestTheDashboardShowsTheChainsOwnEvaluation:
+    """The dashboard's strategy section must show the chain's real answer.
+
+    The view is wired to the decision source's persisted records, so it shows
+    the stage the chain reached and the reason it stopped. It must never
+    evaluate the chain a second time (a second evaluation fetches a second
+    window and could disagree with the one the worker acted on), and it must
+    never build the worker (a status poll that builds the worker freezes the
+    live view).
+    """
+
+    def _controller(self, root, **kwargs):
+        from tradingagents.paper_experiment.dashboard.paper_control import (
+            PaperTradingController,
+        )
+
+        return PaperTradingController(
+            root,
+            enabled=True,
+            decision_source_kind=DECISION_SOURCE_CRYPTO,
+            **kwargs,
+        )
+
+    def test_it_reads_the_crypto_sources_own_state_file(self, tmp_path):
+        root = _experiment_root(tmp_path)
+        (root / "crypto_source_state.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "records": {
+                        SYMBOL: {
+                            "symbol": SYMBOL,
+                            "side": "buy",
+                            "stage": "ENTRY",
+                            "reason_code": "TJR_ENTRY",
+                            "detail": "1m BOS confirmed the entry",
+                            "stop": 98.0,
+                            "target": 104.0,
+                            "reference_price": 100.0,
+                            "evaluated_at": "2026-01-01T12:00:00+00:00",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        evaluations = self._controller(root).strategy_evaluations()
+        row = evaluations[SYMBOL]
+        assert row["stage"] == "ENTRY"
+        assert row["direction"] == "long"
+        assert row["entry"] == 100.0
+        assert row["stop_loss"] == 98.0
+        assert row["take_profit"] == 104.0
+        # The ratio is derived, never invented: reward 4 over risk 2.
+        assert row["risk_reward"] == 2.0
+        assert row["actionable"] is True
+
+    def test_a_no_trade_keeps_its_stage_and_has_no_levels(self, tmp_path):
+        root = _experiment_root(tmp_path)
+        (root / "crypto_source_state.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "records": {
+                        SYMBOL: {
+                            "symbol": SYMBOL,
+                            "side": None,
+                            "stage": "SWEEP",
+                            "reason_code": "NO_5M_REVERSAL",
+                            "detail": "the 5m close did not reverse the sweep",
+                            "stop": None,
+                            "target": None,
+                            "reference_price": None,
+                            "evaluated_at": "2026-01-01T12:00:00+00:00",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        row = self._controller(root).strategy_evaluations()[SYMBOL]
+        assert row["stage"] == "SWEEP"
+        assert row["reason_code"] == "NO_5M_REVERSAL"
+        assert row["direction"] is None
+        assert row["actionable"] is False
+        # An undefined ratio is None, never zero.
+        assert row["risk_reward"] is None
+
+    def test_it_reports_nothing_when_the_source_has_not_evaluated(self, tmp_path):
+        root = _experiment_root(tmp_path)
+        assert self._controller(root).strategy_evaluations() == {}
+
+    def test_it_survives_a_corrupt_state_file(self, tmp_path):
+        root = _experiment_root(tmp_path)
+        (root / "crypto_source_state.json").write_text("{not json", encoding="utf-8")
+        assert self._controller(root).strategy_evaluations() == {}
+
+    def test_it_reads_the_file_of_the_configured_source(self, tmp_path):
+        """It must not show another source's evaluation."""
+        from tradingagents.paper_experiment.dashboard.paper_control import (
+            PaperTradingController,
+        )
+
+        root = _experiment_root(tmp_path)
+        (root / "tjr_source_state.json").write_text(
+            json.dumps({"records": {SYMBOL: {"stage": "TJR_ONLY", "side": None}}}),
+            encoding="utf-8",
+        )
+        controller = PaperTradingController(
+            root, enabled=True, decision_source_kind=DECISION_SOURCE_TJR
+        )
+        assert controller.strategy_evaluations()[SYMBOL]["stage"] == "TJR_ONLY"
+
+        crypto = PaperTradingController(
+            root, enabled=True, decision_source_kind=DECISION_SOURCE_CRYPTO
+        )
+        # The crypto controller reads the crypto file, which does not exist.
+        assert crypto.strategy_evaluations() == {}
+
+    def test_reading_it_does_not_build_the_worker(self, tmp_path):
+        """A poll that builds the worker freezes the live view."""
+        root = _experiment_root(tmp_path)
+        controller = self._controller(root)
+        controller.strategy_evaluations()
+        assert controller._worker is None  # noqa: SLF001
+
+
+class TestTheControllerRestoresTheExperimentSource:
+    """The controller must load the experiment *with* its price source.
+
+    The frozen dataset carries no persisted bars (it reloads from disk), so a
+    load that omitted the source failed with "this experiment's state carries no
+    restorable price bars" — and the paper status reported an error even though
+    the experiment was perfectly resumable. The runner's shared helper rebuilds
+    the source honestly for both cases.
+    """
+
+    def test_the_controller_loads_the_experiment_without_error(self, tmp_path):
+        from tradingagents.paper_experiment.dashboard.paper_control import (
+            PaperTradingController,
+        )
+
+        root = _experiment_root(tmp_path)
+        controller = PaperTradingController(
+            root,
+            enabled=True,
+            decision_source_kind=DECISION_SOURCE_CRYPTO,
+        )
+        experiment = controller._load_experiment()  # noqa: SLF001
+        assert experiment.config.symbols
+
+    def test_the_paper_status_is_stopped_not_an_error(self, tmp_path):
+        from tradingagents.paper_experiment.dashboard.paper_control import (
+            PaperTradingController,
+        )
+
+        root = _experiment_root(tmp_path)
+        controller = PaperTradingController(
+            root,
+            enabled=True,
+            decision_source_kind=DECISION_SOURCE_CRYPTO,
+        )
+        status = controller.status()
+        assert status["status"] == "STOPPED"
+        assert status["last_error"] is None
+
+    def test_the_status_still_does_not_build_the_worker(self, tmp_path):
+        """Restoring the source must not start a worker or place an order."""
+        from tradingagents.paper_experiment.dashboard.paper_control import (
+            PaperTradingController,
+        )
+
+        root = _experiment_root(tmp_path)
+        controller = PaperTradingController(
+            root,
+            enabled=True,
+            decision_source_kind=DECISION_SOURCE_CRYPTO,
+        )
+        status = controller.status()
+        assert status["loop_running"] is False
+        assert status["cycles_completed"] == 0
+        assert status["orders"] == {}
+        assert status["positions"] == {}
