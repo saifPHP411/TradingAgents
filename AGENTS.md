@@ -258,6 +258,35 @@ endpoint, and risk limits are unchanged.
   absence of a no-trade reason, and a consumer iterating the vocabulary must not
   read it as one.
 
+## Deployment (Railway) and the crypto paper path
+
+- A Railway deployment installs the **wheel**, so anything the dashboard reads
+  at startup must be declared in `[tool.setuptools.package-data]`. The frozen
+  baseline dataset (`tradingagents/baseline/data/*.csv`) is committed but is
+  not Python source; without that declaration the installed package has no data
+  and the dashboard refuses to start with "the frozen dataset is unavailable".
+  This failure appears only after the image is built — verify a change by
+  installing the wheel into a clean venv, not just by running the checkout.
+- A Railway volume mount is writable only by root, and the image's default user
+  is the non-root `appuser`. `RAILWAY_RUN_UID=0` is what makes the volume
+  writable; without it the first state write fails with `PermissionError` and
+  the processed/ordered decision sets never land.
+- The worker's `processed_decisions` / `ordered_decisions` sets are what stop a
+  restart from placing the same order twice, so the experiment root must be on
+  the persistent volume, not in the container filesystem.
+- The crypto path reads two different venues: the **decision** price is Binance's
+  `BTC/USDT` and the **execution** price is Alpaca's `BTC/USD`. They are not the
+  same instrument, so an order must be sized from an execution-venue price; when
+  it cannot be read, or it differs from the decision price by more than
+  `max_price_deviation`, the worker places **no** order
+  (`EXECUTION_PRICE_UNAVAILABLE` / `PRICE_DEVIATION`).
+- Every Alpaca host is checked at the point of use: the market-data client
+  refuses a live or unapproved host **at construction, before it reads any
+  credential**, and the crypto asset registry runs `assert_paper_endpoint`
+  itself rather than trusting the caller to have done it. A new provider that
+  takes a `base_url` must do the same — the equity adapter's single gate is not
+  automatically inherited by a new client.
+
 ## Known limitation
 
 An equity-relative position or exposure cap is re-checked at the fill price
