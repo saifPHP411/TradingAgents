@@ -380,6 +380,44 @@ alter a decision, it belongs in `rules.py` and its tests instead.
 - The real window is ~1 month (the vendor cap), not the 6–12 months a study would
   want. Never describe this as a long-horizon test, and never fill the gap.
 
+## Crypto market data on the paper worker
+
+- A crypto pair has **three spellings** and they name the same instrument: the
+  canonical `BTC/USDT`, Binance's `BTCUSDT` and Alpaca's `BTC/USD`. The paper
+  worker's symbol mapping holds the **venue's** spelling (`market_data_symbol`),
+  while the rest of the system holds the canonical one. A price map keyed by only
+  one spelling therefore hides a perfectly good price — the production DOGE/USDT
+  failure was exactly this, and it affected *every* symbol, not just DOGE.
+  `ticker_24h()` keys its result by both spellings, and `_find_ticker()` in
+  `paper_experiment/broker/trading.py` compares on the canonical pair so a symbol
+  can never match a different instrument by accident.
+- When checking a live price, read the **canonical pair** and compare the two
+  spellings through *one* response map. Two separate `price()` calls are two
+  separate HTTP requests, so a small difference is the market moving, not a
+  lookup bug.
+- Binance's batch ticker endpoint **works**; a previous fix that "corrected" its
+  JSON separators was fixing a premise that was not broken. Binance rejects the
+  *whole* batch with HTTP 400 when it holds a symbol it does not list, so the
+  fallback to one request per symbol is for 400/404 only — a throttle or a
+  server fault would be met again, and retrying per symbol only multiplies the
+  load.
+- A provider method that a real run calls with **no** injected seam must have a
+  default that works. `AlpacaCryptoClient.assets()` chose its HTTP seam with
+  `transport or self._transport`, and in production both were `None`, so it
+  called `None` (`'NoneType' object is not callable`). The fallback is
+  `providers/base._default_transport`, the same one every other provider read
+  uses, so the timeout, headers and params stay the ones the project already
+  relies on. The provider imports that symbol *by name*, so a test must patch
+  it in the provider's namespace, not in `base`.
+- A diagnostic record that reaches the dashboard must be scrubbed. The venue's
+  own `code` and `msg` are kept — they are what explains the failure — but a
+  credential the venue echoed back is redacted from the message first, and the
+  record carries no header, no query string and no raw body.
+- A failed read is **not** an empty registry. `EXECUTION_REGISTRY_UNAVAILABLE`
+  means the venue's list could not be read; it must never be reported as "this
+  venue trades nothing", and a coin is never accepted without the venue's own
+  registry.
+
 ## TJR on the paper worker
 
 `paper_experiment/tjr_source.py` is the third `DecisionSource`: it runs the

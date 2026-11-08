@@ -26,11 +26,13 @@ so every branch is exercised offline with a mocked response.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .instruments import InstrumentRegistry, parse_exchange_info
+from .symbols import SymbolError
 from .transport import CryptoDataError, CryptoRateLimitedError, fetch_json
 from .types import (
     BINANCE_INTERVALS,
@@ -49,6 +51,13 @@ WS_HOST = "wss://data-stream.binance.vision"
 REQUEST_TIMEOUT = 15.0
 _MAX_KLINES = 1000
 """Bars per kline request; the venue's own cap. A longer window is paged."""
+
+_BATCH_REFUSAL_STATUSES = frozenset({400, 404})
+"""Statuses that mean *the batch itself* was refused, so a per-symbol retry can help.
+
+A throttling status is deliberately absent: the venue would throttle the
+per-symbol request too, so retrying it would only multiply the load.
+"""
 
 _WS_INTERVAL_MS = {
     "1m": 60_000,
@@ -91,11 +100,15 @@ class BinancePublicClient:
         base_url: str = REST_HOST,
         transport: Callable[..., Any] | None = None,
         timeout: float = REQUEST_TIMEOUT,
+        diagnose: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._transport = transport
         self._timeout = timeout
+        self._diagnose = diagnose
         self.last_error: str | None = None
+        self.last_diagnostics: list[dict[str, object]] = []
+        """The most recent request records, for the dashboard's status view."""
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -108,6 +121,15 @@ class BinancePublicClient:
 
     # -- low level --------------------------------------------------------
 
+    def _record_diagnostic(self, record: dict[str, object]) -> None:
+        """Keep the sanitized request record and pass it to the caller's sink."""
+        self.last_diagnostics.append(record)
+        del self.last_diagnostics[:-20]
+        if self._diagnose is not None:
+            # A sink that fails must not break the read.
+            with contextlib.suppress(Exception):
+                self._diagnose(record)
+
     def _get(self, path: str, params: dict | None = None) -> Any:
         try:
             payload = fetch_json(
@@ -116,6 +138,7 @@ class BinancePublicClient:
                 timeout=self._timeout,
                 transport=self._transport,
                 classify_status=_classify_status,
+                diagnose=self._record_diagnostic,
             )
         except CryptoDataError:
             raise
@@ -199,33 +222,103 @@ class BinancePublicClient:
     # -- live views -------------------------------------------------------
 
     def ticker_24h(self, symbols: Iterable[str]) -> dict[str, Ticker]:
-        """The rolling 24-hour ticker for each symbol, keyed by canonical symbol.
+        """The rolling 24-hour ticker for each symbol.
 
-        Binance's batch endpoint rejects the entire request (HTTP 400) if ANY symbol
-        in the batch is invalid. To handle partial symbol sets robustly, this method
-        requests each symbol individually and returns only those that succeed. This
-        ensures that a single unknown symbol does not lose all tickers.
+        The result is keyed by **both** spellings of every pair: the canonical
+        ``BTC/USDT`` and the venue's own ``BTCUSDT``. A caller that asks for a
+        ticker by either spelling must find it, because the two spellings name
+        the same instrument and the paper worker legitimately holds the venue's
+        spelling in its symbol mapping (``market_data_symbol``) while the rest of
+        the system holds the canonical one. Keying by only one of them made a
+        perfectly good price unreachable and surfaced as "no ticker for
+        'BTCUSDT'".
+
+        The request itself is a single batched call, and it falls back to one
+        request per symbol when the batch is refused — Binance rejects the whole
+        batch (HTTP 400) when it holds a symbol it does not list, and one unknown
+        symbol must not cost the price of every other symbol.
         """
         from .symbols import parse_pair
 
+        markets = [binance_symbol(s) for s in symbols]
+        if not markets:
+            return {}
+
+        rows: list[dict[str, Any]] = []
+        try:
+            payload = self._get("/api/v3/ticker/24hr", {"symbols": _json_symbols(markets)})
+            if isinstance(payload, dict):
+                payload = [payload]
+            if not isinstance(payload, list):
+                raise CryptoDataError("the 24h ticker was not a JSON array")
+            rows = [row for row in payload if isinstance(row, dict)]
+        except CryptoDataError as exc:
+            if exc.status_code is not None and exc.status_code not in _BATCH_REFUSAL_STATUSES:
+                # The venue answered with a status that a per-symbol request would
+                # meet again (a throttle, a server fault). Retrying per symbol
+                # would only multiply the load, so the answer stands.
+                raise
+            # The batch was refused (Binance rejects the whole batch when it holds
+            # a symbol it does not list, and answers 400 when the batch parameter
+            # itself is malformed), or the venue could not be read at all. Ask for
+            # each symbol on its own, so one unknown symbol costs only its own
+            # price and not the rest. A fault that leaves nothing readable is
+            # re-raised by the helper below.
+            rows = self._ticker_24h_individually(markets)
+
         out: dict[str, Ticker] = {}
-        for symbol in symbols:
-            market = binance_symbol(symbol)
+        for row in rows:
+            ticker = Ticker.from_binance(row)
+            if not ticker.symbol:
+                continue
+            try:
+                pair = parse_pair(ticker.symbol)
+            except SymbolError:
+                continue
+            out[pair.canonical] = ticker
+            out[pair.binance_symbol] = ticker
+        return out
+
+    def _ticker_24h_individually(self, markets: list[str]) -> list[dict[str, Any]]:
+        """One ticker request per symbol, skipping the symbols the venue refuses.
+
+        A symbol the venue does not list answers HTTP 400 with its own error; that
+        is that symbol's answer and it must not hide the other symbols' prices.
+        A symbol whose request fails outright (a refused connection, a timeout)
+        likewise costs only its own price: the symbols that did answer still have
+        a price, and reporting them is honest.
+
+        Two outcomes are kept apart. When every symbol was *refused* by the venue
+        (a status it answered with), the result is simply empty — the venue said
+        no such symbol, and that is a fact about the symbols. When the venue could
+        not be *read* at all (a refused connection, a timeout, a body that was not
+        JSON), the first fault is re-raised: the caller must be able to tell "no
+        price for this symbol" from "no price from the venue", and an empty map
+        would read like the former.
+
+        Every failure is recorded in :attr:`last_error` and in the client's
+        diagnostics, so it is visible rather than swallowed.
+        """
+        rows: list[dict[str, Any]] = []
+        failures: list[str] = []
+        first_fault: CryptoDataError | None = None
+        for market in markets:
             try:
                 payload = self._get("/api/v3/ticker/24hr", {"symbol": market})
             except CryptoDataError as exc:
-                # Symbol not found or other venue error: skip this symbol but continue
-                # with the rest. The caller's available()/price() will report the
-                # missing ticker for the specific symbol, not fail the whole batch.
-                self.last_error = f"ticker_24h skipped {symbol}: {exc}"
+                failures.append(f"{market}: {exc}")
+                if exc.status_code is None and first_fault is None:
+                    first_fault = exc
                 continue
-            if not isinstance(payload, dict):
-                # Unexpected response format for this symbol; skip
-                continue
-            ticker = Ticker.from_binance(payload)
-            pair = parse_pair(ticker.symbol)
-            out[pair.canonical] = ticker
-        return out
+            if isinstance(payload, dict):
+                rows.append(payload)
+            elif isinstance(payload, list):
+                rows.extend(row for row in payload if isinstance(row, dict))
+        if failures:
+            self.last_error = "ticker_24h: " + "; ".join(failures)
+        if not rows and first_fault is not None:
+            raise first_fault
+        return rows
 
     def depth(self, symbol: str, *, limit: int = 20) -> OrderBook:
         """An order-book snapshot for ``symbol``."""

@@ -66,6 +66,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from tradingagents.crypto.symbols import try_parse_pair
 from tradingagents.risk.paper_parity import WHOLE_SHARES
 
 from ..symbol_mapping import (
@@ -981,7 +982,22 @@ class BinanceSnapshotMarketData:
             "last_snapshot_observed_at": self.last_observed_at,
             "market_data_status": self.last_status,
             "market_data_status_detail": self.last_status_detail,
+            "market_data_diagnostics": self._diagnostics(),
         }
+
+    def _diagnostics(self) -> list[dict[str, Any]]:
+        """The venue's recent request records, sanitized for display.
+
+        Each record names the endpoint path, the HTTP status, the venue's own
+        error code and message, the response's JSON type and whether the symbol
+        was present in the response. It never carries a credential, a header or a
+        query string, so it is safe to show in the dashboard and to log.
+        """
+        client = self._client
+        records = getattr(client, "last_diagnostics", None)
+        if not isinstance(records, list):
+            return []
+        return [dict(record) for record in records[-10:]]
 
     def last_snapshot_age_seconds(self) -> float | None:
         observation = self.last_observation
@@ -1007,15 +1023,16 @@ class BinanceSnapshotMarketData:
             return False
         try:
             tickers = self._client_or_build().ticker_24h(self.symbols)
-        except Exception:  # noqa: BLE001 - an unreachable source is "not available"
-            self._record_status(MARKET_DATA_STATUS_ERROR, "the ticker request failed")
+        except Exception as exc:  # noqa: BLE001 - an unreachable source is "not available"
+            detail = f"the Binance ticker request failed: {type(exc).__name__}"
+            self._record_status(MARKET_DATA_STATUS_ERROR, detail)
             return False
         if not isinstance(tickers, dict):
             self._record_status(MARKET_DATA_STATUS_MALFORMED, "the response was not an object")
             return False
         for symbol in self.symbols:
             try:
-                self._observation_from(tickers.get(symbol))
+                self._observation_from(_find_ticker(tickers, symbol))
             except MarketDataError as exc:
                 self._record_status(_status_for(exc), str(exc))
                 return False
@@ -1023,7 +1040,13 @@ class BinanceSnapshotMarketData:
         return True
 
     def price(self, symbol: str) -> float:
-        """The current, fresh crypto price for ``symbol``, or raise."""
+        """The current, fresh crypto price for ``symbol``, or raise.
+
+        ``symbol`` may be written either way round — the canonical ``DOGE/USDT``
+        or the venue's own ``DOGEUSDT``. Both name the same instrument, so both
+        must find the same ticker; a spelling difference is not a reason to
+        report that no price exists.
+        """
         symbol = symbol.upper()
         try:
             tickers = self._client_or_build().ticker_24h([symbol])
@@ -1035,7 +1058,7 @@ class BinanceSnapshotMarketData:
             detail = "the Binance ticker response was not an object"
             self._record_status(MARKET_DATA_STATUS_MALFORMED, detail)
             raise MarketDataError(detail)
-        ticker = tickers.get(symbol)
+        ticker = _find_ticker(tickers, symbol)
         if ticker is None:
             detail = (
                 f"Binance returned no ticker for {symbol!r}; no current price is "
@@ -1292,6 +1315,37 @@ class AlpacaCryptoExecutionPrice:
                 f"old, beyond the {self.max_age_seconds:.0f}s maximum; refusing to size "
                 "an order from a stale execution price"
             )
+
+
+def _find_ticker(tickers: dict[str, Any], symbol: str) -> Any:
+    """The ticker for ``symbol``, whatever spelling either side used.
+
+    The venue's ticker map is keyed by the canonical ``BASE/QUOTE`` pair, while a
+    caller may hold the same instrument in the venue's own ``BASEQUOTE`` spelling
+    (the paper worker's symbol mapping does exactly that). Both name the same
+    instrument, so the lookup tries the canonical form first and then the venue's
+    spelling, and only reports "absent" when neither is in the map.
+
+    The comparison is on the *canonical* pair, so a symbol can never be matched
+    to a different instrument by accident: ``BTC/USDT`` and ``BTCUSDT`` are the
+    same pair, and nothing else is.
+    """
+    ticker = tickers.get(symbol)
+    if ticker is not None:
+        return ticker
+    pair = try_parse_pair(symbol)
+    if pair is None:
+        return None
+    for key in (pair.canonical, pair.binance_symbol, pair.alpaca_symbol):
+        ticker = tickers.get(key)
+        if ticker is not None:
+            return ticker
+    # A client that keyed its map by the venue's spelling only is still found.
+    for key, ticker in tickers.items():
+        other = try_parse_pair(str(key))
+        if other is not None and other.canonical == pair.canonical:
+            return ticker
+    return None
 
 
 def _crypto_observation(ticker: Any) -> SnapshotObservation | None:

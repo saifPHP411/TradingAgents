@@ -50,9 +50,9 @@ from .base import (
     ProviderNotConfiguredError,
     ProviderUnsupportedError,
     Transport,
-    fetch_json,
     _default_transport,
     _redact,
+    fetch_json,
 )
 
 DATA_BASE_URL = "https://data.alpaca.markets"
@@ -220,9 +220,10 @@ class AlpacaCryptoClient:
                 f"no Alpaca paper credentials: set {API_KEY_ENV} and {API_SECRET_ENV} "
                 "so the execution venue's asset registry can be read"
             )
-        # Use the injected transport, or the client's transport, or the default transport
-        # from providers.base. This ensures a default HTTP client is available when
-        # no transport is explicitly provided (tests can still inject their own).
+        # Use the injected transport, or the client's transport, or the default
+        # transport from providers.base. The default is what makes this work with
+        # no transport at all: in a real run neither of the first two is set, and
+        # without this fallback the method would call ``None``.
         send = transport or self._transport or _default_transport
         secrets = (self._key, self._secret)
         try:
@@ -236,21 +237,23 @@ class AlpacaCryptoClient:
             raise
         except Exception as exc:  # a transport failure is reported, never hidden
             message = _redact(f"{type(exc).__name__}: {exc}", secrets)
-            raise ProviderError(f"the request failed: {message}") from None
+            self.last_error = f"the request failed: {message}"
+            raise ProviderError(self.last_error) from None
         if response.status_code != 200:
             body = _redact((response.text or "")[:200], secrets)
+            self.last_error = f"Alpaca answered HTTP {response.status_code}: {body}"
             _classify_status(response.status_code, body)
-            raise AlpacaCryptoError(f"Alpaca answered HTTP {response.status_code}: {body}")
+            raise AlpacaCryptoError(self.last_error)
         import json
 
         try:
             payload = json.loads(response.text)
         except (json.JSONDecodeError, TypeError) as exc:
-            raise AlpacaCryptoError(
-                f"Alpaca did not answer with JSON: {_redact(str(exc), secrets)}"
-            ) from None
+            self.last_error = f"Alpaca did not answer with JSON: {_redact(str(exc), secrets)}"
+            raise AlpacaCryptoError(self.last_error) from None
         if not isinstance(payload, list):
-            raise AlpacaCryptoError("Alpaca's asset response was not a JSON array")
+            self.last_error = "Alpaca's asset response was not a JSON array"
+            raise AlpacaCryptoError(self.last_error)
         self.last_error = None
         return [entry for entry in payload if isinstance(entry, dict)]
 
