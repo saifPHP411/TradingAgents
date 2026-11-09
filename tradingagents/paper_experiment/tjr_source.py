@@ -320,6 +320,20 @@ class TjrDecisionSource:
         record = self._records.get(symbol.upper())
         return record.to_dict() if record is not None else None
 
+    @property
+    def no_decision_id(self) -> str | None:
+        """The id of the decision the last evaluation produced but did not offer.
+
+        The chain can complete and the RiskEngine can refuse it, or the chain can
+        stop short of a signal; either way the evaluation had a decision id. The
+        worker records the no-trade against it, so the persisted state names *this*
+        evaluation's decision rather than whichever decision was last.
+        """
+        for record in self._records.values():
+            if record.side is None and record.session == self._last_market_session:
+                return record.decision_id
+        return None
+
     # -- the protocol -----------------------------------------------------
 
     def next_decision(self) -> TradingDecision | None:
@@ -380,11 +394,23 @@ class TjrDecisionSource:
         ``None`` means "nothing to report for this symbol"; the caller then tries
         the next symbol. An existing record for the session whose id the worker has
         already ordered is skipped so it is not re-offered.
+
+        A record whose chain **did not complete** does *not* close the session. The
+        backtest's engine
+        (:meth:`tradingagents.tjr.engine.TjrEngine._process_entries`) re-evaluates
+        the chain at every 5m bar close and only marks the session attempted when a
+        setup *completed*; the live source must mirror that, or a session that
+        opens with an unfinished setup would never be re-read and a later,
+        complete setup would be invisible. So a no-signal record only short-circuits
+        the symbol for the rest of the *same* evaluation instant, not the session.
         """
         record = self._records.get(symbol)
-        if record is not None and record.session == session:
+        if record is not None and record.session == session and self._closes_session(record):
             if record.side is None:
-                return (record.detail or f"the chain stopped at {record.stage}", record.reason_code)
+                # A completed setup the RiskEngine refused: the chain did complete,
+                # so the session is over, but there is no side to trade. Report it
+                # as the no-trade it is rather than offering a decision.
+                return (record.detail, record.reason_code)
             if record.decision_id in self._yielded:
                 return None
             if self._consumed(record.decision_id):
@@ -538,6 +564,21 @@ class TjrDecisionSource:
             return bool(self.is_consumed(decision_id))
         except Exception:  # noqa: BLE001 - an unreadable guard must not re-offer
             return False
+
+    @staticmethod
+    def _closes_session(record: _SymbolRecord) -> bool:
+        """Whether a record ends the symbol's session, as the backtest defines it.
+
+        The backtest marks ``(symbol, session)`` attempted only when the chain
+        produced a BUY (:meth:`tradingagents.tjr.engine.TjrEngine._process_entries`),
+        so a completed setup — whether it was sized, or refused by the RiskEngine —
+        ends the session, while an unfinished chain does not. A risk refusal is a
+        completed setup: the chain *did* complete and the engine *did* judge it, so
+        re-reading the same bars would only re-run the same refusal.
+        """
+        if record.side is not None:
+            return True
+        return record.reason_code == NO_TRADE_RISK_REJECTED
 
     def _to_decision(self, record: _SymbolRecord) -> TradingDecision:
         assert record.side is not None  # only called for a tradeable side

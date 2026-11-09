@@ -2530,10 +2530,30 @@ class PaperTradingWorker:
             reason, code = self._no_decision_outcome()
             self.state.last_no_decision_reason = reason
             self.state.last_no_trade_code = code
+            # A cycle that produced no decision is still a settled outcome, so the
+            # no-trade fields must name *this* cycle. Leaving them untouched would
+            # let an earlier cycle's code (say BROKER_REJECTED) survive here and
+            # read as the current cause — which is exactly what a stale "last
+            # no-trade" looks like on the dashboard.
+            decision_id = self._no_decision_id()
+            if decision_id is not None:
+                self._remember_no_trade(decision_id, code)
+            else:
+                # No decision was in hand, so there is no decision id to name: the
+                # previous cycle's *decision* is no longer the current no-trade.
+                self.state.last_no_trade_decision_id = None
+                self.state.last_no_trade_decision_code = None
+            # A cycle that evaluated cleanly and found nothing has no error of its
+            # own, so an error left over from an *earlier* cycle is cleared here.
+            # Leaving it would show a stale failure beside a fresh "no signal" and
+            # read as if the current cycle had failed. The refresh below has
+            # already re-recorded a read failure if one happened just now.
+            self.state.last_error = None
             self._sync_observability()
             self._save()
             result = CycleResult(
                 ran=False,
+                decision_id=decision_id,
                 skipped_reason=self.state.last_no_decision_reason or "no decision is due",
                 reason_code=self.state.last_no_trade_code,
             )
@@ -3293,6 +3313,22 @@ class PaperTradingWorker:
                 self.state.last_no_trade_decision_code,
             )
         return self._no_decision_reason(), code
+
+    def _no_decision_id(self) -> str | None:
+        """The id of the decision this cycle evaluated but did not offer.
+
+        A source that evaluated a decision and then withheld it — because the
+        chain did not complete, or the RiskEngine refused it — can name that
+        decision, so the no-trade is recorded against a decision id rather than
+        against whichever decision happened to be last. A source that cannot name
+        one returns ``None``, and the worker records the no-trade without an id
+        instead of borrowing an earlier decision's.
+        """
+        for attribute in ("no_decision_id", "last_no_decision_id"):
+            value = getattr(self.decision_source, attribute, None)
+            if isinstance(value, str) and value:
+                return value
+        return None
 
     def _no_decision_reason(self) -> str:
         """Why the last evaluation produced no order, in the source's own words.

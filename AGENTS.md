@@ -478,6 +478,26 @@ make one source do another's job, and do not route TJR through the LLM.
   paper-only, and changes no risk limit. Best paired with
   `--paper-market-data alpaca_snapshot` so an order sizes at a current price.
   `tests/test_phase30_tjr_paper_source.py` drives the whole chain offline.
+- **A no-signal does not close the session.** The backtest's engine re-evaluates
+  the chain at *every* 5m bar close and marks `(symbol, session)` attempted only
+  when a setup *completed*; the live source must mirror that. A record whose chain
+  did not complete (a bare sweep, a short setup on a long-only book) leaves the
+  session open, so the bars are re-read on the next cycle and a later, complete
+  setup is still seen. Closing the session on the first no-signal makes the live
+  path strictly narrower than the backtest it claims to mirror — and it silently
+  stops the fetch, so the data seam's `tjr_data_last_fetch_at` goes stale while
+  `last_strategy_evaluation_at` keeps advancing. A *completed* setup — sized, or
+  refused by the RiskEngine — does close the session: re-reading the same bars
+  would only re-run the same judgement.
+- **A no-decision cycle must refresh the no-trade fields.** The worker's
+  `last_no_trade_decision_id` / `last_no_trade_decision_code` name the *current*
+  cycle's outcome. A cycle that evaluates and finds nothing has to clear them (or
+  record its own decision id), or an earlier `BROKER_REJECTED` survives beside a
+  fresh `NO_SIGNAL` and the dashboard reads as if the current cycle had failed.
+  The same applies to `last_error`: a clean cycle clears an error left over from
+  an earlier one, and `_sync_observability` re-records a read failure if one just
+  happened. The statistics stay a cumulative tally and are never overwritten — the
+  two answer different questions. See `tests/test_phase31_production_runtime_audit.py`.
 
 ## Deployment and venue endpoints
 
