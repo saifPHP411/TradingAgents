@@ -88,8 +88,16 @@ def _is_transient_failure(exc: BaseException) -> bool:
 
 
 def _redact(text: str, secrets: tuple[str, ...]) -> str:
+    """Remove the credentials from a vendor message before it can be raised.
+
+    Only a plausibly key-length secret is replaced: a very short secret would
+    match ordinary words (a one-character key would turn ``unavailable`` into
+    ``un***ilable``), mangling the message without protecting anything real.
+    The vendor keys this module carries are far longer than this floor, so a
+    real credential is always removed.
+    """
     for secret in secrets:
-        if secret:
+        if secret and len(secret) >= 8:
             text = text.replace(secret, "***")
     return text
 

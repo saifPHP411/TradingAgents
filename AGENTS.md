@@ -678,3 +678,44 @@ called `None` and surfaced as `EXECUTION_REGISTRY_UNAVAILABLE` with
 is still a **refusal**: the symbol is rejected, never accepted on a guess, and
 never silently traded.
 
+## Redaction, and the difference between "refused" and "rejected"
+
+Redaction replaces the credential wherever it appears in a message, so a very
+short secret matches ordinary words: a one-character secret turns
+`unavailable` into `un***ilable` and the operator loses the real message. Every
+`_redact` therefore only replaces a secret of at least eight characters — the
+floor Alpaca's own keys clear easily. `providers/alpha_vantage.py` had this
+first; the broker and the other providers had the unbounded form. The floor
+must never become a leak: a credential of any plausible length is still
+removed, and the tests pin that.
+
+A **local refusal** and the venue's own **rejected** are different facts, and
+the broker's idempotency check must not confuse them. A refusal means the
+request was answered without the venue accepting the order — nothing exists at
+the broker, so the same intent may be retried once the cause is gone. The
+venue's `rejected` means the venue *did* see the order and refused it: it
+exists at the broker and must be **reconciled**, never re-submitted, or a
+duplicate order would double the position. The local refusal therefore carries
+its own marker (`_LOCAL_REFUSAL_STATUS = "refused_locally"`), not the venue's
+`"rejected"` string. A refused order also does not spend the daily-order
+budget: that counter counts what the venue accepted.
+
+## The worker-level protection verdict is a roll-up
+
+`state.protection_status` is the **worst** of the per-position verdicts, never
+one position's verdict copied to the top. A position that has closed
+contributes nothing — there is no risk left there — but an unprotected position
+still counts. So every writer of a per-position verdict calls
+`_roll_up_protection_status()`, which recomputes the global from the set. A
+helper that sets the global directly lets one position's outcome overwrite
+another's: closing one of two positions would report the whole worker as
+`CLOSED` while the other was still open and unprotected. See
+`tests/test_protection_evidence_audit.py`.
+
+A **recorded level is not a protection**. The level says what would be done;
+whether it *can* be done is answered by the broker. So `protected` comes from
+`state.protections` — the broker-verified record — and the levels in
+`state.stops` are the subject of that verdict, not the verdict itself. A
+position whose broker could not be read, whose monitor is blind, or whose exit
+was refused is reported as `UNPROTECTED` with the reason, never as protected.
+

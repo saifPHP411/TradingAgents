@@ -84,7 +84,12 @@ def _transport(routes, *, calls=None, fail_on=None):
             raise TimeoutError("simulated timeout")
         for (m, suffix), response in routes.items():
             if method == m and url.endswith(suffix):
-                return response() if callable(response) else response
+                if callable(response):
+                    return response(
+                        method=method, url=url, headers=headers, params=params,
+                        json_body=json_body, timeout=timeout,
+                    )
+                return response
         raise AssertionError(f"unexpected request {method} {url}")
 
     return send
@@ -194,6 +199,29 @@ class TestCredentials:
         message = str(exc.value)
         assert "supersecretpaperkey" not in message
         assert "***" in message
+
+    def test_a_short_credential_does_not_mangle_the_venue_s_message(self):
+        """A very short credential must not be replaced everywhere.
+
+        Redaction replaces the secret wherever it appears. A one-character
+        secret appears inside ordinary words, so replacing it turns
+        "unavailable" into "un***ilable" and the operator loses the actual
+        message. Alpaca's own keys are far longer than the floor, so a real
+        credential is still removed; what the floor buys is that a short
+        secret cannot destroy the message.
+        """
+        broker = AlpacaPaperBroker(
+            api_key="k",
+            api_secret="s",
+            transport=_transport(
+                {("GET", "/v2/account"): _Resp(500, '{"message":"the venue is unavailable"}')}
+            ),
+        )
+        with pytest.raises(BrokerRejectedError) as exc:
+            broker.connect()
+        message = str(exc.value)
+        assert "unavailable" in message
+        assert "***" not in message
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +447,119 @@ class TestDuplicatePrevention:
             client_order_id="c1", allow_orders=True,
         )
         assert [c for c in calls if c["method"] == "POST"] == []
+
+
+class TestARefusedOrderMayBeRetried:
+    """A refusal that never reached the venue does not bar a retry.
+
+    The broker's idempotency rule is that a known client order id is
+    reconciled, never re-submitted — a duplicate order would double the
+    position. That rule protects against the *unknown* case: a request that
+    timed out may have reached the venue.
+
+    A **refusal** is the opposite: the venue answered, and the answer was "no".
+    There is nothing at the broker to reconcile, so reconciling it would ask
+    about an order that never existed and turn a temporary refusal into a
+    permanent one. The same intent must be retryable.
+    """
+
+    def test_a_refused_order_is_retried_rather_than_reconciled(self):
+        calls = []
+        posts = []
+
+        def _post(*, method, url, headers, params, json_body, timeout):
+            posts.append(json_body)
+            # The first attempt is refused; the second is accepted.
+            if len(posts) == 1:
+                return _Resp(500, '{"message":"the venue is unavailable"}')
+            return _Resp(200, _order(status="accepted"))
+
+        routes = {
+            ("GET", "/v2/account"): _Resp(200, _ACCOUNT),
+            ("POST", "/v2/orders"): _post,
+        }
+        broker = AlpacaPaperBroker(
+            api_key="k", api_secret="s", transport=_transport(routes, calls=calls),
+            limits=PaperRiskLimits(max_order_notional=10_000),
+        )
+        broker.connect()
+        with pytest.raises(BrokerRejectedError):
+            broker.submit_order(
+                symbol="SPY", quantity=1, side="buy", reference_price=100,
+                client_order_id="c1", allow_orders=True,
+            )
+        # The venue recovers, so the same intent goes through.
+        order = broker.submit_order(
+            symbol="SPY", quantity=1, side="buy", reference_price=100,
+            client_order_id="c1", allow_orders=True,
+        )
+        assert order.status == "accepted"
+        assert len(posts) == 2
+
+    def test_a_venue_rejected_order_is_reconciled_never_re_submitted(self):
+        """The venue's own ``rejected`` is not a local refusal.
+
+        The venue *did* see this order and refused it, so it exists at the
+        broker and must be reconciled. Re-submitting it would send a second
+        order for one intent.
+        """
+        calls = []
+        posts = []
+
+        def _post(*, method, url, headers, params, json_body, timeout):
+            posts.append(json_body)
+            return _Resp(200, _order(status="rejected"))
+
+        routes = {
+            ("GET", "/v2/account"): _Resp(200, _ACCOUNT),
+            ("POST", "/v2/orders"): _post,
+            ("GET", "/v2/orders:by_client_order_id"): _Resp(200, _order(status="rejected")),
+        }
+        broker = AlpacaPaperBroker(
+            api_key="k", api_secret="s", transport=_transport(routes, calls=calls),
+            limits=PaperRiskLimits(max_order_notional=10_000),
+        )
+        broker.connect()
+        broker.submit_order(
+            symbol="SPY", quantity=1, side="buy", reference_price=100,
+            client_order_id="c1", allow_orders=True,
+        )
+        order = broker.submit_order(
+            symbol="SPY", quantity=1, side="buy", reference_price=100,
+            client_order_id="c1", allow_orders=True,
+        )
+        assert order.status == "rejected"
+        assert len(posts) == 1, "a venue-rejected order was re-submitted"
+
+    def test_a_refused_order_does_not_count_against_the_daily_budget(self):
+        """An order the venue refused is not an order the account placed.
+
+        The daily budget counts what the venue accepted, so a refusal must
+        not spend it. Otherwise repeated refusals would exhaust the budget and
+        the exits would stop being placed even after the venue recovered.
+        """
+        posts = []
+
+        def _post(*, method, url, headers, params, json_body, timeout):
+            posts.append(json_body)
+            return _Resp(500, '{"message":"refused"}')
+
+        routes = {
+            ("GET", "/v2/account"): _Resp(200, _ACCOUNT),
+            ("POST", "/v2/orders"): _post,
+        }
+        broker = AlpacaPaperBroker(
+            api_key="k", api_secret="s", transport=_transport(routes),
+            limits=PaperRiskLimits(max_order_notional=10_000),
+        )
+        broker.connect()
+        for _ in range(3):
+            with pytest.raises(BrokerRejectedError):
+                broker.submit_order(
+                    symbol="SPY", quantity=1, side="buy", reference_price=100,
+                    client_order_id="c1", allow_orders=True,
+                )
+        assert broker.daily_orders() == 0
 
 
 # ---------------------------------------------------------------------------

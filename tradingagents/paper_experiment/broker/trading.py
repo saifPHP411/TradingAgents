@@ -2401,14 +2401,29 @@ def _decision_statistics(state: WorkerState) -> dict[str, Any]:
 def _position_protection_rows(state: WorkerState) -> dict[str, dict[str, Any]]:
     """The protection state of every open position, keyed by symbol.
 
-    An open position is either **managed** — the worker opened it and recorded
-    the strategy's stop and target for it, so the exit policy is watching it —
-    or it is **unprotected**, and the reason says which kind of unprotected it
-    is. A position the worker never opened (it was held before this worker
-    existed, or it came from another tool) has no strategy decision behind it,
-    so no stop or target can be derived for it and none is invented. A position
-    whose recorded levels are missing or unusable is unprotected for the same
-    reason: a level that cannot trigger is not a protection.
+    An open position is either **managed** — the worker opened it, recorded the
+    strategy's stop and target for it, and the broker has confirmed it is still
+    held — or it is **unprotected**, and the reason says which kind of
+    unprotected it is. A position the worker never opened (it was held before
+    this worker existed, or it came from another tool) has no strategy decision
+    behind it, so no stop or target can be derived for it and none is invented.
+    A position whose recorded levels are missing or unusable is unprotected for
+    the same reason: a level that cannot trigger is not a protection.
+
+    **A recorded level is not a protection.** The level only says what *would*
+    be done; whether it *can* be done is a separate question, and it is answered
+    by the broker. So the verdict comes from ``state.protections`` — the
+    broker-verified record written by :meth:`PaperTradingWorker._verify_protection`
+    — and the levels in ``state.stops`` are the *subject* of that verdict, not
+    the verdict itself.
+
+    Reading the levels alone would report a position as protected after the
+    broker could not be reached, after the held quantity changed without the
+    worker's knowledge, and after an exit order was refused: three situations in
+    which the exit mechanism is demonstrably **not** executable. An operator
+    reading such a row would believe a loss was bounded when nothing was
+    bounding it. So the broker's word decides, and the levels are only reported
+    alongside it.
 
     The point of this view is that an unguarded position is never silent. It is
     reported, it carries a reason, and it says what an operator would have to
@@ -2436,21 +2451,38 @@ def _position_protection_rows(state: WorkerState) -> dict[str, dict[str, Any]]:
             take_profit if take_profit is not None and take_profit > 0 else None
         )
         exited = symbol in (state.exits or {})
+        # The broker's verdict on this position, when there is one.
+        verdict = (state.protections or {}).get(symbol)
+        verdict = verdict if isinstance(verdict, dict) else {}
+        verdict_status = verdict.get("status")
         if exited:
             protection_state = "EXITED"
             reason = "EXIT_RECORDED"
             protected = True
+        elif verdict_status:
+            # The broker-verified verdict decides. It is the only evidence that
+            # the exit mechanism can actually act on this position.
+            protection_state = str(verdict_status)
+            protected = verdict_status == PROTECTION_STATUS_PROTECTED
+            reason = str(
+                verdict.get("reason_code")
+                or verdict.get("detail")
+                or protection_state
+            )
         elif usable_stop is not None or usable_target is not None:
-            protection_state = "TJR_MANAGED"
-            reason = "RECORDED_EXIT_LEVELS"
-            protected = True
+            # Levels exist but the broker has never confirmed the position.
+            # That is "not yet known", and it is not "protected": the exit
+            # mechanism has not been shown to work on this position.
+            protection_state = PROTECTION_STATUS_PENDING
+            reason = "PROTECTION_NOT_VERIFIED"
+            protected = False
         elif level:
             # Levels were recorded but none of them can trigger.
-            protection_state = "UNPROTECTED"
+            protection_state = PROTECTION_STATUS_UNPROTECTED
             reason = "UNUSABLE_EXIT_LEVELS"
             protected = False
         else:
-            protection_state = "UNPROTECTED"
+            protection_state = PROTECTION_STATUS_UNPROTECTED
             reason = "NO_RECORDED_EXIT_LEVELS"
             protected = False
         rows[symbol] = {
@@ -3540,12 +3572,14 @@ class PaperTradingWorker:
             record["status"] = PROTECTION_STATUS_CLOSED
             record["checked_at"] = now
             self.state.protections[symbol] = record
+            self._roll_up_protection_status()
             self._save()
             return record
         if symbol in self.state.exit_attempts:
             record["status"] = PROTECTION_STATUS_EXIT_PENDING
             record["checked_at"] = now
             self.state.protections[symbol] = record
+            self._roll_up_protection_status()
             self._save()
             return record
 
@@ -3558,9 +3592,7 @@ class PaperTradingWorker:
             record["detail"] = f"the held quantity could not be read: {exc}"
             record["checked_at"] = now
             self.state.protections[symbol] = record
-            self.state.protection_status = PROTECTION_STATUS_UNPROTECTED
-            self.state.protection_detail = record["detail"]
-            self.state.protection_checked_at = now
+            self._roll_up_protection_status()
             self._save()
             return record
 
@@ -3592,11 +3624,125 @@ class PaperTradingWorker:
             record["detail"] = "the position is held at the broker and its levels are live"
         record["checked_at"] = now
         self.state.protections[symbol] = record
-        self.state.protection_checked_at = now
-        self.state.protection_detail = None
-        self.state.protection_status = PROTECTION_STATUS_PROTECTED
+        self._roll_up_protection_status()
         self._save()
         return record
+
+    def _roll_up_protection_status(self) -> None:
+        """Set the worker-level verdict from the per-position verdicts.
+
+        The worker-level status is the *worst* of the positions' statuses: a
+        worker with one unprotected position is not a protected worker, and the
+        dashboard has to be able to say so. A position that has been closed
+        contributes nothing — there is no risk left there to be covered.
+
+        Every writer of a per-position verdict calls this, so the global status
+        can never disagree with the positions it summarizes. Setting the global
+        status directly from a single position's outcome would let one
+        position's verdict overwrite another's.
+        """
+        statuses = [
+            record.get("status")
+            for record in self.state.protections.values()
+            if isinstance(record, dict) and record.get("status")
+        ]
+        detail: str | None = None
+        for symbol in sorted(self.state.protections):
+            record = self.state.protections[symbol]
+            if not isinstance(record, dict):
+                continue
+            status = record.get("status")
+            if status and status != PROTECTION_STATUS_PROTECTED and detail is None:
+                detail = f"{symbol}: {record.get('detail') or status}"
+        if PROTECTION_STATUS_UNPROTECTED in statuses:
+            self.state.protection_status = PROTECTION_STATUS_UNPROTECTED
+            self.state.protection_detail = detail
+        elif PROTECTION_STATUS_PENDING in statuses:
+            self.state.protection_status = PROTECTION_STATUS_PENDING
+            self.state.protection_detail = detail
+        elif PROTECTION_STATUS_EXIT_PENDING in statuses:
+            self.state.protection_status = PROTECTION_STATUS_EXIT_PENDING
+            self.state.protection_detail = detail
+        elif statuses and all(
+            status == PROTECTION_STATUS_CLOSED for status in statuses
+        ):
+            # Every position is closed, so there is nothing left to protect. The
+            # verdict is "closed", never "protected": reporting a protection
+            # for a position that no longer exists would tell an operator a
+            # risk is covered when no position is open at all.
+            self.state.protection_status = PROTECTION_STATUS_CLOSED
+            self.state.protection_detail = detail
+        else:
+            self.state.protection_status = PROTECTION_STATUS_PROTECTED
+            self.state.protection_detail = None
+        self.state.protection_checked_at = datetime.now(UTC).isoformat()
+
+    def _mark_exit_unexecutable(self, symbol: str, detail: str) -> None:
+        """Record that the exit for ``symbol`` could not be placed.
+
+        A refusal to exit is the strongest possible evidence that the position
+        is not protected: the stop and the target are recorded, the price
+        crossed one of them, and the order that would have acted on it was
+        refused. The position is still open and still needs watching, so the
+        record keeps the levels — but its verdict becomes ``UNPROTECTED`` with
+        the refusal as the reason, so no view can present it as protected.
+
+        The position stays in ``state.stops``: the next cycle retries the exit,
+        because the refusal may be transient (a venue outage, a daily-order cap
+        that resets). What the refusal changes is the *claim*, not the intent.
+        """
+        self._mark_protection_unverifiable(
+            symbol,
+            NO_TRADE_EXIT_REFUSED,
+            f"the exit could not be placed, so the recorded levels cannot be acted "
+            f"on: {detail}",
+        )
+
+    def _mark_protection_closed(self, symbol: str, filled_quantity: float) -> None:
+        """Record that ``symbol``'s position is closed, so its protection is over.
+
+        A closed position needs no guard. The verdict moves to ``CLOSED`` the
+        moment the exit fills, not on the next cycle's re-check: a protection
+        that outlives its position is a claim about something that is gone.
+        """
+        record = self.state.protections.get(symbol)
+        if record is None:
+            return
+        record["status"] = PROTECTION_STATUS_CLOSED
+        record["reason_code"] = None
+        record["detail"] = (
+            f"the position was closed by an exit of {filled_quantity}"
+        )
+        record["held_quantity"] = 0.0
+        record["checked_at"] = datetime.now(UTC).isoformat()
+        self.state.protections[symbol] = record
+        self._roll_up_protection_status()
+
+    def _mark_protection_unverifiable(
+        self, symbol: str, reason_code: str, detail: str
+    ) -> None:
+        """Mark ``symbol``'s protection as not demonstrably in force.
+
+        The recorded levels stay — they are what the exit *would* use, and the
+        next cycle retries with them. What changes is the verdict: the position
+        is reported as ``UNPROTECTED`` with ``reason_code`` as the reason,
+        because the mechanism that would enforce those levels could not be
+        exercised or could not be checked.
+
+        A position is only ever reported as protected on positive evidence
+        that the broker holds it and the monitor can act. Everything else —
+        a read failure, a blind monitor, a refused exit — is "not proven", and
+        "not proven" is reported as unprotected.
+        """
+        record = self.state.protections.get(symbol)
+        if record is None:
+            return
+        record["status"] = PROTECTION_STATUS_UNPROTECTED
+        record["reason_code"] = reason_code
+        record["detail"] = detail
+        record["checked_at"] = datetime.now(UTC).isoformat()
+        self.state.protections[symbol] = record
+        self._roll_up_protection_status()
 
     def _verify_all_protections(self) -> None:
         """Verify every watched position, and roll the worker-level verdict up.
@@ -3611,36 +3757,9 @@ class PaperTradingWorker:
             self.state.protection_checked_at = datetime.now(UTC).isoformat()
             self._save()
             return
-        statuses: list[str] = []
-        detail: str | None = None
         for symbol in sorted(self.state.protections):
-            record = self._verify_protection(symbol)
-            status = record.get("status")
-            if status:
-                statuses.append(status)
-            if status != PROTECTION_STATUS_PROTECTED and detail is None:
-                detail = f"{symbol}: {record.get('detail') or status}"
-        now = datetime.now(UTC).isoformat()
-        if PROTECTION_STATUS_UNPROTECTED in statuses:
-            self.state.protection_status = PROTECTION_STATUS_UNPROTECTED
-            self.state.protection_detail = detail
-        elif PROTECTION_STATUS_PENDING in statuses:
-            self.state.protection_status = PROTECTION_STATUS_PENDING
-            self.state.protection_detail = detail
-        elif PROTECTION_STATUS_EXIT_PENDING in statuses:
-            self.state.protection_status = PROTECTION_STATUS_EXIT_PENDING
-            self.state.protection_detail = detail
-        elif all(status == PROTECTION_STATUS_CLOSED for status in statuses):
-            # Every position is closed, so there is nothing left to protect. The
-            # verdict is "closed", never "protected": reporting a protection
-            # for a position that no longer exists would tell an operator a
-            # risk is covered when no position is open at all.
-            self.state.protection_status = PROTECTION_STATUS_CLOSED
-            self.state.protection_detail = detail
-        else:
-            self.state.protection_status = PROTECTION_STATUS_PROTECTED
-            self.state.protection_detail = None
-        self.state.protection_checked_at = now
+            self._verify_protection(symbol)
+        self._roll_up_protection_status()
         self._save()
 
     def _mark_target_taken(self, symbol: str, target: float, filled: float) -> None:
@@ -3789,6 +3908,12 @@ class PaperTradingWorker:
                 self.state.last_error = f"PositionReadError: {exc}"
                 self.state.last_no_decision_reason = str(exc)
                 self.state.last_no_trade_code = NO_TRADE_POSITION_UNAVAILABLE
+                # The broker could not be read, so the exit cannot be sized and
+                # the position's protection cannot be confirmed. It is not
+                # protected: "I could not check" is not "it is safe".
+                self._mark_protection_unverifiable(
+                    symbol, NO_TRADE_POSITION_UNAVAILABLE, str(exc)
+                )
                 self._save()
                 return CycleResult(
                     ran=False,
@@ -3838,6 +3963,10 @@ class PaperTradingWorker:
                             "filled_quantity": order.filled_quantity,
                             "exited_at": datetime.now(UTC).isoformat(),
                         }
+                        # The position is closed, so its protection is over.
+                        # Leaving the verdict at PROTECTED would claim a guard
+                        # over a position that no longer exists.
+                        self._mark_protection_closed(symbol, order.filled_quantity)
                         self.state.exit_attempts.pop(symbol, None)
                     elif slice_done:
                         # The slice filled and the position is still open: the
@@ -3869,6 +3998,15 @@ class PaperTradingWorker:
                 price = self.market_data.price(market_data_symbol)
             except MarketDataError as exc:
                 self.state.last_error = f"MarketDataError: {exc}"
+                # The monitor is blind. A stop or target cannot be detected
+                # without a price, so the exit cannot fire, so the position's
+                # protection is not demonstrably in force. It stays open and
+                # stays watched — the next cycle retries with a fresh price —
+                # but it is not reported as protected while the monitor cannot
+                # see the market.
+                self._mark_protection_unverifiable(
+                    symbol, NO_TRADE_MARKET_DATA_UNAVAILABLE, str(exc)
+                )
                 self._save()
                 return CycleResult(
                     ran=False,
@@ -3922,6 +4060,11 @@ class PaperTradingWorker:
                         "filled_quantity": order.filled_quantity,
                         "exited_at": datetime.now(UTC).isoformat(),
                     }
+                    # The position is closed, so its protection is over. Leaving
+                    # the verdict at PROTECTED would claim a guard over a
+                    # position that no longer exists, and it would keep
+                    # claiming it until the next cycle happened to re-check.
+                    self._mark_protection_closed(symbol, order.filled_quantity)
                     self.state.exit_attempts.pop(symbol, None)
                 elif hit_target is not None and order.filled_quantity > 0:
                     # The slice for this target filled and the position is still
@@ -4014,6 +4157,13 @@ class PaperTradingWorker:
                 self.state.last_error = f"{type(exc).__name__}: {exc}"
                 self.state.last_no_decision_reason = str(exc)
                 self.state.last_no_trade_code = NO_TRADE_EXIT_REFUSED
+                # The exit could not be placed. That is direct evidence that the
+                # exit mechanism is **not executable** right now, so the position
+                # cannot keep claiming to be protected: the stop and target are
+                # recorded, but the order that would act on them was refused.
+                # Leaving the verdict at PROTECTED would tell an operator a loss
+                # was bounded by a level that cannot currently be acted on.
+                self._mark_exit_unexecutable(symbol, str(exc))
                 self._save()
                 return CycleResult(
                     ran=False,
@@ -4064,6 +4214,11 @@ class PaperTradingWorker:
                         "filled_quantity": order.filled_quantity,
                         "exited_at": datetime.now(UTC).isoformat(),
                     }
+                    # The position is closed, so its protection is over. Leaving
+                    # the verdict at PROTECTED would claim a guard over a
+                    # position that no longer exists, and it would keep
+                    # claiming it until the next cycle happened to re-check.
+                    self._mark_protection_closed(symbol, order.filled_quantity)
                 # The attempt is finished once its own slice has filled. The
                 # position may still be open — that is what a ladder stage is
                 # — and the next cycle must be free to act on the next target,

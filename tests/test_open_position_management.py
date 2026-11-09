@@ -40,7 +40,7 @@ from tradingagents.paper_experiment.broker import (
     PaperTradingWorker,
     TradingDecision,
 )
-from tradingagents.paper_experiment.broker.alpaca_paper import AlpacaPaperBroker
+from tradingagents.paper_experiment.broker.alpaca_paper import AlpacaPaperBroker, BrokerOrder
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
@@ -232,23 +232,85 @@ def _build_worker(
     return worker
 
 
+def _filled_order(
+    *,
+    symbol=EXECUTION,
+    quantity=9.194395796,
+    average_entry_price=1.085,
+    side="buy",
+    client_order_id="entry-1",
+):
+    """A **filled** order as the broker reports it.
+
+    The fill is what the worker reads back to record the entry's protection, so
+    a helper that writes the level without a fill would skip the very step that
+    makes the protection verifiable.
+    """
+    return BrokerOrder(
+        client_order_id=client_order_id,
+        broker_order_id="broker-entry-1",
+        symbol=symbol,
+        side=side,
+        quantity=quantity,
+        filled_quantity=quantity,
+        filled_avg_price=average_entry_price,
+        status="filled",
+        order_type="market",
+        time_in_force="day",
+        submitted_at="2026-11-08T12:00:00Z",
+    )
+
+
 def _filled_entry_worker(
     tmp_path,
     *,
     stop_loss=None,
     take_profit=None,
     held: float = 9.194395796,
+    raw_levels=False,
     **kwargs,
 ):
-    """A worker whose state already holds a filled entry with recorded levels.
+    """A worker whose state holds a filled entry with recorded levels.
 
     This is the state a *real* TJR entry leaves behind: the position was
     opened by this worker, so the stop and target the chain derived are
     recorded against it. The **broker** reports the same holding, because the
     broker is the authority for what is held.
+
+    The entry is driven through the worker's **own** path — the decision is
+    submitted and the broker's fill is what produces the record — rather than
+    by writing ``state.stops`` by hand. That matters: a hand-written level is
+    only a *claim* that a position is protected, while the real path also
+    produces the broker-verified verdict that the protection depends on. A
+    helper that fabricates the level alone would make every protection
+    assertion in this file vacuous.
+
+    ``raw_levels=True`` writes the level straight into the persisted state
+    instead. That is the only way a *malformed* level can exist at all — the
+    real decision path refuses one — so it models a legacy or hand-edited state
+    file. Such a level can never be protected, and the tests that use it say
+    so.
     """
     kwargs.setdefault("positions", [_position(qty=held)])
     worker = _build_worker(tmp_path, **kwargs)
+    worker._execution_to_market_data[EXECUTION] = MARKET_DATA
+    if raw_levels:
+        if stop_loss is not None or take_profit is not None:
+            worker.state.stops[EXECUTION] = {
+                "symbol": EXECUTION,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "decision_id": "tjr-XRPUSDT-2026-11-08",
+                "recorded_at": "2026-11-08T12:00:00Z",
+                "canonical_symbol": MARKET_DATA,
+            }
+    elif stop_loss is not None or take_profit is not None:
+        worker._record_exit_levels(
+            _decision(stop_loss=stop_loss, take_profit=take_profit),
+            _filled_order(
+                symbol=EXECUTION, quantity=held, average_entry_price=1.085
+            ),
+        )
     worker.state.positions[EXECUTION] = {
         "symbol": EXECUTION,
         "quantity": held,
@@ -256,17 +318,10 @@ def _filled_entry_worker(
         "market_value": "9.976",
         "opened_at": "2026-11-08T12:00:00Z",
     }
-    if stop_loss is not None or take_profit is not None:
-        worker.state.stops[EXECUTION] = {
-            "symbol": EXECUTION,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "decision_id": "tjr-XRPUSDT-2026-11-08",
-            "recorded_at": "2026-11-08T12:00:00Z",
-            "canonical_symbol": MARKET_DATA,
-        }
-    worker._execution_to_market_data[EXECUTION] = MARKET_DATA
     worker._save()
+    # The verdict the protection depends on: the broker is asked whether it
+    # holds the position. A position that was never checked is not protected.
+    worker._verify_all_protections()
     return worker
 
 
@@ -384,7 +439,10 @@ class TestPositionWithValidTjrExitLevels:
         from tradingagents.paper_experiment.dashboard.engine_view import positions_view
 
         rows = positions_view(status)
-        assert rows[0]["protection_state"] == "TJR_MANAGED"
+        # The state is the broker's verdict, not an inference from the recorded
+        # levels. The broker holds the position, so the position is PROTECTED.
+        assert rows[0]["protection_state"] == "PROTECTED"
+        assert rows[0]["protected"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +469,7 @@ class TestPositionWithoutValidExitLevels:
             take_profit=None,
             price=0.01,
             calls=calls,
+            raw_levels=True,
         )
         assert worker._check_exits() is None
         assert [c for c in calls if c["method"] == "POST"] == []
@@ -423,6 +482,7 @@ class TestPositionWithoutValidExitLevels:
             take_profit=0.0,
             price=0.01,
             calls=calls,
+            raw_levels=True,
         )
         assert worker._check_exits() is None
         assert [c for c in calls if c["method"] == "POST"] == []

@@ -397,6 +397,16 @@ class BrokerOrder:
         }
 
 
+_LOCAL_REFUSAL_STATUS = "refused_locally"
+"""The marker for an order the venue **never saw**.
+
+A local refusal — an HTTP error, a rejected credential, a malformed order —
+means the request was answered without the venue accepting the order. There is
+nothing at the broker to reconcile, so the same intent may be retried. This is
+distinct from the venue's own ``rejected``, which means the venue *did* see the
+order and refused it: that one is reconciled, never re-submitted.
+"""
+
 _ALPACA_STATUS_MAP = {
     "new": "accepted",
     "accepted": "accepted",
@@ -714,9 +724,17 @@ class AlpacaPaperBroker:
         }
 
     def _redact(self, text: str) -> str:
+        """Remove the credentials from a venue message before it can be raised.
+
+        Only a plausibly key-length secret is replaced: a very short secret
+        would match ordinary words (a one-character key would turn
+        ``unavailable`` into ``un***ilable``), mangling the message without
+        protecting anything real. Alpaca's own keys are far longer than this
+        floor, so a real credential is always removed.
+        """
         out = text
         for secret in (self._key, self._secret):
-            if secret:
+            if secret and len(secret) >= 8:
                 out = out.replace(secret, "***")
         return out
 
@@ -1068,8 +1086,30 @@ class AlpacaPaperBroker:
         # Idempotency: a client_order_id we already know is never re-submitted.
         # A reconcile sends no time-in-force, so it is checked before the
         # pre-flight validation below rather than being blocked by it.
-        if client_order_id in self._state.orders:
-            return self._reconcile(client_order_id)
+        known = self._state.orders.get(client_order_id)
+        if known is not None:
+            if known.get("status") == _LOCAL_REFUSAL_STATUS:
+                # The request was **refused before it reached the venue**, so
+                # there is nothing at the broker to reconcile and nothing to
+                # duplicate. The refusal is the venue's answer to this attempt,
+                # not a permanent bar: the caller may retry the same intent once
+                # the cause is gone (a venue outage, a daily-order cap that
+                # resets). Forcing a reconcile here would ask the broker about
+                # an order it never accepted, get a 404, and turn a temporary
+                # refusal into a permanent one — the exit could then never be
+                # placed for this position, however many cycles ran.
+                #
+                # This marker is distinct from the venue's own ``rejected``:
+                # that one means the venue *did* see the order and refused it,
+                # so it is reconciled, never re-submitted.
+                self._state.orders.pop(client_order_id, None)
+                if self._store:
+                    self._store.save(self._state)
+            else:
+                # The outcome is either known (the order reached the broker) or
+                # unknown (the request timed out). Both must reconcile, never
+                # re-submit: a duplicate order would double the exit.
+                return self._reconcile(client_order_id)
 
         # Pre-flight: an unsupported time-in-force is refused here, before the
         # request, so it is never sent and never answered with an HTTP 422.
@@ -1120,7 +1160,7 @@ class AlpacaPaperBroker:
             # The outcome is unknown. Reconcile by client order id; never re-submit.
             return self._reconcile(client_order_id)
         except BrokerRejectedError:
-            self._state.orders[client_order_id]["status"] = "rejected"
+            self._state.orders[client_order_id]["status"] = _LOCAL_REFUSAL_STATUS
             if self._store:
                 self._store.save(self._state)
             raise

@@ -495,6 +495,26 @@ class TestTheCredentialNeverLeaks:
         assert API_KEY not in rendered
         assert API_SECRET not in rendered
 
+    def test_a_credential_of_any_plausible_length_is_always_removed(self):
+        """The redaction floor must not become a way to leak a credential.
+
+        Redaction only replaces a secret that is at least eight characters long,
+        so a very short secret would survive into the message. That is a
+        deliberate trade — a one-character secret matches ordinary words and
+        would turn "unavailable" into "un***ilable" — but it is only safe
+        because a real Alpaca key is far longer. This pins that: every length a
+        real key could have is removed.
+        """
+        for key in ("12345678", "123456789", "a-realistic-alpaca-key"):
+            transport = _RecordingTransport(500, f"denied for {key}")
+            client = AlpacaCryptoClient(api_key=key, api_secret=key, transport=transport)
+
+            with pytest.raises(ProviderError) as excinfo:
+                client.assets(base_url=PAPER_URL)
+
+            assert key not in str(excinfo.value)
+            assert key not in (client.last_error or "")
+
 
 # ---------------------------------------------------------------------------
 # 5. The paper host, and only the paper host
