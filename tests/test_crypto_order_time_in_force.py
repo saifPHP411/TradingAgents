@@ -291,6 +291,11 @@ class TestTheWorkerPassesTheAssetClassThrough:
                     symbol=CRYPTO_SYMBOL,
                     side="buy",
                     notional=25.0,
+                    # Levels the strategy proposed, so the mandatory-protection
+                    # gate admits the trade. This test is about the asset class
+                    # and the time-in-force, not about protection.
+                    stop_loss=45000.0,
+                    take_profit=60000.0,
                 )
 
         class _Market:
@@ -337,6 +342,11 @@ class TestTheWorkerPassesTheAssetClassThrough:
                     symbol=EQUITY_SYMBOL,
                     side="buy",
                     notional=25.0,
+                    # Levels the strategy proposed, so the mandatory-protection
+                    # gate admits the trade. This test is about the asset class
+                    # and the time-in-force, not about protection.
+                    stop_loss=9.0,
+                    take_profit=12.0,
                 )
 
         class _Market:

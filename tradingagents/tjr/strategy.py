@@ -137,6 +137,7 @@ def _signal_from_evaluation(evaluation: TjrEvaluation) -> TradingSignal:
             entry_price=evaluation.entry,
             stop_loss=evaluation.stop,
             take_profit=evaluation.target,
+            targets=list(evaluation.targets),
             holding_period_days=1,
             source="tjr",
             reasoning=evaluation.detail,

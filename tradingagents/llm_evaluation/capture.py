@@ -170,6 +170,8 @@ def build_record(
     snapshot_prefix: str = "feed",
     snapshot_id: str | None = None,
     captured_at: str | None = None,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
 ) -> tuple[DecisionRecord, bool]:
     """Build a validated record from an already-resolved decision and window.
 
@@ -181,6 +183,14 @@ def build_record(
     takes precedence over the ``snapshot_prefix:start..end`` form, so a record can
     point at an artifact that can be re-read and re-hashed rather than a bare
     date range.
+
+    ``stop_loss`` and ``take_profit`` are the levels the **strategy** proposed.
+    They are recorded verbatim, and only when the caller actually supplied them:
+    a caller that has no levels leaves them ``None``, and this function does not
+    derive, default or adjust a level of its own. The levels are validated by
+    :class:`~tradingagents.llm_evaluation.records.DecisionRecord` (finite and
+    positive); whether they are on the correct side of the entry is the
+    protection gate's question, not this function's.
     """
     window_start, window_end, bar_count = _window_bounds(frame)
     window_reproducible = bar_count > 0
@@ -217,8 +227,8 @@ def build_record(
         model_name=model_name,
         reasoning_excerpt=reasoning_excerpt,
         position_size=None,
-        stop_loss=None,
-        take_profit=None,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
         order_intent="MARKET",
         limit_price=None,
         time_in_force="DAY",

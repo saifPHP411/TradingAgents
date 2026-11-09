@@ -128,7 +128,20 @@ def _broker_factory(routes, *, calls=None):
 
 
 def _decision(decision_id="d1", *, symbol="SPY", side="buy", notional=25.0):
-    return TradingDecision(decision_id=decision_id, symbol=symbol, side=side, notional=notional)
+    """A decision the worker is willing to act on.
+
+    A BUY carries the levels the mandatory-protection gate requires: a stop
+    below the entry and a target above it. The default price seam quotes 10.0,
+    so the levels are chosen around it.
+    """
+    return TradingDecision(
+        decision_id=decision_id,
+        symbol=symbol,
+        side=side,
+        notional=notional,
+        stop_loss=9.0 if side.lower() == "buy" else None,
+        take_profit=12.0 if side.lower() == "buy" else None,
+    )
 
 
 class _Source:

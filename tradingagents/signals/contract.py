@@ -157,6 +157,17 @@ class TradingSignal(BaseModel):
     )
     stop_loss: float | None = Field(default=None, gt=0.0, description="Absolute stop level, or None")
     take_profit: float | None = Field(default=None, gt=0.0, description="Absolute target, or None")
+    targets: list[float] = Field(
+        default_factory=list,
+        description=(
+            "Every target the strategy supports, nearest first. A strategy that "
+            "derives several draws on liquidity names them all, so a position can "
+            "be managed in stages (TP1, then TP2, then TP3) instead of only at one "
+            "price. Empty when the strategy names a single target (which is then "
+            "``take_profit``) or none at all. Never padded: the list holds only the "
+            "levels the market actually supports."
+        ),
+    )
 
     position_size: float | None = Field(
         default=None,
@@ -266,7 +277,7 @@ class TradingSignal(BaseModel):
         entry, stop, target = self.entry_price, self.stop_loss, self.take_profit
 
         if self.action is SignalAction.HOLD:
-            if stop is not None or target is not None:
+            if stop is not None or target is not None or self.targets:
                 raise ValueError("a HOLD must not carry stop_loss or take_profit levels")
             if self.position_size is not None:
                 raise ValueError("a HOLD must not request a position_size")
@@ -274,16 +285,46 @@ class TradingSignal(BaseModel):
                 raise ValueError("a HOLD must not request a LIMIT order")
             return self
 
+        # The target ladder must be ordered away from the entry, and every level
+        # in it must sit on the winning side. An unordered ladder would make
+        # "TP1" mean two different prices on two different readers, which is
+        # exactly the ambiguity a staged exit cannot tolerate.
+        ladder = list(self.targets)
+        if ladder and target is not None and target not in ladder:
+            raise ValueError(
+                f"the take_profit ({target}) must be one of the listed targets "
+                f"({ladder})"
+            )
+        if ladder:
+            if ladder != sorted(ladder, reverse=self.action is SignalAction.BUY):
+                raise ValueError(
+                    f"the targets must be ordered away from the entry: {ladder}"
+                )
+            if len(set(ladder)) != len(ladder):
+                raise ValueError(f"the targets must be distinct: {ladder}")
+
         if self.action is SignalAction.BUY:
             if entry is not None and stop is not None and stop >= entry:
                 raise ValueError(f"a BUY stop_loss ({stop}) must be below its entry_price ({entry})")
             if entry is not None and target is not None and target <= entry:
                 raise ValueError(f"a BUY take_profit ({target}) must be above its entry_price ({entry})")
+            if entry is not None:
+                wrong = [level for level in ladder if level <= entry]
+                if wrong:
+                    raise ValueError(
+                        f"a BUY target ({wrong[0]}) must be above its entry_price ({entry})"
+                    )
         else:  # SELL
             if entry is not None and stop is not None and stop <= entry:
                 raise ValueError(f"a SELL stop_loss ({stop}) must be above its entry_price ({entry})")
             if entry is not None and target is not None and target >= entry:
                 raise ValueError(f"a SELL take_profit ({target}) must be below its entry_price ({entry})")
+            if entry is not None:
+                wrong = [level for level in ladder if level >= entry]
+                if wrong:
+                    raise ValueError(
+                        f"a SELL target ({wrong[0]}) must be below its entry_price ({entry})"
+                    )
 
         if self.order_intent is OrderIntent.LIMIT:
             if self.limit_price is None:
@@ -361,6 +402,7 @@ def signal_from_decision(
     entry_price: float | None = None,
     stop_loss: float | None = None,
     take_profit: float | None = None,
+    targets: list[float] | None = None,
     position_size: float | None = None,
     holding_period_days: int | None = None,
     confidence: float | None = None,
@@ -393,6 +435,7 @@ def signal_from_decision(
         entry_price=entry_price,
         stop_loss=stop_loss,
         take_profit=take_profit,
+        targets=list(targets) if targets else [],
         position_size=position_size,
         holding_period_days=holding_period_days,
         order_intent=order_intent,

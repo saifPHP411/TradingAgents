@@ -179,6 +179,12 @@ class _OneDecision:
             side="buy",
             notional=None if self._quantity is not None else self._notional,
             quantity=self._quantity,
+            # Levels the strategy proposed, so the mandatory-protection gate
+            # admits the trade. These tests are about the market-data wiring,
+            # not about protection, and a decision with no levels is refused
+            # before it ever reaches the broker.
+            stop_loss=9.0,
+            take_profit=12.0,
         )
 
 

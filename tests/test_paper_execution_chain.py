@@ -162,13 +162,25 @@ def _broker_factory(routes, *, calls=None, limits=None):
 
 
 def _experiment(root, *, periods=12, processed=1, rating="Buy", lag=2):
-    """An experiment advanced ``processed`` sessions, with a StubInference decision."""
+    """An experiment advanced ``processed`` sessions, with a StubInference decision.
+
+    The stub proposes the levels the mandatory-protection gate requires: a stop
+    below the entry and a target above it. The last session's bar opens around
+    111.0, so the levels are chosen around that.
+    """
     source = StaticPriceSource({SYMBOL: _frame(periods)}, name="static_test")
     config = ExperimentConfig.from_protocol(
         symbols=(SYMBOL,), decision_frequency_sessions=1, evaluation_lag_sessions=lag
     )
     experiment = PaperExperiment(
-        source=source, config=config, root=root, inference=StubInference(rating=rating)
+        source=source,
+        config=config,
+        root=root,
+        inference=StubInference(
+            rating=rating,
+            stop_loss=100.0,
+            take_profit=130.0,
+        ),
     )
     experiment.ensure_created()
     for session in list(source.sessions())[:processed]:

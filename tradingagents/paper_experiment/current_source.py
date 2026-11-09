@@ -124,6 +124,18 @@ class _SymbolDecision:
     window_hash: str | None
     bar_count: int | None
     evaluated_at: str
+    stop_loss: float | None = None
+    """The stop the strategy proposed, when it proposed one.
+
+    Recorded verbatim, never derived here. ``None`` means the strategy proposed
+    none, and the mandatory-protection gate then refuses the trade — which is the
+    correct outcome, not a defect: a position whose exit is not defined cannot
+    be managed."""
+    take_profit: float | None = None
+    """The target the strategy proposed, when it proposed one. Same rules."""
+    targets: tuple[float, ...] = ()
+    """Every target the strategy supports, nearest first. Empty when it named
+    one, which is then ``take_profit``."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +148,9 @@ class _SymbolDecision:
             "window_hash": self.window_hash,
             "bar_count": self.bar_count,
             "evaluated_at": self.evaluated_at,
+            "stop_loss": self.stop_loss,
+            "take_profit": self.take_profit,
+            "targets": list(self.targets),
         }
 
     @classmethod
@@ -417,6 +432,14 @@ class CurrentMarketDecisionSource:
 
         action = action_for_rating(rating)
         side = _SIDE_BY_ACTION.get(action) if action is not None else None
+        # The levels the strategy proposed, if it proposed any. They come from the
+        # inference seam and are recorded verbatim; this source never derives one.
+        # A decision with no levels is carried honestly and is refused later, by
+        # the mandatory-protection gate, rather than being padded with a level
+        # this source made up.
+        stop_loss = getattr(self.inference, "stop_loss", None)
+        take_profit = getattr(self.inference, "take_profit", None)
+        targets = tuple(getattr(self.inference, "targets", ()) or ())
         record = _SymbolDecision(
             symbol=symbol,
             session=session,
@@ -427,6 +450,9 @@ class CurrentMarketDecisionSource:
             window_hash=window.content_hash,
             bar_count=window.bar_count,
             evaluated_at=datetime.now(UTC).isoformat(),
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            targets=targets,
         )
         self._decisions[symbol] = record
         self._record_evaluation(record)
@@ -457,10 +483,12 @@ class CurrentMarketDecisionSource:
             side=record.side,
             notional=self.order_notional,
             rationale=record.reasoning,
-            # The strategy proposed no stop or target, so none is fabricated. Sizing
-            # is the worker's configured notional, exactly as the historical bridge.
-            stop_loss=None,
-            take_profit=None,
+            # The levels the strategy proposed, carried verbatim. When it proposed
+            # none, these stay ``None`` — never fabricated here. Sizing is the
+            # worker's configured notional, exactly as the historical bridge.
+            stop_loss=record.stop_loss,
+            take_profit=record.take_profit,
+            targets=tuple(record.targets),
             strategy_name=self.strategy_name,
         )
 

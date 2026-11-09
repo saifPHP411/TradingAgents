@@ -223,6 +223,13 @@ class _SymbolRecord:
     """
     reference_price: float | None
     evaluated_at: str
+    targets: tuple[float, ...] = ()
+    """Every take-profit the rule chain derived, nearest first.
+
+    ``target`` is the first of these. The ladder holds only the draws on
+    liquidity the market actually supports, so it can hold one level or several
+    and is never padded.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -236,6 +243,7 @@ class _SymbolRecord:
             "detail": self.detail,
             "stop": self.stop,
             "target": self.target,
+            "targets": list(self.targets),
             "quantity": self.quantity,
             "notional": self.notional,
             "reference_price": self.reference_price,
@@ -567,6 +575,7 @@ class TjrDecisionSource:
                 detail=f"the RiskEngine refused the entry: {verdict.explain()}",
                 stop=evaluation.stop,
                 target=evaluation.target,
+                targets=tuple(evaluation.targets or ()),
                 quantity=None,
                 notional=None,
                 reference_price=reference_price,
@@ -587,6 +596,7 @@ class TjrDecisionSource:
             detail=detail,
             stop=evaluation.stop,
             target=evaluation.target,
+            targets=tuple(evaluation.targets or ()),
             quantity=float(verdict.quantity),
             # The cash amount the RiskEngine sized the entry for. The worker turns
             # this into a quantity at the *execution* venue's price, so the order's
@@ -704,6 +714,7 @@ class TjrDecisionSource:
             rationale=record.detail,
             stop_loss=record.stop,
             take_profit=record.target,
+            targets=tuple(record.targets or ((record.target,) if record.target is not None else ())),
             strategy_name=self.strategy_name,
         )
 

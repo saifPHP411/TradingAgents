@@ -121,8 +121,20 @@ def _experiment(root, *, rating="Buy", sessions=6):
     config = ExperimentConfig.from_protocol(
         symbols=("SPY",), decision_frequency_sessions=1, evaluation_lag_sessions=1
     )
+    # The levels are carried so the mandatory-protection gate admits the trade:
+    # these tests are about *delivery*, not about protection, and a decision
+    # with no levels is refused before it is ever delivered. A HOLD carries
+    # none — a hold is not a trade, so it has no levels to protect.
+    actionable = rating.strip().lower() != "hold"
     experiment = PaperExperiment(
-        source=source, config=config, root=root, inference=StubInference(rating=rating)
+        source=source,
+        config=config,
+        root=root,
+        inference=StubInference(
+            rating=rating,
+            stop_loss=9.0 if actionable else None,
+            take_profit=30.0 if actionable else None,
+        ),
     )
     experiment.ensure_created()
     # The controller and the source reload from disk, so the initial state must be

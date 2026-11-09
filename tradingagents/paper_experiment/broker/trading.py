@@ -69,6 +69,15 @@ from typing import Any, Protocol
 from tradingagents.crypto.symbols import try_parse_pair
 from tradingagents.risk.paper_parity import WHOLE_SHARES
 
+from ..protection import (
+    INVALID_RISK_REWARD,
+    INVALID_TARGET_ORDER,
+    NO_VALID_STOP_LOSS,
+    NO_VALID_TAKE_PROFIT,
+    PROTECTION_UNAVAILABLE,
+    ProtectionRefusal,
+    validate_protection,
+)
 from ..symbol_mapping import (
     SymbolMapping,
     get_allowed_symbols_for_broker,
@@ -260,6 +269,73 @@ venue's own spread, market movement, and the different quote asset), but a large
 gap means the trade would no longer be the trade the strategy decided on, so the
 order is refused rather than placed at an unexpected notional.
 """
+NO_TRADE_NO_VALID_STOP_LOSS = "NO_VALID_STOP_LOSS"
+"""The trade has no usable stop loss, so it cannot be protected.
+
+The rule this enforces is absolute: **a trade with no protectable stop is not
+taken.** The refusal happens locally, before any order reaches the venue, so no
+unprotected position is ever opened in the first place.
+"""
+NO_TRADE_NO_VALID_TAKE_PROFIT = "NO_VALID_TAKE_PROFIT"
+"""The trade has no usable take profit, so it has no defined exit."""
+NO_TRADE_INVALID_RISK_REWARD = "INVALID_RISK_REWARD"
+"""The target's reward does not justify the risk the stop implies."""
+NO_TRADE_PROTECTION_UNAVAILABLE = "PROTECTION_UNAVAILABLE"
+"""The levels are individually fine, but the position could not be protected.
+
+The mechanism that enforces the levels is not available — the venue offers no
+usable order type for the exit, or the monitor could not be armed or could not
+be verified against the broker. A new trade is refused rather than opened
+without protection.
+"""
+NO_TRADE_PROTECTION_FAILED = "PROTECTION_FAILED"
+"""The protection could not be **established after** the entry filled.
+
+Distinct from ``PROTECTION_UNAVAILABLE``, which refuses the entry *before* it
+is sent: this one means the order is already at the venue and the position
+exists, but the worker could not verify that it is protected. The position is
+reported as unprotected and the worker stops opening new trades until it is
+resolved.
+"""
+
+# -- the protection states a position can be in ---------------------------------
+
+PROTECTION_STATUS_PROTECTED = "PROTECTED"
+"""The position's exit levels are recorded, the monitor is armed, and the last
+check confirmed the position is actually held at the broker."""
+
+PROTECTION_STATUS_UNPROTECTED = "UNPROTECTED"
+"""The position has no enforceable protection. Either it has no recorded
+levels, or the levels could not be verified against the broker. Never reported
+as protected."""
+
+PROTECTION_STATUS_PENDING = "PROTECTION_PENDING"
+"""The position was just opened and its protection has not been verified yet.
+
+The window between the entry filling and the first verification. It is a
+distinct state so the dashboard never shows a position as protected before it
+has actually been checked."""
+
+PROTECTION_STATUS_EXIT_PENDING = "EXIT_PENDING"
+"""An exit order for this position has been placed and has not settled. The
+position is still open and still watched."""
+
+PROTECTION_STATUS_PARTIALLY_CLOSED = "PARTIALLY_CLOSED"
+"""Some of the position was closed at a target and the rest is still held and
+still protected."""
+
+PROTECTION_STATUS_CLOSED = "CLOSED"
+"""The position was closed. The record is kept so the exit is not repeated."""
+
+PROTECTION_STATUSES = (
+    PROTECTION_STATUS_PROTECTED,
+    PROTECTION_STATUS_UNPROTECTED,
+    PROTECTION_STATUS_PENDING,
+    PROTECTION_STATUS_EXIT_PENDING,
+    PROTECTION_STATUS_PARTIALLY_CLOSED,
+    PROTECTION_STATUS_CLOSED,
+)
+"""Every state a position's protection can be in, from a closed set."""
 
 NO_TRADE_REASONS = (
     NO_TRADE_NO_DECISION_DUE,
@@ -283,6 +359,11 @@ NO_TRADE_REASONS = (
     NO_TRADE_POSITION_UNAVAILABLE,
     NO_TRADE_EXECUTION_PRICE_UNAVAILABLE,
     NO_TRADE_PRICE_DEVIATION,
+    NO_TRADE_NO_VALID_STOP_LOSS,
+    NO_TRADE_NO_VALID_TAKE_PROFIT,
+    NO_TRADE_INVALID_RISK_REWARD,
+    NO_TRADE_PROTECTION_UNAVAILABLE,
+    NO_TRADE_PROTECTION_FAILED,
 )
 """The closed vocabulary of reasons a RUNNING worker placed no order. A reason is
 ``None`` only when the cycle actually placed an order."""
@@ -454,6 +535,14 @@ class TradingDecision:
     take_profit: float | None = None
     """The strategy's proposed take-profit, when it proposed one. Same rules as
     ``stop_loss``."""
+    targets: tuple[float, ...] = ()
+    """Every take-profit the strategy supports, nearest first.
+
+    ``take_profit`` is the first of these. A strategy that derives several draws
+    on liquidity names them all, so the position can be managed in stages (TP1,
+    then TP2, then TP3) instead of only at one price. Empty when the strategy
+    named a single target — which is then ``take_profit`` — and never padded
+    with levels the strategy did not derive."""
     strategy_name: str | None = None
     """The name of the strategy that produced the decision, for the Decisions view.
     Never fabricated: ``None`` when the source did not name one."""
@@ -1502,6 +1591,40 @@ def _exit_reason(
     return None
 
 
+def _ladder_exit_reason(
+    price: float, stop_loss: Any, targets: Any, taken: Any = ()
+) -> tuple[str, float | None] | None:
+    """Which recorded level ``price`` has crossed on a multi-target ladder.
+
+    Returns ``(reason, target_price)`` — where ``reason`` is ``"stop_loss"`` or
+    ``"take_profit"`` — and the target that triggered it, or ``None`` when no
+    level has been crossed.
+
+    The ladder is the strategy's own list of levels, nearest first. Only the
+    targets that have **not** yet been taken can trigger: a target already
+    reached is not a new trigger, so the position is not sold into it twice.
+
+    The stop is checked first, for the same reason as in :func:`_exit_reason`: a
+    bar that spans both levels is read as the stop, which is the conservative
+    reading.
+    """
+    if not math.isfinite(price) or price <= 0:
+        return None
+    stop = _as_float(stop_loss)
+    if stop is not None and stop > 0 and price <= stop:
+        return ("stop_loss", None)
+    already = {float(value) for value in (taken or ()) if _as_float(value) is not None}
+    for candidate in list(targets or ()):
+        level = _as_float(candidate)
+        if level is None or level <= 0:
+            continue
+        if any(abs(level - done) <= 1e-9 for done in already):
+            continue
+        if price >= level:
+            return ("take_profit", level)
+    return None
+
+
 def _has_usable_level(stop_loss: Any, take_profit: Any) -> bool:
     """Whether a recorded position carries at least one level that can trigger.
 
@@ -1518,7 +1641,13 @@ def _has_usable_level(stop_loss: Any, take_profit: Any) -> bool:
     return False
 
 
-def _exit_order_id(symbol: str, price: float, reason: str, episode: int = 0) -> str:
+def _exit_order_id(
+    symbol: str,
+    price: float,
+    reason: str,
+    episode: int = 0,
+    target: float | None = None,
+) -> str:
     """A deterministic, broker-safe id for one exit **episode**.
 
     Derived from the symbol, the trigger reason and the episode number, so
@@ -1536,6 +1665,12 @@ def _exit_order_id(symbol: str, price: float, reason: str, episode: int = 0) -> 
     daily-order budget, and it would also close a position that a *new* entry
     had legitimately re-opened.
 
+    The **target** is part of the id when there is one, because a ladder's
+    rungs are separate exits: closing the first rung and then the second is
+    two different orders, and an id shared between them would make the second
+    reconcile the first instead of closing the next slice. The target is the
+    level, not the price, so it does not change as the market moves.
+
     ``episode`` distinguishes one *holding* of a symbol from a later one: a
     position that was closed and then re-opened is a new episode and gets its
     own id, so the broker does not reconcile the old episode's order instead
@@ -1545,6 +1680,8 @@ def _exit_order_id(symbol: str, price: float, reason: str, episode: int = 0) -> 
     longer affects the id.
     """
     material = f"exit:{symbol.upper()}:{reason}:{episode}"
+    if target is not None:
+        material = f"{material}:{target:.12g}"
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
     return f"ptx-{digest}"
 
@@ -1670,9 +1807,31 @@ class PaperTradingConfig:
     order_notional: float = 25.0
     """Target cash per order. Deliberately small, so a 50 USD paper account is not
     drained by one order."""
+    min_reward_risk: float = 1.0
+    """The smallest reward-to-risk ratio a trade may be taken at.
+
+    The **gate**, not a sizing rule: a trade whose nearest target offers less
+    reward than its stop risks is refused before the order is sent, because
+    such a trade cannot be managed well. The default of 1.0 is TJR's own
+    ``min_reward_risk`` — the same number the rule chain already refuses
+    setups below — so the gate and the strategy agree by default.
+
+    Raising it only removes trades; it never adds one and never enlarges one.
+    """
+    max_risk_per_trade: float | None = None
+    """The most one entry may **lose** if its stop is hit, in dollars.
+
+    ``None`` (the default) means no dollar-risk budget: the size is bounded by
+    the notional cap alone, exactly as before. Setting it makes the size the
+    smaller of the notional-sized quantity and the quantity whose loss at the
+    strategy's stop fits this budget, so a wide stop buys a smaller position
+    instead of the same dollars with more risk attached.
+
+    It can only ever **shrink** an order. The $25 notional cap, the five open
+    positions, the ten daily orders and the long-only rule are untouched by it.
+    """
     whole_shares: bool = WHOLE_SHARES
     """Whether to size to whole shares, derived from the one parity constant.
-
     ``False`` (the default) allows a fractional quantity, which is what lets a
     $25 order on a $200+ name buy a positive quantity instead of flooring to zero.
     This is not a second policy: it reads :data:`tradingagents.risk.paper_parity.WHOLE_SHARES`,
@@ -1955,6 +2114,47 @@ class WorkerState:
     opened, keyed by symbol. Written when an order fills from a decision that
     carried them, and read by the exit policy. A position with no entry here has no
     recorded exit level, so no exit is fabricated for it. Additive and optional."""
+    protections: dict[str, dict] = field(default_factory=dict)
+    """The **protection state** of each position the worker opened, keyed by symbol.
+
+    Distinct from :attr:`stops`, which holds the *levels*; this holds the
+    *verdict* on whether those levels are actually being enforced. A position
+    can have levels and still be unprotected — the monitor may not be armed, or
+    the last check may have failed — and the difference is exactly what an
+    operator has to see.
+
+    Each row carries the state (``PROTECTED``, ``PROTECTION_PENDING``,
+    ``UNPROTECTED``, ``EXIT_PENDING``, ``PARTIALLY_CLOSED``, ``CLOSED``), the
+    reason when it is not protected, the entry/SL/targets, the quantity the
+    protection was verified against, and the instant of the last check.
+
+    Additive and optional: an older state file without it reads back as "no
+    protection recorded"."""
+    protection_status: str = PROTECTION_STATUS_UNPROTECTED
+    """The protection state of the worker **as a whole**.
+
+    The worker-level gate: a worker whose protection monitor is not available
+    must not open a new trade, because a new trade would join the positions it
+    already cannot protect. ``PROTECTED`` means the mechanism is available and
+    every watched position was verified on the last check."""
+    protection_checked_at: str | None = None
+    """When the protection mechanism was last verified against the broker.
+
+    The dashboard's "last protection check" time. It is set only by a real
+    check, so its absence means "never checked" rather than "checked at
+    start-up"."""
+    protection_detail: str | None = None
+    """Why the worker-level protection state is what it is. ``None`` when the
+    protection is healthy."""
+    target_progress: dict[str, dict] = field(default_factory=dict)
+    """How far each position has progressed through its target ladder.
+
+    Keyed by symbol, each row names the targets that have already been acted
+    on and the quantity that was closed at each. It is what makes a staged exit
+    idempotent across a restart: a target that was already taken is not taken
+    twice, and the remainder is still known after the process dies.
+
+    Additive and optional."""
     cycles_completed: int = 0
     """Cycles the loop has run since the last start. Additive and optional: an
     older state file without the field reads back as ``0``, and a reader of an
@@ -2023,6 +2223,11 @@ class WorkerState:
             "exit_attempts": {k: dict(v) for k, v in sorted(self.exit_attempts.items())},
             "exit_attempt_counter": self.exit_attempt_counter,
             "stops": {k: dict(v) for k, v in sorted(self.stops.items())},
+            "protections": {k: dict(v) for k, v in sorted(self.protections.items())},
+            "protection_status": self.protection_status,
+            "protection_checked_at": self.protection_checked_at,
+            "protection_detail": self.protection_detail,
+            "target_progress": {k: dict(v) for k, v in sorted(self.target_progress.items())},
             "cycles_completed": self.cycles_completed,
             "processed_decisions": sorted(self.processed_decisions),
             "decision_outcomes": dict(sorted(self.decision_outcomes.items())),
@@ -2074,6 +2279,15 @@ class WorkerState:
             },
             exit_attempt_counter=int(payload.get("exit_attempt_counter") or 0),
             stops={k: dict(v) for k, v in (payload.get("stops") or {}).items()},
+            protections={
+                k: dict(v) for k, v in (payload.get("protections") or {}).items()
+            },
+            protection_status=payload.get("protection_status", PROTECTION_STATUS_UNPROTECTED),
+            protection_checked_at=payload.get("protection_checked_at"),
+            protection_detail=payload.get("protection_detail"),
+            target_progress={
+                k: dict(v) for k, v in (payload.get("target_progress") or {}).items()
+            },
             cycles_completed=_as_int(payload.get("cycles_completed"), 0),
             processed_decisions=set(payload.get("processed_decisions") or []),
             decision_outcomes={
@@ -2331,6 +2545,17 @@ def worker_status_view(
         "stops": {k: dict(v) for k, v in sorted(state.stops.items())},
         "position_protection": {
             k: dict(v) for k, v in sorted(_position_protection_rows(state).items())
+        },
+        # The protection **verdict**, separate from the levels. ``protection_status``
+        # says whether the positions are actually being protected; the rows above
+        # say what each position's levels are. An operator needs both: a stop
+        # level on a position the broker does not hold is not a protection.
+        "protection_status": state.protection_status,
+        "protection_checked_at": state.protection_checked_at,
+        "protection_detail": state.protection_detail,
+        "protections": {k: dict(v) for k, v in sorted(state.protections.items())},
+        "target_progress": {
+            k: dict(v) for k, v in sorted(state.target_progress.items())
         },
         "last_cycle": last_cycle.to_dict() if last_cycle is not None else None,
         "decision_statistics": _decision_statistics(state),
@@ -3022,6 +3247,36 @@ class PaperTradingWorker:
             self.last_cycle = result
             return result
 
+        # -- the mandatory protection gate -------------------------------------
+        # A BUY is only sent when the trade can be *managed*: it has a stop, it
+        # has a target, the levels are on the right side of the entry, and the
+        # reward justifies the risk. The check happens **here**, before the order
+        # reaches the venue, so an unprotectable trade never becomes a position.
+        #
+        # The levels are the strategy's own — TJR derives the stop from the
+        # invalidation swing and the targets from the draws on liquidity. Nothing
+        # here invents a level or adjusts one; the gate only decides whether the
+        # strategy's levels are usable.
+        if decision.side.lower() == "buy":
+            refusal = self._check_protection(decision, execution_price)
+            if refusal is not None:
+                code, detail = refusal
+                self.state.last_error = None
+                self.state.last_no_decision_reason = detail
+                self.state.last_no_trade_code = code
+                self._remember_no_trade(decision.decision_id, code)
+                self._save()
+                result = CycleResult(
+                    ran=False,
+                    decision_id=decision.decision_id,
+                    skipped_reason=detail,
+                    reason_code=code,
+                    reference_price=execution_price,
+                    **self._market_data_fields(),
+                )
+                self.last_cycle = result
+                return result
+
         try:
             order = broker.submit_order(
                 symbol=execution_symbol,
@@ -3091,6 +3346,86 @@ class PaperTradingWorker:
         self.last_cycle = result
         return result
 
+    def _check_protection(
+        self, decision: TradingDecision, execution_price: float
+    ) -> tuple[str, str] | None:
+        """Whether this BUY may be sent, or the reason it may not.
+
+        Returns ``None`` when the trade is protectable, and ``(code, detail)``
+        otherwise. The codes come from the worker's closed no-trade vocabulary,
+        so a dashboard can tell a missing stop from a missing target from an
+        unavailable protection mechanism.
+
+        The check is local and happens **before** the order is submitted. That
+        is the whole point: an unprotectable trade must never reach the venue,
+        because a position without protection is worse than no position at all.
+
+        Four things are required, and each has its own reason:
+
+        1. a usable **stop** — otherwise the loss is unbounded;
+        2. a usable **target** — otherwise there is no defined exit;
+        3. levels on the **correct side** of the entry, with a reward that
+           justifies the risk;
+        4. an **available protection mechanism** — the worker must be able to
+           enforce the levels once the position exists.
+        """
+        entry = execution_price
+        stop = decision.stop_loss
+        targets = list(decision.targets or ())
+        if not targets and decision.take_profit is not None:
+            targets = [decision.take_profit]
+
+        verdict = validate_protection(
+            entry=entry,
+            stop_loss=stop,
+            targets=targets,
+            side="long",
+            min_reward_risk=self.config.min_reward_risk,
+        )
+        if isinstance(verdict, ProtectionRefusal):
+            return self._protection_code(verdict.reason_code), verdict.detail
+
+        # The mechanism itself. The venue offers no bracket or OCO order for
+        # crypto, so the levels are enforced by the worker's own exit monitor.
+        # The monitor is available whenever the worker can read a price and
+        # place an exit order — both of which it must already be able to do to
+        # run at all. If either is missing, the trade is refused rather than
+        # opened without protection.
+        if not self._protection_mechanism_available():
+            return (
+                NO_TRADE_PROTECTION_UNAVAILABLE,
+                "the exit monitor is not available: the worker cannot read a "
+                "current price or place an exit order, so the position could not "
+                "be protected after the entry filled",
+            )
+        return None
+
+    @staticmethod
+    def _protection_code(reason_code: str) -> str:
+        """Map a protection reason onto the worker's no-trade vocabulary."""
+        return {
+            NO_VALID_STOP_LOSS: NO_TRADE_NO_VALID_STOP_LOSS,
+            NO_VALID_TAKE_PROFIT: NO_TRADE_NO_VALID_TAKE_PROFIT,
+            INVALID_RISK_REWARD: NO_TRADE_INVALID_RISK_REWARD,
+            INVALID_TARGET_ORDER: NO_TRADE_INVALID_RISK_REWARD,
+            PROTECTION_UNAVAILABLE: NO_TRADE_PROTECTION_UNAVAILABLE,
+        }.get(reason_code, NO_TRADE_PROTECTION_UNAVAILABLE)
+
+    def _protection_mechanism_available(self) -> bool:
+        """Whether the exit monitor can actually enforce the levels.
+
+        The monitor needs two things: a price seam to watch, and a broker to
+        receive the exit order. Both are checked against the **real** seams, so
+        the answer cannot be optimistic.
+
+        This is a *capability* check, not a verification: it says the monitor
+        could run. Whether a specific position is actually protected is
+        established separately, by reading the position back from the broker.
+        """
+        if self._broker is None:
+            return False
+        return self.market_data is not None
+
     def _record_exit_levels(self, decision: TradingDecision, order: BrokerOrder) -> None:
         """Record the strategy's stop/target for a *filled* long entry.
 
@@ -3099,6 +3434,16 @@ class PaperTradingWorker:
         exit. The levels are stored verbatim from the decision; when the strategy
         proposed none, nothing is stored, so the exit policy has no level to act on
         and fabricates none.
+
+        Two records are written, and they answer different questions:
+
+        - ``state.stops`` holds the **levels** — what to watch and where to exit;
+        - ``state.protections`` holds the **verdict** — whether the position is
+          actually protected, verified against the broker.
+
+        A position starts as ``PROTECTION_PENDING``: the entry has filled, but
+        nothing has yet confirmed that the broker agrees the position exists. It
+        is not reported as ``PROTECTED`` until that confirmation arrives.
         """
         if order.side.lower() != "buy" or order.filled_quantity <= 0:
             return
@@ -3112,12 +3457,23 @@ class PaperTradingWorker:
         self.state.exit_attempts.pop(symbol, None)
         self.state.exits.pop(symbol, None)
         self.state.exit_attempt_counter += 1
+        targets = list(decision.targets or ())
+        if not targets and decision.take_profit is not None:
+            targets = [decision.take_profit]
+        now = datetime.now(UTC).isoformat()
+        # The entry the protection is measured from is the price the position was
+        # actually filled at. The order's average fill is the truth; the level
+        # record's own entry is only a fallback for a fill that reports no
+        # average price.
+        entry_price = order.filled_avg_price
         self.state.stops[symbol] = {
             "symbol": symbol,
             "stop_loss": decision.stop_loss,
             "take_profit": decision.take_profit,
+            "targets": targets,
+            "entry_price": entry_price,
             "decision_id": decision.decision_id,
-            "recorded_at": datetime.now(UTC).isoformat(),
+            "recorded_at": now,
             # The canonical decision symbol, so a reader can tell *which* market
             # the levels came from (``BTC/USDT``) from the execution symbol the
             # position is held under (``BTC/USD``). Additive and optional.
@@ -3126,7 +3482,265 @@ class PaperTradingWorker:
             # later episode cannot be confused with one for these levels.
             "episode": self.state.exit_attempt_counter,
         }
+        # The protection starts as *pending*, never as *protected*: the entry has
+        # filled, but the position has not yet been read back from the broker.
+        # Claiming protection before it is verified is the exact lie this whole
+        # feature exists to prevent.
+        self.state.protections[symbol] = {
+            "symbol": symbol,
+            "status": PROTECTION_STATUS_PENDING,
+            "reason_code": None,
+            "detail": "the entry filled; the protection has not been verified yet",
+            "entry_price": entry_price,
+            "stop_loss": decision.stop_loss,
+            "take_profit": decision.take_profit,
+            "targets": targets,
+            "decision_id": decision.decision_id,
+            "quantity": order.filled_quantity,
+            "recorded_at": now,
+            "checked_at": None,
+            "episode": self.state.exit_attempt_counter,
+        }
+        # A new entry starts a fresh target ladder: no target has been taken yet.
+        self.state.target_progress[symbol] = {
+            "symbol": symbol,
+            "targets": targets,
+            "taken": [],
+            "closed_quantity": 0.0,
+            "updated_at": now,
+        }
         self._save()
+
+    def _verify_protection(self, symbol: str) -> dict[str, Any]:
+        """Confirm the position is really held, and record the verdict.
+
+        The levels are recorded when the entry fills, but a recorded level is not
+        a protected position: the position has to be **held at the broker** for
+        the levels to mean anything. So the position is read back and compared
+        with what was recorded.
+
+        The verdict is one of:
+
+        - ``PROTECTED`` — the broker holds the position at (or near) the
+          recorded quantity, so the levels are live;
+        - ``UNPROTECTED`` — the broker does not hold it, or holds a different
+          quantity, so the recorded levels cannot be enforced;
+        - ``EXIT_PENDING`` — an exit order is in flight;
+        - ``CLOSED`` — the position is flat and the episode is over.
+
+        A read failure is never reported as protected: the position is marked
+        ``UNPROTECTED`` with the failure as its reason, because "I could not
+        check" and "it is protected" must never look the same.
+        """
+        record = self.state.protections.get(symbol)
+        if record is None:
+            return {}
+        now = datetime.now(UTC).isoformat()
+        if symbol in self.state.exits:
+            record["status"] = PROTECTION_STATUS_CLOSED
+            record["checked_at"] = now
+            self.state.protections[symbol] = record
+            self._save()
+            return record
+        if symbol in self.state.exit_attempts:
+            record["status"] = PROTECTION_STATUS_EXIT_PENDING
+            record["checked_at"] = now
+            self.state.protections[symbol] = record
+            self._save()
+            return record
+
+        expected = record.get("quantity")
+        try:
+            held = self._held_quantity(symbol)
+        except PositionReadError as exc:
+            record["status"] = PROTECTION_STATUS_UNPROTECTED
+            record["reason_code"] = NO_TRADE_POSITION_UNAVAILABLE
+            record["detail"] = f"the held quantity could not be read: {exc}"
+            record["checked_at"] = now
+            self.state.protections[symbol] = record
+            self.state.protection_status = PROTECTION_STATUS_UNPROTECTED
+            self.state.protection_detail = record["detail"]
+            self.state.protection_checked_at = now
+            self._save()
+            return record
+
+        if held <= 0:
+            record["status"] = PROTECTION_STATUS_CLOSED
+            record["reason_code"] = None
+            record["detail"] = "the broker reports the position is flat"
+            record["checked_at"] = now
+            record["held_quantity"] = 0.0
+            self.state.protections[symbol] = record
+            self._save()
+            return record
+
+        record["held_quantity"] = held
+        if expected is not None and abs(float(expected) - held) > 1e-6:
+            # The broker holds a different quantity than the entry filled. The
+            # levels are still the right ones, but the protection is stated
+            # against the quantity actually held, so the record follows the
+            # broker rather than the order.
+            record["status"] = PROTECTION_STATUS_PARTIALLY_CLOSED
+            record["reason_code"] = None
+            record["detail"] = (
+                f"the broker holds {held} against an entry of {expected}; the "
+                "position was reduced outside the worker"
+            )
+        else:
+            record["status"] = PROTECTION_STATUS_PROTECTED
+            record["reason_code"] = None
+            record["detail"] = "the position is held at the broker and its levels are live"
+        record["checked_at"] = now
+        self.state.protections[symbol] = record
+        self.state.protection_checked_at = now
+        self.state.protection_detail = None
+        self.state.protection_status = PROTECTION_STATUS_PROTECTED
+        self._save()
+        return record
+
+    def _verify_all_protections(self) -> None:
+        """Verify every watched position, and roll the worker-level verdict up.
+
+        The worker-level status is the *worst* of the positions' statuses: a
+        worker with one unprotected position is not a protected worker, and the
+        dashboard has to be able to say so.
+        """
+        if not self.state.protections:
+            self.state.protection_status = PROTECTION_STATUS_UNPROTECTED
+            self.state.protection_detail = "no position is protected"
+            self.state.protection_checked_at = datetime.now(UTC).isoformat()
+            self._save()
+            return
+        statuses: list[str] = []
+        detail: str | None = None
+        for symbol in sorted(self.state.protections):
+            record = self._verify_protection(symbol)
+            status = record.get("status")
+            if status:
+                statuses.append(status)
+            if status != PROTECTION_STATUS_PROTECTED and detail is None:
+                detail = f"{symbol}: {record.get('detail') or status}"
+        now = datetime.now(UTC).isoformat()
+        if PROTECTION_STATUS_UNPROTECTED in statuses:
+            self.state.protection_status = PROTECTION_STATUS_UNPROTECTED
+            self.state.protection_detail = detail
+        elif PROTECTION_STATUS_PENDING in statuses:
+            self.state.protection_status = PROTECTION_STATUS_PENDING
+            self.state.protection_detail = detail
+        elif PROTECTION_STATUS_EXIT_PENDING in statuses:
+            self.state.protection_status = PROTECTION_STATUS_EXIT_PENDING
+            self.state.protection_detail = detail
+        elif all(status == PROTECTION_STATUS_CLOSED for status in statuses):
+            # Every position is closed, so there is nothing left to protect. The
+            # verdict is "closed", never "protected": reporting a protection
+            # for a position that no longer exists would tell an operator a
+            # risk is covered when no position is open at all.
+            self.state.protection_status = PROTECTION_STATUS_CLOSED
+            self.state.protection_detail = detail
+        else:
+            self.state.protection_status = PROTECTION_STATUS_PROTECTED
+            self.state.protection_detail = None
+        self.state.protection_checked_at = now
+        self._save()
+
+    def _mark_target_taken(self, symbol: str, target: float, filled: float) -> None:
+        """Record that a target was reached, so it is not sold into twice.
+
+        The ladder is the strategy's own, and a target that has been taken is
+        spent: the next cycle watches the *next* target, and the position that
+        is left is still protected by the same stop.
+
+        The record is written to the worker's state, so it survives a restart:
+        a worker that comes back mid-ladder does not sell the same target again.
+        """
+        progress = self.state.target_progress.get(symbol)
+        if progress is None:
+            progress = {
+                "symbol": symbol,
+                "targets": [],
+                "taken": [],
+                "closed_quantity": 0.0,
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+        taken = list(progress.get("taken") or [])
+        if not any(abs(float(target) - float(done)) <= 1e-9 for done in taken):
+            taken.append(float(target))
+        progress["taken"] = taken
+        progress["closed_quantity"] = float(progress.get("closed_quantity") or 0.0) + float(
+            filled or 0.0
+        )
+        progress["updated_at"] = datetime.now(UTC).isoformat()
+        self.state.target_progress[symbol] = progress
+
+    def _exit_quantity(
+        self,
+        *,
+        symbol: str,
+        held: float,
+        reason: str,
+        ladder: list[Any],
+        taken: list[Any],
+        target: float | None,
+        entry_quantity: float | None = None,
+    ) -> float:
+        """How much of the position this exit closes.
+
+        A **stop** closes the whole position: a stop is the end of the trade, not
+        a stage of it. A **target** closes the slice that target represents.
+
+        The slice is an equal share of the **original** position, one share per
+        remaining target, so a three-target ladder closes a third at the first
+        target, another third at the second, and the rest at the last. The
+        original size is the yardstick, not what happens to be held now: the
+        rungs have to add up to the position the entry opened, so a share is
+        never computed against a shrinking base.
+
+        That split is the simplest one that needs no extra level from the
+        strategy — the ladder says *where* to take profit, not *how much* at
+        each one.
+
+        The last target closes the remainder, and a single-target exit closes
+        everything. The result is never more than what is held and never
+        negative, and it is never zero: a zero-quantity order would be rejected
+        by the venue, so the whole remaining position is closed instead.
+        """
+        if reason != "take_profit" or not ladder or target is None:
+            return float(held)
+        remaining = [
+            level
+            for level in ladder
+            if not any(
+                abs(float(_as_float(level) or 0.0) - float(done)) <= 1e-9
+                for done in taken
+                if _as_float(done) is not None
+            )
+        ]
+        if len(remaining) <= 1:
+            # The last target, or a single target: close what is left.
+            return float(held)
+        base = entry_quantity if entry_quantity is not None else float(held)
+        if not math.isfinite(base) or base <= 0:
+            base = float(held)
+        # The share is of the original position, but it can never exceed what
+        # is actually held: the broker is the authority for what is held, and
+        # an order for more than the position would be refused as a short.
+        share = base / len(remaining)
+        if float(held) < base:
+            # The position is smaller than the entry recorded (it was reduced
+            # outside the worker), so the shares are of what is left.
+            share = float(held) / len(remaining)
+        slice_size = share
+        if not math.isfinite(slice_size) or slice_size <= 0:
+            return float(held)
+        if self.config.whole_shares:
+            slice_size = math.floor(slice_size)
+        else:
+            slice_size = math.floor(slice_size * 1_000_000) / 1_000_000
+        if slice_size <= 0:
+            # A fractional slice too small to express: close the whole position
+            # rather than send an order the venue would reject.
+            return float(held)
+        return min(float(held), slice_size)
 
     def _check_exits(self) -> CycleResult | None:
         """Close a worker-held long whose recorded stop or target has triggered.
@@ -3201,7 +3815,21 @@ class PaperTradingWorker:
                     # Reconciling an exit does not make it *done*. A partially
                     # filled exit still leaves a remainder, so the position stays
                     # watched; only a fully filled exit closes it.
-                    if self._exit_completed(order, held):
+                    # The attempt's own quantity is the yardstick, not the whole
+                    # holding: a ladder exit closes one slice, and it is done
+                    # when that slice fills — the rest of the position stays open
+                    # against the next target.
+                    attempted = _as_float(attempt.get("quantity"))
+                    slice_done = self._exit_completed(
+                        order, attempted if attempted is not None else held
+                    )
+                    if slice_done:
+                        attempt_target = _as_float(attempt.get("target"))
+                        if attempt.get("reason") == "take_profit" and attempt_target is not None:
+                            self._mark_target_taken(
+                                symbol, attempt_target, order.filled_quantity
+                            )
+                    if slice_done and self._exit_completed(order, held):
                         self.state.exits[symbol] = {
                             "symbol": symbol,
                             "reason": attempt.get("reason") or "exit",
@@ -3210,6 +3838,11 @@ class PaperTradingWorker:
                             "filled_quantity": order.filled_quantity,
                             "exited_at": datetime.now(UTC).isoformat(),
                         }
+                        self.state.exit_attempts.pop(symbol, None)
+                    elif slice_done:
+                        # The slice filled and the position is still open: the
+                        # attempt is finished, so the next cycle may act on the
+                        # next target.
                         self.state.exit_attempts.pop(symbol, None)
                     self._save()
                     return CycleResult(
@@ -3244,11 +3877,34 @@ class PaperTradingWorker:
                     reason_code=NO_TRADE_MARKET_DATA_UNAVAILABLE,
                     **self._market_data_fields(),
                 )
-            reason = _exit_reason(price, stop_loss, take_profit)
+            # A strategy that names a **ladder** of targets is managed in stages:
+            # the nearest untaken target triggers a *partial* close, and the
+            # position stays open against the next one. The stop still closes the
+            # whole position, because a stop is not a stage — it is the end.
+            #
+            # The ladder is checked **first** when the strategy named one, so a
+            # position is never closed in full at the first target just because
+            # the ladder's first rung happens to be the recorded take-profit.
+            ladder = list(level.get("targets") or ())
+            progress = self.state.target_progress.get(symbol) or {}
+            taken = list(progress.get("taken") or ())
+            hit_target: float | None = None
+            if ladder:
+                ladder_hit = _ladder_exit_reason(price, stop_loss, ladder, taken)
+                if ladder_hit is not None:
+                    reason, hit_target = ladder_hit
+                else:
+                    reason = None
+            else:
+                reason = _exit_reason(price, stop_loss, take_profit)
             if reason is None:
                 continue
             exit_id = _exit_order_id(
-                symbol, price, reason, int(level.get("episode") or 0)
+                symbol,
+                price,
+                reason,
+                int(level.get("episode") or 0),
+                target=hit_target,
             )
             if exit_id in self.state.orders:
                 # Already attempted for this trigger: reconcile, do not resubmit.
@@ -3267,6 +3923,11 @@ class PaperTradingWorker:
                         "exited_at": datetime.now(UTC).isoformat(),
                     }
                     self.state.exit_attempts.pop(symbol, None)
+                elif hit_target is not None and order.filled_quantity > 0:
+                    # The slice for this target filled and the position is still
+                    # open: mark the target as taken so the next cycle watches
+                    # the next one instead of selling into this one again.
+                    self._mark_target_taken(symbol, hit_target, order.filled_quantity)
                 self._save()
                 return CycleResult(
                     ran=False,
@@ -3321,10 +3982,26 @@ class PaperTradingWorker:
                         reference_price=price,
                         **self._market_data_fields(),
                     )
+            # How much to close. A **stop** closes everything — the position is
+            # over. A **target** on a multi-target ladder closes only the slice
+            # that target represents, and the position stays open against the
+            # next one. A single-target exit, or the last target of a ladder,
+            # closes everything.
+            exit_quantity = self._exit_quantity(
+                symbol=symbol,
+                held=held,
+                reason=reason,
+                ladder=ladder,
+                taken=taken,
+                target=hit_target if reason == "take_profit" else None,
+                entry_quantity=_as_float(
+                    (self.state.protections.get(symbol) or {}).get("quantity")
+                ),
+            )
             try:
                 order = broker.submit_order(
                     symbol=symbol,
-                    quantity=held,
+                    quantity=exit_quantity,
                     side="sell",
                     reference_price=exit_price,
                     client_order_id=exit_id,
@@ -3360,7 +4037,10 @@ class PaperTradingWorker:
                 "reason": reason,
                 "price": price,
                 "client_order_id": exit_id,
-                "quantity": held,
+                "quantity": exit_quantity,
+                # Which target this exit is for, so a reconciliation after a
+                # restart knows which level the slice belonged to.
+                "target": hit_target,
                 "attempted_at": datetime.now(UTC).isoformat(),
             }
             # The exit is recorded as *done* only when the position is actually
@@ -3368,15 +4048,26 @@ class PaperTradingWorker:
             # recording it as exited would silence the protection on the part
             # that is still open — the position would look closed while it is
             # not.
-            if self._exit_completed(order, held):
-                self.state.exits[symbol] = {
-                    "symbol": symbol,
-                    "reason": reason,
-                    "price": price,
-                    "quantity": held,
-                    "filled_quantity": order.filled_quantity,
-                    "exited_at": datetime.now(UTC).isoformat(),
-                }
+            if self._exit_completed(order, exit_quantity):
+                # A target that has been reached is marked as **taken**, so the
+                # next cycle watches the *next* target rather than selling into
+                # the same one again. A stop is not a target: it closes the
+                # position, and the ladder is over.
+                if reason == "take_profit" and hit_target is not None:
+                    self._mark_target_taken(symbol, hit_target, order.filled_quantity)
+                if self._exit_completed(order, held):
+                    self.state.exits[symbol] = {
+                        "symbol": symbol,
+                        "reason": reason,
+                        "price": price,
+                        "quantity": held,
+                        "filled_quantity": order.filled_quantity,
+                        "exited_at": datetime.now(UTC).isoformat(),
+                    }
+                # The attempt is finished once its own slice has filled. The
+                # position may still be open — that is what a ladder stage is
+                # — and the next cycle must be free to act on the next target,
+                # so the attempt record is cleared either way.
                 self.state.exit_attempts.pop(symbol, None)
             self._save()
             return CycleResult(
@@ -3500,7 +4191,7 @@ class PaperTradingWorker:
         re-sized order can never exceed the notional the risk engine approved.
         """
         if decision.quantity is not None and decision.notional is None:
-            return float(decision.quantity)
+            return self._risk_capped_quantity(decision, reference_price, float(decision.quantity))
         assert decision.notional is not None  # __post_init__ guarantees one
         raw = decision.notional / reference_price
         if self.config.whole_shares:
@@ -3519,7 +4210,60 @@ class PaperTradingWorker:
                 f"the notional {decision.notional} buys no shares at price "
                 f"{reference_price}; the order would be empty"
             )
-        return float(quantity)
+        return self._risk_capped_quantity(decision, reference_price, float(quantity))
+
+    def _risk_capped_quantity(
+        self, decision: TradingDecision, reference_price: float, quantity: float
+    ) -> float:
+        """The quantity whose **loss at the stop** fits the risk budget.
+
+        The notional cap bounds how much cash an order commits. It does not bound
+        how much that cash can **lose**: a $25 position with a 2% stop risks
+        $0.50, and the same $25 with a 40% stop risks $10. A cap that only
+        watches the notional therefore lets the *risk* of the book float with
+        whatever stop distance the strategy happened to find.
+
+        This closes that gap: the size is the smaller of the notional-sized
+        quantity and the quantity whose stop-distance loss fits
+        ``max_risk_per_trade``. The risk bound can only ever make an order
+        **smaller**, so the $25 notional cap, the five-position cap, the
+        ten-order cap and the long-only rule are all unchanged — this only
+        narrows an entry that would otherwise be too large for its stop.
+
+        A decision with no stop never reaches here: the mandatory-protection gate
+        refuses it before the order is sent. When the stop is present but at the
+        entry (a zero distance), the risk bound is zero and the trade is refused
+        by the caller rather than sized to zero.
+        """
+        stop = decision.stop_loss
+        if stop is None:
+            # The gate already refused a decision without a stop. Reaching here
+            # means the gate was bypassed, so the notional sizing stands and no
+            # risk bound is invented from a level that does not exist.
+            return quantity
+        distance = abs(float(reference_price) - float(stop))
+        if not math.isfinite(distance) or distance <= 0:
+            raise WorkerError(
+                f"the stop {stop} is at the entry price {reference_price}, so the "
+                "trade carries no risk distance to size against"
+            )
+        budget = self.config.max_risk_per_trade
+        if budget is None or budget <= 0:
+            return quantity
+        risk_units = budget / distance
+        if not math.isfinite(risk_units):
+            return quantity
+        capped = min(quantity, risk_units)
+        if self.config.whole_shares:
+            capped = math.floor(capped)
+        else:
+            capped = math.floor(capped * 1_000_000) / 1_000_000
+        if capped <= 0:
+            raise WorkerError(
+                f"a {budget:.8g} risk budget against a stop {distance:.8g} away from "
+                f"price {reference_price} buys no shares; the order would be empty"
+            )
+        return float(capped)
 
     def _size_sell(self, decision: TradingDecision, *, execution_symbol: str) -> float:
         """The SELL quantity: the held long, clamped to it. Never the notional.
@@ -3662,6 +4406,19 @@ class PaperTradingWorker:
                 step()
             except Exception as exc:  # noqa: BLE001 - a stale view is better than a crash
                 self.state.last_error = f"{type(exc).__name__}: {exc}"
+        # The protection is re-verified on every refresh, so the dashboard's
+        # "last protection check" is a real check and not a timestamp of when
+        # the state file was written. Contained like the reads above: a failed
+        # verification marks the position unprotected, it never crashes a cycle.
+        if self.state.protections:
+            try:
+                self._verify_all_protections()
+            except Exception as exc:  # noqa: BLE001 - a stale view beats a crash
+                self.state.last_error = f"{type(exc).__name__}: {exc}"
+                self.state.protection_status = PROTECTION_STATUS_UNPROTECTED
+                self.state.protection_detail = (
+                    f"the protection could not be verified: {type(exc).__name__}: {exc}"
+                )
 
     def _no_decision_outcome(self) -> tuple[str, str]:
         """The ``(reason, code)`` for a cycle the source yielded no decision.

@@ -188,7 +188,10 @@ def _current_source(
         )
     return CurrentMarketDecisionSource(
         symbols=(SYMBOL,),
-        inference=StubInference(rating=rating),
+        # The stub proposes the levels the mandatory-protection gate requires: a
+        # stop below the entry and a target above it. The price seam quotes
+        # 101.0, so the levels are chosen around it.
+        inference=StubInference(rating=rating, stop_loss=95.0, take_profit=112.0),
         market_data=market_data,
         market_hours=clock,
         order_notional=order_notional,
@@ -569,11 +572,34 @@ class TestCadenceAndIdempotency:
         assert source.skip_code == NO_TRADE_CURRENT_MARKET_NO_NEW_DATA
 
     def test_the_current_source_does_not_fabricate_size_or_stop(self):
+        """The source sizes nothing and invents no level of its own.
+
+        The size is the worker's configured notional, and the levels are exactly
+        what the strategy seam proposed — copied, never derived, never defaulted.
+        A seam that proposes none yields a decision with none, which the
+        mandatory-protection gate then refuses.
+        """
         source = _current_source()
         decision = source.next_decision()
         assert decision.notional == 25.0  # the worker's configured target
+        assert decision.stop_loss == 95.0  # the seam's stop, copied verbatim
+        assert decision.take_profit == 112.0  # the seam's target, copied verbatim
+
+    def test_a_seam_that_proposes_no_levels_yields_a_decision_with_none(self):
+        """No levels in means no levels out — the source never pads them."""
+        source = CurrentMarketDecisionSource(
+            symbols=(SYMBOL,),
+            inference=StubInference(rating="Buy"),
+            market_data=_bars_source(),
+            market_hours=StaticMarketHours(is_open=True, session=SESSION),
+            order_notional=25.0,
+            state_path=None,
+        )
+        decision = source.next_decision()
+        assert decision is not None
         assert decision.stop_loss is None
         assert decision.take_profit is None
+        assert decision.targets == ()
 
 
 # ---------------------------------------------------------------------------

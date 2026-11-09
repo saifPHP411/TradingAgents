@@ -473,6 +473,40 @@ The rules that follow from that:
   did not open. A broker-only position is an operator decision, not something
   the worker may act on.
 
+## Mandatory trade protection
+
+`paper_experiment/protection.py` is the gate between a strategy's intent and a
+live paper order. **No trade opens without a valid stop loss and take profit.**
+The levels are market-based and come from the TJR structure; the worker never
+invents one.
+
+- The gate requires four things, each with its own reason: a usable **stop**,
+  a usable **target**, levels on the correct side of the entry with a reward
+  that justifies the risk, and an **available protection mechanism**. A failure
+  is a named reason from a closed vocabulary
+  (`NO_VALID_STOP_LOSS`, `NO_VALID_TAKE_PROFIT`, `INVALID_RISK_REWARD`,
+  `INVALID_TARGET_ORDER`, `PROTECTION_UNAVAILABLE`), mapped onto the worker's
+  own `NO_TRADE_REASONS`. A refusal is a refusal — never a smaller position
+  opened "for safety".
+- Alpaca's crypto venue offers **market, limit and stop_limit only**: there is
+  no bracket and no OCO. The worker's **exit monitor** is therefore the only
+  protection mechanism, so the gate also checks that the monitor can read a
+  price and place an exit order. If it cannot, the trade is refused rather than
+  opened unprotected.
+- A decision may name **several targets** (`TradingDecision.targets`). The
+  ladder is managed in stages: the nearest untaken target triggers a **partial**
+  close, the position stays open against the next target, and the **stop still
+  closes everything**. The exit quantity is scaled from the **original entry
+  quantity** against the still-held quantity, so a partial ladder never
+  over-sells. The exit order id carries the target, so two rungs of the same
+  ladder are distinguishable orders.
+- The levels reach the decision through the **strategy**, never through a
+  prompt or an invention in the worker. A decision with no levels is refused by
+  the gate — that is the correct outcome, not a gap to be patched.
+- The gate does not change the risk limits: `$25` max order notional, `5` max
+  open positions, `10` max daily orders, long only. They live in
+  `PaperRiskLimits` and are unchanged by the protection work.
+
 ## TJR on the paper worker
 
 `paper_experiment/tjr_source.py` is the third `DecisionSource`: it runs the
@@ -563,6 +597,25 @@ make one source do another's job, and do not route TJR through the LLM.
   registry being unavailable is its own state
   (`EXECUTION_REGISTRY_UNAVAILABLE`) — it must not be reported as "no symbols
   rejected".
+- **A provider method must never resolve its transport to `None`.** Every
+  transport-taking method ends in `transport or self._transport or
+  _default_transport`; the last term is the one that makes a *real* run work,
+  because in production neither the caller's transport nor the client's is set.
+  `AlpacaCryptoClient.assets()` once omitted it, and the null callable surfaced
+  on Railway as `EXECUTION_REGISTRY_UNAVAILABLE` plus `TypeError: 'NoneType'
+  object is not callable` — a venue problem that was really a missing default.
+  The fallback must be the *same* `_default_transport` from `providers/base.py`,
+  so the timeout, headers and params match every other provider read. A test
+  that claims to cover "the default transport" but **injects** a transport
+  proves nothing here; the default path is covered by patching the
+  `requests.get` that `_default_transport` calls. See
+  `tests/test_alpaca_crypto_transport.py`.
+- A failed registry read must stay a failure. `read_alpaca_execution_registry`
+  raises, so `execution_registry` is `None` and every symbol is *rejected* with
+  `EXECUTION_REGISTRY_UNAVAILABLE`. It must never be turned into an empty
+  registry: an empty registry reads as "this venue trades nothing", which is a
+  different and wrong claim, and it would accept a symbol the venue never
+  confirmed.
 - A dashboard percentage has **two scales**. A ratio (`total_return = 0.05`
   means 5%) is scaled by 100; a feed's own percentage (Binance's
   `priceChangePercent = 0.091` means 0.091%) is not. Printing the second kind

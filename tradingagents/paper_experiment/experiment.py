@@ -690,6 +690,13 @@ class PaperExperiment:
         answered_model = getattr(self.inference, "last_model", None) or self.config.model
         fallback_reason = getattr(self.inference, "last_fallback_reason", None)
         frame = snapshot.to_frame() if snapshot is not None else None
+        # The levels the strategy proposed, if it proposed any. They are read from
+        # the inference seam, never derived here: a level this function invented
+        # would be a level the market never supported. A seam that proposes none
+        # produces a decision with no levels, which the mandatory-protection gate
+        # then refuses — correctly, because an unprotectable trade is not taken.
+        stop_loss = getattr(self.inference, "stop_loss", None)
+        take_profit = getattr(self.inference, "take_profit", None)
         try:
             record, window_reproducible = build_record(
                 ticker=symbol,
@@ -704,6 +711,8 @@ class PaperExperiment:
                 reasoning_excerpt=reasoning,
                 snapshot_id=snapshot.snapshot_id if snapshot else None,
                 captured_at=self._session_timestamp(session).isoformat(),
+                stop_loss=stop_loss,
+                take_profit=take_profit,
             )
         except CaptureError as exc:
             return self._block(

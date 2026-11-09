@@ -118,6 +118,16 @@ class TjrEvaluation:
     entry: float | None = None
     stop: float | None = None
     target: float | None = None
+    targets: list[float] = field(default_factory=list)
+    """Every target the market supports, nearest first.
+
+    ``target`` is the first of these, kept as its own field because it is what
+    the strategy has always exposed. ``targets`` is the whole ladder, so a
+    caller can manage a position in stages without re-deriving the levels.
+
+    The ladder is **not** padded: it holds only the levels the market actually
+    supports, so it can be empty (no setup), hold one target, or hold several.
+    """
     sweep: Sweep | None = None
     confirmation: str | None = None
     zone: tuple[float, float] | None = None
@@ -139,6 +149,7 @@ class TjrEvaluation:
             "entry": None if self.entry is None else round(self.entry, 6),
             "stop": None if self.stop is None else round(self.stop, 6),
             "target": None if self.target is None else round(self.target, 6),
+            "targets": [round(value, 6) for value in self.targets],
             "sweep": None if self.sweep is None else self.sweep.to_dict(),
             "confirmation": self.confirmation,
             "zone": None if self.zone is None else [round(self.zone[0], 6), round(self.zone[1], 6)],
@@ -669,7 +680,7 @@ def _evaluate_sweep(
             levels=levels,
         )
     impulse = _impulse_extreme(frame_5m, sweep, confirmed_at)
-    target = _target(
+    ladder = _target_ladder(
         side,
         entry=entry,
         stop=stop,
@@ -678,6 +689,7 @@ def _evaluate_sweep(
         formed_by=sweep.bar,
         impulse=impulse,
     )
+    target = ladder[0] if ladder else None
     if target is None:
         return TjrEvaluation(
             symbol=symbol,
@@ -720,6 +732,7 @@ def _evaluate_sweep(
         entry=entry,
         stop=stop,
         target=target,
+        targets=list(ladder),
         sweep=sweep,
         confirmation=confirmation,
         zone=zone,
@@ -757,14 +770,79 @@ def _target(
     such draw exists, a fixed multiple of the risk is used, so a setup is never taken
     without a defined exit.
     """
+    ladder = _target_ladder(
+        side,
+        entry=entry,
+        stop=stop,
+        levels=levels,
+        settings=settings,
+        formed_by=formed_by,
+        impulse=impulse,
+    )
+    return ladder[0] if ladder else None
+
+
+def _target_ladder(
+    side: str,
+    *,
+    entry: float,
+    stop: float,
+    levels: list[LiquidityLevel],
+    settings: TjrSettings,
+    formed_by: pd.Timestamp,
+    impulse: float,
+    max_targets: int = 3,
+) -> list[float]:
+    """The ladder of draws on liquidity beyond the entry, nearest first.
+
+    The same rule as :func:`_target`, applied repeatedly: each level must sit
+    beyond the **previous** one, so the ladder is strictly ordered away from
+    the entry and no two targets are the same price.
+
+    How many targets there are is the **market's** decision, not the
+    strategy's. A setup with one draw on liquidity has one target; a setup
+    with a draw, a higher swing high and an equal-high cluster above it has
+    three. The ladder is never padded: if only one level supports a target,
+    there is one target, and the fallback R is used only when **no** draw
+    exists at all.
+
+    The fallback is not repeated. When no draw exists, one target is derived
+    from the risk multiple; inventing a second and third target at fixed R
+    multiples would be a fabricated ladder, not market structure.
+    """
     risk = abs(entry - stop)
     eligible = [level for level in levels if level.formed_at <= formed_by]
     if side == "long":
-        beyond = [level for level in eligible if level.price > max(entry, impulse)]
-        if beyond:
-            return min(beyond, key=lambda level: level.price).price
-        return entry + settings.fallback_target_r * risk if risk > 0 else None
-    beyond = [level for level in eligible if level.price < min(entry, impulse)]
-    if beyond:
-        return max(beyond, key=lambda level: level.price).price
-    return entry - settings.fallback_target_r * risk if risk > 0 else None
+        beyond = sorted(
+            (level for level in eligible if level.price > max(entry, impulse)),
+            key=lambda level: level.price,
+        )
+        ladder: list[float] = []
+        last = max(entry, impulse)
+        for level in beyond:
+            if level.price <= last:
+                continue
+            ladder.append(level.price)
+            last = level.price
+            if len(ladder) >= max_targets:
+                break
+        if ladder:
+            return ladder
+        return [entry + settings.fallback_target_r * risk] if risk > 0 else []
+    beyond = sorted(
+        (level for level in eligible if level.price < min(entry, impulse)),
+        key=lambda level: level.price,
+        reverse=True,
+    )
+    ladder = []
+    last = min(entry, impulse)
+    for level in beyond:
+        if level.price >= last:
+            continue
+        ladder.append(level.price)
+        last = level.price
+        if len(ladder) >= max_targets:
+            break
+    if ladder:
+        return ladder
+    return [entry - settings.fallback_target_r * risk] if risk > 0 else []

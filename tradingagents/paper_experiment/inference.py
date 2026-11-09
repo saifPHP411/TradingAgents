@@ -147,6 +147,11 @@ class StubInference:
 
     ``genuine`` is ``False``, so a record built from it is a ``synthetic_fixture``
     and the report never counts it as a real inference.
+
+    ``stop_loss`` and ``take_profit`` are optional. When set, the decision carries
+    them as the levels the strategy proposed; when unset, it carries none — and
+    the mandatory-protection gate then refuses the trade, because a position
+    without levels cannot be protected. Both cases are exercised by the suite.
     """
 
     rating: str = "Hold"
@@ -154,6 +159,9 @@ class StubInference:
     genuine: bool = False
     calls: int = 0
     last_window: object | None = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
+    targets: tuple[float, ...] = ()
 
     def __call__(self, *, symbol: str, session: str, window=None) -> tuple[str, str]:
         self.calls += 1
