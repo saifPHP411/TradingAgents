@@ -79,6 +79,7 @@ from .alpaca_paper import (
     BrokerError,
     BrokerOrder,
     BrokerRejectedError,
+    InsufficientFundsError,
     PaperRiskLimits,
     PaperRiskRejected,
     assert_paper_endpoint,
@@ -199,6 +200,14 @@ NO_TRADE_MARKET_DATA_UNAVAILABLE = "MARKET_DATA_UNAVAILABLE"
 NO_TRADE_SIZE_TOO_SMALL = "SIZE_TOO_SMALL"
 NO_TRADE_RISK_REJECTED = "RISK_REJECTED"
 NO_TRADE_BROKER_REJECTED = "BROKER_REJECTED"
+NO_TRADE_INSUFFICIENT_FUNDS = "INSUFFICIENT_FUNDS"
+"""The venue refused the order because the account had no buying power for it.
+
+Distinct from :data:`NO_TRADE_BROKER_REJECTED` because the two call for
+different actions: this one is the *account's* money, so it is fixed by funding
+the account or freeing cash, while a general broker refusal is about the order
+itself. The worker names it when the broker says so, never on its own judgement.
+"""
 NO_TRADE_ALREADY_PROCESSED = "ALREADY_PROCESSED"
 NO_TRADE_ORDER_EXISTS = "ORDER_EXISTS"
 NO_TRADE_EXIT_REFUSED = "EXIT_REFUSED"
@@ -262,6 +271,7 @@ NO_TRADE_REASONS = (
     NO_TRADE_SIZE_TOO_SMALL,
     NO_TRADE_RISK_REJECTED,
     NO_TRADE_BROKER_REJECTED,
+    NO_TRADE_INSUFFICIENT_FUNDS,
     NO_TRADE_ALREADY_PROCESSED,
     NO_TRADE_ORDER_EXISTS,
     NO_TRADE_EXIT_REFUSED,
@@ -417,7 +427,16 @@ class TradingDecision:
 
     ``notional`` is the target cash amount to trade; the worker converts it to a
     share quantity from the *current* price, so sizing never depends on a stale
-    price. ``quantity`` may be given instead (then ``notional`` is ignored).
+    price. ``quantity`` may be given instead, when the caller has already sized
+    the order in units.
+
+    When **both** are given, the notional is the quantity's cash value at the
+    price the quantity was sized at, and the worker re-divides the notional by
+    the price the order will actually trade at. That matters on the cross-venue
+    crypto path, where a quantity sized at the market-data venue's price
+    (``XRP/USDT``) would otherwise be sent as an order on the execution venue's
+    pair (``XRP/USD``) — a quantity that means a different amount of cash on the
+    other side, so the order's notional was never the one that was approved.
     """
 
     decision_id: str
@@ -749,7 +768,7 @@ class AlpacaSnapshotMarketData:
                 "a current price from Alpaca market data (feed=iex); validated for "
                 "freshness before any order is sized"
             ),
-            "is_current_price": True,
+            "is_current_price": self._is_current_price(),
             "max_snapshot_age_seconds": self.max_age_seconds,
             "last_snapshot_at": observation.as_of if observation else None,
             "last_snapshot_price": observation.price if observation else None,
@@ -759,6 +778,23 @@ class AlpacaSnapshotMarketData:
             "market_data_status": self.last_status,
             "market_data_status_detail": self.last_status_detail,
         }
+
+    def _is_current_price(self) -> bool:
+        """Whether the price this seam is currently reporting is a current one.
+
+        The answer is derived from the **same** observation the age is measured
+        from, so the two can never disagree: a price whose age has grown past
+        ``max_age_seconds`` is reported as not current, whatever the last read
+        said. A seam that has read nothing yet is not current either.
+        """
+        if self.last_observation is None:
+            return False
+        age = self.last_snapshot_age_seconds()
+        if age is None:
+            return False
+        if self.max_age_seconds is not None and age > self.max_age_seconds:
+            return False
+        return age >= -abs(self.future_tolerance_seconds)
 
     def last_snapshot_age_seconds(self) -> float | None:
         """The age, in seconds, of the last observed snapshot; ``None`` if unknown."""
@@ -784,10 +820,15 @@ class AlpacaSnapshotMarketData:
             return False
         for symbol in self.symbols:
             try:
-                self._observation_from(snapshots.get(symbol))
+                observation = self._observation_from(snapshots.get(symbol))
             except MarketDataError as exc:
                 self._record_status(_status_for(exc), str(exc))
                 return False
+            if self.last_observation is None:
+                # Stored from *this* read, so the reported age and the reported
+                # status describe the same price rather than two different reads.
+                self.last_observation = observation
+                self.last_observed_at = self._clock().isoformat()
         self._record_status(MARKET_DATA_STATUS_OK, None)
         return True
 
@@ -973,7 +1014,7 @@ class BinanceSnapshotMarketData:
                 "a current crypto price from Binance public market data (no key); "
                 "validated for freshness before any order is sized"
             ),
-            "is_current_price": True,
+            "is_current_price": self._is_current_price(),
             "max_snapshot_age_seconds": self.max_age_seconds,
             "last_snapshot_at": observation.as_of if observation else None,
             "last_snapshot_price": observation.price if observation else None,
@@ -984,6 +1025,23 @@ class BinanceSnapshotMarketData:
             "market_data_status_detail": self.last_status_detail,
             "market_data_diagnostics": self._diagnostics(),
         }
+
+    def _is_current_price(self) -> bool:
+        """Whether the price this seam is currently reporting is a current one.
+
+        Derived from the **same** observation the reported age is measured from,
+        so the two can never disagree. A price whose age has grown past
+        ``max_age_seconds`` is reported as not current, whatever the last read
+        said at the time; a seam that has read nothing yet is not current either.
+        """
+        if self.last_observation is None:
+            return False
+        age = self.last_snapshot_age_seconds()
+        if age is None:
+            return False
+        if self.max_age_seconds is not None and age > self.max_age_seconds:
+            return False
+        return age >= -abs(self.future_tolerance_seconds)
 
     def _diagnostics(self) -> list[dict[str, Any]]:
         """The venue's recent request records, sanitized for display.
@@ -1030,12 +1088,20 @@ class BinanceSnapshotMarketData:
         if not isinstance(tickers, dict):
             self._record_status(MARKET_DATA_STATUS_MALFORMED, "the response was not an object")
             return False
+        observations: list[SnapshotObservation] = []
         for symbol in self.symbols:
             try:
-                self._observation_from(_find_ticker(tickers, symbol))
+                observations.append(self._observation_from(_find_ticker(tickers, symbol)))
             except MarketDataError as exc:
                 self._record_status(_status_for(exc), str(exc))
                 return False
+        # The observation is stored from *this* read, so the reported age and the
+        # reported status describe the same price. Validating without storing left
+        # the view showing the age of an older read beside the status of a newer
+        # one, which is how a 273s-old price was reported as "ok".
+        if observations:
+            self.last_observation = observations[0]
+            self.last_observed_at = self._clock().isoformat()
         self._record_status(MARKET_DATA_STATUS_OK, None)
         return True
 
@@ -1179,16 +1245,34 @@ class AlpacaCryptoExecutionPrice:
                 "a current price on the EXECUTION venue (Alpaca crypto), read for the "
                 "pair the order will actually trade; validated for freshness"
             ),
-            "is_current_price": True,
+            "is_current_price": self._is_current_price(),
             "execution_data_provider": self.provider_name,
             "execution_data_max_snapshot_age_seconds": self.max_age_seconds,
             "execution_data_last_snapshot_at": observation.as_of if observation else None,
             "execution_data_last_snapshot_price": observation.price if observation else None,
             "execution_data_last_snapshot_field": observation.field if observation else None,
+            "execution_data_last_snapshot_age_seconds": self.last_snapshot_age_seconds(),
             "execution_data_last_observed_at": self.last_observed_at,
             "execution_data_status": self.last_status,
             "execution_data_status_detail": self.last_status_detail,
         }
+
+    def _is_current_price(self) -> bool:
+        """Whether the execution price being reported is a current one.
+
+        Derived from the **same** observation the reported age is measured from,
+        so the two can never disagree: a price whose age has grown past
+        ``max_age_seconds`` is reported as not current, whatever the last read
+        said at the time. A seam that has read nothing yet is not current either.
+        """
+        if self.last_observation is None:
+            return False
+        age = self.last_snapshot_age_seconds()
+        if age is None:
+            return False
+        if self.max_age_seconds is not None and age > self.max_age_seconds:
+            return False
+        return age >= -abs(self.future_tolerance_seconds)
 
     def last_snapshot_age_seconds(self) -> float | None:
         observation = self.last_observation
@@ -1208,12 +1292,18 @@ class AlpacaCryptoExecutionPrice:
         except Exception:  # noqa: BLE001 - an unreachable source is "not available"
             self._record_status(MARKET_DATA_STATUS_ERROR, "the execution price request failed")
             return False
+        observations: list[SnapshotObservation] = []
         for symbol in self.symbols:
             try:
-                self._observation_from(snapshots.get(symbol))
+                observations.append(self._observation_from(snapshots.get(symbol)))
             except MarketDataError as exc:
                 self._record_status(_status_for(exc), str(exc))
                 return False
+        # Stored from *this* read, so the reported age and the reported status
+        # describe the same price rather than two different reads.
+        if observations:
+            self.last_observation = observations[0]
+            self.last_observed_at = self._clock().isoformat()
         self._record_status(MARKET_DATA_STATUS_OK, None)
         return True
 
@@ -2820,7 +2910,11 @@ class PaperTradingWorker:
             code = (
                 NO_TRADE_RISK_REJECTED
                 if isinstance(exc, PaperRiskRejected)
-                else NO_TRADE_BROKER_REJECTED
+                else (
+                    NO_TRADE_INSUFFICIENT_FUNDS
+                    if isinstance(exc, InsufficientFundsError)
+                    else NO_TRADE_BROKER_REJECTED
+                )
             )
             self.state.last_no_decision_reason = str(exc)
             self.state.last_no_trade_code = code
@@ -3131,8 +3225,28 @@ class PaperTradingWorker:
         return self._size_buy(decision, reference_price)
 
     def _size_buy(self, decision: TradingDecision, reference_price: float) -> float:
-        """The BUY quantity: the notional at the current price, unchanged."""
-        if decision.quantity is not None:
+        """The BUY quantity: the notional at the **execution** price.
+
+        A decision that carries a *quantity* has one that was computed elsewhere,
+        at a price that may not be the price this order will trade at. On the
+        cross-venue crypto path that quantity was sized at the market-data
+        venue's price (``XRP/USDT``) while the order is placed on the execution
+        venue's pair (``XRP/USD``): a quantity sized from one venue's price means
+        a different amount of cash on the other, so the order's notional was
+        never the one the risk engine approved — the $25 cap included.
+
+        So a quantity is honoured **only** when it is already denominated at the
+        execution price. When the decision carries both, the notional is the
+        quantity's cash value at the price it was sized at, and it is the notional
+        that is re-divided by the execution price. A decision that carries only a
+        quantity (no notional) cannot be re-based, so it is used as it stands —
+        the quantity is the only statement of size there is.
+
+        The notional, when present, is always what bounds the order: the broker
+        re-checks ``quantity * execution_price`` against its own cap, so a
+        re-sized order can never exceed the notional the risk engine approved.
+        """
+        if decision.quantity is not None and decision.notional is None:
             return float(decision.quantity)
         assert decision.notional is not None  # __post_init__ guarantees one
         raw = decision.notional / reference_price

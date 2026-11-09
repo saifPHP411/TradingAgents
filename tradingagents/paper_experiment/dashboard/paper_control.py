@@ -621,6 +621,35 @@ class PaperTradingController:
             except Exception:  # noqa: BLE001 - an unpriceable entry is no decision
                 return 0.0
 
+        def _execution_price(symbol: str) -> float:
+            """The execution venue's price for the pair the order will trade.
+
+            The crypto path analyses Binance's ``XRP/USDT`` and trades Alpaca's
+            ``XRP/USD``. The account is funded in USD and every risk cap is
+            denominated in that currency, so the risk engine must size the entry
+            at the **execution** venue's price. Sizing it at the market-data
+            venue's price sized a USD order in USDT terms.
+
+            The canonical symbol is translated to its execution pair through the
+            worker's own validated symbol map — the same map the worker uses to
+            place the order — so the price is read for the instrument the order
+            will actually be placed on, and an unmapped symbol has no price.
+            """
+            worker = holder.get("worker")
+            if worker is None:
+                return 0.0
+            symbol_map = getattr(worker, "_symbol_map", None) or {}
+            mapping = symbol_map.get(symbol)
+            if mapping is None:
+                return 0.0
+            seam = getattr(worker.config, "execution_price_seam", None)
+            if seam is None:
+                return 0.0
+            try:
+                return float(seam.price(mapping.execution_symbol))
+            except Exception:  # noqa: BLE001 - an unpriceable entry is no decision
+                return 0.0
+
         # Use ONLY accepted symbols from the validated configuration.
         # Rejected symbols must not reach the TJR decision source.
         crypto_symbols = tuple(
@@ -637,6 +666,7 @@ class PaperTradingController:
             "strategy_name": experiment.config.strategy_id,
             "book_provider": _book,
             "price_provider": _price,
+            "execution_price_provider": _execution_price,
             "is_consumed": lambda decision_id: holder["worker"].has_order_for(decision_id),
             "state_path": self.root / "crypto_source_state.json",
             # The same settings the crypto backtest measured. Without this the

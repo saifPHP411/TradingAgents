@@ -395,15 +395,21 @@ class TestRiskEngineGate:
         source = _source(book=TjrBookSnapshot(cash=5000.0), price=100.6)
         decision = source.next_decision()
         assert decision is not None
-        # $25 / $100.6 ≈ 0.2485 shares; the engine's own sizing, not the source's.
-        assert decision.quantity == pytest.approx(25.0 / 100.6, rel=1e-6)
+        # The engine's own sizing: $25 / $100.6 ≈ 0.2485 units, expressed as the
+        # cash amount it represents. The decision carries the **notional**, so the
+        # worker sizes the order at the price the pair will actually trade at —
+        # a quantity sized here would be denominated in the market-data venue's
+        # price, which is not the execution venue's price.
+        assert decision.notional == pytest.approx(MAX_ORDER_NOTIONAL, rel=1e-6)
+        assert decision.quantity is None
 
     def test_the_source_requests_no_size_of_its_own(self):
-        # The decision carries the engine's quantity; the source fabricates none.
+        # The decision carries the engine's cash amount; the source fabricates
+        # neither a quantity nor a notional of its own.
         source = _source(book=TjrBookSnapshot(cash=5000.0), price=100.6)
         decision = source.next_decision()
-        assert decision.notional is None
-        assert decision.quantity is not None
+        assert decision.notional == pytest.approx(MAX_ORDER_NOTIONAL, rel=1e-6)
+        assert decision.quantity is None
 
     def test_an_empty_book_is_refused_by_the_engine(self):
         # No cash -> NO_EQUITY -> a named risk rejection, never an order.
@@ -420,8 +426,8 @@ class TestRiskEngineGate:
         source = _source(book=TjrBookSnapshot(cash=1_000_000.0), price=100.6)
         decision = source.next_decision()
         assert decision is not None
-        # The $25 cap binds: 25 / 100.6, not a fraction of the large book.
-        assert decision.quantity * 100.6 == pytest.approx(MAX_ORDER_NOTIONAL, rel=1e-6)
+        # The $25 cap binds: 25, not a fraction of the large book.
+        assert decision.notional == pytest.approx(MAX_ORDER_NOTIONAL, rel=1e-6)
 
     def test_the_position_cap_is_read_from_the_shared_book(self):
         # Five positions already held: a sixth entry is refused by the shared cap.
@@ -457,7 +463,15 @@ class TestRiskEngineGate:
         source = _source(book=TjrBookSnapshot(cash=5000.0), price=250.0)
         decision = source.next_decision()
         assert decision is not None
-        assert decision.quantity == pytest.approx(25.0 / 250.0, rel=1e-6)
+        # The cash amount is the same either way (the $25 cap binds), but the
+        # quantity it represents is priced at the execution seam, so the
+        # notional/price pair on the record must agree.
+        assert decision.notional == pytest.approx(MAX_ORDER_NOTIONAL, rel=1e-6)
+        record = source._records[SYMBOL]
+        assert record.reference_price == pytest.approx(250.0, rel=1e-6)
+        assert record.notional / record.reference_price == pytest.approx(
+            MAX_ORDER_NOTIONAL / 250.0, rel=1e-6
+        )
 
 
 @pytest.mark.unit

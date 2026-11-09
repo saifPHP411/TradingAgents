@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import tempfile
 from collections.abc import Callable
@@ -134,6 +135,16 @@ def ledger_from_snapshot(snapshot: TjrBookSnapshot, *, prices: dict[str, float])
     holdings, marked at the prices the caller supplies. It is never used to apply a
     fill, so it cannot diverge from the broker — the RiskEngine only reads
     ``cash``/``equity``/``open_positions`` from it.
+
+    **A holding is matched by its base asset, not by its full symbol.** On the
+    crypto path the broker holds the position under the *execution* pair
+    (``XRP/USD``) while the strategy's price is quoted in the *market-data* pair
+    (``XRP/USDT``). Matching the two spellings literally left every position
+    marked at no price, so the RiskEngine computed an equity of the cash alone —
+    understating the account by the whole value of the open positions, and with it
+    every exposure and drawdown check that is a fraction of equity. The base asset
+    is the one part of the symbol both venues spell the same way, so it is the
+    key that actually identifies the holding.
     """
     cash = snapshot.cash if snapshot.cash > 0 else 1.0
     ledger = Ledger(initial_cash=cash)
@@ -143,11 +154,42 @@ def ledger_from_snapshot(snapshot: TjrBookSnapshot, *, prices: dict[str, float])
             continue
         holding = ledger.holding(symbol.upper())
         holding.quantity = float(quantity)
-        price = prices.get(symbol.upper())
+        price = _matching_price(symbol, prices)
         if price is not None and price > 0:
             holding.average_entry_price = float(price)
             holding.last_price = float(price)
     return ledger
+
+
+def _matching_price(symbol: str, prices: dict[str, float]) -> float | None:
+    """The price for ``symbol`` from ``prices``, matched by base asset if needed.
+
+    An exact (case-insensitive) symbol match wins. Failing that, the price whose
+    symbol names the same **base asset** is used — the crypto path's
+    ``XRP/USD`` holding is marked at the ``XRP/USDT`` price, because the two name
+    the same coin. A symbol whose base asset matches nothing is left unmarked, so
+    its value is excluded rather than guessed at.
+    """
+    key = symbol.upper()
+    price = prices.get(key)
+    if price is not None:
+        return price
+    base = _base_asset(key)
+    if base is None:
+        return None
+    for candidate, candidate_price in prices.items():
+        if _base_asset(candidate.upper()) == base:
+            return candidate_price
+    return None
+
+
+def _base_asset(symbol: str) -> str | None:
+    """The base asset of a ``BASE/QUOTE`` symbol, or ``None`` if it has no quote."""
+    text = symbol.strip().upper()
+    if "/" not in text:
+        return None
+    base = text.partition("/")[0]
+    return base or None
 
 
 @dataclass
@@ -172,6 +214,13 @@ class _SymbolRecord:
     stop: float | None
     target: float | None
     quantity: float | None
+    notional: float | None
+    """The cash amount the entry was sized for, in the account's own currency.
+
+    This is what the worker turns into an order quantity, at the price of the pair
+    that will actually trade. ``quantity`` is kept alongside it as the audit trail
+    of what the RiskEngine computed at the market-data venue's price.
+    """
     reference_price: float | None
     evaluated_at: str
 
@@ -188,6 +237,7 @@ class _SymbolRecord:
             "stop": self.stop,
             "target": self.target,
             "quantity": self.quantity,
+            "notional": self.notional,
             "reference_price": self.reference_price,
             "evaluated_at": self.evaluated_at,
         }
@@ -225,6 +275,26 @@ class TjrDecisionSource:
     price_provider: Callable[[str], float] | None = None
     """The *execution* price seam, so the RiskEngine sizes at the price the order
     will actually fill against. ``None`` falls back to the newest closed 1m close."""
+    execution_price_provider: Callable[[str], float] | None = None
+    """The execution venue's price for the **execution** symbol, in the account's
+    own currency.
+
+    The crypto path analyses one market and trades another: the TJR chain reads
+    Binance's ``BTC/USDT`` and the order is placed on Alpaca's ``BTC/USD``. The
+    account is funded in USD and every cap the risk engine enforces — the $25
+    order notional, the exposure fraction of equity — is denominated in the
+    account's currency. Sizing a USD order from a USDT price therefore sized it in
+    the wrong currency, and the cash value of the order was never the value the
+    risk engine approved.
+
+    This seam supplies the USD price for the execution symbol, so the risk engine
+    sizes the entry in the currency the order will actually cost. It is separate
+    from :attr:`price_provider` (the market-data venue's price) because the two
+    are different instruments on different venues.
+
+    ``None`` falls back to :attr:`price_provider`, and then to the newest closed
+    1m close — the same fallback the market-data path uses. On a single-venue
+    path the two prices are the same price, so nothing changes."""
     is_consumed: Callable[[str], bool] | None = None
     """Whether the worker has already ordered a decision id (its durable set)."""
     state_path: str | os.PathLike | None = None
@@ -455,6 +525,7 @@ class TjrDecisionSource:
                 stop=None,
                 target=None,
                 quantity=None,
+                notional=None,
                 reference_price=None,
                 evaluated_at=as_of.isoformat(),
             )
@@ -467,12 +538,19 @@ class TjrDecisionSource:
         # No book supplied means no cash: the engine refuses to size, so no order is
         # produced. The live path always supplies the worker's own book.
         snapshot = self.book_provider() if self.book_provider is not None else TjrBookSnapshot(0.0)
-        ledger = ledger_from_snapshot(snapshot, prices={symbol: reference_price})
+        # The price the risk engine sizes at is the **execution** venue's price for
+        # the pair the order will trade, in the account's own currency. The
+        # market-data venue's price (the chain's own ``reference_price``) is a
+        # different instrument on a different venue, quoted in a different
+        # currency, so sizing from it made the engine's $25 notional cap and its
+        # equity fractions describe a USD order in USDT terms.
+        execution_price = self._execution_price(symbol, reference_price)
+        ledger = ledger_from_snapshot(snapshot, prices={symbol: execution_price})
         risk = RiskEngine(self.risk_limits)
         verdict = risk.evaluate(
             signal,
             ledger,
-            price=reference_price,
+            price=execution_price,
             equity_peak=snapshot.equity_peak,
             day_start_equity=snapshot.day_start_equity,
             daily_orders_placed=snapshot.daily_orders,
@@ -490,6 +568,7 @@ class TjrDecisionSource:
                 stop=evaluation.stop,
                 target=evaluation.target,
                 quantity=None,
+                notional=None,
                 reference_price=reference_price,
                 evaluated_at=as_of.isoformat(),
             )
@@ -509,7 +588,20 @@ class TjrDecisionSource:
             stop=evaluation.stop,
             target=evaluation.target,
             quantity=float(verdict.quantity),
-            reference_price=reference_price,
+            # The cash amount the RiskEngine sized the entry for. The worker turns
+            # this into a quantity at the *execution* venue's price, so the order's
+            # cash value is the one the risk engine approved. The engine's own
+            # ``max_order_value`` cap is what bounds this figure, and it is
+            # unchanged.
+            notional=(
+                float(verdict.notional)
+                if verdict.notional and verdict.notional > 0
+                else float(verdict.quantity) * execution_price
+            ),
+            # The price the entry was sized at — the execution venue's, in the
+            # account's currency. It is the price the notional is denominated in,
+            # so the two can never disagree.
+            reference_price=execution_price,
             evaluated_at=as_of.isoformat(),
         )
         self._records[symbol] = record
@@ -557,6 +649,19 @@ class TjrDecisionSource:
                 return float(price)
         return float(one.frame["close"].iloc[-1])
 
+    def _execution_price(self, symbol: str, fallback: float) -> float:
+        """The execution venue's price for ``symbol``, in the account's currency.
+
+        Falls back to ``fallback`` (the market-data price) when no execution
+        price is available, so a single-venue path — where the two prices are the
+        same price — behaves exactly as it did before.
+        """
+        if self.execution_price_provider is not None:
+            price = self.execution_price_provider(symbol)
+            if price is not None and price > 0 and math.isfinite(float(price)):
+                return float(price)
+        return float(fallback)
+
     def _consumed(self, decision_id: str) -> bool:
         if self.is_consumed is None:
             return False
@@ -586,7 +691,16 @@ class TjrDecisionSource:
             decision_id=record.decision_id,
             symbol=record.symbol,
             side=record.side,
-            quantity=record.quantity,
+            # The **notional**, never the quantity. The RiskEngine sized the entry
+            # at the market-data venue's price (Binance's ``XRP/USDT``), but the
+            # order is placed on the execution venue's pair (``XRP/USD``). A
+            # quantity sized from one venue's price means a different thing on the
+            # other, so the worker would send an order whose cash value it never
+            # computed. Carrying the cash amount instead lets the worker size the
+            # order at the price the pair will actually trade at, which is the
+            # only price the account's currency and the risk cap are denominated
+            # in. The RiskEngine's own cap on this figure is unchanged.
+            notional=record.notional,
             rationale=record.detail,
             stop_loss=record.stop,
             take_profit=record.target,

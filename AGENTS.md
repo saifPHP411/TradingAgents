@@ -533,3 +533,55 @@ make one source do another's job, and do not route TJR through the LLM.
 - The dashboard refuses to bind `0.0.0.0` without an access token, and every
   mutating paper route needs both the token and a confirmation header. The
   token is stored only in the browser, never echoed into a log or a response.
+
+## The crypto account trades USD, not USDT
+
+The crypto path **analyses** one market and **trades** another: the TJR chain
+reads Binance's `XRP/USDT` and the order is placed on Alpaca's `XRP/USD`. The
+Alpaca paper account is funded in USD, and every figure the risk engine
+enforces — the $25 order notional, the exposure fraction of equity — is
+denominated in USD. Three rules follow, and each one has a defect it prevents:
+
+- **A decision carries a notional, not a quantity.** A quantity sized at the
+  USDT price means a different amount of cash on the USD pair, so the order's
+  cash value was never the value the risk engine approved. `TradingDecision`
+  may carry both: the notional is the quantity's cash value at the price it was
+  sized at, and `PaperTradingWorker._size_buy` re-divides the notional by the
+  price the order will actually trade at. A decision with **only** a quantity
+  cannot be re-based and is used as it stands.
+- **The risk engine sizes at the execution venue's price**, not the market-data
+  venue's. `TjrDecisionSource.execution_price_provider` supplies it; without it
+  the engine's $25 cap and its equity fractions described a USD order in USDT
+  terms. The source's fallback chain is execution price → market-data price →
+  newest closed 1m close, so a single-venue path is unchanged.
+- **A holding is matched by its base asset**, not by its full symbol. The broker
+  holds `XRP/USD`; the strategy prices `XRP/USDT`. Matching the two spellings
+  literally left every position marked at no price, so the engine computed an
+  equity of the cash alone — the account was understated by the whole value of
+  its open positions, and every fraction-of-equity check with it. An exact
+  symbol match still wins; an unmatched base asset is left unmarked rather than
+  guessed at.
+
+The **exit** path is deliberately in two currencies: the stop and target are
+quoted in USDT (they come from the chain), so they are monitored against the
+*market-data* USDT price, while the exit *order* is priced and placed on the
+USD execution pair. The exit's quantity is the held position, never a notional,
+so a close is never re-sized in the wrong currency.
+
+The freshness view must not contradict itself. A seam's `describe()` derives its
+age and its `is_current_price` answer from the **same stored observation** — the
+one `available()` validated and kept — so a price that has aged past the limit
+cannot still be reported as "ok" beside a 273-second-old age. A seam that has
+read nothing yet reports `is_current_price: false`; it has no price to call
+current. See `tests/test_crypto_usd_execution.py`.
+
+A provider that calls an HTTP seam must never be able to call `None`. The
+fallback is `transport or self._transport or _default_transport`, with
+`_default_transport` imported from `providers/base.py` so the timeout, headers
+and params are the shared ones. `AlpacaCryptoClient.assets()` had
+`transport or self._transport` only, so a real run — where neither is set —
+called `None` and surfaced as `EXECUTION_REGISTRY_UNAVAILABLE` with
+`TypeError: 'NoneType' object is not callable`. A registry that cannot be read
+is still a **refusal**: the symbol is rejected, never accepted on a guess, and
+never silently traded.
+

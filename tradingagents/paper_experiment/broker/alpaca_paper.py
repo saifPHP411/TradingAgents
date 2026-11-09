@@ -108,11 +108,52 @@ class LiveEndpointRefusedError(BrokerError):
 
 
 class BrokerRejectedError(BrokerError):
-    """The broker rejected the request (auth, risk, or a bad order)."""
+    """The broker rejected the request (auth, risk, or a bad order).
+
+    A refusal is a *decision by the venue*, not a transport failure: the request
+    reached Alpaca and Alpaca said no. The subclass
+    :class:`InsufficientFundsError` names the one refusal the operator can act on
+    — the account had no buying power for the order — so the dashboard can tell
+    "the account is out of money" apart from "the venue refused this order for
+    some other reason", which are different problems with different fixes.
+    """
+
+
+class InsufficientFundsError(BrokerRejectedError):
+    """The account had no buying power for the order.
+
+    Alpaca says this in words ("insufficient buying power", "not enough
+    buying power") rather than with a status code of its own, so it is read from
+    the refusal's message. It is distinguished from every other refusal because
+    it is the one the *account* causes and the operator can fix by funding it or
+    by freeing cash — not by changing the order.
+    """
 
 
 class PaperRiskRejected(BrokerError):
     """A locally-enforced paper risk limit refused the order before submission."""
+
+
+_INSUFFICIENT_FUNDS_MARKERS = (
+    "insufficient buying power",
+    "insufficient funds",
+    "insufficient cash",
+    "not enough buying power",
+    "not enough cash",
+    "exceeds available buying power",
+)
+"""The phrases Alpaca uses when the account cannot pay for an order.
+
+Alpaca does not give this refusal a status code of its own — it is an HTTP 422
+with one of these messages — so it is read from the body. The list is closed so
+a free-text body cannot invent a classification.
+"""
+
+
+def _is_insufficient_funds(body: str) -> bool:
+    """Whether a refusal body says the account lacked buying power."""
+    text = (body or "").lower()
+    return any(marker in text for marker in _INSUFFICIENT_FUNDS_MARKERS)
 
 
 def _host_of(url: str) -> str:
@@ -718,6 +759,14 @@ class AlpacaPaperBroker:
             if response.status_code in (401, 403):
                 raise BrokerRejectedError(
                     f"the broker refused the credential (HTTP {response.status_code}): {body}"
+                )
+            if _is_insufficient_funds(body):
+                # The one refusal the *account* causes. It is named apart so the
+                # dashboard can say "the account has no buying power for this"
+                # rather than the catch-all "the broker rejected the order".
+                raise InsufficientFundsError(
+                    f"the account has insufficient buying power for this order "
+                    f"(HTTP {response.status_code}): {body}"
                 )
             raise BrokerRejectedError(
                 f"the broker answered HTTP {response.status_code}: {body}"

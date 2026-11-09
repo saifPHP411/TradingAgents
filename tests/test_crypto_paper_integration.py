@@ -393,7 +393,24 @@ class TestExecutionPriceSeam:
         seam, _ = _execution_seam()
         described = seam.describe()
         assert described["execution_data_provider"] == PROVIDER_ALPACA_CRYPTO
+        # A seam that has read nothing yet has no price to call current.
+        assert described["is_current_price"] is False
+
+    def test_it_reports_a_price_it_just_read_as_current(self):
+        seam, _ = _execution_seam()
+        seam.price(EXECUTION_SYMBOL)
+        described = seam.describe()
         assert described["is_current_price"] is True
+        assert described["execution_data_last_snapshot_age_seconds"] == pytest.approx(0.0)
+
+    def test_it_never_reports_a_stale_price_as_current(self):
+        # A stale price is refused outright — by ``price()`` and by
+        # ``available()`` — so there is never a stale price for the view to call
+        # current in the first place.
+        aged_seam, _ = _execution_seam(age_seconds=3600.0)
+        assert aged_seam.available() is False
+        described = aged_seam.describe()
+        assert described["is_current_price"] is False
 
     def test_a_stale_execution_price_is_refused(self):
         seam, _ = _execution_seam(age_seconds=3600)

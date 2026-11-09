@@ -107,13 +107,24 @@ may name it. A pair Alpaca does not list is reported as rejected, and no order i
 ever sent for it.
 """
 
-QUOTE_PREFERENCE: tuple[str, ...] = ("USDT", "USD", "USDC")
+QUOTE_PREFERENCE: tuple[str, ...] = ("USD", "USDT", "USDC")
 """Quote assets considered when resolving an execution pair, in order.
 
 The *canonical* symbol keeps its own quote — the market-data venue's — because
 that is the instrument the strategy analysed. The execution venue's quote is
 chosen separately, from the venue's own registry, so no USDT-to-USD rate is ever
 assumed.
+
+**USD comes first.** The account is funded in USD and every figure the order
+carries — the reference price, the entry, the stop, the target, the quantity and
+the resulting P&L — is denominated in the execution venue's quote. A USD-quoted
+pair therefore keeps all of them in the account's own currency, with no
+conversion step and no risk of a USDT figure being read as a USD one.
+
+A venue that lists only a USDT pair is still usable: the quote is then taken from
+the venue's own registry and the conversion is done explicitly, from a named,
+recent rate. It is never *assumed* — the venue's listing decides which pair
+exists, and this order only decides which of the venue's own pairs is preferred.
 """
 
 
