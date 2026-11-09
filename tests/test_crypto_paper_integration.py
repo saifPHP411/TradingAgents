@@ -1018,38 +1018,39 @@ class TestAlpacaCryptoClientAssets:
         ]
 
     def test_assets_works_without_transport_using_default(self):
-        """assets() works when no transport is passed (uses default transport)."""
-        # This test verifies the fix: no transport passed should not raise TypeError
-        from tradingagents.paper_experiment.providers.alpaca_crypto import AlpacaCryptoClient
-        from tradingagents.paper_experiment.providers.base import HttpResponse
+        """assets() works when no transport is passed (uses default transport).
 
-        class _FakeTransport:
-            def __init__(self, response: HttpResponse) -> None:
-                self.response = response
-                self.calls: list[dict] = []
-
-            def __call__(self, *, url, params, headers, timeout):
-                self.calls.append({"url": url, "params": params, "headers": headers})
-                return self.response
-
-        fake_transport = _FakeTransport(
-            HttpResponse(200, json.dumps(self._assets_response()))
+        The default transport is the real one: it calls ``requests.get``. This
+        test patches that call, so it exercises the path a live run takes —
+        no transport anywhere. A test that injects a transport and calls it
+        "the default" proves nothing about the bug this pins.
+        """
+        from tradingagents.paper_experiment.providers.alpaca_crypto import (
+            AlpacaCryptoClient,
         )
 
-        # The client is created without a transport, but we pass one to assets()
-        # This tests that assets() can accept a custom transport
-        client = AlpacaCryptoClient(api_key="test-key", api_secret="test-secret")
-        assets = client.assets(
-            base_url="https://paper-api.alpaca.markets",
-            transport=fake_transport,
-        )
+        calls = []
+
+        class _FakeResponse:
+            status_code = 200
+            text = json.dumps(self._assets_response())
+
+        def fake_get(url, *, params=None, headers=None, timeout=None):
+            calls.append({"url": url, "params": params, "headers": headers})
+            return _FakeResponse()
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr("requests.get", fake_get)
+            client = AlpacaCryptoClient(api_key="test-key", api_secret="test-secret")
+            assets = client.assets(base_url="https://paper-api.alpaca.markets")
 
         assert len(assets) == 2
         assert assets[0]["symbol"] == "BTC/USD"
         assert assets[1]["symbol"] == "ETH/USD"
-        assert fake_transport.calls, "transport was not called"
-        assert fake_transport.calls[0]["params"]["asset_class"] == "crypto"
-        assert fake_transport.calls[0]["params"]["status"] == "active"
+        assert calls, "the default transport was never called"
+        assert calls[0]["url"] == "https://paper-api.alpaca.markets/v2/assets"
+        assert calls[0]["params"]["asset_class"] == "crypto"
+        assert calls[0]["params"]["status"] == "active"
 
     def test_assets_works_with_custom_transport(self):
         """assets() works when a custom transport is passed."""
