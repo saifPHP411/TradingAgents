@@ -1502,15 +1502,49 @@ def _exit_reason(
     return None
 
 
-def _exit_order_id(symbol: str, price: float, reason: str) -> str:
-    """A deterministic, broker-safe id for one exit trigger.
+def _has_usable_level(stop_loss: Any, take_profit: Any) -> bool:
+    """Whether a recorded position carries at least one level that can trigger.
 
-    Derived from the symbol, the trigger reason and the *rounded* price, so a
-    re-run of the same trigger reconciles rather than resubmitting, while a
-    genuinely new trigger (a different price) gets a new id. Matches the broker's
-    client-order-id shape.
+    A level is usable only when it is a finite, positive number — the same
+    rule :func:`_exit_reason` applies when it compares a price against it. A
+    missing, malformed or non-positive level is **not** a trigger and **not** a
+    protection: a position whose levels are all unusable is an unguarded
+    position, and the exit policy must say so rather than treat it as watched.
     """
-    material = f"exit:{symbol.upper()}:{reason}:{price:.4f}"
+    for level in (stop_loss, take_profit):
+        number = _as_float(level)
+        if number is not None and number > 0:
+            return True
+    return False
+
+
+def _exit_order_id(symbol: str, price: float, reason: str, episode: int = 0) -> str:
+    """A deterministic, broker-safe id for one exit **episode**.
+
+    Derived from the symbol, the trigger reason and the episode number, so
+    every attempt to close the same position for the same reason carries the
+    **same** id. That is what makes the exit idempotent: a price that ticks
+    between two cycles, or a worker that restarts mid-exit, reconciles the
+    order it already placed instead of placing a second one for the same
+    position.
+
+    The price is deliberately **not** part of the id. It used to be, which
+    meant every price change minted a fresh id and therefore a fresh order — so
+    a stop that stayed triggered across several cycles produced a stream of
+    exit orders for one position. The broker's long-only guard bounds the
+    damage, but a stream of exits is still the wrong behaviour: it spends the
+    daily-order budget, and it would also close a position that a *new* entry
+    had legitimately re-opened.
+
+    ``episode`` distinguishes one *holding* of a symbol from a later one: a
+    position that was closed and then re-opened is a new episode and gets its
+    own id, so the broker does not reconcile the old episode's order instead
+    of placing a new exit.
+
+    ``price`` is still accepted so a caller does not have to change, but it no
+    longer affects the id.
+    """
+    material = f"exit:{symbol.upper()}:{reason}:{episode}"
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
     return f"ptx-{digest}"
 
@@ -1893,6 +1927,29 @@ class WorkerState:
     """Positions the exit policy has already acted on, keyed by symbol, with the
     reason and time. The durable "do not exit this position twice" memory. Additive
     and optional."""
+    exit_attempts: dict[str, dict] = field(default_factory=dict)
+    """Exit orders the worker has already placed, keyed by symbol.
+
+    Distinct from :attr:`exits`: an *attempt* is an exit order that reached the
+    broker, while an *exit* is a position that is actually closed. A partially
+    filled exit is an attempt that is not yet an exit, and the two must not be
+    confused — otherwise a remainder still held would look closed and its
+    protection would go silent.
+
+    This is the durable half of the duplicate-exit guard: while an attempt is
+    outstanding for a symbol, the exit policy reconciles that attempt instead of
+    placing another order, so a price that keeps moving (or a worker that
+    restarts) cannot turn one stop trigger into a stream of orders. Additive
+    and optional: an older state file without it reads back as "no attempt
+    known"."""
+    exit_attempt_counter: int = 0
+    """How many exit episodes this worker has run.
+
+    A position that is closed and later **re-opened** is a new holding, and it
+    needs its own exit id — otherwise the new position would inherit the old
+    episode's id and the broker would reconcile the old order instead of
+    placing a new exit. The counter is part of the exit id, so each episode of
+    a position gets a distinct, deterministic id."""
     stops: dict[str, dict] = field(default_factory=dict)
     """The stop-loss / take-profit recorded for each open position the worker
     opened, keyed by symbol. Written when an order fills from a decision that
@@ -1963,6 +2020,8 @@ class WorkerState:
             "last_no_trade_decision_id": self.last_no_trade_decision_id,
             "last_no_trade_decision_code": self.last_no_trade_decision_code,
             "exits": {k: dict(v) for k, v in sorted(self.exits.items())},
+            "exit_attempts": {k: dict(v) for k, v in sorted(self.exit_attempts.items())},
+            "exit_attempt_counter": self.exit_attempt_counter,
             "stops": {k: dict(v) for k, v in sorted(self.stops.items())},
             "cycles_completed": self.cycles_completed,
             "processed_decisions": sorted(self.processed_decisions),
@@ -2010,6 +2069,10 @@ class WorkerState:
             last_no_trade_decision_id=payload.get("last_no_trade_decision_id"),
             last_no_trade_decision_code=payload.get("last_no_trade_decision_code"),
             exits={k: dict(v) for k, v in (payload.get("exits") or {}).items()},
+            exit_attempts={
+                k: dict(v) for k, v in (payload.get("exit_attempts") or {}).items()
+            },
+            exit_attempt_counter=int(payload.get("exit_attempt_counter") or 0),
             stops={k: dict(v) for k, v in (payload.get("stops") or {}).items()},
             cycles_completed=_as_int(payload.get("cycles_completed"), 0),
             processed_decisions=set(payload.get("processed_decisions") or []),
@@ -2121,6 +2184,78 @@ def _decision_statistics(state: WorkerState) -> dict[str, Any]:
     }
 
 
+def _position_protection_rows(state: WorkerState) -> dict[str, dict[str, Any]]:
+    """The protection state of every open position, keyed by symbol.
+
+    An open position is either **managed** — the worker opened it and recorded
+    the strategy's stop and target for it, so the exit policy is watching it —
+    or it is **unprotected**, and the reason says which kind of unprotected it
+    is. A position the worker never opened (it was held before this worker
+    existed, or it came from another tool) has no strategy decision behind it,
+    so no stop or target can be derived for it and none is invented. A position
+    whose recorded levels are missing or unusable is unprotected for the same
+    reason: a level that cannot trigger is not a protection.
+
+    The point of this view is that an unguarded position is never silent. It is
+    reported, it carries a reason, and it says what an operator would have to
+    do about it.
+
+    A pure function of the persisted state, so the status view can build it
+    without a worker — and therefore without a broker request.
+    """
+    rows: dict[str, dict[str, Any]] = {}
+    for symbol, position in sorted((state.positions or {}).items()):
+        if not isinstance(position, dict):
+            continue
+        try:
+            quantity = float(position.get("quantity") or 0.0)
+        except (TypeError, ValueError):
+            quantity = 0.0
+        if quantity <= 0:
+            continue
+        level = (state.stops or {}).get(symbol)
+        level = level if isinstance(level, dict) else {}
+        stop_loss = _as_float(level.get("stop_loss"))
+        take_profit = _as_float(level.get("take_profit"))
+        usable_stop = stop_loss if stop_loss is not None and stop_loss > 0 else None
+        usable_target = (
+            take_profit if take_profit is not None and take_profit > 0 else None
+        )
+        exited = symbol in (state.exits or {})
+        if exited:
+            protection_state = "EXITED"
+            reason = "EXIT_RECORDED"
+            protected = True
+        elif usable_stop is not None or usable_target is not None:
+            protection_state = "TJR_MANAGED"
+            reason = "RECORDED_EXIT_LEVELS"
+            protected = True
+        elif level:
+            # Levels were recorded but none of them can trigger.
+            protection_state = "UNPROTECTED"
+            reason = "UNUSABLE_EXIT_LEVELS"
+            protected = False
+        else:
+            protection_state = "UNPROTECTED"
+            reason = "NO_RECORDED_EXIT_LEVELS"
+            protected = False
+        rows[symbol] = {
+            "symbol": symbol,
+            "quantity": quantity,
+            "protected": protected,
+            "protection_state": protection_state,
+            "reason": reason,
+            "stop_loss": usable_stop,
+            "take_profit": usable_target,
+            "decision_id": level.get("decision_id"),
+            "canonical_symbol": level.get("canonical_symbol"),
+            "exit_reason": (
+                (state.exits or {}).get(symbol, {}).get("reason") if exited else None
+            ),
+        }
+    return rows
+
+
 def worker_status_view(
     *,
     state: WorkerState,
@@ -2194,6 +2329,9 @@ def worker_status_view(
         "day": state.day,
         "exits": {k: dict(v) for k, v in sorted(state.exits.items())},
         "stops": {k: dict(v) for k, v in sorted(state.stops.items())},
+        "position_protection": {
+            k: dict(v) for k, v in sorted(_position_protection_rows(state).items())
+        },
         "last_cycle": last_cycle.to_dict() if last_cycle is not None else None,
         "decision_statistics": _decision_statistics(state),
         "risk_limits": {
@@ -2966,8 +3104,16 @@ class PaperTradingWorker:
             return
         if decision.stop_loss is None and decision.take_profit is None:
             return
-        self.state.stops[order.symbol.upper()] = {
-            "symbol": order.symbol.upper(),
+        symbol = order.symbol.upper()
+        # A **new** entry starts a new exit episode for this symbol. The old
+        # episode's guard is cleared so the new position can be exited on its
+        # own levels, and the counter is advanced so the new episode's order
+        # id cannot collide with the old one at the broker.
+        self.state.exit_attempts.pop(symbol, None)
+        self.state.exits.pop(symbol, None)
+        self.state.exit_attempt_counter += 1
+        self.state.stops[symbol] = {
+            "symbol": symbol,
             "stop_loss": decision.stop_loss,
             "take_profit": decision.take_profit,
             "decision_id": decision.decision_id,
@@ -2976,6 +3122,9 @@ class PaperTradingWorker:
             # the levels came from (``BTC/USDT``) from the execution symbol the
             # position is held under (``BTC/USD``). Additive and optional.
             "canonical_symbol": decision.symbol,
+            # Which exit episode these levels belong to, so an exit order for a
+            # later episode cannot be confused with one for these levels.
+            "episode": self.state.exit_attempt_counter,
         }
         self._save()
 
@@ -3008,19 +3157,73 @@ class PaperTradingWorker:
         for symbol in sorted(self.state.stops):
             if symbol in self.state.exits:
                 continue
-            position = self.state.positions.get(symbol)
-            if not position:
-                continue
-            try:
-                held = float(position.get("quantity") or 0.0)
-            except (TypeError, ValueError):
-                continue
-            if held <= 0:
-                continue
             level = self.state.stops[symbol]
             stop_loss = level.get("stop_loss")
             take_profit = level.get("take_profit")
-            if stop_loss is None and take_profit is None:
+            if not _has_usable_level(stop_loss, take_profit):
+                continue
+
+            # The **broker** is the authority for what is still held. The
+            # worker's last synced view is a snapshot: an exit that filled
+            # partially, or a position reduced elsewhere, leaves that snapshot
+            # stale, and sizing the close from it would either oversell (refused
+            # as a short) or close the wrong amount. A read failure is a refusal
+            # to exit, never an assumption that the position is flat.
+            try:
+                held = self._held_quantity(symbol)
+            except PositionReadError as exc:
+                self.state.last_error = f"PositionReadError: {exc}"
+                self.state.last_no_decision_reason = str(exc)
+                self.state.last_no_trade_code = NO_TRADE_POSITION_UNAVAILABLE
+                self._save()
+                return CycleResult(
+                    ran=False,
+                    error=str(exc),
+                    skipped_reason=f"the held quantity for {symbol} could not be read",
+                    reason_code=NO_TRADE_POSITION_UNAVAILABLE,
+                    **self._market_data_fields(),
+                )
+
+            attempt = self.state.exit_attempts.get(symbol)
+            if attempt is not None:
+                # An exit order for this position has already been placed. It is
+                # reconciled, never replaced: a stop that stays triggered while
+                # the price moves must not turn into a stream of orders, and a
+                # restart must not re-place one. A *new* episode — the position
+                # was closed and re-opened — carries its own attempt record and
+                # is not caught here.
+                exit_id = attempt.get("client_order_id")
+                if not exit_id:
+                    self.state.exit_attempts.pop(symbol, None)
+                else:
+                    order = self._reconcile(exit_id)
+                    self._record_order(order)
+                    # Reconciling an exit does not make it *done*. A partially
+                    # filled exit still leaves a remainder, so the position stays
+                    # watched; only a fully filled exit closes it.
+                    if self._exit_completed(order, held):
+                        self.state.exits[symbol] = {
+                            "symbol": symbol,
+                            "reason": attempt.get("reason") or "exit",
+                            "price": attempt.get("price"),
+                            "quantity": held,
+                            "filled_quantity": order.filled_quantity,
+                            "exited_at": datetime.now(UTC).isoformat(),
+                        }
+                        self.state.exit_attempts.pop(symbol, None)
+                    self._save()
+                    return CycleResult(
+                        ran=False,
+                        client_order_id=exit_id,
+                        order=order,
+                        skipped_reason=f"an exit order for {symbol} already exists",
+                        reference_price=attempt.get("price"),
+                        **self._market_data_fields(),
+                    )
+            if held <= 0:
+                # The broker says the position is flat. There is nothing to
+                # close, and no level to watch. This is the ordinary end of a
+                # position that was closed outside the worker.
                 continue
 
             # The stop/target is monitored against the **market-data** price (the
@@ -3044,17 +3247,26 @@ class PaperTradingWorker:
             reason = _exit_reason(price, stop_loss, take_profit)
             if reason is None:
                 continue
-            exit_id = _exit_order_id(symbol, price, reason)
+            exit_id = _exit_order_id(
+                symbol, price, reason, int(level.get("episode") or 0)
+            )
             if exit_id in self.state.orders:
                 # Already attempted for this trigger: reconcile, do not resubmit.
                 order = self._reconcile(exit_id)
                 self._record_order(order)
-                self.state.exits[symbol] = {
-                    "symbol": symbol,
-                    "reason": reason,
-                    "price": price,
-                    "exited_at": datetime.now(UTC).isoformat(),
-                }
+                # Reconciling an exit does not make it *done*. A partially
+                # filled exit still leaves a remainder, so the position stays
+                # watched; only a fully filled exit closes it.
+                if self._exit_completed(order, held):
+                    self.state.exits[symbol] = {
+                        "symbol": symbol,
+                        "reason": reason,
+                        "price": price,
+                        "quantity": held,
+                        "filled_quantity": order.filled_quantity,
+                        "exited_at": datetime.now(UTC).isoformat(),
+                    }
+                    self.state.exit_attempts.pop(symbol, None)
                 self._save()
                 return CycleResult(
                     ran=False,
@@ -3135,14 +3347,37 @@ class PaperTradingWorker:
                     reference_price=exit_price,
                     **self._market_data_fields(),
                 )
-            self.state.exits[symbol] = {
+            self.state.last_error = None
+            self._record_order(order)
+            # The exit order is recorded as an **attempt** the moment it
+            # reaches the broker, whatever its fill status. That record is what
+            # stops a second order: the next cycle reconciles this one instead
+            # of placing another, so a stop that stays triggered across several
+            # cycles cannot become a stream of orders, and a restart cannot
+            # re-place one.
+            self.state.exit_attempts[symbol] = {
                 "symbol": symbol,
                 "reason": reason,
                 "price": price,
-                "exited_at": datetime.now(UTC).isoformat(),
+                "client_order_id": exit_id,
+                "quantity": held,
+                "attempted_at": datetime.now(UTC).isoformat(),
             }
-            self.state.last_error = None
-            self._record_order(order)
+            # The exit is recorded as *done* only when the position is actually
+            # closed. A partially filled exit leaves a remainder still held, so
+            # recording it as exited would silence the protection on the part
+            # that is still open — the position would look closed while it is
+            # not.
+            if self._exit_completed(order, held):
+                self.state.exits[symbol] = {
+                    "symbol": symbol,
+                    "reason": reason,
+                    "price": price,
+                    "quantity": held,
+                    "filled_quantity": order.filled_quantity,
+                    "exited_at": datetime.now(UTC).isoformat(),
+                }
+                self.state.exit_attempts.pop(symbol, None)
             self._save()
             return CycleResult(
                 ran=True,
@@ -3153,6 +3388,24 @@ class PaperTradingWorker:
                 **self._market_data_fields(),
             )
         return None
+
+    @staticmethod
+    def _exit_completed(order: BrokerOrder, held: float) -> bool:
+        """Whether an exit order has actually closed the position.
+
+        The broker's **filled quantity** is the authority, not the order's
+        status string: a market order the broker reports as ``accepted`` can
+        already be fully filled, and a status of ``filled`` can still leave a
+        remainder when the broker filled less than the order asked for. The
+        position is closed when the filled quantity covers what was held.
+
+        A partially filled exit, an unfilled order, or a canceled order all
+        leave a remainder, so the position is still open and its recorded levels
+        must keep being watched.
+        """
+        if order.status in ("canceled", "expired", "rejected"):
+            return False
+        return order.filled_quantity >= held - 1e-9
 
     def _market_data_fields(self) -> dict[str, Any]:
         """The seam's identity for a cycle result, read defensively.
@@ -3338,6 +3591,15 @@ class PaperTradingWorker:
             "submitted_at": order.submitted_at,
         }
         self._save()
+
+    def position_protection(self) -> dict[str, dict[str, Any]]:
+        """The protection state of every open position, keyed by symbol.
+
+        A thin wrapper over :func:`_position_protection_rows`, so the worker's
+        own view and the status view can never disagree about which positions
+        are guarded and which are not.
+        """
+        return _position_protection_rows(self.state)
 
     def sync_positions(self) -> dict[str, dict]:
         """Refresh the broker's positions into the worker state (read-only)."""

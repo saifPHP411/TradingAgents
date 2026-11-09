@@ -336,6 +336,7 @@ def positions_view(
     """
     internal = internal_positions or {}
     stops = status.get("stops") or {}
+    protection = status.get("position_protection") or {}
     positions = status.get("positions") or {}
     rows: list[dict[str, Any]] = []
     for symbol, position in sorted(positions.items()):
@@ -355,6 +356,12 @@ def positions_view(
         level = stops.get(symbol) if isinstance(stops.get(symbol), dict) else {}
         internal_row = internal.get(symbol) if isinstance(internal.get(symbol), dict) else {}
         internal_qty = _opt_float(internal_row.get("quantity")) if internal_row else None
+        # The protection state is the worker's own verdict on whether this
+        # position is guarded by a recorded exit level. It is separate from the
+        # ledger reconciliation below: a position can agree with the ledger and
+        # still be unguarded, because the guard comes from a strategy decision
+        # and this position has none.
+        guard = protection.get(symbol) if isinstance(protection.get(symbol), dict) else {}
         rows.append(
             {
                 "symbol": symbol,
@@ -375,6 +382,9 @@ def positions_view(
                 "reconciled": (
                     internal_qty is not None and abs(internal_qty - quantity) < 1e-6
                 ),
+                "protected": guard.get("protected", False),
+                "protection_state": guard.get("protection_state", "UNPROTECTED"),
+                "protection_reason": guard.get("reason", "NO_RECORDED_EXIT_LEVELS"),
             }
         )
     return rows

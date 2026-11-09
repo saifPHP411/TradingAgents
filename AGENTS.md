@@ -433,6 +433,46 @@ alter a decision, it belongs in `rules.py` and its tests instead.
   venue trades nothing", and a coin is never accepted without the venue's own
   registry.
 
+## Open-position management (worker exits)
+
+The worker's exit policy closes a **long it opened**. Three separate facts must
+never be confused, and each has its own durable record in `worker_state.json`:
+
+- `state.stops` — the levels the strategy derived for a position the worker
+  opened. **Only** a decision that carried a stop or a target writes here
+  (`_record_exit_levels`). A position the worker did *not* open (held before
+  this worker existed, or opened by another tool) has no decision behind it, so
+  no level is derived for it and none is invented.
+- `state.exit_attempts` — an exit **order** that reached the broker. Distinct
+  from an exit: a partially filled exit is an attempt, not a closed position.
+- `state.exits` — a position that is actually **closed**.
+
+The rules that follow from that:
+
+- A position with no `state.stops` entry is **unprotected**, and
+  `position_protection()` says so with a reason
+  (`NO_RECORDED_EXIT_LEVELS` / `UNUSABLE_EXIT_LEVELS`). It is never silently
+  treated as guarded. The dashboard's `positions_view` carries the same
+  `protected` / `protection_state` fields.
+- The exit sizes from the **live broker** quantity (`_held_quantity`), not from
+  `state.positions`. The synced view is a snapshot and goes stale the moment an
+  exit fills partially. A position read that fails is a *refusal* to exit
+  (`POSITION_UNAVAILABLE`), never an assumption that the position is flat.
+- The exit order id identifies the exit **episode**
+  (`_exit_order_id(symbol, price, reason, episode)`), not the trigger price.
+  The price used to be part of it, so a stop that stayed triggered while the
+  price moved minted a new id — and therefore a new order — every cycle. The
+  episode number distinguishes one *holding* of a symbol from a later one, so a
+  position that is closed and re-opened gets its own exit id.
+- An exit is recorded as **done** only when the broker's **filled quantity**
+  covers what was held. The order's status string is not the authority: a
+  market order the broker reports as `accepted` can already be filled.
+- `state.exits` is cleared and `state.exit_attempts` is dropped when a **new
+  entry** is recorded for that symbol, because that is a new episode.
+- TJR is long-only and emits only BUY, so it can never *close* a position it
+  did not open. A broker-only position is an operator decision, not something
+  the worker may act on.
+
 ## TJR on the paper worker
 
 `paper_experiment/tjr_source.py` is the third `DecisionSource`: it runs the
