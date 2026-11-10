@@ -747,6 +747,18 @@ whether it *can* be done is answered by the broker. So `protected` comes from
 position whose broker could not be read, whose monitor is blind, or whose exit
 was refused is reported as `UNPROTECTED` with the reason, never as protected.
 
+The roll-up's **precedence** matters, because a `CLOSED` record is history —
+it describes a position that is gone — and must never decide the verdict
+while an open position is unguarded. The order is: `UNPROTECTED` wins, then
+an open position with **no** protection record (`PENDING`), then a `PENDING`
+record, then `EXIT_PENDING`, then — only when **nothing** is open — `CLOSED`
+(if every record is closed) or `NO_OPEN_POSITIONS`. An open position whose own
+record says `CLOSED` is `PENDING`: the broker says it is held and the record
+says it is over, and that disagreement is the finding. The detail names the
+**unguarded** position, not the closed history, because the operator has to be
+told which position needs attention. See
+`tests/test_phase35_venue_reconciliation_review.py`.
+
 `UNPROTECTED` is a claim about an **open** position, so it is the wrong verdict
 for a worker that holds nothing. The worker-level verdict has its own state,
 `PROTECTION_STATUS_NO_OPEN_POSITIONS`, for "there is nothing here to protect".
@@ -876,8 +888,45 @@ same account, or one whose submission was ambiguous.
   against;
 - `status_mismatches` — the worker recorded `accepted` and the venue says
   `filled`;
-- `unmatched_positions` — a position the venue holds that the worker does not
-  match by symbol.
+- `venue_positions_missing_from_worker` — a position the venue holds that the
+  worker has no record of;
+- `worker_positions_missing_from_venue` — a position the worker believes it
+  holds that the venue does not report;
+- `position_quantity_mismatches` — both sides hold the symbol, but in
+  different quantities.
 
 The report is a **read**. It changes no order and places none. Its purpose is
 to make a divergence visible, not to resolve it by acting.
+
+**The reconciliation is two-way, and it reads the venue fresh.** The two
+directions answer different questions, so they are separate lists — and the
+quantity disagreement is a third fact, not a variant of either. The positions
+are read with `refresh=True`: a **cached** response is the worker's own
+earlier view, so comparing against it compares the worker with itself and can
+never find a divergence that appeared since the cache was filled. Both sides
+are canonicalised before they are compared, so the venue's `AVAXUSD` and the
+worker's `AVAX/USD` are one instrument.
+
+**The two venue reads are independent.** `GET /v2/orders` and
+`GET /v2/positions` are two requests, and either can fail on its own. The
+report carries `orders_readable` and `positions_readable` separately, and a
+failed order list no longer skips the positions read. An unreadable list is
+**unknown**, never "empty": a venue that could not be asked has not been shown
+to hold nothing. See `tests/test_phase35_venue_reconciliation_review.py`.
+
+**The order list is paginated.** `GET /v2/orders` returns one page at a time,
+so a single request sees only the first `limit` orders. `list_orders` follows
+Alpaca's `after` cursor under a bounded page count and returns a
+`VenueOrderPage` that says how many pages were read and whether the read was
+truncated. A venue record that carries no usable client order id is returned
+as an **unclassified** record rather than dropped — an order nobody can
+identify is a finding, and discarding it would let the reconciliation report
+that everything agrees.
+
+**A closed position leaves the position map.** `state.positions` is a
+snapshot of the broker's holdings, refreshed only by the next position read.
+The exit's filled quantity already proves the position is closed at the
+venue, so `_mark_protection_closed` removes the symbol from that map;
+otherwise the roll-up sees an *open* position whose own record says it is
+closed. A ladder exit that only fills one slice does not call it, so a
+partial close keeps the position.
