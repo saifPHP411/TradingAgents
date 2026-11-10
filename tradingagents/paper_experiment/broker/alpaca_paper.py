@@ -45,6 +45,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from tradingagents.crypto.symbols import try_parse_pair
+
 # ---------------------------------------------------------------------------
 # Endpoint safety
 # ---------------------------------------------------------------------------
@@ -163,6 +165,38 @@ def _host_of(url: str) -> str:
 def _today() -> str:
     """The current UTC calendar day, ``YYYY-MM-DD``. The daily-order window."""
     return datetime.now(UTC).date().isoformat()
+
+
+def canonical_position_symbol(symbol: str) -> str:
+    """The canonical ``BASE/QUOTE`` spelling of a venue's crypto symbol.
+
+    Alpaca spells a crypto position ``AVAXUSD`` while the order that opened it
+    was sent as ``AVAX/USD``. They name the same instrument, but as dictionary
+    keys they are different strings, so a position read from the venue was
+    invisible to every lookup made with the execution spelling: the exit could
+    not be sized, the broker's own "is this a short?" check read the holding as
+    zero, and the entry gate saw no open position at all.
+
+    So the venue's spelling is normalised **once**, at the boundary where the
+    position enters the system, and every consumer downstream — the worker
+    state, the protection rows, the exit monitor, the entry gate — then sees the
+    same symbol.
+
+    An **equity** symbol is never rewritten: ``AAPL`` is not a crypto pair, and
+    the crypto parser is only consulted for a symbol that actually looks like
+    one. A symbol that cannot be parsed keeps the venue's own spelling, so an
+    unknown instrument is reported as the venue wrote it rather than guessed at.
+    """
+    text = str(symbol or "").strip().upper()
+    if not text:
+        return text
+    if "/" in text:
+        # Already the canonical spelling; normalise the case only.
+        return text
+    pair = try_parse_pair(text)
+    if pair is None:
+        return text
+    return pair.canonical
 
 
 _APPROVED_SCHEME = "https"
@@ -586,6 +620,13 @@ class BrokerPosition:
     market_value: float | None
     average_entry_price: float | None
     side: str | None = None
+    venue_symbol: str | None = None
+    """The symbol exactly as the venue wrote it (``AVAXUSD``).
+
+    The canonical ``symbol`` is what the rest of the system matches on; this is
+    the venue's own spelling, kept so the raw answer stays auditable and a
+    spelling change at the venue is visible rather than silently normalised
+    away."""
 
     @property
     def is_short(self) -> bool:
@@ -598,6 +639,7 @@ class BrokerPosition:
             "market_value": self.market_value,
             "average_entry_price": self.average_entry_price,
             "side": self.side,
+            "venue_symbol": self.venue_symbol or self.symbol,
         }
 
 
@@ -866,6 +908,14 @@ class AlpacaPaperBroker:
         mapping if never read) without a request — useful for a read-only view that
         must not call out. A position with a zero quantity is dropped, so a closed
         position does not read as open.
+
+        The key is the **canonical** symbol. Alpaca spells a crypto position
+        ``AVAXUSD`` while the order that opened it was sent as ``AVAX/USD``, so
+        keying by the venue's raw spelling left the holding invisible to every
+        lookup made with the execution spelling: the exit could not be sized, the
+        "is this a short?" check read the holding as zero, and the entry gate saw
+        no open position. The venue's own spelling is kept on the position as
+        ``venue_symbol``, so the raw answer is still auditable.
         """
         if refresh or self._positions is None:
             payload = self._request("GET", "/v2/positions")
@@ -875,18 +925,20 @@ class AlpacaPaperBroker:
             for entry in payload:
                 if not isinstance(entry, dict):
                     continue
-                symbol = str(entry.get("symbol", "")).upper()
-                if not symbol:
+                venue_symbol = str(entry.get("symbol", "")).upper()
+                if not venue_symbol:
                     continue
                 quantity = _as_float(entry.get("qty"))
                 if quantity == 0.0:
                     continue
+                symbol = canonical_position_symbol(venue_symbol)
                 found[symbol] = BrokerPosition(
                     symbol=symbol,
                     quantity=quantity,
                     market_value=_as_optional_float(entry.get("market_value")),
                     average_entry_price=_as_optional_float(entry.get("avg_entry_price")),
                     side=_as_optional_str(entry.get("side")),
+                    venue_symbol=venue_symbol,
                 )
             self._positions = found
             self._state.positions = {s: p.to_dict() for s, p in sorted(found.items())}
@@ -1190,6 +1242,50 @@ class AlpacaPaperBroker:
     def get_order(self, broker_order_id: str) -> BrokerOrder:
         payload = self._request("GET", f"/v2/orders/{broker_order_id}")
         return self._parse_order(payload)
+
+    def list_orders(
+        self,
+        *,
+        status: str = "all",
+        limit: int = 500,
+        direction: str = "desc",
+    ) -> list[BrokerOrder]:
+        """Every order the venue knows about, read from ``GET /v2/orders``.
+
+        The worker reconciles the orders **it** submitted by client order id, but
+        that is blind to an order the venue holds and the worker does not: one
+        submitted before a restart whose state was lost, one placed by another
+        tool against the same account, or one whose submission was ambiguous.
+        Reading the venue's own order list is how that divergence is *seen*
+        rather than assumed absent.
+
+        This is a **read**: it never submits, cancels or modifies an order. It
+        exists so a divergence can be reported, not so an old order can be sent
+        again.
+        """
+        payload = self._request(
+            "GET",
+            "/v2/orders",
+            params={
+                "status": status,
+                "limit": str(limit),
+                "direction": direction,
+                "nested": "true",
+            },
+        )
+        if not isinstance(payload, list):
+            raise BrokerError("the broker orders response was not the expected list")
+        orders: list[BrokerOrder] = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                orders.append(self._parse_order(entry))
+            except BrokerError:
+                # An entry without a client order id cannot be reconciled against
+                # the worker's own orders; it is skipped rather than guessed at.
+                continue
+        return orders
 
     def cancel_order(self, broker_order_id: str) -> BrokerOrder:
         self._request("DELETE", f"/v2/orders/{broker_order_id}")

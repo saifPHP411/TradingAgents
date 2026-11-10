@@ -2020,6 +2020,22 @@ class PaperTradingConfig:
     """The maximum age of a snapshot price, in seconds, when the snapshot seam is
     used. ``None`` disables the age check (not recommended). Ignored by
     ``bar_open``, which is historical by construction."""
+    observation_interval_seconds: float | None = None
+    """How often the market-data seam is re-read, independently of the decision
+    cadence. ``None`` derives it from ``market_data_max_age_seconds`` so the
+    observation is refreshed *before* it can age past the bound.
+
+    The decision cadence (``poll_interval_seconds``) and the observation cadence
+    answer different questions. The decision cadence asks "is it time to look for
+    a trade?", and it is deliberately slow: a decision must not be produced just
+    because time passed. The observation cadence asks "is the price I am
+    reporting still current?", and it must be faster than the freshness bound,
+    or the reported price is stale for most of its life — with a 60s poll and a
+    15s bound, a 44-second-old price was reported as ``ok`` beside
+    ``is_current_price: false``.
+
+    Setting it explicitly overrides the derived value. It changes only *what is
+    observed*; it never produces a decision and never places an order."""
     decision_source: str = DECISION_SOURCE_HISTORY
     """Which decision source this worker draws on — ``history`` (the default) or
     ``current_market``.
@@ -2101,6 +2117,10 @@ class PaperTradingConfig:
             self.market_data_max_age_seconds > 0
         ):
             raise WorkerError("market_data_max_age_seconds must be positive or None")
+        if self.observation_interval_seconds is not None and not (
+            self.observation_interval_seconds > 0
+        ):
+            raise WorkerError("observation_interval_seconds must be positive or None")
         if not math.isfinite(self.max_price_deviation) or self.max_price_deviation < 0:
             raise WorkerError(
                 "max_price_deviation must be a finite, non-negative fraction, got "
@@ -2828,6 +2848,13 @@ class PaperTradingWorker:
         self._stop_event = threading.Event()
         self._loop: threading.Thread | None = None
         self._next_cycle_at: str | None = None
+        self._last_market_data_at: str | None = None
+        """When the market-data seam was last re-read, for the observation tick.
+
+        This is the worker's own knowledge of its last read, so the observation
+        cadence can be scheduled from it. It is set only when a read actually
+        happened, so a failed read leaves the previous instant in place and the
+        observation comes due again promptly rather than being pushed out."""
 
     # -- construction helpers --------------------------------------------
 
@@ -3093,12 +3120,38 @@ class PaperTradingWorker:
         is re-read from the config on every pass. The whole iteration — the cycle
         and its bookkeeping save — is wrapped, so nothing inside can kill the
         thread with an unhandled error.
+
+        Two cadences run here. The **decision** cadence
+        (``poll_interval_seconds``) runs the full cycle, which is what evaluates
+        the strategy and may place an order. The **observation** cadence is
+        faster and only re-reads the market-data seam, so the price the worker
+        reports stays inside its freshness bound.
+
+        They are separate because they answer different questions. Letting the
+        observation ride on the decision cadence meant a 15-second freshness
+        bound was met by a 60-second poll, so the reported price was stale for
+        44 seconds out of every minute. Refreshing more often changes only what
+        is *observed*: the observation tick never evaluates the strategy, never
+        produces a decision and never places an order, so a faster tick cannot
+        become a reason to trade.
         """
         while not self._stop_event.is_set():
-            interval = self.config.poll_interval_seconds
+            interval = self._next_interval()
             if self._stop_event.wait(interval):
                 break
             try:
+                if not self._decision_due():
+                    # An observation-only tick: refresh the price and nothing
+                    # else. The cycle refreshes it too, so doing it here as
+                    # well would make two venue requests for one read. The
+                    # lock is held for the read, so a stop cannot interleave
+                    # with it.
+                    with self._lock:
+                        if self._stop_event.is_set():
+                            break
+                        if self._observation_due():
+                            self._refresh_market_data()
+                    continue
                 self._run_cycle_locked()
                 with self._lock:
                     if self._stop_event.is_set():
@@ -3109,6 +3162,57 @@ class PaperTradingWorker:
             except Exception as exc:  # noqa: BLE001 - a cycle failure must not crash the process
                 self._fail_cycle(exc)
                 break
+
+    def _observation_interval(self) -> float | None:
+        """How often the market-data seam is re-read, or ``None`` for no tick.
+
+        Derived from the freshness bound when it is not set explicitly: the
+        observation is refreshed at half the bound, so it can never be read at
+        the moment it expires. With no bound there is nothing to keep fresh, so
+        there is no observation tick.
+        """
+        configured = self.config.observation_interval_seconds
+        if configured is not None:
+            return configured
+        bound = self.config.market_data_max_age_seconds
+        if bound is None:
+            return None
+        return max(1.0, bound / 2.0)
+
+    def _next_interval(self) -> float:
+        """How long to wait before the next tick: the shorter of the two cadences."""
+        observation = self._observation_interval()
+        decision = self.config.poll_interval_seconds
+        if observation is None:
+            return decision
+        return min(decision, observation)
+
+    def _observation_due(self) -> bool:
+        """Whether the market-data seam is due for another read."""
+        interval = self._observation_interval()
+        if interval is None:
+            return False
+        return self._elapsed_since_observation() >= interval
+
+    def _elapsed_since_observation(self) -> float:
+        """Seconds since the last successful observation read."""
+        observed = self._last_market_data_at
+        if not observed:
+            return float("inf")
+        parsed = _parse_utc(observed)
+        if parsed is None:
+            return float("inf")
+        return (datetime.now(UTC) - parsed).total_seconds()
+
+    def _decision_due(self) -> bool:
+        """Whether the decision cadence has come round again."""
+        due = self._next_cycle_at
+        if not due:
+            return True
+        parsed = _parse_utc(due)
+        if parsed is None:
+            return True
+        return datetime.now(UTC) >= parsed
 
     def _run_cycle_locked(self) -> None:
         """Run exactly one cycle, skipping it if a stop was requested first.
@@ -3880,6 +3984,12 @@ class PaperTradingWorker:
             if status and status != PROTECTION_STATUS_PROTECTED and detail is None:
                 detail = f"{symbol}: {record.get('detail') or status}"
         open_symbols = self._open_position_symbols()
+        # An open position with no protection record at all. The record is the
+        # broker-verified verdict, so its absence means nothing has confirmed
+        # that this position's exit can be placed.
+        unverified_symbols = sorted(
+            symbol for symbol in open_symbols if symbol not in (self.state.protections or {})
+        )
         if PROTECTION_STATUS_UNPROTECTED in statuses:
             self.state.protection_status = PROTECTION_STATUS_UNPROTECTED
             self.state.protection_detail = detail
@@ -3904,6 +4014,19 @@ class PaperTradingWorker:
             # claiming an unprotected position that does not exist.
             self.state.protection_status = PROTECTION_STATUS_NO_OPEN_POSITIONS
             self.state.protection_detail = detail
+        elif unverified_symbols:
+            # An open position with **no** protection record is not protected.
+            # The absence of a verdict is not a verdict of "safe": the position
+            # is held and nothing has confirmed that its exit can be placed.
+            # Reporting the worker as protected here would tell an operator a
+            # risk is covered when one open position has no guard at all, so the
+            # honest answer is "pending" — the position is watched, and the
+            # guard has not been confirmed.
+            self.state.protection_status = PROTECTION_STATUS_PENDING
+            self.state.protection_detail = detail or (
+                f"{unverified_symbols[0]}: the open position has no verified "
+                "protection record, so its exit cannot be confirmed as executable"
+            )
         else:
             self.state.protection_status = PROTECTION_STATUS_PROTECTED
             self.state.protection_detail = None
@@ -4791,6 +4914,103 @@ class PaperTradingWorker:
             self._save()
         return outcomes
 
+    def reconcile_with_venue(self) -> dict[str, Any]:
+        """Compare the venue's own view with the worker's, and report the gap.
+
+        Reconciling the orders **this worker** knows about (by client order id)
+        is blind to two things: an order the venue holds and the worker does not
+        know about, and a position the venue holds under a spelling the worker
+        does not match. Both were visible in the report — an order the venue
+        called ``accepted`` with a filled quantity of zero, beside a
+        ``positions = {}`` view — and neither could be *seen* from the worker's
+        side alone.
+
+        So this reads the venue's order list and the venue's positions and
+        reports the differences:
+
+        - ``unknown_orders`` — orders the venue holds that this worker never
+          submitted (or has lost the record of). They are **reported**, never
+          submitted, cancelled or adopted: an order this worker did not send
+          has no decision behind it, so it cannot be traded against.
+        - ``unmatched_positions`` — positions the venue holds that this worker
+          does not match by symbol. A position with no decision behind it has no
+          exit levels, so it is reported as unprotected rather than managed.
+        - ``status_mismatches`` — an order the worker recorded with a status the
+          venue no longer agrees with.
+
+        The report is **read-only**: it changes no order and places none. Its
+        purpose is to make a divergence visible instead of leaving the view to
+        imply that everything agrees.
+        """
+        broker = self._broker
+        if broker is None:
+            return {
+                "venue_readable": False,
+                "unknown_orders": [],
+                "unmatched_positions": [],
+                "status_mismatches": [],
+                "detail": "the worker has no broker, so the venue cannot be read",
+            }
+        report: dict[str, Any] = {
+            "venue_readable": False,
+            "unknown_orders": [],
+            "unmatched_positions": [],
+            "status_mismatches": [],
+            "detail": None,
+        }
+        known = self.state.orders or {}
+        try:
+            venue_orders = broker.list_orders()
+        except Exception as exc:  # noqa: BLE001 - an unreadable venue is unknown
+            report["detail"] = f"the venue's order list could not be read: {type(exc).__name__}"
+            self.state.last_error = f"{type(exc).__name__}: {exc}"
+            return report
+        report["venue_readable"] = True
+        for order in venue_orders:
+            record = known.get(order.client_order_id)
+            if record is None:
+                report["unknown_orders"].append(
+                    {
+                        "broker_order_id": order.broker_order_id,
+                        "client_order_id": order.client_order_id,
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "quantity": order.quantity,
+                        "filled_quantity": order.filled_quantity,
+                        "status": order.status,
+                        "submitted_at": order.submitted_at,
+                    }
+                )
+                continue
+            stored_status = str(record.get("status") or "")
+            if stored_status and stored_status.upper() != order.status.upper():
+                report["status_mismatches"].append(
+                    {
+                        "client_order_id": order.client_order_id,
+                        "broker_order_id": order.broker_order_id,
+                        "symbol": order.symbol,
+                        "worker_status": stored_status,
+                        "venue_status": order.status,
+                        "filled_quantity": order.filled_quantity,
+                    }
+                )
+        # The venue's positions, matched the same way the worker matches them.
+        held = self._held_quantity_map()
+        for symbol, position in sorted((self.state.positions or {}).items()):
+            if symbol not in held:
+                report["unmatched_positions"].append(
+                    {"symbol": symbol, "quantity": position.get("quantity")}
+                )
+        return report
+
+    def _held_quantity_map(self) -> dict[str, float]:
+        """The broker's held quantities, keyed by canonical symbol."""
+        broker = self._broker
+        if broker is None:
+            return {}
+        positions = broker.positions(refresh=False)
+        return {symbol: position.quantity for symbol, position in positions.items()}
+
     def position_protection(self) -> dict[str, dict[str, Any]]:
         """The protection state of every open position, keyed by symbol.
 
@@ -4881,6 +5101,11 @@ class PaperTradingWorker:
             refresh()
         except Exception as exc:  # noqa: BLE001 - a stale price beats a crash
             self.state.last_error = f"{type(exc).__name__}: {exc}"
+        else:
+            # The read happened, so the observation is due again one interval
+            # from now. A failed read leaves the previous instant in place, so
+            # the next tick comes round promptly instead of being pushed out.
+            self._last_market_data_at = datetime.now(UTC).isoformat()
 
     def _sync_observability(self) -> None:
         """Best-effort account/position refresh, so the view is not stale.

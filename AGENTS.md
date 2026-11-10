@@ -804,3 +804,80 @@ writes the venue's answer down. Three properties are non-negotiable:
 `accepted` is not `filled`, and an unfilled order is not a position. See
 `tests/test_phase33_runtime_audit_refresh.py`.
 
+
+## One crypto instrument, one spelling (the venue boundary)
+
+Alpaca spells a crypto position `AVAXUSD`. The order that opened it was sent
+as `AVAX/USD`. They name the same instrument, but as **dictionary keys** they
+are different strings, so every lookup that used one spelling against a map
+keyed by the other silently found nothing. The production account really held
+`AVAXUSD`; the worker reported `positions={}`.
+
+The rule: **the venue's spelling is normalised once, at the boundary where the
+position enters the system** (`AlpacaPaperBroker.positions()`), and everything
+downstream sees the canonical `AVAX/USD`. The raw venue spelling is kept on
+`BrokerPosition.venue_symbol` so the venue's own answer stays auditable.
+
+What the mismatch broke, each a separate defect:
+
+- the held quantity read as `0.0`, so the exit monitor could not size a close;
+- the broker's own "is this a short?" check read the holding as zero, so a
+  correct exit would have been **refused as opening a short**;
+- the entry gate looked for the open position under the execution spelling,
+  found nothing, and allowed a new entry while the first position's guard was
+  in doubt;
+- the protection roll-up counted the position the worker could not see, and
+  reported `PROTECTED` for a position with no confirmed exit at all.
+
+Equity symbols are never rewritten — `AAPL` is not a crypto pair. An
+unparseable instrument keeps the venue's spelling rather than being guessed
+at. See `tests/test_phase34_crypto_symbol_reconciliation.py`.
+
+## The observation cadence is not the decision cadence
+
+Two questions, two clocks:
+
+- the **decision** cadence (`poll_interval_seconds`, 60s) asks *"is it time to
+  look for a trade?"* — deliberately slow, because a decision must not be
+  produced just because time passed;
+- the **observation** cadence asks *"is the price I am reporting still
+  current?"* — it must be **faster than the freshness bound**, or the reported
+  price is stale for most of its life.
+
+Letting the observation ride on the decision cadence meant a 15-second
+freshness bound was served by a 60-second poll: the price was stale for 44
+seconds out of every minute. The status was corrected to say `stale`, but a
+correct label on a stale price is still a stale price.
+
+The worker loop now runs on the shorter of the two. An observation-only tick
+re-reads the market-data seam and does **nothing else**: it never asks the
+decision source, never runs a cycle and never places an order, so a faster
+tick can never become a reason to trade. `cycles_completed` counts decision
+cycles only. The observation interval is half the freshness bound, floored at
+one second so a tight bound cannot hammer the venue.
+
+Railway needs no change: the interval is derived from
+`TRADINGAGENTS_PAPER_SNAPSHOT_MAX_AGE_SECONDS` (15), which the dashboard
+already passes into `PaperTradingConfig`.
+
+## The venue's own order list, read
+
+Reconciling the orders **this worker** knows about (by client order id) is
+blind to an order the venue holds and the worker does not: one submitted
+before a restart whose state was lost, one placed by another tool against the
+same account, or one whose submission was ambiguous.
+
+`AlpacaPaperBroker.list_orders()` reads `GET /v2/orders`, and
+`PaperTradingWorker.reconcile_with_venue()` reports the difference:
+
+- `unknown_orders` — orders the venue holds that this worker never submitted.
+  They are **reported, never submitted, cancelled or adopted**: an order this
+  worker did not send has no decision behind it, so it cannot be traded
+  against;
+- `status_mismatches` — the worker recorded `accepted` and the venue says
+  `filled`;
+- `unmatched_positions` — a position the venue holds that the worker does not
+  match by symbol.
+
+The report is a **read**. It changes no order and places none. Its purpose is
+to make a divergence visible, not to resolve it by acting.
