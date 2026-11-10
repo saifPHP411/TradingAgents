@@ -515,14 +515,21 @@ class TestTheVenueReconciliation:
             worker.stop()
 
     def test_an_unreadable_venue_is_reported_as_unreadable(self, tmp_path):
-        """A venue that cannot be read is unknown, never "no divergence"."""
+        """A venue that cannot be read is unknown, never "no divergence".
+
+        The order list and the position list are **two separate requests**, so
+        one of them failing says nothing about the other. Here the order list
+        fails while the positions read succeeds, so the report says exactly
+        that: the orders are unknown, the positions were read.
+        """
         routes = _routes(order_list=_Resp(503, {"message": "unavailable"}))
         worker = _worker(tmp_path, routes=routes)
         worker.start()
         worker.run_once()
         try:
             report = worker.reconcile_with_venue()
-            assert report["venue_readable"] is False
+            assert report["orders_readable"] is False
+            assert report["positions_readable"] is True
             assert report["unknown_orders"] == []
             assert report["detail"]
         finally:

@@ -431,6 +431,43 @@ class BrokerOrder:
         }
 
 
+@dataclass(frozen=True)
+class VenueOrderPage:
+    """The venue's order list, read as pages, with nothing thrown away.
+
+    ``orders`` are the records the venue sent that could be parsed. They carry
+    a client order id, so they can be matched against the worker's own orders.
+
+    ``unclassified`` are the records the venue sent that could **not** be
+    matched — most often because they carry no usable client order id. They
+    are reported rather than dropped: an order the venue holds that nobody can
+    explain is a finding, and discarding it would leave the operator with a
+    reconciliation that claims everything agrees.
+
+    ``pages_read`` and ``truncated`` say how much of the list was actually
+    seen. A truncated read is not a complete one, and the caller is told.
+    """
+
+    orders: list[BrokerOrder] = field(default_factory=list)
+    unclassified: list[dict[str, Any]] = field(default_factory=list)
+    pages_read: int = 0
+    truncated: bool = False
+
+    @property
+    def total_records(self) -> int:
+        """Every record the venue returned, classified or not."""
+        return len(self.orders) + len(self.unclassified)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "orders": [order.to_dict() for order in self.orders],
+            "unclassified": list(self.unclassified),
+            "pages_read": self.pages_read,
+            "truncated": self.truncated,
+            "total_records": self.total_records,
+        }
+
+
 _LOCAL_REFUSAL_STATUS = "refused_locally"
 """The marker for an order the venue **never saw**.
 
@@ -1249,7 +1286,8 @@ class AlpacaPaperBroker:
         status: str = "all",
         limit: int = 500,
         direction: str = "desc",
-    ) -> list[BrokerOrder]:
+        max_pages: int = 20,
+    ) -> VenueOrderPage:
         """Every order the venue knows about, read from ``GET /v2/orders``.
 
         The worker reconciles the orders **it** submitted by client order id, but
@@ -1262,30 +1300,92 @@ class AlpacaPaperBroker:
         This is a **read**: it never submits, cancels or modifies an order. It
         exists so a divergence can be reported, not so an old order can be sent
         again.
+
+        **Pagination.** ``GET /v2/orders`` returns one page at a time, so a
+        single request sees only the first ``limit`` orders. The pages are
+        followed with Alpaca's ``after`` cursor until the venue returns a short
+        page, so a busy account's older orders are not silently missing from
+        the comparison. The page count is bounded by ``max_pages``: an account
+        with an unbounded order history must not turn one reconciliation into
+        an unbounded crawl, and the bound is reported rather than hidden.
+
+        **Nothing is discarded.** A record the venue sent that cannot be parsed
+        — no client order id, or a shape the parser does not understand — is
+        returned as an **unclassified** order rather than dropped. A silently
+        dropped record is a record that cannot be reconciled and cannot be
+        explained, which is exactly the failure this method exists to remove.
         """
-        payload = self._request(
-            "GET",
-            "/v2/orders",
-            params={
+        if max_pages < 1:
+            raise BrokerError("max_pages must be at least 1")
+        if limit < 1:
+            raise BrokerError("limit must be at least 1")
+        page_size = min(int(limit), 500)
+        orders: list[BrokerOrder] = []
+        unclassified: list[dict[str, Any]] = []
+        after: str | None = None
+        pages_read = 0
+        truncated = False
+        while pages_read < max_pages:
+            params: dict[str, str] = {
                 "status": status,
-                "limit": str(limit),
+                "limit": str(page_size),
                 "direction": direction,
                 "nested": "true",
-            },
+            }
+            if after:
+                params["after"] = after
+            payload = self._request("GET", "/v2/orders", params=params)
+            if not isinstance(payload, list):
+                raise BrokerError("the broker orders response was not the expected list")
+            pages_read += 1
+            for entry in payload:
+                if not isinstance(entry, dict):
+                    unclassified.append(
+                        {
+                            "reason": "the venue record was not an order object",
+                            "record_type": type(entry).__name__,
+                        }
+                    )
+                    continue
+                try:
+                    orders.append(self._parse_order(entry))
+                except BrokerError as exc:
+                    unclassified.append(
+                        {
+                            "reason": str(exc),
+                            "broker_order_id": (
+                                str(entry["id"]) if entry.get("id") else None
+                            ),
+                            "symbol": str(entry.get("symbol", "")),
+                            "side": str(entry.get("side", "")),
+                            "status": str(entry.get("status", "")),
+                        }
+                    )
+            if not payload:
+                # The venue returned an empty page: there is nothing more.
+                break
+            if len(payload) < page_size:
+                break
+            # The venue's cursor is the id of the last record on the page.
+            last = payload[-1]
+            cursor = last.get("id") if isinstance(last, dict) else None
+            if not cursor:
+                # A full page with no usable cursor cannot be followed. The
+                # orders already read are kept; the fact that the read stopped
+                # early is reported rather than passed off as a complete list.
+                truncated = True
+                break
+            after = str(cursor)
+        else:
+            # The page bound was reached with a full page still in hand, so
+            # there may be more orders than were read.
+            truncated = True
+        return VenueOrderPage(
+            orders=orders,
+            unclassified=unclassified,
+            pages_read=pages_read,
+            truncated=truncated,
         )
-        if not isinstance(payload, list):
-            raise BrokerError("the broker orders response was not the expected list")
-        orders: list[BrokerOrder] = []
-        for entry in payload:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                orders.append(self._parse_order(entry))
-            except BrokerError:
-                # An entry without a client order id cannot be reconciled against
-                # the worker's own orders; it is skipped rather than guessed at.
-                continue
-        return orders
 
     def cancel_order(self, broker_order_id: str) -> BrokerOrder:
         self._request("DELETE", f"/v2/orders/{broker_order_id}")

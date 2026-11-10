@@ -92,6 +92,7 @@ from .alpaca_paper import (
     PaperRiskLimits,
     PaperRiskRejected,
     assert_paper_endpoint,
+    canonical_position_symbol,
 )
 
 WORKER_STATE_SCHEMA_VERSION = 1
@@ -3990,29 +3991,20 @@ class PaperTradingWorker:
         unverified_symbols = sorted(
             symbol for symbol in open_symbols if symbol not in (self.state.protections or {})
         )
+        # A **closed** record is history: it describes a position that is gone.
+        # It says nothing about a position that is open now, so it must never
+        # decide the verdict while an open position is unguarded. The old
+        # records are therefore separated out before the precedence is applied,
+        # so "every old record is closed" cannot mask a new open position.
+        live_statuses = [
+            record.get("status")
+            for symbol, record in (self.state.protections or {}).items()
+            if symbol in open_symbols
+            and isinstance(record, dict)
+            and record.get("status")
+        ]
         if PROTECTION_STATUS_UNPROTECTED in statuses:
             self.state.protection_status = PROTECTION_STATUS_UNPROTECTED
-            self.state.protection_detail = detail
-        elif PROTECTION_STATUS_PENDING in statuses:
-            self.state.protection_status = PROTECTION_STATUS_PENDING
-            self.state.protection_detail = detail
-        elif PROTECTION_STATUS_EXIT_PENDING in statuses:
-            self.state.protection_status = PROTECTION_STATUS_EXIT_PENDING
-            self.state.protection_detail = detail
-        elif statuses and all(
-            status == PROTECTION_STATUS_CLOSED for status in statuses
-        ):
-            # Every position is closed, so there is nothing left to protect. The
-            # verdict is "closed", never "protected": reporting a protection
-            # for a position that no longer exists would tell an operator a
-            # risk is covered when no position is open at all.
-            self.state.protection_status = PROTECTION_STATUS_CLOSED
-            self.state.protection_detail = detail
-        elif not open_symbols:
-            # Nothing is open, so there is nothing to protect. This is the state
-            # a worker with no position reports; it says so plainly instead of
-            # claiming an unprotected position that does not exist.
-            self.state.protection_status = PROTECTION_STATUS_NO_OPEN_POSITIONS
             self.state.protection_detail = detail
         elif unverified_symbols:
             # An open position with **no** protection record is not protected.
@@ -4022,10 +4014,51 @@ class PaperTradingWorker:
             # risk is covered when one open position has no guard at all, so the
             # honest answer is "pending" — the position is watched, and the
             # guard has not been confirmed.
+            #
+            # This is checked *before* the closed-history branch: a closed
+            # record for an earlier position says nothing about the position
+            # that is open now. The detail names the **unguarded** position,
+            # not the closed history — the operator has to be told which
+            # position needs attention.
             self.state.protection_status = PROTECTION_STATUS_PENDING
-            self.state.protection_detail = detail or (
+            self.state.protection_detail = (
                 f"{unverified_symbols[0]}: the open position has no verified "
                 "protection record, so its exit cannot be confirmed as executable"
+            )
+        elif PROTECTION_STATUS_PENDING in statuses:
+            self.state.protection_status = PROTECTION_STATUS_PENDING
+            self.state.protection_detail = detail
+        elif PROTECTION_STATUS_EXIT_PENDING in statuses:
+            self.state.protection_status = PROTECTION_STATUS_EXIT_PENDING
+            self.state.protection_detail = detail
+        elif not open_symbols:
+            # Nothing is open, so there is nothing to protect. This is the state
+            # a worker with no position reports; it says so plainly instead of
+            # claiming an unprotected position that does not exist.
+            if statuses and all(status == PROTECTION_STATUS_CLOSED for status in statuses):
+                # Every position is closed, so there is nothing left to protect.
+                # The verdict is "closed", never "protected": reporting a
+                # protection for a position that no longer exists would tell an
+                # operator a risk is covered when no position is open at all.
+                self.state.protection_status = PROTECTION_STATUS_CLOSED
+                self.state.protection_detail = detail
+            else:
+                self.state.protection_status = PROTECTION_STATUS_NO_OPEN_POSITIONS
+                self.state.protection_detail = detail
+        elif live_statuses and all(
+            status == PROTECTION_STATUS_CLOSED for status in live_statuses
+        ):
+            # Every **open** position carries a closed record: the record says
+            # the episode is over, but the broker still reports the position
+            # as held. The two disagree, and the disagreement is the finding —
+            # the position is open, so the verdict must not be "closed" and
+            # must not be "protected" either. "Pending" is the honest answer:
+            # the position is held and its guard is not established.
+            self.state.protection_status = PROTECTION_STATUS_PENDING
+            self.state.protection_detail = detail or (
+                f"{sorted(open_symbols)[0]}: the broker reports the position as "
+                "open, but its protection record says it is closed; the guard "
+                "cannot be confirmed as executable"
             )
         else:
             self.state.protection_status = PROTECTION_STATUS_PROTECTED
@@ -4077,6 +4110,14 @@ class PaperTradingWorker:
         A closed position needs no guard. The verdict moves to ``CLOSED`` the
         moment the exit fills, not on the next cycle's re-check: a protection
         that outlives its position is a claim about something that is gone.
+
+        The position is also dropped from ``state.positions``. That map is a
+        **snapshot** of the broker's holdings, and it is only refreshed by the
+        next position read — so without this the closed position would linger
+        in it and the roll-up would see an *open* position whose own record
+        says it is closed. The exit's filled quantity already proves the
+        position is closed at the venue, so keeping a stale entry for it
+        would contradict the fact this method is recording.
         """
         record = self.state.protections.get(symbol)
         if record is None:
@@ -4089,6 +4130,7 @@ class PaperTradingWorker:
         record["held_quantity"] = 0.0
         record["checked_at"] = datetime.now(UTC).isoformat()
         self.state.protections[symbol] = record
+        self.state.positions.pop(symbol, None)
         self._roll_up_protection_status()
 
     def _mark_protection_unverifiable(
@@ -4926,90 +4968,206 @@ class PaperTradingWorker:
         side alone.
 
         So this reads the venue's order list and the venue's positions and
-        reports the differences:
+        reports the differences.
 
-        - ``unknown_orders`` — orders the venue holds that this worker never
-          submitted (or has lost the record of). They are **reported**, never
-          submitted, cancelled or adopted: an order this worker did not send
-          has no decision behind it, so it cannot be traded against.
-        - ``unmatched_positions`` — positions the venue holds that this worker
-          does not match by symbol. A position with no decision behind it has no
-          exit levels, so it is reported as unprotected rather than managed.
-        - ``status_mismatches`` — an order the worker recorded with a status the
-          venue no longer agrees with.
+        **The two reads are separate.** ``GET /v2/orders`` and
+        ``GET /v2/positions`` are two different requests, and either can fail on
+        its own. A successful order list says nothing about whether the
+        positions were read, so the report carries ``orders_readable`` and
+        ``positions_readable`` independently, and a successful orders request
+        never implies that the positions were successfully read. An unreadable
+        list is **unknown**, never "empty": a venue that could not be asked has
+        not been shown to hold nothing.
 
-        The report is **read-only**: it changes no order and places none. Its
-        purpose is to make a divergence visible instead of leaving the view to
-        imply that everything agrees.
+        The positions are read **fresh** (``refresh=True``). A cached response
+        is the worker's own earlier view, so comparing it against the worker
+        would compare the worker with itself and could never find a divergence
+        that appeared since the cache was filled.
+
+        The comparison runs in **both directions**:
+
+        - ``venue_positions_missing_from_worker`` — the venue holds a position
+          the worker does not know about. It is reported, never adopted: a
+          position with no decision behind it has no exit levels, so it cannot
+          be traded against.
+        - ``worker_positions_missing_from_venue`` — the worker believes it holds
+          a position the venue does not report.
+        - ``position_quantity_mismatches`` — both sides hold the symbol, but in
+          different quantities. This is a *different* fact from either side
+          being absent, so it is reported separately.
+
+        Symbols are canonicalised on both sides before they are compared, so
+        the venue's ``AVAXUSD`` and the worker's ``AVAX/USD`` are recognised as
+        the same instrument instead of being reported as two positions that do
+        not exist.
+
+        The report is **read-only**: it changes no order, adopts no position,
+        closes nothing, cancels nothing and places nothing. Its purpose is to
+        make a divergence visible instead of leaving the view to imply that
+        everything agrees.
         """
         broker = self._broker
-        if broker is None:
-            return {
-                "venue_readable": False,
-                "unknown_orders": [],
-                "unmatched_positions": [],
-                "status_mismatches": [],
-                "detail": "the worker has no broker, so the venue cannot be read",
-            }
         report: dict[str, Any] = {
             "venue_readable": False,
+            "orders_readable": False,
+            "positions_readable": False,
             "unknown_orders": [],
-            "unmatched_positions": [],
+            "unclassified_orders": [],
+            "venue_positions_missing_from_worker": [],
+            "worker_positions_missing_from_venue": [],
+            "position_quantity_mismatches": [],
             "status_mismatches": [],
+            "orders_truncated": False,
             "detail": None,
         }
+        if broker is None:
+            report["detail"] = "the worker has no broker, so the venue cannot be read"
+            return report
+
+        # --- the venue's order list (one request, its own readability) ---
         known = self.state.orders or {}
         try:
-            venue_orders = broker.list_orders()
+            page = broker.list_orders()
         except Exception as exc:  # noqa: BLE001 - an unreadable venue is unknown
-            report["detail"] = f"the venue's order list could not be read: {type(exc).__name__}"
+            report["detail"] = (
+                f"the venue's order list could not be read: {type(exc).__name__}"
+            )
             self.state.last_error = f"{type(exc).__name__}: {exc}"
-            return report
-        report["venue_readable"] = True
-        for order in venue_orders:
-            record = known.get(order.client_order_id)
-            if record is None:
-                report["unknown_orders"].append(
+        else:
+            report["orders_readable"] = True
+            report["orders_truncated"] = bool(getattr(page, "truncated", False))
+            for order in page.orders:
+                record = known.get(order.client_order_id)
+                if record is None:
+                    report["unknown_orders"].append(
+                        {
+                            "broker_order_id": order.broker_order_id,
+                            "client_order_id": order.client_order_id,
+                            "symbol": order.symbol,
+                            "side": order.side,
+                            "quantity": order.quantity,
+                            "filled_quantity": order.filled_quantity,
+                            "status": order.status,
+                            "submitted_at": order.submitted_at,
+                        }
+                    )
+                    continue
+                stored_status = str(record.get("status") or "")
+                if stored_status and stored_status.upper() != order.status.upper():
+                    report["status_mismatches"].append(
+                        {
+                            "client_order_id": order.client_order_id,
+                            "broker_order_id": order.broker_order_id,
+                            "symbol": order.symbol,
+                            "worker_status": stored_status,
+                            "venue_status": order.status,
+                            "filled_quantity": order.filled_quantity,
+                        }
+                    )
+            # A venue record the worker cannot classify is reported, not
+            # dropped: an order nobody can explain is a finding.
+            for entry in page.unclassified:
+                report["unclassified_orders"].append(dict(entry))
+
+        # --- the venue's positions (a separate request, its own readability) ---
+        venue_positions: dict[str, float] = {}
+        try:
+            venue_positions = self._held_quantity_map(refresh=True)
+        except Exception as exc:  # noqa: BLE001 - an unreadable venue is unknown
+            report["positions_readable"] = False
+            position_detail = (
+                f"the venue's positions could not be read: {type(exc).__name__}"
+            )
+            report["detail"] = (
+                f"{report['detail']}; {position_detail}"
+                if report["detail"]
+                else position_detail
+            )
+            self.state.last_error = f"{type(exc).__name__}: {exc}"
+        else:
+            report["positions_readable"] = True
+            self._compare_positions_with_venue(venue_positions, report)
+        # The aggregate says whether *either* read came back. It is never the
+        # one that decides what was compared: ``orders_readable`` and
+        # ``positions_readable`` are the facts, and a caller that needs to know
+        # whether the positions were verified reads that one.
+        report["venue_readable"] = bool(
+            report["orders_readable"] or report["positions_readable"]
+        )
+        return report
+
+    def _compare_positions_with_venue(
+        self, venue_positions: dict[str, float], report: dict[str, Any]
+    ) -> None:
+        """Compare the venue's positions with the worker's, in both directions."""
+        worker_positions = self.state.positions or {}
+        worker_quantities = {
+            canonical_position_symbol(str(symbol)): _as_float(position.get("quantity"))
+            for symbol, position in worker_positions.items()
+            if isinstance(position, dict)
+        }
+        worker_quantities = {
+            symbol: quantity
+            for symbol, quantity in worker_quantities.items()
+            if quantity is not None
+        }
+        # The venue's holdings the worker does not know about.
+        for symbol, quantity in sorted(venue_positions.items()):
+            if symbol not in worker_quantities:
+                report["venue_positions_missing_from_worker"].append(
                     {
-                        "broker_order_id": order.broker_order_id,
-                        "client_order_id": order.client_order_id,
-                        "symbol": order.symbol,
-                        "side": order.side,
-                        "quantity": order.quantity,
-                        "filled_quantity": order.filled_quantity,
-                        "status": order.status,
-                        "submitted_at": order.submitted_at,
+                        "symbol": symbol,
+                        "quantity": quantity,
+                        "detail": (
+                            "the venue holds this position, but the worker has no "
+                            "record of it; it is reported, never adopted"
+                        ),
                     }
                 )
                 continue
-            stored_status = str(record.get("status") or "")
-            if stored_status and stored_status.upper() != order.status.upper():
-                report["status_mismatches"].append(
+            worker_quantity = worker_quantities[symbol]
+            if abs(float(worker_quantity) - float(quantity)) > 1e-6:
+                report["position_quantity_mismatches"].append(
                     {
-                        "client_order_id": order.client_order_id,
-                        "broker_order_id": order.broker_order_id,
-                        "symbol": order.symbol,
-                        "worker_status": stored_status,
-                        "venue_status": order.status,
-                        "filled_quantity": order.filled_quantity,
+                        "symbol": symbol,
+                        "worker_quantity": worker_quantity,
+                        "venue_quantity": quantity,
+                        "detail": (
+                            "the worker and the venue disagree about how much is "
+                            "held; neither side is corrected automatically"
+                        ),
                     }
                 )
-        # The venue's positions, matched the same way the worker matches them.
-        held = self._held_quantity_map()
-        for symbol, position in sorted((self.state.positions or {}).items()):
-            if symbol not in held:
-                report["unmatched_positions"].append(
-                    {"symbol": symbol, "quantity": position.get("quantity")}
+        # The worker's holdings the venue does not report.
+        for symbol, quantity in sorted(worker_quantities.items()):
+            if symbol not in venue_positions:
+                report["worker_positions_missing_from_venue"].append(
+                    {
+                        "symbol": symbol,
+                        "quantity": quantity,
+                        "detail": (
+                            "the worker believes it holds this position, but the "
+                            "venue does not report it; it is reported, never closed"
+                        ),
+                    }
                 )
-        return report
 
-    def _held_quantity_map(self) -> dict[str, float]:
-        """The broker's held quantities, keyed by canonical symbol."""
+    def _held_quantity_map(self, *, refresh: bool = False) -> dict[str, float]:
+        """The broker's held quantities, keyed by canonical symbol.
+
+        ``refresh=True`` asks the venue for a **fresh** read. A cached response
+        is the worker's own earlier view, so a reconciliation that compared the
+        worker against its own cache could never find a divergence that appeared
+        since the cache was filled.
+        """
         broker = self._broker
         if broker is None:
             return {}
-        positions = broker.positions(refresh=False)
-        return {symbol: position.quantity for symbol, position in positions.items()}
+        positions = broker.positions(refresh=refresh)
+        return {
+            canonical_position_symbol(str(symbol)): position.quantity
+            for symbol, position in positions.items()
+        }
 
     def position_protection(self) -> dict[str, dict[str, Any]]:
         """The protection state of every open position, keyed by symbol.
