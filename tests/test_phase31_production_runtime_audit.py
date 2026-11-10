@@ -42,6 +42,7 @@ from tradingagents.paper_experiment.broker import (
     NO_TRADE_NO_SIGNAL,
     NO_TRADE_REASONS,
     NO_TRADE_RISK_REJECTED,
+    NO_TRADE_TJR_NO_NEW_DATA,
     AlpacaPaperBroker,
     PaperRiskLimits,
     PaperTradingConfig,
@@ -361,11 +362,18 @@ class TestTheSessionIsNotClosedByANoSignal:
         )
         decision = source.next_decision()
         assert decision is not None
-        assert decision.decision_id == f"tjr-{SYMBOL}-{SESSION}"
+        assert decision.decision_id.startswith(f"tjr-{SYMBOL}-{SESSION}-")
         assert decision.side == "buy"
 
-    def test_a_completed_setup_still_closes_the_session(self):
-        """A setup that completed is not re-read: the backtest consumes it."""
+    def test_a_completed_setup_is_not_offered_twice(self):
+        """A setup that completed is consumed: the same signal is not repeated.
+
+        The bars *are* re-read on every cycle — a new completed bar is a new
+        judgement, exactly as the backtest judges the chain again at every bar
+        close, and that is the only way a later sweep can be seen at all. But the
+        setup it finds here is the *same* setup, and the same setup is the same
+        signal: it is offered once and never again.
+        """
         stamp = _as_of()
         data = _CountingData(_bars(BULLISH_BARS), clock=lambda: stamp.to_pydatetime())
         source = _source(
@@ -374,10 +382,15 @@ class TestTheSessionIsNotClosedByANoSignal:
             book=TjrBookSnapshot(cash=5000.0),
             price=100.6,
         )
-        assert source.next_decision() is not None
-        assert len(data.fetches) == 1
-        source.next_decision()
-        assert len(data.fetches) == 1  # not re-read
+        first = source.next_decision()
+        assert first is not None
+        # The next cycle re-reads the bars (so a new sweep would be seen) but
+        # finds the same setup, so the decision is not offered again.
+        assert source.next_decision() is None
+        assert source.skip_code == NO_TRADE_TJR_NO_NEW_DATA
+        assert len(data.fetches) == 2
+        # The id is the same, so the worker's ordered set would refuse it too.
+        assert source.last_decision_for(SYMBOL)["decision_id"] == first.decision_id
 
     def test_a_risk_rejection_still_closes_the_session(self):
         """A completed setup the engine refused is a judged setup, not a pending one.
@@ -393,10 +406,10 @@ class TestTheSessionIsNotClosedByANoSignal:
         assert source.next_decision() is None
         assert source.skip_code == NO_TRADE_RISK_REJECTED
         assert len(data.fetches) == 1
-        # The next cycle reports the same refusal without re-reading the bars.
+        # The next cycle reports the same refusal, and never a decision.
         assert source.next_decision() is None
         assert source.skip_code == NO_TRADE_RISK_REJECTED
-        assert len(data.fetches) == 1
+        assert len(data.fetches) == 2
 
 
 # ---------------------------------------------------------------------------

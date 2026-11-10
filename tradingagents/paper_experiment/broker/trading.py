@@ -460,6 +460,62 @@ def _parse_utc(value: Any) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _observation_status(
+    observation: SnapshotObservation | None,
+    *,
+    age_seconds: float | None,
+    max_age_seconds: float | None,
+    future_tolerance_seconds: float,
+    read_status: str,
+    read_detail: str | None,
+) -> tuple[str, str | None]:
+    """The status to *report* for an observation, derived from the observation itself.
+
+    A seam records the outcome of the last **read**, but a price does not stop
+    ageing when the read ends. Reporting the read's outcome forever is how a
+    6142-second-old price came to be reported as ``ok`` beside
+    ``is_current_price: false`` — two fields describing one price and disagreeing.
+
+    So the reported status is recomputed from the **same** observation the reported
+    age is measured from: an observation that has aged past ``max_age_seconds`` is
+    ``stale``, one dated materially in the future is ``future``, and one whose
+    timestamp is missing or unparseable is ``malformed``. Only an observation that
+    is still inside its freshness window keeps the read's own outcome, so a
+    transport failure is never masked by a price that happens to be fresh.
+
+    The returned status is what a view must show, and it can never contradict
+    :meth:`_is_current_price`, because both are derived from this one function's
+    inputs.
+    """
+    if observation is None:
+        return read_status, read_detail
+    if observation.as_of is None:
+        return (
+            MARKET_DATA_STATUS_MALFORMED,
+            "the last observation carries no timestamp, so its age cannot be "
+            "verified; the price is not a current one",
+        )
+    if age_seconds is None:
+        return (
+            MARKET_DATA_STATUS_MALFORMED,
+            f"the last observation's timestamp {observation.as_of!r} is malformed; "
+            "the price is not a current one",
+        )
+    if age_seconds < -abs(future_tolerance_seconds):
+        return (
+            MARKET_DATA_STATUS_FUTURE,
+            f"the last observation is {-age_seconds:.1f}s in the future, beyond the "
+            "allowed clock skew; the price is not a current one",
+        )
+    if max_age_seconds is not None and age_seconds > max_age_seconds:
+        return (
+            MARKET_DATA_STATUS_STALE,
+            f"the last observation is {age_seconds:.1f}s old, beyond the "
+            f"{max_age_seconds:.0f}s maximum; the price is not a current one",
+        )
+    return read_status, read_detail
+
+
 class WorkerError(RuntimeError):
     """The worker was driven in a way it cannot support."""
 
@@ -852,6 +908,15 @@ class AlpacaSnapshotMarketData:
     def describe(self) -> dict[str, Any]:
         """The secret-free identity and last-observation view for a dashboard."""
         observation = self.last_observation
+        age = self.last_snapshot_age_seconds()
+        status, detail = _observation_status(
+            observation,
+            age_seconds=age,
+            max_age_seconds=self.max_age_seconds,
+            future_tolerance_seconds=self.future_tolerance_seconds,
+            read_status=self.last_status,
+            read_detail=self.last_status_detail,
+        )
         return {
             "market_data_detail": (
                 "a current price from Alpaca market data (feed=iex); validated for "
@@ -862,10 +927,10 @@ class AlpacaSnapshotMarketData:
             "last_snapshot_at": observation.as_of if observation else None,
             "last_snapshot_price": observation.price if observation else None,
             "last_snapshot_field": observation.field if observation else None,
-            "last_snapshot_age_seconds": self.last_snapshot_age_seconds(),
+            "last_snapshot_age_seconds": age,
             "last_snapshot_observed_at": self.last_observed_at,
-            "market_data_status": self.last_status,
-            "market_data_status_detail": self.last_status_detail,
+            "market_data_status": status,
+            "market_data_status_detail": detail,
         }
 
     def _is_current_price(self) -> bool:
@@ -1098,6 +1163,15 @@ class BinanceSnapshotMarketData:
 
     def describe(self) -> dict[str, Any]:
         observation = self.last_observation
+        age = self.last_snapshot_age_seconds()
+        status, detail = _observation_status(
+            observation,
+            age_seconds=age,
+            max_age_seconds=self.max_age_seconds,
+            future_tolerance_seconds=self.future_tolerance_seconds,
+            read_status=self.last_status,
+            read_detail=self.last_status_detail,
+        )
         return {
             "market_data_detail": (
                 "a current crypto price from Binance public market data (no key); "
@@ -1108,10 +1182,10 @@ class BinanceSnapshotMarketData:
             "last_snapshot_at": observation.as_of if observation else None,
             "last_snapshot_price": observation.price if observation else None,
             "last_snapshot_field": observation.field if observation else None,
-            "last_snapshot_age_seconds": self.last_snapshot_age_seconds(),
+            "last_snapshot_age_seconds": age,
             "last_snapshot_observed_at": self.last_observed_at,
-            "market_data_status": self.last_status,
-            "market_data_status_detail": self.last_status_detail,
+            "market_data_status": status,
+            "market_data_status_detail": detail,
             "market_data_diagnostics": self._diagnostics(),
         }
 
@@ -1329,6 +1403,15 @@ class AlpacaCryptoExecutionPrice:
 
     def describe(self) -> dict[str, Any]:
         observation = self.last_observation
+        age = self.last_snapshot_age_seconds()
+        status, detail = _observation_status(
+            observation,
+            age_seconds=age,
+            max_age_seconds=self.max_age_seconds,
+            future_tolerance_seconds=self.future_tolerance_seconds,
+            read_status=self.last_status,
+            read_detail=self.last_status_detail,
+        )
         return {
             "market_data_detail": (
                 "a current price on the EXECUTION venue (Alpaca crypto), read for the "
@@ -1340,10 +1423,10 @@ class AlpacaCryptoExecutionPrice:
             "execution_data_last_snapshot_at": observation.as_of if observation else None,
             "execution_data_last_snapshot_price": observation.price if observation else None,
             "execution_data_last_snapshot_field": observation.field if observation else None,
-            "execution_data_last_snapshot_age_seconds": self.last_snapshot_age_seconds(),
+            "execution_data_last_snapshot_age_seconds": age,
             "execution_data_last_observed_at": self.last_observed_at,
-            "execution_data_status": self.last_status,
-            "execution_data_status_detail": self.last_status_detail,
+            "execution_data_status": status,
+            "execution_data_status_detail": detail,
         }
 
     def _is_current_price(self) -> bool:
@@ -3429,6 +3512,54 @@ class PaperTradingWorker:
                 "the exit monitor is not available: the worker cannot read a "
                 "current price or place an exit order, so the position could not "
                 "be protected after the entry filled",
+            )
+
+        # An **open** position whose protection is not confirmed blocks a new
+        # entry. Opening a second position while the first one's guard is in
+        # doubt increases the risk that is already unguarded: the worker would be
+        # managing two positions when it can only prove it can manage one. The
+        # verdict comes from the broker-verified record, never from the recorded
+        # levels — a recorded level says what would be done, not that it can be.
+        refusal = self._open_position_protection_refusal()
+        if refusal is not None:
+            return refusal
+        return None
+
+    def _open_position_protection_refusal(self) -> tuple[str, str] | None:
+        """Whether an open position's unconfirmed protection blocks a new entry.
+
+        The check is over the positions **this worker opened** — the ones it
+        recorded exit levels for and is therefore meant to be managing. For each
+        of them the verdict must be the broker-verified one: a position whose
+        protection cannot be confirmed blocks the entry, because opening a
+        second position while the first one's guard is in doubt increases the
+        risk that is already unguarded.
+
+        A position the worker did **not** open is a different case and is not
+        this gate's business: it was held before this worker existed, or it came
+        from another tool, so it has no strategy decision behind it and no levels
+        to enforce. That position is reported as unprotected by the protection
+        view, and the operator is told about it; it does not stop the worker from
+        taking its first, properly protected, trade.
+
+        A closed position contributes nothing: there is no risk left to cover.
+        """
+        rows = _position_protection_rows(self.state)
+        for symbol in sorted(self.state.stops or {}):
+            record = rows.get(symbol)
+            if record is None:
+                # The worker opened the position and recorded its levels, but the
+                # position is no longer held: the exit is already recorded, so
+                # there is no open risk to cover.
+                continue
+            if record.get("protected"):
+                continue
+            return (
+                NO_TRADE_PROTECTION_FAILED,
+                f"the open position in {symbol} is not confirmed as protected "
+                f"({record.get('protection_state')}: "
+                f"{record.get('reason') or 'no reason recorded'}); "
+                "refusing a new entry",
             )
         return None
 

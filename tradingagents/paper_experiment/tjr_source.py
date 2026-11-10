@@ -16,11 +16,18 @@ One decision per symbol per trading session
 -------------------------------------------
 
 TJR's own backtest attempts **at most one entry per symbol per session**
-(``TjrBacktester._attempted``), so the live source matches it: the decision id is
-``tjr-<symbol>-<session>``. Within a session the chain is re-evaluated on each
-cycle until it completes; the moment it does, the id is fixed and the worker's
-durable ``ordered_decisions`` set (and the broker's ``client_order_id``
-idempotency) refuse a duplicate.
+(``TjrBacktester._attempted``), and the live source matches it: within a session
+the chain is re-evaluated at every 5m bar close and a symbol is attempted only
+when a setup *completes*.
+
+A "session" is not a closed **day**, though. The backtest judges the chain again
+at every new bar close, so a sweep that appears later the same day is a *new*
+setup and is judged on its own merits. The live source does the same: the symbol
+is re-evaluated whenever newer **completed** bars have arrived, and a setup is
+identified by **the sweep that produced it**. So a new sweep in the same session
+gets its own decision id and may trade, while a re-read of the same sweep is the
+same signal and is refused by the worker's durable ``ordered_decisions`` set (and
+by the broker's ``client_order_id`` idempotency).
 
 The order goes through the RiskEngine
 -------------------------------------
@@ -52,6 +59,7 @@ yields *no* decision with a named reason code — never a fake signal.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -230,6 +238,18 @@ class _SymbolRecord:
     liquidity the market actually supports, so it can hold one level or several
     and is never padded.
     """
+    setup_key: str | None = None
+    """The identity of the setup this record came from.
+
+    A completed setup is identified by **the sweep that produced it** — the 5m bar
+    that swept the level, the level's price and the sweep's direction. Two
+    evaluations that agree on this key are the *same* setup seen twice, so the
+    second is a repeat and must not produce a second order; a different key is a
+    different setup, and may produce a new one.
+
+    ``None`` for a record whose chain did not complete: there is no setup to
+    identify.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -248,6 +268,7 @@ class _SymbolRecord:
             "notional": self.notional,
             "reference_price": self.reference_price,
             "evaluated_at": self.evaluated_at,
+            "setup_key": self.setup_key,
         }
 
     @classmethod
@@ -470,33 +491,35 @@ class TjrDecisionSource:
         """A decision, or a ``(detail, code)`` skip to fall back to, or ``None``.
 
         ``None`` means "nothing to report for this symbol"; the caller then tries
-        the next symbol. An existing record for the session whose id the worker has
-        already ordered is skipped so it is not re-offered.
+        the next symbol.
 
-        A record whose chain **did not complete** does *not* close the session. The
-        backtest's engine
+        **The symbol is re-evaluated whenever it has not been decided yet, or
+        whenever new completed data has arrived.** A record that ends the symbol's
+        session (a completed setup, whether sized or refused by the RiskEngine)
+        used to short-circuit the symbol for the *whole* session, which made a
+        sweep that appeared later the same day invisible: the chain was never run
+        again, so the opportunity was never seen. The backtest's engine
         (:meth:`tradingagents.tjr.engine.TjrEngine._process_entries`) re-evaluates
-        the chain at every 5m bar close and only marks the session attempted when a
-        setup *completed*; the live source must mirror that, or a session that
-        opens with an unfinished setup would never be re-read and a later,
-        complete setup would be invisible. So a no-signal record only short-circuits
-        the symbol for the rest of the *same* evaluation instant, not the session.
+        at every 5m bar close and only marks the session attempted when a setup
+        *completed*; the live source now mirrors that.
+
+        **A repeated setup does not produce a second order.** A setup is
+        identified by the sweep that produced it, so re-reading the same bars
+        yields the same setup key and the same decision id: the worker's ordered
+        set refuses it, and the source does not re-offer it either. A *different*
+        sweep is a different setup and gets its own decision id, so it may trade.
+
+        A record whose chain **did not complete** does not close the session
+        either, so a session that opens with an unfinished setup is re-read and a
+        later, complete setup is found.
         """
         record = self._records.get(symbol)
-        if record is not None and record.session == session and self._closes_session(record):
-            if record.side is None:
-                # A completed setup the RiskEngine refused: the chain did complete,
-                # so the session is over, but there is no side to trade. Report it
-                # as the no-trade it is rather than offering a decision.
-                return (record.detail, record.reason_code)
-            if record.decision_id in self._yielded:
-                return None
-            if self._consumed(record.decision_id):
-                return None
-            self._yielded.add(record.decision_id)
-            return self._to_decision(record)
-
         as_of = self._clock()
+        # The bars are fetched on **every** cycle, before anything else. That is
+        # what detects a new opportunity: the chain can only see a new sweep if
+        # the new bars are read. It is also what keeps the data seam's own
+        # "last fetch" evidence current, so the view cannot claim the data is
+        # stale (or absent) while the worker is polling it.
         try:
             five, one = self._series(symbol, session, as_of)
         except TjrIntradayDataError as exc:
@@ -507,6 +530,29 @@ class TjrDecisionSource:
                 NO_TRADE_MARKET_DATA_UNAVAILABLE,
             )
 
+        if (
+            record is not None
+            and record.session == session
+            and self._closes_session(record)
+            and not self._has_new_completed_data(five, record)
+        ):
+            # The session is closed for this symbol, but only until *new* completed
+            # data arrives. The chain is re-run when the newest closed bar closed
+            # after the instant the record was judged. A re-run that finds the
+            # *same* setup is a repeat and is not re-offered; one that finds a
+            # *new* setup is a new opportunity.
+            if record.side is None:
+                # A completed setup the RiskEngine refused: the chain did
+                # complete, so there is nothing to re-judge until new data
+                # arrives. Report it as the no-trade it is.
+                return (record.detail, record.reason_code)
+            if record.decision_id in self._yielded:
+                return None
+            if self._consumed(record.decision_id):
+                return None
+            self._yielded.add(record.decision_id)
+            return self._to_decision(record)
+
         strategy = self._strategy(symbol, five, one)
         try:
             signal, evaluation = strategy.signal(symbol, session, pd.Timestamp(as_of))
@@ -516,11 +562,39 @@ class TjrDecisionSource:
                 NO_TRADE_STRATEGY_UNAVAILABLE,
             )
 
+        setup_key = self._setup_key(evaluation)
         detail = f"{evaluation.stage}:{evaluation.reason_code}:{evaluation.detail}"
+
+        # A re-read of the **same** setup is a repeat, not a new opportunity. The
+        # chain is re-run on new bars, and a new bar can confirm the setup that
+        # was already found without changing which setup it is. The identity of
+        # the setup decides: the same sweep is the same signal and must not be
+        # offered twice; a different sweep is a different signal.
+        if (
+            record is not None
+            and record.setup_key is not None
+            and setup_key is not None
+            and record.setup_key == setup_key
+            and self._closes_session(record)
+        ):
+            if record.side is None:
+                return (record.detail, record.reason_code)
+            if record.decision_id in self._yielded or self._consumed(record.decision_id):
+                return None
+            self._yielded.add(record.decision_id)
+            return self._to_decision(record)
+
         if signal.action is not SignalAction.BUY:
             # A chain that did not complete is an honest no-trade: the worker's
             # code is the generic NO_SIGNAL (a member of its closed vocabulary),
             # and the TJR chain's own reason code is carried in the detail.
+            #
+            # An unfinished chain does **not** replace a completed one: the record
+            # still holds the completed setup, so the symbol keeps its session
+            # closed and the next poll compares against that setup, not against
+            # this unfinished one.
+            if record is not None and self._closes_session(record):
+                return None
             record = _SymbolRecord(
                 symbol=symbol,
                 session=session,
@@ -542,7 +616,7 @@ class TjrDecisionSource:
             return (record.detail[:_REASONING_EXCERPT], record.reason_code)
 
         reference_price = self._reference_price(symbol, one)
-        decision_id = f"tjr-{symbol}-{session}"
+        decision_id = self._decision_id(symbol, session, setup_key)
         # No book supplied means no cash: the engine refuses to size, so no order is
         # produced. The live path always supplies the worker's own book.
         snapshot = self.book_provider() if self.book_provider is not None else TjrBookSnapshot(0.0)
@@ -580,6 +654,7 @@ class TjrDecisionSource:
                 notional=None,
                 reference_price=reference_price,
                 evaluated_at=as_of.isoformat(),
+                setup_key=setup_key,
             )
             self._records[symbol] = record
             self._save()
@@ -613,6 +688,7 @@ class TjrDecisionSource:
             # so the two can never disagree.
             reference_price=execution_price,
             evaluated_at=as_of.isoformat(),
+            setup_key=setup_key,
         )
         self._records[symbol] = record
         self._save()
@@ -690,10 +766,92 @@ class TjrDecisionSource:
         ends the session, while an unfinished chain does not. A risk refusal is a
         completed setup: the chain *did* complete and the engine *did* judge it, so
         re-reading the same bars would only re-run the same refusal.
+
+        A closed session is not a closed **day**: it is closed *for the bars it was
+        judged on*. New completed bars are a new judgement, and the backtest
+        judges them too — it re-evaluates the chain at every 5m bar close and only
+        refuses a symbol it has already *attempted*, which it does so at the
+        instant the setup completes, not for the rest of the day.
         """
         if record.side is not None:
             return True
         return record.reason_code == NO_TRADE_RISK_REJECTED
+
+    @staticmethod
+    def _setup_key(evaluation: Any) -> str | None:
+        """The identity of the setup an evaluation found.
+
+        A setup is identified by **the sweep that produced it**: the 5m bar that
+        swept the level, the level's price, and the sweep's direction. That is
+        what distinguishes "the same setup, seen again" from "a new sweep, later
+        the same day" — the distinction the session rule needs in order to allow a
+        new opportunity without repeating an old signal.
+
+        ``None`` when the chain did not complete: there is no setup to identify.
+        """
+        sweep = getattr(evaluation, "sweep", None)
+        if sweep is None:
+            return None
+        bar = getattr(sweep, "bar", None)
+        level = getattr(sweep, "level", None)
+        price = getattr(level, "price", None) if level is not None else None
+        direction = getattr(sweep, "direction", None)
+        if bar is None or price is None or direction is None:
+            return None
+        return f"{pd.Timestamp(bar).isoformat()}|{float(price):.8f}|{direction}"
+
+    @staticmethod
+    def _decision_id(symbol: str, session: str, setup_key: str | None) -> str:
+        """The decision id for a setup.
+
+        The id must identify the **setup**, not merely the day, so that a new
+        sweep in the same session is a new decision while a re-read of the same
+        sweep is the same decision. The setup's identity is folded into the id as
+        a short digest; without a setup key (an evaluation that did not complete)
+        the id falls back to the session-scoped form, which is what an
+        already-decided symbol must keep.
+        """
+        base = f"tjr-{symbol}-{session}"
+        if not setup_key:
+            return base
+        digest = hashlib.sha256(setup_key.encode("utf-8")).hexdigest()[:12]
+        return f"{base}-{digest}"
+
+    @staticmethod
+    def _has_new_completed_data(five: IntradaySeries, record: _SymbolRecord) -> bool:
+        """Whether **completed** bars are available beyond the ones already judged.
+
+        The record was judged at :attr:`_SymbolRecord.evaluated_at`, the instant
+        of that evaluation. The chain is re-run when the data seam can serve a
+        bar that had **closed after** that instant — the same rule the backtest
+        uses when it judges the chain at every 5m bar close.
+
+        The comparison is against the *evaluation instant*, not against the
+        record's age, because the newest bar the seam serves is the newest bar
+        that had closed by **now**: a bar that closed after the judgement is new
+        information, and a bar that closed before it is not.
+
+        A forming bar is never counted. The data seam drops every bar that had
+        not closed at the evaluation instant, so a still-forming bar can never
+        make the source believe it has new data.
+        """
+        frame = getattr(five, "frame", None)
+        if frame is None or getattr(frame, "empty", True):
+            return False
+        evaluated_at = record.evaluated_at
+        if not evaluated_at:
+            return True
+        try:
+            judged_at = pd.Timestamp(evaluated_at)
+        except Exception:  # noqa: BLE001 - an unusable stamp is not new data
+            return False
+        try:
+            newest_close = pd.Timestamp(frame.index[-1]) + pd.Timedelta(
+                minutes=getattr(five, "bar_minutes", 5)
+            )
+        except Exception:  # noqa: BLE001 - an unusable index is not new data
+            return False
+        return newest_close > judged_at
 
     def _to_decision(self, record: _SymbolRecord) -> TradingDecision:
         assert record.side is not None  # only called for a tradeable side

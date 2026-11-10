@@ -178,13 +178,23 @@ class CryptoMarketDataEngine:
         does not replace it. The engine's price is the newer of the two sources,
         so overwriting a newer ticker with an older one would make the view
         report a stale price as the current one.
+
+        A ticker with **no** observation instant is not merged at all: it cannot
+        be ordered against what is already held, and accepting it would put an
+        unverifiable price into the state's own price field.
         """
         with self._lock:
             state = self._state.get(ticker.symbol)
             if state is None:
                 return
+            if ticker.observed_at is None:
+                return
             previous = state.ticker
-            if previous is not None and ticker.observed_at < previous.observed_at:
+            if (
+                previous is not None
+                and previous.observed_at is not None
+                and ticker.observed_at < previous.observed_at
+            ):
                 # Older than what we already hold: keep the ticker, but let the
                 # stream's own price field carry the observation.
                 state.stream_price = ticker.last

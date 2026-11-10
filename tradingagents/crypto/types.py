@@ -93,7 +93,13 @@ class Ticker:
     low_24h: float | None
     change_24h: float | None
     change_percent_24h: float | None
-    observed_at: datetime
+    observed_at: datetime | None
+    """The venue's own observation instant, or ``None`` when the venue stated none.
+
+    ``None`` means *unverifiable*, not *now*: a reader must treat it as an
+    absence rather than as a current instant, so a payload with no timestamp
+    cannot pass a freshness check.
+    """
 
     @property
     def spread(self) -> float | None:
@@ -130,7 +136,7 @@ class Ticker:
             "low_24h": self.low_24h,
             "change_24h": self.change_24h,
             "change_percent_24h": self.change_percent_24h,
-            "observed_at": self.observed_at.isoformat(),
+            "observed_at": self.observed_at.isoformat() if self.observed_at else None,
         }
 
     @classmethod
@@ -142,6 +148,14 @@ class Ticker:
         object spells the close time ``closeTime``, while the stream event spells
         it ``C`` (with ``E`` as the event time). Both are accepted, so the same
         normalizer serves the snapshot and the live tape.
+
+        **A payload with no timestamp yields a ticker with no timestamp.** The
+        observation instant is the venue's own, and when the venue did not state
+        one there is no honest instant to report: substituting the local clock
+        made every such ticker look infinitely fresh, so a response with no
+        timestamp at all passed the freshness check and could size an order. The
+        absence is kept, so the seam that reads the ticker can fail closed on an
+        unverifiable price instead of trusting a fabricated one.
         """
         observed = _stamp(payload.get("closeTime"))
         if observed is None:
@@ -174,7 +188,7 @@ class Ticker:
             low_24h=first("lowPrice", "l"),
             change_24h=first("priceChange", "p"),
             change_percent_24h=first("priceChangePercent", "P"),
-            observed_at=observed or datetime.now(UTC),
+            observed_at=observed,
         )
 
 

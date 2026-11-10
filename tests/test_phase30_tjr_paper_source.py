@@ -299,13 +299,17 @@ class TestCadenceAndIdempotency:
         source = _source(book=TjrBookSnapshot(cash=5000.0), price=100.6)
         first = source.next_decision()
         assert first is not None
+        # The same bars, re-read: the same setup, so the same decision is not
+        # offered a second time.
         assert source.next_decision() is None
         assert source.skip_code == NO_TRADE_TJR_NO_NEW_DATA
 
     def test_the_decision_id_is_deterministic(self):
         source = _source(book=TjrBookSnapshot(cash=5000.0), price=100.6)
         decision = source.next_decision()
-        assert decision.decision_id == f"tjr-{SYMBOL}-{SESSION}"
+        # The id identifies the *setup*, so it starts with the symbol and session
+        # and carries a digest of the sweep that produced it.
+        assert decision.decision_id.startswith(f"tjr-{SYMBOL}-{SESSION}-")
         other = _source(book=TjrBookSnapshot(cash=5000.0), price=100.6)
         assert other.next_decision().decision_id == decision.decision_id
 
@@ -336,13 +340,13 @@ class TestCadenceAndIdempotency:
         )
         first = source.next_decision()
         assert first is not None
-        assert first.decision_id == f"tjr-{SYMBOL}-{SESSION}"
+        assert first.decision_id.startswith(f"tjr-{SYMBOL}-{SESSION}-")
         # The market rolls to the next session.
         clock._session = next_session
         now["instant"] = _as_of(next_session).to_pydatetime()
         second = source.next_decision()
         assert second is not None
-        assert second.decision_id == f"tjr-{SYMBOL}-{next_session}"
+        assert second.decision_id.startswith(f"tjr-{SYMBOL}-{next_session}-")
         assert second.decision_id != first.decision_id
 
     def test_a_restart_within_a_session_replays_the_same_decision(self, tmp_path):
@@ -357,11 +361,10 @@ class TestCadenceAndIdempotency:
         assert replayed.decision_id == decision.decision_id
 
     def test_a_consumed_decision_is_not_re_offered(self):
-        offered = {f"tjr-{SYMBOL}-{SESSION}"}
         source = _source(
             book=TjrBookSnapshot(cash=5000.0),
             price=100.6,
-            is_consumed=lambda did: did in offered,
+            is_consumed=lambda _did: True,
         )
         assert source.next_decision() is None
         assert source.skip_code == NO_TRADE_TJR_NO_NEW_DATA
