@@ -327,6 +327,23 @@ still protected."""
 PROTECTION_STATUS_CLOSED = "CLOSED"
 """The position was closed. The record is kept so the exit is not repeated."""
 
+PROTECTION_STATUS_NO_OPEN_POSITIONS = "NO_OPEN_POSITIONS"
+"""The worker holds no position, so there is no risk left to protect.
+
+The worker-level verdict only. It is distinct from ``CLOSED`` (a position was
+opened and then closed) because there is a difference an operator has to see:
+``CLOSED`` says the worker's own episode is over, while ``NO_OPEN_POSITIONS``
+says nothing was ever open — or that the broker currently reports nothing open.
+
+It exists because the alternative was wrong. The verdict defaulted to
+``UNPROTECTED``, which is a claim about an *open* position, so a worker holding
+nothing reported an unprotected position that did not exist — beside an empty
+positions map and a null protection-check time. A state that means "there is
+nothing here to protect" says exactly that, and it never hides a position: a
+position the broker reports open always produces a per-position verdict, and
+the roll-up takes the worst of those.
+"""
+
 PROTECTION_STATUSES = (
     PROTECTION_STATUS_PROTECTED,
     PROTECTION_STATUS_UNPROTECTED,
@@ -334,8 +351,18 @@ PROTECTION_STATUSES = (
     PROTECTION_STATUS_EXIT_PENDING,
     PROTECTION_STATUS_PARTIALLY_CLOSED,
     PROTECTION_STATUS_CLOSED,
+    PROTECTION_STATUS_NO_OPEN_POSITIONS,
 )
 """Every state a position's protection can be in, from a closed set."""
+
+_TERMINAL_ORDER_STATUSES = frozenset({"FILLED", "REJECTED", "CANCELLED"})
+"""The order statuses a broker will not change again.
+
+An order in one of these states is never asked about again during
+reconciliation: the broker's answer is final, so re-asking would only spend
+a request. Everything else — ``accepted``, ``partially_filled``, or a status
+this worker does not recognise — is unsettled and is read back each cycle.
+"""
 
 NO_TRADE_REASONS = (
     NO_TRADE_NO_DECISION_DUE,
@@ -676,6 +703,17 @@ class MarketData(Protocol):
     def available(self) -> bool:  # pragma: no cover - protocol
         ...
 
+    def refresh(self) -> bool:  # pragma: no cover - protocol
+        """Re-read the source and keep the stored observation current.
+
+        Optional: a seam that does not implement it simply is not refreshed.
+        The worker's cycle calls it so a *current* price is observed even when
+        the cycle produces no decision and holds no position — otherwise the
+        stored observation ages out and the view reports a stale price beside
+        a diagnostics trail of earlier successful reads.
+        """
+        ...
+
 
 def market_data_identity(market_data: Any) -> dict[str, Any]:
     """The secret-free identity of a market-data seam, for a status view.
@@ -986,6 +1024,17 @@ class AlpacaSnapshotMarketData:
         self._record_status(MARKET_DATA_STATUS_OK, None)
         return True
 
+    def refresh(self) -> bool:
+        """Re-read the snapshot source so the stored observation stays current.
+
+        Called by the worker every cycle, independently of whether a decision
+        was produced or a position is open. ``available()`` already performs the
+        read this needs, so this delegates to it. It never raises: a failed
+        refresh leaves the previous observation in place, and its age is what
+        the freshness view reports.
+        """
+        return self.available()
+
     def price(self, symbol: str) -> float:
         """The current, fresh price for ``symbol``, or raise :class:`MarketDataError`."""
         symbol = symbol.upper()
@@ -1268,6 +1317,25 @@ class BinanceSnapshotMarketData:
         self._record_status(MARKET_DATA_STATUS_OK, None)
         return True
 
+    def refresh(self) -> bool:
+        """Re-read Binance so the stored observation stays current.
+
+        The worker's cycle calls this every pass, **independently of whether a
+        decision was produced or a position is open**. Without it the only
+        reads were the entry path (a decision existed) and the exit path (a
+        position existed); a worker with neither let the stored observation age
+        out, so the view reported a stale price beside a diagnostics trail of
+        earlier HTTP 200s.
+
+        ``available()`` already performs exactly the read this needs — one
+        batched ticker request for every configured symbol, validated for
+        freshness before it is stored — so this delegates to it rather than
+        duplicating the fetch. It never raises: a failed refresh leaves the
+        previous observation in place, and that observation's age is what the
+        freshness view reports.
+        """
+        return self.available()
+
     def price(self, symbol: str) -> float:
         """The current, fresh crypto price for ``symbol``, or raise.
 
@@ -1478,6 +1546,17 @@ class AlpacaCryptoExecutionPrice:
             self.last_observed_at = self._clock().isoformat()
         self._record_status(MARKET_DATA_STATUS_OK, None)
         return True
+
+    def refresh(self) -> bool:
+        """Re-read the execution venue so the stored observation stays current.
+
+        Called by the worker every cycle, independently of whether a decision
+        was produced or a position is open. ``available()`` already performs the
+        read this needs, so this delegates to it. It never raises: a failed
+        refresh leaves the previous observation in place, and its age is what
+        the freshness view reports.
+        """
+        return self.available()
 
     def price(self, symbol: str) -> float:
         """The current, fresh execution-venue price for ``symbol``.
@@ -2213,13 +2292,18 @@ class WorkerState:
 
     Additive and optional: an older state file without it reads back as "no
     protection recorded"."""
-    protection_status: str = PROTECTION_STATUS_UNPROTECTED
+    protection_status: str = PROTECTION_STATUS_NO_OPEN_POSITIONS
     """The protection state of the worker **as a whole**.
 
     The worker-level gate: a worker whose protection monitor is not available
     must not open a new trade, because a new trade would join the positions it
     already cannot protect. ``PROTECTED`` means the mechanism is available and
-    every watched position was verified on the last check."""
+    every watched position was verified on the last check.
+
+    The default is ``NO_OPEN_POSITIONS``, because that is what a worker that has
+    never held anything actually is. It used to default to ``UNPROTECTED``,
+    which is a claim about an *open* position — so a worker holding nothing
+    reported an unprotected position that did not exist."""
     protection_checked_at: str | None = None
     """When the protection mechanism was last verified against the broker.
 
@@ -2365,7 +2449,9 @@ class WorkerState:
             protections={
                 k: dict(v) for k, v in (payload.get("protections") or {}).items()
             },
-            protection_status=payload.get("protection_status", PROTECTION_STATUS_UNPROTECTED),
+            protection_status=payload.get(
+                "protection_status", PROTECTION_STATUS_NO_OPEN_POSITIONS
+            ),
             protection_checked_at=payload.get("protection_checked_at"),
             protection_detail=payload.get("protection_detail"),
             target_progress={
@@ -3672,6 +3758,9 @@ class PaperTradingWorker:
             "closed_quantity": 0.0,
             "updated_at": now,
         }
+        # The worker-level verdict is rolled up here too, so it can never
+        # disagree with the per-position verdict this method just wrote.
+        self._roll_up_protection_status()
         self._save()
 
     def _verify_protection(self, symbol: str) -> dict[str, Any]:
@@ -3771,6 +3860,11 @@ class PaperTradingWorker:
         can never disagree with the positions it summarizes. Setting the global
         status directly from a single position's outcome would let one
         position's verdict overwrite another's.
+
+        With no open position there is no risk to cover, so the verdict is
+        ``NO_OPEN_POSITIONS`` — never ``UNPROTECTED``, which is a claim about an
+        open position, and never ``PROTECTED``, which would claim a guard for a
+        position that does not exist.
         """
         statuses = [
             record.get("status")
@@ -3785,6 +3879,7 @@ class PaperTradingWorker:
             status = record.get("status")
             if status and status != PROTECTION_STATUS_PROTECTED and detail is None:
                 detail = f"{symbol}: {record.get('detail') or status}"
+        open_symbols = self._open_position_symbols()
         if PROTECTION_STATUS_UNPROTECTED in statuses:
             self.state.protection_status = PROTECTION_STATUS_UNPROTECTED
             self.state.protection_detail = detail
@@ -3803,10 +3898,34 @@ class PaperTradingWorker:
             # risk is covered when no position is open at all.
             self.state.protection_status = PROTECTION_STATUS_CLOSED
             self.state.protection_detail = detail
+        elif not open_symbols:
+            # Nothing is open, so there is nothing to protect. This is the state
+            # a worker with no position reports; it says so plainly instead of
+            # claiming an unprotected position that does not exist.
+            self.state.protection_status = PROTECTION_STATUS_NO_OPEN_POSITIONS
+            self.state.protection_detail = detail
         else:
             self.state.protection_status = PROTECTION_STATUS_PROTECTED
             self.state.protection_detail = None
         self.state.protection_checked_at = datetime.now(UTC).isoformat()
+
+    def _open_position_symbols(self) -> set[str]:
+        """The symbols the broker currently reports as held.
+
+        The worker's own position map, which is refreshed from the broker, is
+        the authority on what is *held*. A position with no recorded protection
+        record still counts: the absence of a verdict is not the absence of a
+        position, and a position must never be hidden because nothing has been
+        verified about it yet.
+        """
+        open_symbols: set[str] = set()
+        for symbol, position in (self.state.positions or {}).items():
+            if not isinstance(position, dict):
+                continue
+            quantity = _as_float(position.get("quantity"))
+            if quantity is not None and quantity > 0:
+                open_symbols.add(symbol)
+        return open_symbols
 
     def _mark_exit_unexecutable(self, symbol: str, detail: str) -> None:
         """Record that the exit for ``symbol`` could not be placed.
@@ -4622,6 +4741,56 @@ class PaperTradingWorker:
         }
         self._save()
 
+    def reconcile_orders(self) -> dict[str, str]:
+        """Re-read every unsettled order from the broker and record what it says.
+
+        The stored order is a **submit-time snapshot**. The broker's answer is
+        the authority on what became of it, and the two can differ: a market
+        order the broker reports as ``accepted`` may already be filled, and an
+        order whose submission never reached the venue stays ``accepted``
+        forever because nothing ever asks.
+
+        So each cycle asks the broker about the orders that are not yet
+        terminal, and writes the answer back. Three properties matter:
+
+        - **It never re-submits.** Reconciliation is a read. An order the
+          worker already knows about is asked about, never sent again, so a
+          restart cannot double a position.
+        - **It never invents a result.** If the venue cannot be read, the
+          stored order is left exactly as it was and the failure is recorded.
+          The order stays ``accepted`` — which is the truth: the worker does
+          not know better. It is not turned into ``filled`` or ``cancelled``.
+        - **A terminal answer is final.** Once the broker says the order is
+          filled, rejected or cancelled, it is not asked about again.
+
+        The recorded statuses are what the dashboard's trade view reads, so
+        without this the view reported the moment of submission forever.
+        """
+        broker = self._broker
+        if broker is None:
+            return {}
+        outcomes: dict[str, str] = {}
+        for client_order_id, record in sorted((self.state.orders or {}).items()):
+            if not isinstance(record, dict):
+                continue
+            status = record.get("status")
+            if isinstance(status, str) and status.upper() in _TERMINAL_ORDER_STATUSES:
+                continue
+            try:
+                order = self._reconcile(client_order_id)
+            except Exception as exc:  # noqa: BLE001 - an unreadable venue is unknown
+                # The stored record is left untouched: the worker's last
+                # knowledge stands, and the failure is recorded so an operator
+                # can see that the venue could not be asked.
+                outcomes[client_order_id] = "unreachable"
+                self.state.last_error = f"{type(exc).__name__}: {exc}"
+                continue
+            self._record_order(order)
+            outcomes[client_order_id] = str(order.status)
+        if outcomes:
+            self._save()
+        return outcomes
+
     def position_protection(self) -> dict[str, dict[str, Any]]:
         """The protection state of every open position, keyed by symbol.
 
@@ -4641,6 +4810,11 @@ class PaperTradingWorker:
         now = datetime.now(UTC).isoformat()
         self.state.positions_at = now
         self.state.positions_checked_at = now
+        # The worker-level verdict is a statement about the positions that are
+        # held, so it is re-derived after every position read. Without this a
+        # worker whose last position closed kept reporting the verdict it had
+        # when that position was open.
+        self._roll_up_protection_status()
         self._save()
         return dict(self.state.positions)
 
@@ -4676,6 +4850,38 @@ class PaperTradingWorker:
         self._save()
         return dict(self.state.account)
 
+    def _refresh_market_data(self) -> None:
+        """Re-read the market-data seam so its observation stays current.
+
+        The price seam is read on two paths only: the entry path (a decision
+        exists) and the exit path (a position is open). A worker that had
+        neither — no decision due, no position held — read nothing, so its
+        stored observation aged out while the diagnostics kept showing the HTTP
+        200 of an *earlier* read. The view then reported a stale price beside a
+        successful-request trail that described the past, not the present.
+
+        So the seam is refreshed every cycle, independently of what the cycle
+        decides. The refresh is *contained*: it never raises and never fails a
+        cycle, because observing the market is not the same as trading on it. A
+        failed refresh leaves the previous observation in place, and that
+        observation's age is what the freshness view reports — a stale price
+        stays visibly stale.
+
+        This changes what is *observed*, never what is *traded*: the entry path
+        still reads its own price through ``price()`` and still refuses a price
+        that is not fresh at the moment of the order.
+        """
+        seam = self.market_data
+        if seam is None:
+            return
+        refresh = getattr(seam, "refresh", None)
+        if not callable(refresh):
+            return
+        try:
+            refresh()
+        except Exception as exc:  # noqa: BLE001 - a stale price beats a crash
+            self.state.last_error = f"{type(exc).__name__}: {exc}"
+
     def _sync_observability(self) -> None:
         """Best-effort account/position refresh, so the view is not stale.
 
@@ -4685,9 +4891,10 @@ class PaperTradingWorker:
         the dashboard's cash, equity and positions current between orders instead
         of frozen at start-up.
         """
+        self._refresh_market_data()
         if self._broker is None:
             return
-        for step in (self.sync_account, self.sync_positions):
+        for step in (self.sync_account, self.reconcile_orders, self.sync_positions):
             try:
                 step()
             except Exception as exc:  # noqa: BLE001 - a stale view is better than a crash

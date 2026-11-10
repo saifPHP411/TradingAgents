@@ -702,12 +702,21 @@ class TestThePositionLifecycle:
         The entry filled; that is not yet evidence that the position is held
         and guarded. The verdict stays pending until the broker's own position
         read has confirmed the holding.
+
+        The worker-level verdict says ``PROTECTION_PENDING``, not
+        ``UNPROTECTED``: "not verified yet" and "verified and found unguarded"
+        are different facts, and an unverified position is not a confirmed
+        breach. Either way the position is **not** protected, so a new entry
+        is refused — which is what the gate checks.
         """
         worker, venue = _open_position(tmp_path, quantity=2.0)
         assert worker.state.protections[EXECUTION_SYMBOL]["status"] == (
             PROTECTION_STATUS_PENDING
         )
-        assert worker.state.protection_status == PROTECTION_STATUS_UNPROTECTED
+        assert worker.state.protection_status == PROTECTION_STATUS_PENDING
+        # Not protected either way, so a new entry is refused.
+        assert worker.state.protection_status != PROTECTION_STATUS_PROTECTED
+        assert worker._open_position_protection_refusal() is not None
 
         worker.run_once()
         assert worker.state.protections[EXECUTION_SYMBOL]["status"] == (

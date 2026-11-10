@@ -747,3 +747,60 @@ whether it *can* be done is answered by the broker. So `protected` comes from
 position whose broker could not be read, whose monitor is blind, or whose exit
 was refused is reported as `UNPROTECTED` with the reason, never as protected.
 
+`UNPROTECTED` is a claim about an **open** position, so it is the wrong verdict
+for a worker that holds nothing. The worker-level verdict has its own state,
+`PROTECTION_STATUS_NO_OPEN_POSITIONS`, for "there is nothing here to protect".
+The state default and the state-loader default are both that, so an old file
+without the field no longer reads back as an unprotected position that does not
+exist. A position that is open but **not yet verified** is
+`PROTECTION_STATUS_PENDING` — "the check has not happened" is not "the check
+happened and found the guard broken". The entry gate reads the *per-position*
+verdict, so the summary's wording never weakens the guard.
+
+## The idle worker observes the market; it does not just trade it
+
+The price seam used to be read on two paths only: the entry path (a decision
+existed) and the exit path (a position was open). A worker with neither — no
+decision due, no position held — read nothing, so its stored observation aged
+out while the diagnostics kept showing the HTTP 200 of an **earlier** read. The
+view then reported `last_snapshot_age_seconds = 863.94` beside a trail of
+successful requests that described the past, not the present.
+
+So the worker refreshes the seam **every cycle**, independently of what the
+cycle decides: `_refresh_market_data()` runs at the top of `_sync_observability()`.
+The refresh is *contained* — it never raises and never fails a cycle, because
+observing the market is not the same as trading on it. A failed refresh leaves
+the previous observation in place, so its age keeps growing and the status
+keeps saying `stale`.
+
+**This changes what is observed, never what is traded.** The entry path still
+reads its own price through `price()` and still refuses a price that is not
+fresh at the moment of the order. An HTTP 200 is never evidence that a price
+is current: the age comes from the venue's own timestamp, and a missing or
+future timestamp is refused (fail-closed), so a stale observation is never
+stored at all.
+
+## A stored order is a submit-time snapshot, not the venue's answer
+
+`state.orders` records what the order looked like **when it was sent**. The
+broker's answer is the authority on what became of it, and the two differ: a
+market order the venue reports as `accepted` may already be filled, and an
+order whose submission never reached the venue stays `accepted` forever
+because nothing ever asks. The report showed `AVAX/USD accepted,
+filled_quantity=0` beside `positions={}` and never changed, because the
+record was never reconciled.
+
+So `reconcile_orders()` reads back every **unsettled** order each cycle and
+writes the venue's answer down. Three properties are non-negotiable:
+
+- it is a **read** — it never re-submits, so a restart cannot double a
+  position;
+- it **invents nothing** — a venue that cannot be read leaves the stored
+  record exactly as it was, and the failure is recorded. `accepted` is not
+  turned into `filled` and not into `cancelled`;
+- a **terminal** answer is final — `FILLED`, `REJECTED` and `CANCELLED` are
+  never asked about again.
+
+`accepted` is not `filled`, and an unfilled order is not a position. See
+`tests/test_phase33_runtime_audit_refresh.py`.
+
