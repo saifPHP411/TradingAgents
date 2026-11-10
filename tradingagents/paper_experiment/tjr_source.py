@@ -89,6 +89,7 @@ from .broker.trading import (
     TradingDecision,
 )
 from .market_hours import MARKET_OPEN, MarketHoursError, MarketHoursGate
+from .tjr_diagnostics import classify_evaluation_failure, format_evaluation_failure
 from .tjr_intraday_data import (
     TjrIntradayData,
     TjrIntradayDataError,
@@ -557,8 +558,15 @@ class TjrDecisionSource:
         try:
             signal, evaluation = strategy.signal(symbol, session, pd.Timestamp(as_of))
         except Exception as exc:  # noqa: BLE001 - a rule failure yields no decision
+            # The failure is **not** a no-signal: the chain could not produce an
+            # answer, so the source refuses to produce a decision. What changes
+            # is that the refusal now says *where* it happened and *which
+            # contract field* was refused, so the fault is diagnosable without
+            # the operator reproducing it. The detail is sanitized: it names the
+            # stage and the field, and carries no market data and no secret.
+            diagnostics = classify_evaluation_failure(exc)
             return (
-                f"the TJR chain could not evaluate {symbol}: {type(exc).__name__}",
+                format_evaluation_failure(symbol, diagnostics),
                 NO_TRADE_STRATEGY_UNAVAILABLE,
             )
 

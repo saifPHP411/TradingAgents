@@ -930,3 +930,47 @@ venue, so `_mark_protection_closed` removes the symbol from that map;
 otherwise the roll-up sees an *open* position whose own record says it is
 closed. A ladder exit that only fills one slice does not call it, so a
 partial close keeps the position.
+
+## The target ladder is nearest-first, and the contract now says so
+
+`TradingSignal.targets` is a **ladder**, and the project's convention is
+*nearest first*: ascending for a BUY, descending for a SELL. That is what
+`TradingDecision.targets` documents, what `protection.py` assumes when it
+sorts the ladder and reads `clean_targets[0]` as *the nearest target*, and
+what the three-rung worker test asserts (`[12.0, 14.0, 16.0]`).
+
+`TradingSignal`'s validator used to require the **reverse** for a BUY, which
+contradicted every other part of the project. The rule chain builds its ladder
+nearest-first (`tjr/rules.py::_target_ladder`), so a long setup with **two or
+more** liquidity targets was refused by the contract the moment the chain
+finished — the chain's answer never reached the risk layer. The failure was
+**symbol-agnostic**: it was the ladder's *shape*, not the instrument, so one
+symbol in a report failed while its neighbours (with a single target) passed.
+
+The validator now requires nearest-first for both sides, and its message names
+the direction it wanted. A ladder in the wrong order is still refused — the
+fix removes a contradiction, it does not remove the constraint.
+
+**A ladder rung needs a level that predates the sweep.** The chain derives its
+targets from the draws on liquidity above the entry that formed *before* the
+sweep bar. A swing high confirmed *after* the sweep does not qualify, and
+neither does the current session's running high. In practice the rungs come
+from the previous session's high and from the completed 1h/4h buckets, so a
+market needs that history before it can carry more than one rung.
+
+**A failed evaluation says where it failed.** `tjr_diagnostics.py` turns an
+exception from the chain into a record: the **stage** (`rule_chain` or
+`signal_contract`), the **field**, the constraint text and the error's class.
+The constraint's *numbers* are redacted, because the project's own constraint
+messages quote the offending price and the diagnostics promise no market data.
+The failure still maps to `STRATEGY_UNAVAILABLE` — a refusal, never a
+no-signal — and it never becomes a decision.
+
+**A refusal says which decision it was.** `WorkerState.decision_outcomes`
+holds only a *code*, which is enough to count refusals and not enough to
+diagnose them: the symbol, the side and the venue's own message were all lost,
+and `last_error` held only the most recent one. `WorkerState.rejections` keeps
+one bounded row per refused decision (`symbol`, `side`, `code`, `error_type`,
+the redacted `detail`, and the time), and `worker_status_view()` exposes it
+beside the tally. It is **observational**: it changes no decision, no cadence
+and no risk limit. See `tests/test_phase36_tjr_ladder_and_rejections.py`.

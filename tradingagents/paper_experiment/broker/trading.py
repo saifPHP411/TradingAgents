@@ -403,6 +403,14 @@ order (submitted, or reconciled as already existing). Distinct from every
 ``NO_TRADE_REASONS`` because it is the *absence* of a no-trade reason, and a
 consumer that iterates the no-trade vocabulary must not read it as one."""
 
+_REJECTION_MESSAGE_CHARS = 400
+"""The ceiling on a persisted refusal message.
+
+The venue's own wording about an order is kept — it is what identifies the
+cause — but it is bounded, so a long-running worker cannot grow the state file
+without limit. The broker adapter redacts the credential before the error is
+raised, so the text that reaches here is already secret-free."""
+
 MARKET_DATA_CHOICES = (PROVIDER_BAR_OPEN, PROVIDER_ALPACA_SNAPSHOT, PROVIDER_BINANCE_SNAPSHOT)
 """The price seams an operator may select. ``bar_open`` is the historical default;
 ``alpaca_snapshot`` is the equity current-price opt-in; ``binance_snapshot`` is the
@@ -2382,6 +2390,28 @@ class WorkerState:
     inferring it from the refusal-inclusive set. Additive and optional: an older
     state file without the field reads back as "no order known", and the schema
     version does not change."""
+    rejections: dict[str, dict] = field(default_factory=dict)
+    """Why each **refused** decision was refused, keyed by decision id.
+
+    :attr:`decision_outcomes` records the *code* a decision settled with, and
+    that is enough to count refusals. It is not enough to diagnose them: a
+    tally of ``BROKER_REJECTED`` says how many times the venue said no, and
+    nothing about **which symbol**, **which side**, or **what the venue said**.
+    ``last_error`` holds only the *most recent* error, so the earlier
+    refusals are gone by the time an operator looks.
+
+    This is that missing record, one row per refused decision: the symbol, the
+    side, the code, the exception's class, the venue's own message (already
+    redacted by the broker adapter) and the time of the refusal. The message is
+    the venue's wording about the order, not a credential — the broker adapter
+    redacts it before the error is raised — and it is truncated so the state
+    file cannot grow without bound.
+
+    Bounded to the most recent refusals, so a long-running worker cannot grow
+    the state file without limit. Additive and optional: an older state file
+    without the field reads back as "no refusal recorded"."""
+    rejection_limit: int = 50
+    """How many refusal records are kept. The most recent ones win."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2420,6 +2450,8 @@ class WorkerState:
             "processed_decisions": sorted(self.processed_decisions),
             "decision_outcomes": dict(sorted(self.decision_outcomes.items())),
             "ordered_decisions": sorted(self.ordered_decisions),
+            "rejections": {k: dict(v) for k, v in sorted(self.rejections.items())},
+            "rejection_limit": self.rejection_limit,
         }
 
     @classmethod
@@ -2486,6 +2518,12 @@ class WorkerState:
                 if isinstance(v, str)
             },
             ordered_decisions=set(payload.get("ordered_decisions") or []),
+            rejections={
+                str(k): dict(v)
+                for k, v in (payload.get("rejections") or {}).items()
+                if isinstance(v, dict)
+            },
+            rejection_limit=_as_int(payload.get("rejection_limit"), 50),
         )
 
 
@@ -2781,6 +2819,10 @@ def worker_status_view(
         },
         "last_cycle": last_cycle.to_dict() if last_cycle is not None else None,
         "decision_statistics": _decision_statistics(state),
+        # One row per refused decision: the symbol, the side and what the venue
+        # said. `decision_statistics` counts the refusals; this says which ones
+        # they were, because a count cannot be acted on.
+        "rejections": {k: dict(v) for k, v in sorted(state.rejections.items())},
         "risk_limits": {
             "max_order_notional": config.limits.max_order_notional,
             "max_open_positions": config.limits.max_open_positions,
@@ -2938,6 +2980,46 @@ class PaperTradingWorker:
         self.state.last_no_trade_decision_id = decision_id
         self.state.last_no_trade_decision_code = code
         self.state.decision_outcomes[decision_id] = code
+
+    def _remember_rejection(
+        self,
+        decision_id: str,
+        *,
+        symbol: str,
+        side: str,
+        code: str,
+        exc: BaseException,
+    ) -> None:
+        """Record **why** a decision was refused, not just the code that it was.
+
+        :meth:`_remember_no_trade` answers "did this decision trade?" with a
+        code. It does not answer "what did the venue say?", and by the time an
+        operator reads the dashboard ``last_error`` has already been
+        overwritten by the next cycle. This keeps one row per refused decision
+        so six refusals can be told apart instead of counted.
+
+        The venue's own message is already redacted by the broker adapter
+        before the error is raised, and it is truncated again here so the state
+        file stays bounded. The record is **observational**: it changes no
+        decision, no cadence and no risk limit.
+        """
+        message = str(exc)
+        if len(message) > _REJECTION_MESSAGE_CHARS:
+            message = message[: _REJECTION_MESSAGE_CHARS - 1].rstrip() + "…"
+        self.state.rejections[decision_id] = {
+            "symbol": symbol,
+            "side": side,
+            "code": code,
+            "error_type": type(exc).__name__,
+            "detail": message,
+            "at": datetime.now(UTC).isoformat(),
+        }
+        limit = max(1, int(self.state.rejection_limit or 1))
+        if len(self.state.rejections) > limit:
+            # The oldest rows go first; the dict preserves insertion order, and
+            # the decision ids are unique, so the newest is the last one.
+            for stale in list(self.state.rejections)[: len(self.state.rejections) - limit]:
+                self.state.rejections.pop(stale, None)
 
     # -- status -----------------------------------------------------------
 
@@ -3618,6 +3700,16 @@ class PaperTradingWorker:
             self.state.last_no_decision_reason = str(exc)
             self.state.last_no_trade_code = code
             self._remember_no_trade(decision.decision_id, code)
+            # The code counts the refusal; this row says which decision it was
+            # and what the venue said, so several refusals can be told apart
+            # instead of only counted. `last_error` keeps only the newest.
+            self._remember_rejection(
+                decision.decision_id,
+                symbol=decision.symbol,
+                side=decision.side,
+                code=code,
+                exc=exc,
+            )
             self._save()
             result = CycleResult(
                 ran=False,

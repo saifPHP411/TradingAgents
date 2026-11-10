@@ -165,7 +165,8 @@ class TradingSignal(BaseModel):
             "be managed in stages (TP1, then TP2, then TP3) instead of only at one "
             "price. Empty when the strategy names a single target (which is then "
             "``take_profit``) or none at all. Never padded: the list holds only the "
-            "levels the market actually supports."
+            "levels the market actually supports. Ordered **away from the entry**: "
+            "ascending for a BUY (nearest target first) and descending for a SELL."
         ),
     )
 
@@ -296,9 +297,11 @@ class TradingSignal(BaseModel):
                 f"({ladder})"
             )
         if ladder:
-            if ladder != sorted(ladder, reverse=self.action is SignalAction.BUY):
+            if ladder != sorted(ladder, reverse=self.action is SignalAction.SELL):
+                expected = "ascending" if self.action is SignalAction.BUY else "descending"
                 raise ValueError(
-                    f"the targets must be ordered away from the entry: {ladder}"
+                    f"the targets must be ordered away from the entry "
+                    f"({expected}, nearest first): {ladder}"
                 )
             if len(set(ladder)) != len(ladder):
                 raise ValueError(f"the targets must be distinct: {ladder}")
