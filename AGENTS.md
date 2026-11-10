@@ -563,6 +563,34 @@ make one source do another's job, and do not route TJR through the LLM.
   `last_strategy_evaluation_at` keeps advancing. A *completed* setup — sized, or
   refused by the RiskEngine — does close the session: re-reading the same bars
   would only re-run the same judgement.
+- **A closed session is closed for the bars it was judged on, not for the day.**
+  A setup is identified by **the sweep that produced it** (`bar|level.price|
+  direction`, folded into the decision id as a digest), so a re-read of the same
+  sweep is a repeat and is refused, while a *different* sweep in the same session
+  is a new opportunity and gets its own id. The source fetches the bars on
+  **every** cycle — before the closure check — because the chain can only see a
+  new sweep if the new bars are read, and because the fetch is what keeps
+  `tjr_data_last_fetch_at` from staying `null` while the worker polls. A symbol
+  is re-evaluated when a bar that **closed after** the last judgement is
+  available; a forming bar never counts. See
+  `tests/test_phase32_tjr_runtime_audit.py`.
+- **A market-data status is derived from the observation, not from the last
+  read.** A price does not stop ageing when the read ends, so reporting the
+  read's outcome forever is how a 6142-second-old price came to be labelled `ok`
+  beside `is_current_price: false`. `_observation_status()` recomputes the
+  reported status from the *same* observation the reported age is measured from:
+  aged → `stale`, future → `future`, missing/malformed → `malformed`. A ticker
+  with no timestamp is **unverifiable**, not *now* — `Ticker.from_binance` must
+  not substitute the local clock, or a timestamp-less payload passes the
+  freshness check and can size an order.
+- **The entry guard covers the positions this worker opened.** A position whose
+  broker-verified protection is not `PROTECTED` blocks a *new* entry, because a
+  second position increases the risk that is already unguarded. The scope is the
+  worker's own positions (`state.stops`), not every position the venue reports:
+  a position held before this worker existed has no strategy decision behind it,
+  so it is the protection view's business (it already reports it unprotected),
+  and it must not stop the worker from taking its first properly protected
+  trade. Gating on the venue's whole book makes every first entry impossible.
 - **A no-decision cycle must refresh the no-trade fields.** The worker's
   `last_no_trade_decision_id` / `last_no_trade_decision_code` name the *current*
   cycle's outcome. A cycle that evaluates and finds nothing has to clear them (or
