@@ -96,7 +96,6 @@ from .alpaca_paper import (
 )
 from .bybit_demo import (
     BybitDemoBroker,
-    assert_demo_endpoint,
 )
 
 WORKER_STATE_SCHEMA_VERSION = 1

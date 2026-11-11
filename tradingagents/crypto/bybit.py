@@ -25,8 +25,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .instruments import InstrumentRegistry
+from .symbols import SymbolError, parse_pair
 from .transport import CryptoDataError, CryptoRateLimitedError, fetch_json
-from .types import Ticker
 
 DEMO_REST_HOST = "https://api-demo.bybit.com"
 """Bybit's **demo** REST host: no key needed for public market data."""
@@ -128,9 +128,6 @@ class BybitPublicClient:
         if not isinstance(instrument_list, list):
             raise CryptoDataError("instruments info missing 'list'")
 
-        # Parse instruments using the same format as Binance
-        from .instruments import parse_exchange_info
-
         # Bybit's format is different, need to adapt
         rules = self._parse_bybit_instruments(instrument_list)
         registry = InstrumentRegistry(
@@ -150,13 +147,13 @@ class BybitPublicClient:
             if not symbol:
                 continue
             status = str(entry.get("status", ""))
-            base_coin = str(entry.get("baseCoin", ""))
-            quote_coin = str(entry.get("quoteCoin", ""))
+            _base_coin = str(entry.get("baseCoin", ""))
+            _quote_coin = str(entry.get("quoteCoin", ""))
             lot_filter = entry.get("lotSizeFilter", {})
             price_filter = entry.get("priceFilter", {})
 
             min_order_qty = float(lot_filter.get("minOrderQty", "0"))
-            max_order_qty = float(lot_filter.get("maxOrderQty", "0"))
+            _max_order_qty = float(lot_filter.get("maxOrderQty", "0"))
             qty_step = float(lot_filter.get("qtyStep", "0"))
             min_order_amt = float(lot_filter.get("minOrderAmt", "0"))
             tick_size = float(price_filter.get("tickSize", "0"))
@@ -187,8 +184,6 @@ class BybitPublicClient:
 
         The request itself is a single batched call.
         """
-        from .symbols import parse_pair, SymbolError
-
         markets = [bybit_symbol(s) for s in symbols]
         if not markets:
             return {}

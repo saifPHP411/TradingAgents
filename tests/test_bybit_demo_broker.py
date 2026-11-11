@@ -20,26 +20,19 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from decimal import Decimal
 
 import pytest
 
 from tradingagents.paper_experiment.broker.bybit_demo import (
     DEMO_BASE_URL as BYBIT_DEMO_BASE_URL,
-    BybitDemoBroker,
     BrokerError,
     BrokerNotConfiguredError,
-    InsufficientFundsError,
+    BybitDemoBroker,
     LiveEndpointRefusedError,
     PaperRiskLimits,
     PaperRiskRejected,
     assert_demo_endpoint,
     assert_demo_request_url,
-)
-from tradingagents.paper_experiment.broker.state import BrokerAccountState, BrokerStateStore
-from tradingagents.paper_experiment.broker.trading import (
-    NO_TRADE_INSUFFICIENT_FUNDS,
-    NO_TRADE_RISK_REJECTED,
 )
 
 # Test constants
@@ -914,7 +907,7 @@ class TestDecimalQuantity:
 
         # Small quantity that would be scientific notation in str()
         # Use high reference_price so notional >= $10 min_order_amt
-        order = client.submit_order(
+        client.submit_order(
             symbol="BTC/USDT",
             quantity=0.00001,  # Would be 1e-05 in scientific notation
             side="buy",
