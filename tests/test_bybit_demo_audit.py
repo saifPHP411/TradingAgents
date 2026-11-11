@@ -818,6 +818,299 @@ class TestPerPairMinimums:
 # ---------------------------------------------------------------------------
 
 
+class TestTheRealSpotInstrumentShape:
+    """A Spot ``lotSizeFilter`` has no ``qtyStep``; the step is ``basePrecision``.
+
+    The documented Spot example for BTCUSDT is::
+
+        "lotSizeFilter": {
+            "basePrecision": "0.000001",
+            "quotePrecision": "0.0000001",
+            "minOrderQty": "0.000011",
+            "maxOrderQty": "83",
+            "minOrderAmt": "5",
+            "maxOrderAmt": "8000000",
+            "maxLimitOrderQty": "83",
+            "maxMarketOrderQty": "41.5"
+        }
+
+    A parser that reads only ``qtyStep`` sees no step at all for every real
+    Spot pair, and a missing step silently disables the step check.
+    """
+
+    def _documented_spot(self, symbol: str = "BTCUSDT") -> dict:
+        """The venue's own documented Spot shape, with no ``qtyStep``."""
+        return {
+            "symbol": symbol,
+            "status": "Trading",
+            "baseCoin": symbol[:-4],
+            "quoteCoin": "USDT",
+            "lotSizeFilter": {
+                "basePrecision": "0.000001",
+                "quotePrecision": "0.0000001",
+                "minOrderQty": "0.000011",
+                "maxOrderQty": "83",
+                "minOrderAmt": "5",
+                "maxOrderAmt": "8000000",
+                "maxLimitOrderQty": "83",
+                "maxMarketOrderQty": "41.5",
+            },
+            "priceFilter": {"tickSize": "0.1"},
+        }
+
+    def test_the_documented_shape_carries_no_qty_step(self):
+        assert "qtyStep" not in self._documented_spot()["lotSizeFilter"]
+
+    def test_the_step_comes_from_the_base_precision(self):
+        transport = RecordingTransport()
+        transport.add(
+            "GET",
+            "/v5/market/instruments-info",
+            instruments_response([self._documented_spot()]),
+        )
+        broker = make_broker(transport)
+
+        instrument = broker.get_instrument("BTCUSDT")
+
+        assert instrument is not None
+        assert instrument.qty_step == pytest.approx(0.000001)
+
+    def test_a_quantity_off_the_step_is_refused_locally(self):
+        transport = RecordingTransport()
+        transport.add(
+            "GET",
+            "/v5/market/instruments-info",
+            instruments_response([self._documented_spot()]),
+        )
+        transport.add(
+            "GET",
+            "/v5/account/wallet-balance",
+            wallet_response({"USDT": {"walletBalance": "1000"}}),
+        )
+        broker = make_broker(transport)
+        broker.connect()
+
+        # 0.0001005 BTC at $50,000 is $5.025 -- over the pair's $5 minimum --
+        # but it is not a multiple of the 0.000001 step.
+        with pytest.raises(PaperRiskRejected) as caught:
+            broker.submit_order(
+                symbol="BTC/USDT",
+                side="buy",
+                quantity=0.0001005,
+                reference_price=50000.0,
+                client_order_id="bybit-off-step",
+                allow_orders=True,
+            )
+
+        assert "0.000001" in str(caught.value)
+        assert transport.calls_to("POST", "/v5/order/create") == []
+
+    def test_a_quantity_on_the_step_is_accepted(self):
+        transport = RecordingTransport()
+        transport.add(
+            "GET",
+            "/v5/market/instruments-info",
+            instruments_response([self._documented_spot()]),
+        )
+        transport.add(
+            "GET",
+            "/v5/account/wallet-balance",
+            wallet_response({"USDT": {"walletBalance": "1000"}}),
+        )
+        transport.add(
+            "POST",
+            "/v5/order/create",
+            {"retCode": 0, "retMsg": "OK", "result": {"orderId": "v-step", "orderLinkId": "bybit-on-step"}},
+        )
+        broker = make_broker(transport)
+        broker.connect()
+
+        order = broker.submit_order(
+            symbol="BTC/USDT",
+            side="buy",
+            quantity=0.000100,
+            reference_price=50000.0,
+            client_order_id="bybit-on-step",
+            allow_orders=True,
+        )
+
+        assert order.quantity == pytest.approx(0.000100)
+
+    def test_the_minimum_amount_is_read_from_the_notional_field(self):
+        """The venue deprecated ``minOrderQty``; ``minOrderAmt`` is the bound."""
+        transport = RecordingTransport()
+        transport.add(
+            "GET",
+            "/v5/market/instruments-info",
+            instruments_response([self._documented_spot()]),
+        )
+        broker = make_broker(transport)
+
+        instrument = broker.get_instrument("BTCUSDT")
+
+        assert instrument is not None
+        assert instrument.min_order_amt == pytest.approx(5.0)
+
+    def test_an_order_below_the_minimum_amount_is_refused(self):
+        transport = RecordingTransport()
+        transport.add(
+            "GET",
+            "/v5/market/instruments-info",
+            instruments_response([self._documented_spot()]),
+        )
+        transport.add(
+            "GET",
+            "/v5/account/wallet-balance",
+            wallet_response({"USDT": {"walletBalance": "1000"}}),
+        )
+        broker = make_broker(transport)
+        broker.connect()
+
+        # 0.000011 BTC at $100 is $0.0011 -- below the pair's $5 minimum.
+        with pytest.raises(PaperRiskRejected) as caught:
+            broker.submit_order(
+                symbol="BTC/USDT",
+                side="buy",
+                quantity=0.000011,
+                reference_price=100.0,
+                client_order_id="bybit-under-min",
+                allow_orders=True,
+            )
+
+        assert "BELOW_MIN_NOTIONAL" in str(caught.value)
+        assert transport.calls_to("POST", "/v5/order/create") == []
+
+
+class TestTheDocumentedDemoRoutes:
+    """Every route the adapter calls is one the demo service documents.
+
+    The venue's Demo Trading Service page lists the available endpoints.
+    Get Trade History is ``/v5/execution/list``; ``/v5/order/execution`` is
+    not a route the service serves, so a call to it fails at the venue and
+    the protection evidence can never be read.
+    """
+
+    def test_the_execution_route_is_the_documented_one(self):
+        transport = RecordingTransport()
+        transport.add(
+            "GET",
+            "/v5/execution/list",
+            {"retCode": 0, "retMsg": "OK", "result": {"list": []}},
+        )
+        broker = make_broker(transport)
+        broker._state.confirmed = True
+
+        executed, truncated = broker._read_order_executions()
+
+        assert executed == {}
+        assert truncated is False
+        assert transport.calls_to("GET", "/v5/execution/list")
+
+    def test_the_undocumented_execution_route_is_never_called(self):
+        transport = RecordingTransport()
+        transport.add(
+            "GET",
+            "/v5/execution/list",
+            {"retCode": 0, "retMsg": "OK", "result": {"list": []}},
+        )
+        broker = make_broker(transport)
+        broker._state.confirmed = True
+
+        broker._read_order_executions()
+
+        assert transport.calls_to("GET", "/v5/order/execution") == []
+
+    def test_the_execution_rows_are_summed_per_client_order_id(self):
+        transport = RecordingTransport()
+        transport.add(
+            "GET",
+            "/v5/execution/list",
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "list": [
+                        {"orderLinkId": "abc", "execQty": "0.1", "execPrice": "50000"},
+                        {"orderLinkId": "abc", "execQty": "0.05", "execPrice": "50100"},
+                    ]
+                },
+            },
+        )
+        broker = make_broker(transport)
+        broker._state.confirmed = True
+
+        executed, _ = broker._read_order_executions()
+
+        assert executed["abc"] == pytest.approx(0.15)
+
+    def test_a_market_order_uses_the_documented_ioc_time_in_force(self):
+        """The venue documents that a Market order always uses ``IOC``."""
+        transport = RecordingTransport()
+        transport.add(
+            "GET",
+            "/v5/market/instruments-info",
+            instruments_response([spot_instrument("BTCUSDT")]),
+        )
+        transport.add(
+            "GET",
+            "/v5/account/wallet-balance",
+            wallet_response({"USDT": {"walletBalance": "1000"}}),
+        )
+        transport.add(
+            "POST",
+            "/v5/order/create",
+            {"retCode": 0, "retMsg": "OK", "result": {"orderId": "v-ioc", "orderLinkId": "bybit-ioc"}},
+        )
+        broker = make_broker(transport)
+        broker.connect()
+
+        broker.submit_order(
+            symbol="BTC/USDT",
+            side="buy",
+            quantity=0.0005,
+            reference_price=50000,
+            client_order_id="bybit-ioc",
+            allow_orders=True,
+        )
+
+        create = transport.calls_to("POST", "/v5/order/create")[0]
+        assert create["json_body"]["orderType"] == "Market"
+        assert create["json_body"]["timeInForce"] == "IOC"
+
+    def test_a_market_order_states_its_quantity_unit(self):
+        """Spot Market orders are by value unless ``marketUnit`` says otherwise."""
+        transport = RecordingTransport()
+        transport.add(
+            "GET",
+            "/v5/market/instruments-info",
+            instruments_response([spot_instrument("BTCUSDT")]),
+        )
+        transport.add(
+            "GET",
+            "/v5/account/wallet-balance",
+            wallet_response({"USDT": {"walletBalance": "1000"}}),
+        )
+        transport.add(
+            "POST",
+            "/v5/order/create",
+            {"retCode": 0, "retMsg": "OK", "result": {"orderId": "v-unit", "orderLinkId": "bybit-unit"}},
+        )
+        broker = make_broker(transport)
+        broker.connect()
+
+        broker.submit_order(
+            symbol="BTC/USDT",
+            side="buy",
+            quantity=0.0005,
+            reference_price=50000,
+            client_order_id="bybit-unit",
+            allow_orders=True,
+        )
+
+        create = transport.calls_to("POST", "/v5/order/create")[0]
+        assert create["json_body"]["marketUnit"] == "baseCoin"
+
+
 class TestQuantitiesAndLimits:
     def _ready_transport(self, **instrument: Any) -> RecordingTransport:
         transport = RecordingTransport()

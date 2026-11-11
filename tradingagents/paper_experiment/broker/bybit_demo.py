@@ -343,6 +343,33 @@ def _as_optional_float(value: Any) -> float | None:
     return number
 
 
+def _spot_qty_step(lot_filter: Mapping[str, Any]) -> float:
+    """The quantity step for a Spot instrument, from the venue's own fields.
+
+    A Spot ``lotSizeFilter`` has **no** ``qtyStep``. The venue expresses the
+    step as ``basePrecision`` -- the precision of the base coin -- and the
+    documented Spot example (BTCUSDT: ``basePrecision`` ``0.000001``) shows
+    the quantity must be a multiple of it. A non-Spot shape may carry an
+    explicit ``qtyStep``, which is used when it is present.
+
+    Reading only ``qtyStep`` would yield a step of zero for every real Spot
+    pair, and a zero step silently disables the step check: a quantity on a
+    forbidden boundary would be sent and rejected by the venue instead of
+    being refused here.
+    """
+    for field_name in ("qtyStep", "basePrecision"):
+        raw = lot_filter.get(field_name)
+        if raw is None or raw == "":
+            continue
+        try:
+            step = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if step > 0 and math.isfinite(step):
+            return step
+    return 0.0
+
+
 def assert_demo_endpoint(base_url: str) -> str:
     """Return ``base_url`` if it is the approved demo host, else raise.
 
@@ -1002,9 +1029,13 @@ class BybitDemoBroker:
 
             min_order_qty = float(lot_filter.get("minOrderQty", "0"))
             max_order_qty = float(lot_filter.get("maxOrderQty", "0"))
-            qty_step = float(lot_filter.get("qtyStep", "0"))
+            qty_step = _spot_qty_step(lot_filter)
             min_order_amt = float(lot_filter.get("minOrderAmt", "0"))
             tick_size = float(price_filter.get("tickSize", "0"))
+            # ``minOrderQty`` and ``maxOrderQty`` are **deprecated** for Spot:
+            # the venue documents that it no longer checks them and checks
+            # ``minOrderAmt`` instead. They are read and kept for the audit
+            # record, but the bound that is enforced is ``minOrderAmt``.
 
             tradable = status == "Trading"
             info = InstrumentInfo(
@@ -1448,10 +1479,14 @@ class BybitDemoBroker:
     def _read_order_executions(self, *, symbol: str | None = None, max_pages: int = 10) -> tuple[dict[str, float], bool]:
         """Read the venue's **executions** for a symbol, keyed by client order id.
 
-        ``GET /v5/order/execution`` is the per-trade record: one row per
+        ``GET /v5/execution/list`` is the per-trade record: one row per
         execution, with ``execQty`` and ``execPrice``. It is the source that
         says *how much* actually traded, which the order list alone does not
         distinguish from a status string.
+
+        The path is the one the venue documents for Get Trade History; it is
+        **not** ``/v5/order/execution``, which is not a route the demo service
+        serves.
 
         The returned quantity is the sum of the executed quantities per order,
         so a partial fill that arrived in two executions is reported as the
@@ -1470,7 +1505,7 @@ class BybitDemoBroker:
             if cursor:
                 params["cursor"] = cursor
 
-            payload = self._request("GET", "/v5/order/execution", params=params, signed=True)
+            payload = self._request("GET", "/v5/execution/list", params=params, signed=True)
             result = payload.get("result", {})
             row_list = result.get("list", [])
             if not isinstance(row_list, list):
@@ -1734,7 +1769,8 @@ class BybitDemoBroker:
             step_decimal = Decimal(str(instrument.qty_step))
             if (qty_decimal / step_decimal) % 1 != 0:
                 raise PaperRiskRejected(
-                    f"quantity {quantity} for {symbol} does not match qtyStep {instrument.qty_step}"
+                    f"quantity {quantity} for {symbol} does not match qtyStep "
+                    f"{format(Decimal(str(instrument.qty_step)), 'f')}"
                 )
 
         intent = {
@@ -1773,6 +1809,9 @@ class BybitDemoBroker:
         # This ensures the actual order value matches the notional approved by RiskEngine.
         if order_type.lower() == "market":
             body["marketUnit"] = "baseCoin"
+            # The venue documents that a Market order always uses IOC, so the
+            # request says IOC rather than a time in force the venue ignores.
+            body["timeInForce"] = "IOC"
         if order_type.lower() == "limit":
             # Limit orders require a price parameter
             # The caller must provide reference_price as the limit price
@@ -1784,7 +1823,8 @@ class BybitDemoBroker:
                 tick_decimal = Decimal(str(instrument.tick_size))
                 if (price_decimal / tick_decimal) % 1 != 0:
                     raise PaperRiskRejected(
-                        f"reference_price {reference_price} for {symbol} does not match tickSize {instrument.tick_size}"
+                        f"reference_price {reference_price} for {symbol} does not match tickSize "
+                        f"{format(Decimal(str(instrument.tick_size)), 'f')}"
                     )
             body["price"] = self._format_price(reference_price, instrument)
 
@@ -2078,7 +2118,8 @@ class BybitDemoBroker:
                 tick_decimal = Decimal(str(instrument.tick_size))
                 if (price_decimal / tick_decimal) % 1 != 0:
                     raise PaperRiskRejected(
-                        f"{name}_price {price} for {symbol} does not match tickSize {instrument.tick_size}"
+                        f"{name}_price {price} for {symbol} does not match tickSize "
+                        f"{format(Decimal(str(instrument.tick_size)), 'f')}"
                     )
 
         # Validate SL < TP for long positions
@@ -2108,7 +2149,9 @@ class BybitDemoBroker:
                 "side": "Sell",  # SL for a long position is a sell
                 "orderType": "Market",
                 "qty": qty_str,
-                "timeInForce": "GTC",
+                # The venue documents that a Market order always uses IOC, so
+                # IOC is what is sent rather than a contradictory GTC.
+                "timeInForce": "IOC",
                 "orderLinkId": sl_client_id,
                 "orderFilter": "tpslOrder",
                 "triggerPrice": sl_price_str,
@@ -2131,7 +2174,7 @@ class BybitDemoBroker:
                 "side": "Sell",  # TP for a long position is a sell
                 "orderType": "Market",
                 "qty": qty_str,
-                "timeInForce": "GTC",
+                "timeInForce": "IOC",
                 "orderLinkId": tp_client_id,
                 "orderFilter": "tpslOrder",
                 "triggerPrice": tp_price_str,

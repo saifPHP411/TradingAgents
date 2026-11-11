@@ -339,7 +339,7 @@ class MockTransport:
             return self.open_orders
         if path == "/v5/order/history":
             return self.history_orders
-        if path == "/v5/order/execution":
+        if path == "/v5/execution/list":
             return self.executions
         return []
 
@@ -438,7 +438,7 @@ class MockTransport:
         if key[0] == "GET" and path in (
             "/v5/order/realtime",
             "/v5/order/history",
-            "/v5/order/execution",
+            "/v5/execution/list",
         ):
             rows = self._default_order_list(path)
             link_id = (params or {}).get("orderLinkId")

@@ -974,3 +974,54 @@ one bounded row per refused decision (`symbol`, `side`, `code`, `error_type`,
 the redacted `detail`, and the time), and `worker_status_view()` exposes it
 beside the tally. It is **observational**: it changes no decision, no cadence
 and no risk limit. See `tests/test_phase36_tjr_ladder_and_rejections.py`.
+
+## Bybit Demo Spot execution (branch `bybit-demo-integration`)
+
+`tradingagents/paper_experiment/broker/bybit_demo.py` is a **second execution
+broker**, selected by `--execution-provider` / `$TRADINGAGENTS_EXECUTION_PROVIDER`
+(`alpaca_paper` | `bybit_demo`). Alpaca Paper stays the default; the resolver
+has a closed vocabulary and **no fall-back**, so a Bybit selection whose
+credentials are missing stops the run instead of trading somewhere else.
+
+The adapter is Spot-only, demo-only, long-only, and it does **not** re-implement
+the risk engine: every order goes through the shared `RiskEngine`. The risk
+limits ($25 notional, 5 positions, 10 daily orders) are unchanged.
+
+**The venue's own field names are the source of truth.** Three facts about
+Bybit Spot that a parser gets wrong by guessing:
+
+- A Spot `lotSizeFilter` has **no `qtyStep`**. The step is `basePrecision`
+  (the documented BTCUSDT Spot example shows `basePrecision` `0.000001`).
+  Reading only `qtyStep` yields a step of zero for every real Spot pair, and
+  a zero step silently *disables* the step check. `_spot_qty_step()` reads
+  `qtyStep` first and falls back to `basePrecision`.
+- `minOrderQty` and `maxOrderQty` are **deprecated** for Spot: the venue
+  documents that it no longer checks them and checks `minOrderAmt` instead.
+  `minOrderAmt` is the bound that is enforced; the deprecated pair is kept
+  only for the audit record.
+- Get Trade History is `GET /v5/execution/list`. It is **not**
+  `/v5/order/execution`, which is not a route the demo service serves — a
+  call to it fails, and the protection evidence can never be read.
+
+**Only documented routes are called.** The demo service's own endpoint list is
+the reference: `/v5/order/create`, `/v5/order/cancel`, `/v5/order/realtime`,
+`/v5/order/history`, `/v5/execution/list`, `/v5/account/wallet-balance`,
+`/v5/market/*`. Spot positions come from the wallet balance, so
+`/v5/position/list` is not used.
+
+**A Market order always uses `IOC`** — the venue documents this, so the
+request says `IOC` rather than a time in force the venue ignores. A Spot
+Market order also states `marketUnit=baseCoin`, because the risk engine sizes
+in the base coin.
+
+**Spot TP/SL is a standalone conditional order**, not an attached bracket:
+`orderFilter="tpslOrder"` with `triggerPrice`, one order per leg. The
+endpoint does **not** accept `stopOrderType` as a request parameter — that
+field appears only in the response, where it classifies the order.
+
+**A protection is proved at the venue, never asserted.** The legs are read
+back from the terminal order list (`/v5/order/history`) and the execution list
+(`/v5/execution/list`); the counterpart is only cancelled after a *fill* is
+observed, and the cancel is verified at the venue before the pair is marked
+resolved. A truncated read leaves the protection **unproven**, so the position
+reads `UNPROTECTED` and the existing protection gate refuses a new entry.

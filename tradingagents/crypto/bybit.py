@@ -20,6 +20,7 @@ so every branch is exercised offline with a mocked response.
 from __future__ import annotations
 
 import contextlib
+import math
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any
@@ -40,6 +41,26 @@ REQUEST_TIMEOUT = 15.0
 def _classify_status(status: int, body: str) -> None:
     if status == 429:
         raise CryptoRateLimitedError(f"the venue throttled the request (HTTP 429): {body}")
+
+
+def _spot_qty_step(lot_filter: dict[str, Any]) -> float:
+    """The quantity step for a Spot instrument, from the venue's own fields.
+
+    A Spot ``lotSizeFilter`` carries **no** ``qtyStep``; the venue expresses
+    the step as ``basePrecision``, the precision of the base coin. An explicit
+    ``qtyStep`` is preferred when a shape carries one.
+    """
+    for field_name in ("qtyStep", "basePrecision"):
+        raw = lot_filter.get(field_name)
+        if raw is None or raw == "":
+            continue
+        try:
+            step = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if step > 0 and math.isfinite(step):
+            return step
+    return 0.0
 
 
 def bybit_symbol(symbol: str) -> str:
@@ -154,7 +175,7 @@ class BybitPublicClient:
 
             min_order_qty = float(lot_filter.get("minOrderQty", "0"))
             _max_order_qty = float(lot_filter.get("maxOrderQty", "0"))
-            qty_step = float(lot_filter.get("qtyStep", "0"))
+            qty_step = _spot_qty_step(lot_filter)
             min_order_amt = float(lot_filter.get("minOrderAmt", "0"))
             tick_size = float(price_filter.get("tickSize", "0"))
 
