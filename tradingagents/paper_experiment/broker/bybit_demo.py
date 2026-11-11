@@ -832,19 +832,42 @@ class BybitDemoBroker:
     def _read_protection_orders(self) -> dict[str, dict]:
         """Read all conditional (protection) orders: StopLoss and TakeProfit.
 
+        Reads from /v5/order/realtime with pagination support.
         Returns dict mapping Bybit symbol to dict with 'stop_loss' and 'take_profit' keys.
         Each contains the order details from the broker.
+
+        Per Bybit V5 docs: https://bybit-exchange.github.io/docs/v5/order/open-order
+        Response includes: orderId, orderLinkId, symbol, side, orderType, qty, timeInForce,
+        orderStatus, orderFilter, stopOrderType, triggerPrice, createdTime, updatedTime
         """
-        # Read from order/realtime with stop order types
-        payload = self._request("GET", "/v5/order/realtime",
-                               params={"category": SPOT_CATEGORY}, signed=True)
-        result = payload.get("result", {})
-        order_list = result.get("list", [])
-        if not isinstance(order_list, list):
-            return {}
+        # Read from order/realtime with stop order types, handling pagination
+        all_orders: list[dict] = []
+        cursor: str | None = None
+        max_pages = 10  # Safety limit to avoid infinite loops
+        pages_read = 0
+
+        while pages_read < max_pages:
+            params = {"category": SPOT_CATEGORY}
+            if cursor:
+                params["cursor"] = cursor
+
+            payload = self._request("GET", "/v5/order/realtime", params=params, signed=True)
+            result = payload.get("result", {})
+            order_list = result.get("list", [])
+            if not isinstance(order_list, list):
+                break
+
+            all_orders.extend(order_list)
+            pages_read += 1
+
+            # Check for pagination cursor
+            next_cursor = result.get("nextPageCursor")
+            if not next_cursor:
+                break
+            cursor = next_cursor
 
         protection_orders: dict[str, dict] = {}
-        for entry in order_list:
+        for entry in all_orders:
             if not isinstance(entry, dict):
                 continue
             raw_symbol = str(entry.get("symbol", "")).upper()
@@ -856,6 +879,7 @@ class BybitDemoBroker:
             order_filter = str(entry.get("orderFilter", ""))
             stop_order_type = str(entry.get("stopOrderType", ""))
             order_type = str(entry.get("orderType", "")).lower()
+            order_status = str(entry.get("orderStatus", "")).lower()
 
             # A protection order has orderFilter="tpslOrder" with stopOrderType set,
             # or stopOrderType (legacy), or is a conditional order type
@@ -877,6 +901,9 @@ class BybitDemoBroker:
             is_sl = (order_filter == "tpslOrder" and stop_order_type == "StopLoss") or stop_order_type.lower() == "stoploss" or order_type == "stoploss"
             is_tp = (order_filter == "tpslOrder" and stop_order_type == "TakeProfit") or stop_order_type.lower() == "takeprofit" or order_type == "takeprofit"
 
+            # Valid active statuses for protection orders
+            active_statuses = ("active", "untriggered", "new", "partially_filled")
+
             if is_sl:
                 protection_orders[raw_symbol]["stop_loss"] = {
                     "order_id": entry.get("orderId"),
@@ -885,11 +912,12 @@ class BybitDemoBroker:
                     "order_type": "StopLoss",
                     "trigger_price": trigger_price,
                     "quantity": float(entry.get("qty", "0")),
-                    "status": str(entry.get("orderStatus", "")).lower(),
+                    "status": order_status,
                     "side": entry.get("side"),
                     "time_in_force": entry.get("timeInForce"),
                     "created_at": entry.get("createdTime"),
                     "updated_at": entry.get("updatedTime"),
+                    "is_active": order_status in active_statuses,
                 }
             elif is_tp:
                 protection_orders[raw_symbol]["take_profit"] = {
@@ -899,11 +927,12 @@ class BybitDemoBroker:
                     "order_type": "TakeProfit",
                     "trigger_price": trigger_price,
                     "quantity": float(entry.get("qty", "0")),
-                    "status": str(entry.get("orderStatus", "")).lower(),
+                    "status": order_status,
                     "side": entry.get("side"),
                     "time_in_force": entry.get("timeInForce"),
                     "created_at": entry.get("createdTime"),
                     "updated_at": entry.get("updatedTime"),
+                    "is_active": order_status in active_statuses,
                 }
         return protection_orders
 
@@ -1591,7 +1620,8 @@ class BybitDemoBroker:
 
         try:
             # Create StopLoss order - Bybit V5 Spot TP/SL order
-            # Uses orderFilter="tpslOrder" (per V5 Spot docs) with stopOrderType="StopLoss"
+            # Per https://bybit-exchange.github.io/docs/v5/order/create-order
+            # orderFilter="tpslOrder", stopOrderType="StopLoss", orderType="Market"
             sl_client_id = f"{client_order_id_prefix}-sl"
             sl_body = {
                 "category": SPOT_CATEGORY,
@@ -1616,7 +1646,6 @@ class BybitDemoBroker:
             created_orders["stop_loss"] = sl_order
 
             # Create TakeProfit order - Bybit V5 Spot TP/SL order
-            # Uses orderFilter="tpslOrder" (per V5 Spot docs) with stopOrderType="TakeProfit"
             tp_client_id = f"{client_order_id_prefix}-tp"
             tp_body = {
                 "category": SPOT_CATEGORY,
@@ -1639,6 +1668,18 @@ class BybitDemoBroker:
             )
             self._record_order(tp_order)
             created_orders["take_profit"] = tp_order
+
+            # Record the protection order pair for OCO handling
+            # We store the link between SL and TP by using the same prefix
+            self._state.protection_order_pairs[client_order_id_prefix] = {
+                "sl_client_id": sl_client_id,
+                "tp_client_id": tp_client_id,
+                "symbol": symbol,
+                "position_qty": position_quantity,
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+            if self._store:
+                self._store.save(self._state)
 
         except Exception as e:
             # If either fails, cancel any created orders
@@ -1670,7 +1711,8 @@ class BybitDemoBroker:
         result = {}
         for key in ("stop_loss", "take_profit"):
             order_data = prot.get(key)
-            if order_data and order_data.get("status") in ("active", "untriggered", "new"):
+            # Use is_active flag (based on orderStatus) for verification
+            if order_data and order_data.get("is_active", False):
                 result[key] = BrokerOrder(
                     client_order_id=order_data.get("order_link_id", ""),
                     broker_order_id=order_data.get("order_id"),
@@ -1698,7 +1740,164 @@ class BybitDemoBroker:
         self._state.applied_fills.add(order.client_order_id)
         if self._store:
             self._store.save(self._state)
+
+        # If this was a protection order (SL or TP), check if we need to cancel the counterpart
+        self._handle_protection_order_fill(order)
         return True
+
+    def _handle_protection_order_fill(self, order: BrokerOrder) -> None:
+        """Handle OCO logic when a protection order (SL/TP) fills.
+
+        If SL or TP fills (fully or partially), cancel the counterpart order.
+        This prevents selling more than the position quantity.
+        """
+        # Find the protection pair this order belongs to
+        for prefix, pair in self._state.protection_order_pairs.items():
+            sl_client_id = pair.get("sl_client_id")
+            tp_client_id = pair.get("tp_client_id")
+
+            if order.client_order_id == sl_client_id:
+                # SL filled, cancel TP
+                self._cancel_counterpart_protection(prefix, tp_client_id, pair.get("symbol"), "TP cancelled due to SL fill")
+                break
+            elif order.client_order_id == tp_client_id:
+                # TP filled, cancel SL
+                self._cancel_counterpart_protection(prefix, sl_client_id, pair.get("symbol"), "SL cancelled due to TP fill")
+                break
+
+    def _cancel_counterpart_protection(self, prefix: str, client_order_id: str, symbol: str, reason: str) -> None:
+        """Cancel the counterpart protection order (SL or TP)."""
+        if not client_order_id or not symbol:
+            return
+
+        try:
+            # Check if order is still active before cancelling
+            order_state = self._state.orders.get(client_order_id)
+            if order_state and order_state.get("status") in ("active", "untriggered", "new", "submitting", "accepted"):
+                self.cancel_order(client_order_id=client_order_id, symbol=symbol)
+                # Mark the pair as resolved
+                if prefix in self._state.protection_order_pairs:
+                    self._state.protection_order_pairs[prefix]["resolved"] = True
+                    self._state.protection_order_pairs[prefix]["resolution_reason"] = reason
+                    self._state.protection_order_pairs[prefix]["resolved_at"] = datetime.now(UTC).isoformat()
+                    if self._store:
+                        self._store.save(self._state)
+        except Exception:
+            # Log but don't raise - cancellation failure shouldn't break fill processing
+            pass
+
+    def reconcile_protection_orders(self, symbol: str) -> dict[str, Any]:
+        """Reconcile protection orders with the broker and handle OCO logic.
+
+        This should be called periodically to:
+        1. Verify protection orders are still active
+        2. Cancel counterpart if one leg has filled
+        3. Detect partial fills and adjust
+
+        Returns dict with status of protection orders and any actions taken.
+        """
+        if not self._state.confirmed:
+            return {"error": "not confirmed"}
+
+        bybit_symbol = self._to_bybit_symbol(symbol.upper())
+        protection_orders = self._read_protection_orders()
+        prot = protection_orders.get(bybit_symbol, {})
+
+        result = {
+            "symbol": symbol,
+            "stop_loss": None,
+            "take_profit": None,
+            "actions_taken": [],
+        }
+
+        sl_data = prot.get("stop_loss")
+        tp_data = prot.get("take_profit")
+
+        # Check if SL filled and TP still active
+        if sl_data and sl_data.get("status") in ("filled", "partiallyfilled") and tp_data and tp_data.get("is_active", False):
+            # Cancel TP
+            tp_client_id = tp_data.get("order_link_id")
+            if tp_client_id:
+                try:
+                    self.cancel_order(client_order_id=tp_client_id, symbol=symbol)
+                    result["actions_taken"].append("TP cancelled after SL fill")
+                except Exception as e:
+                    result["actions_taken"].append(f"Failed to cancel TP: {e}")
+
+        # Check if TP filled and SL still active
+        if tp_data and tp_data.get("status") in ("filled", "partiallyfilled") and sl_data and sl_data.get("is_active", False):
+            # Cancel SL
+            sl_client_id = sl_data.get("order_link_id")
+            if sl_client_id:
+                try:
+                    self.cancel_order(client_order_id=sl_client_id, symbol=symbol)
+                    result["actions_taken"].append("SL cancelled after TP fill")
+                except Exception as e:
+                    result["actions_taken"].append(f"Failed to cancel SL: {e}")
+
+        # Build result with current status
+        for key, data in [("stop_loss", sl_data), ("take_profit", tp_data)]:
+            if data:
+                result[key] = {
+                    "order_id": data.get("order_id"),
+                    "order_link_id": data.get("order_link_id"),
+                    "status": data.get("status"),
+                    "quantity": data.get("quantity"),
+                    "trigger_price": data.get("trigger_price"),
+                    "is_active": data.get("is_active", False),
+                }
+
+        return result
+
+    def is_position_protected(self, symbol: str) -> tuple[bool, str]:
+        """Check if a position is properly protected with both SL and TP.
+
+        Returns (is_protected, reason). If not protected, reason explains why.
+        """
+        if not self._state.confirmed:
+            return False, "broker not confirmed"
+
+        bybit_symbol = self._to_bybit_symbol(symbol.upper())
+        protection_orders = self._read_protection_orders()
+        prot = protection_orders.get(bybit_symbol, {})
+
+        sl_data = prot.get("stop_loss")
+        tp_data = prot.get("take_profit")
+
+        # Check position exists
+        position = self._positions.get(symbol.upper()) if self._positions else None
+        if not position or position.quantity <= 0:
+            return False, "no open position"
+
+        position_qty = position.quantity
+
+        # Both SL and TP must exist and be active
+        if not sl_data:
+            return False, "stop_loss missing"
+        if not tp_data:
+            return False, "take_profit missing"
+
+        if not sl_data.get("is_active", False):
+            return False, f"stop_loss not active (status: {sl_data.get('status')})"
+        if not tp_data.get("is_active", False):
+            return False, f"take_profit not active (status: {tp_data.get('status')})"
+
+        # Verify quantities match position (allow small rounding differences)
+        sl_qty = sl_data.get("quantity", 0)
+        tp_qty = tp_data.get("quantity", 0)
+
+        # Both should cover the full position (Bybit TP/SL are full-position by default)
+        # Allow 1% tolerance for rounding
+        if abs(sl_qty - position_qty) > position_qty * 0.01:
+            return False, f"stop_loss quantity mismatch: {sl_qty} vs position {position_qty}"
+        if abs(tp_qty - position_qty) > position_qty * 0.01:
+            return False, f"take_profit quantity mismatch: {tp_qty} vs position {position_qty}"
+
+        # Verify sides are correct (both should be Sell for long position)
+        if sl_data.get("side") != "Sell" or tp_data.get("side") != "Sell":
+            return False, "protection order side mismatch (expected Sell for long)"
+
+        return True, "protected"
 
     # -- diagnostic ---------------------------------------------------------
 

@@ -1581,5 +1581,674 @@ class TestNonTradableSymbols:
             )
 
 
+# ---------------------------------------------------------------------------
+# Comprehensive protection order tests (OCO, partial fills, restart recovery)
+# ---------------------------------------------------------------------------
+
+
+class TestProtectionOrderComprehensive:
+    """Comprehensive tests for protection order handling per Bybit V5 API."""
+
+    def test_protection_orders_with_pagination(self):
+        """Test reading protection orders with pagination.
+
+        Since MockTransport uses a dict keyed by (method, path), we can't easily
+        test sequential pagination calls. Instead, we test that the parser correctly
+        handles multiple orders in a single response (which is what the combined
+        result would look like).
+        """
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+
+        # Combined response (simulating result after pagination)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                ],
+                "nextPageCursor": "",
+            }
+        })
+
+        client = _make_client(transport)
+        client.connect()
+
+        prot = client._read_protection_orders()
+        assert "BTCUSDT" in prot
+        assert prot["BTCUSDT"]["stop_loss"] is not None
+        assert prot["BTCUSDT"]["take_profit"] is not None
+        assert prot["BTCUSDT"]["stop_loss"]["order_id"] == "bybit-sl-123"
+        assert prot["BTCUSDT"]["take_profit"]["order_id"] == "bybit-tp-123"
+
+    def test_protection_order_missing_orderfilter(self):
+        """Test handling response where orderFilter is missing from entry."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        # orderFilter is missing
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    }
+                ]
+            }
+        })
+
+        client = _make_client(transport)
+        client.connect()
+
+        prot = client._read_protection_orders()
+        # Should still detect via stopOrderType
+        assert "BTCUSDT" in prot
+        assert prot["BTCUSDT"]["stop_loss"] is not None
+
+    def test_sl_filled_tp_cancelled(self):
+        """Test OCO: SL fills, TP should be cancelled."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Filled",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                ]
+            }
+        })
+        # Cancel TP response
+        transport.add_response("POST", "/v5/order/cancel", {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {"orderId": "bybit-tp-123", "orderLinkId": "pt-test-tp"}
+        })
+
+        client = _make_client(transport)
+        client.connect()
+
+        # Set up protection pair
+        client._state.protection_order_pairs["pt-test"] = {
+            "sl_client_id": "pt-test-sl",
+            "tp_client_id": "pt-test-tp",
+            "symbol": "BTC/USDT",
+            "position_qty": 0.1,
+        }
+        # Set position
+        client._positions = {"BTC/USDT": type('obj', (object,), {"quantity": 0.1})()}
+
+        result = client.reconcile_protection_orders("BTC/USDT")
+
+        assert result["stop_loss"]["status"] == "filled"
+        assert result["take_profit"]["status"] == "untriggered"
+        assert "TP cancelled after SL fill" in result["actions_taken"]
+
+    def test_tp_filled_sl_cancelled(self):
+        """Test OCO: TP fills, SL should be cancelled."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Filled",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                ]
+            }
+        })
+        # Cancel SL response
+        transport.add_response("POST", "/v5/order/cancel", {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {"orderId": "bybit-sl-123", "orderLinkId": "pt-test-sl"}
+        })
+
+        client = _make_client(transport)
+        client.connect()
+
+        # Set up protection pair
+        client._state.protection_order_pairs["pt-test"] = {
+            "sl_client_id": "pt-test-sl",
+            "tp_client_id": "pt-test-tp",
+            "symbol": "BTC/USDT",
+            "position_qty": 0.1,
+        }
+        client._positions = {"BTC/USDT": type('obj', (object,), {"quantity": 0.1})()}
+
+        result = client.reconcile_protection_orders("BTC/USDT")
+
+        assert result["take_profit"]["status"] == "filled"
+        assert result["stop_loss"]["status"] == "untriggered"
+        assert "SL cancelled after TP fill" in result["actions_taken"]
+
+    def test_partial_fill_sl(self):
+        """Test partial fill of SL - counterpart should still be cancelled for safety."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "PartiallyFilled",  # Bybit uses PartiallyFilled
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                ]
+            }
+        })
+        # Cancel TP response
+        transport.add_response("POST", "/v5/order/cancel", {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {"orderId": "bybit-tp-123", "orderLinkId": "pt-test-tp"}
+        })
+
+        client = _make_client(transport)
+        client.connect()
+
+        client._state.protection_order_pairs["pt-test"] = {
+            "sl_client_id": "pt-test-sl",
+            "tp_client_id": "pt-test-tp",
+            "symbol": "BTC/USDT",
+            "position_qty": 0.1,
+        }
+        client._positions = {"BTC/USDT": type('obj', (object,), {"quantity": 0.1})()}
+
+        result = client.reconcile_protection_orders("BTC/USDT")
+
+        assert result["stop_loss"]["status"] == "partiallyfilled"
+        assert "TP cancelled after SL fill" in result["actions_taken"]
+
+    def test_restart_recovery_reads_protection_pairs(self):
+        """Test that protection order pairs are persisted and recovered on restart."""
+        import os
+        import tempfile
+
+        # Use a temporary file for state persistence
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as f:
+            state_path = f.name
+
+        try:
+            # First write an empty valid state to the file
+            from tradingagents.paper_experiment.broker.state import BrokerAccountState
+            empty_state = BrokerAccountState()
+            empty_state.endpoint = "https://api-demo.bybit.com"
+            import json
+            with open(state_path, 'w') as f:
+                json.dump(empty_state.to_dict(), f)
+
+            transport = MockTransport()
+            transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+            transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+            transport.add_response("GET", "/v5/order/realtime", {
+                "retCode": 0,
+                "result": {"list": []}
+            })
+
+            # First client creates protection orders
+            client1 = _make_client(transport, state_path=state_path)
+            client1.connect()
+
+            client1._state.protection_order_pairs["pt-restart"] = {
+                "sl_client_id": "pt-restart-sl",
+                "tp_client_id": "pt-restart-tp",
+                "symbol": "BTC/USDT",
+                "position_qty": 0.1,
+            }
+            if client1._store:
+                client1._store.save(client1._state)
+
+            # Create new client (simulating restart) with same state path
+            transport2 = MockTransport()
+            transport2.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+            transport2.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+            transport2.add_response("GET", "/v5/order/realtime", {
+                "retCode": 0,
+                "result": {"list": []}
+            })
+
+            client2 = _make_client(transport2, state_path=state_path)
+            client2.connect()
+
+            # Should be able to access the persisted protection pairs
+            assert "pt-restart" in client2._state.protection_order_pairs
+            pair = client2._state.protection_order_pairs["pt-restart"]
+            assert pair["sl_client_id"] == "pt-restart-sl"
+            assert pair["tp_client_id"] == "pt-restart-tp"
+            assert pair["symbol"] == "BTC/USDT"
+        finally:
+            # Clean up temp file
+            if os.path.exists(state_path):
+                os.unlink(state_path)
+
+    def test_is_position_protected_valid(self):
+        """Test is_position_protected returns True for valid protection."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                ]
+            }
+        })
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
+
+        client = _make_client(transport)
+        client.connect()
+        client.positions(refresh=True)
+
+        protected, reason = client.is_position_protected("BTC/USDT")
+        assert protected is True
+        assert reason == "protected"
+
+    def test_is_position_protected_missing_sl(self):
+        """Test is_position_protected returns False when SL is missing."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                ]
+            }
+        })
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
+
+        client = _make_client(transport)
+        client.connect()
+        client.positions(refresh=True)
+
+        protected, reason = client.is_position_protected("BTC/USDT")
+        assert protected is False
+        assert "stop_loss missing" in reason
+
+    def test_is_position_protected_rejected_sl(self):
+        """Test is_position_protected returns False when SL is rejected."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Rejected",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                ]
+            }
+        })
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
+
+        client = _make_client(transport)
+        client.connect()
+        client.positions(refresh=True)
+
+        protected, reason = client.is_position_protected("BTC/USDT")
+        assert protected is False
+        assert "not active" in reason
+
+    def test_is_position_protected_quantity_mismatch(self):
+        """Test is_position_protected returns False when SL/TP quantity doesn't match position."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.05",  # Only half the position
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                ]
+            }
+        })
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
+
+        client = _make_client(transport)
+        client.connect()
+        client.positions(refresh=True)
+
+        protected, reason = client.is_position_protected("BTC/USDT")
+        assert protected is False
+        assert "quantity mismatch" in reason
+
+    def test_is_position_protected_wrong_side(self):
+        """Test is_position_protected returns False when side is wrong."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Buy",  # Wrong side for long position SL
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                ]
+            }
+        })
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
+
+        client = _make_client(transport)
+        client.connect()
+        client.positions(refresh=True)
+
+        protected, reason = client.is_position_protected("BTC/USDT")
+        assert protected is False
+        assert "side mismatch" in reason
+
+    def test_verify_protection_orders_untriggered(self):
+        """Test verify_protection_orders returns orders with untriggered status."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "orderFilter": "tpslOrder",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                ]
+            }
+        })
+
+        client = _make_client(transport)
+        client.connect()
+
+        verified = client.verify_protection_orders("BTC/USDT")
+
+        assert verified["stop_loss"] is not None
+        assert verified["stop_loss"].client_order_id == "pt-test-sl"
+        assert verified["stop_loss"].status == "untriggered"
+        assert verified["take_profit"] is not None
+        assert verified["take_profit"].client_order_id == "pt-test-tp"
+        assert verified["take_profit"].status == "untriggered"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

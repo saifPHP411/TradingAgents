@@ -27,8 +27,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-BROKER_STATE_SCHEMA_VERSION = 1
-"""The on-disk broker state format. Bumped when a reader must know the shape changed."""
+BROKER_STATE_SCHEMA_VERSION = 2
+"""The on-disk broker state format. Bumped when a reader must know the shape changed.
+
+Version 2 adds protection_order_pairs for OCO handling of SL/TP orders.
+"""
 
 
 class BrokerStateError(RuntimeError):
@@ -110,6 +113,13 @@ class BrokerAccountState:
     explicit reset. Additive and optional: an older state file without these
     fields reads back as "no orders today", so the schema version does not change.
     """
+    """Protection order pairs (SL/TP) for OCO handling.
+
+    Keyed by the client_order_id_prefix used when creating the pair. Contains
+    the client_order_ids for both SL and TP, the symbol, and position quantity.
+    This enables cancelling the counterpart when one leg fills.
+    """
+    protection_order_pairs: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -130,6 +140,7 @@ class BrokerAccountState:
             "positions_at": self.positions_at,
             "daily_orders_count": self.daily_orders_count,
             "daily_orders_date": self.daily_orders_date,
+            "protection_order_pairs": {k: dict(v) for k, v in sorted(self.protection_order_pairs.items())},
         }
 
     @classmethod
@@ -151,6 +162,9 @@ class BrokerAccountState:
         positions = payload.get("positions") or {}
         if not isinstance(positions, dict):
             raise BrokerStateError("broker state 'positions' must be a mapping")
+        protection_pairs = payload.get("protection_order_pairs") or {}
+        if not isinstance(protection_pairs, dict):
+            raise BrokerStateError("broker state 'protection_order_pairs' must be a mapping")
         return cls(
             schema_version=version,
             endpoint=payload.get("endpoint", ""),
@@ -169,6 +183,7 @@ class BrokerAccountState:
             positions_at=payload.get("positions_at"),
             daily_orders_count=_as_non_negative_int(payload.get("daily_orders_count"), 0),
             daily_orders_date=payload.get("daily_orders_date") or None,
+            protection_order_pairs={k: dict(v) for k, v in protection_pairs.items()},
         )
 
 
