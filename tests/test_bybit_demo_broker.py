@@ -1790,10 +1790,12 @@ class TestProtectionOrderComprehensive:
 
         prot = client._read_protection_orders()
         assert "BTCUSDT" in prot
-        assert prot["BTCUSDT"]["stop_loss"] is not None
-        assert prot["BTCUSDT"]["take_profit"] is not None
-        assert prot["BTCUSDT"]["stop_loss"]["order_id"] == "bybit-sl-123"
-        assert prot["BTCUSDT"]["take_profit"]["order_id"] == "bybit-tp-123"
+        # A symbol can carry several orders of the same kind (a residual pair
+        # beside the original one), so the read keeps **all** of them.
+        assert prot["BTCUSDT"]["stop_loss"]
+        assert prot["BTCUSDT"]["take_profit"]
+        assert prot["BTCUSDT"]["stop_loss"][0]["order_id"] == "bybit-sl-123"
+        assert prot["BTCUSDT"]["take_profit"][0]["order_id"] == "bybit-tp-123"
 
     def test_protection_order_missing_orderfilter(self):
         """Test handling response where orderFilter is missing from entry."""

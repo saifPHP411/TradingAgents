@@ -118,6 +118,29 @@ class BrokerAccountState:
     leg fills. Additive and optional: an older state file without this field
     reads back with no pairs, so the schema version does not change.
     """
+    protection_levels: dict[str, dict] = field(default_factory=dict)
+    """The levels a protection pair was created from, keyed by canonical symbol.
+
+    Each entry holds the ``stop_loss`` and ``take_profit`` prices the pair
+    covers. They are kept so that a **partial** fill can be re-protected: when
+    one leg sells part of the position, the quantity that is still held needs
+    a new guard, and the only levels that may be used for it are the ones the
+    strategy derived — the broker never invents a level. Additive and
+    optional: an older state file without this field reads back with no
+    levels, so the schema version does not change.
+    """
+    protection_residuals: dict[str, dict] = field(default_factory=dict)
+    """What happened to the quantity a partial protection fill left behind.
+
+    Keyed by the prefix of the pair that partially filled. Each entry records
+    the executed quantity the venue reported, the residual the venue still
+    held, whether a replacement pair was created, whether the venue confirmed
+    it, and why the outcome is what it is. It is the audit trail for the
+    decision "the residual is protected" or "the residual is unprotected", so
+    the reason survives a restart. Additive and optional: an older state file
+    without this field reads back with no residuals, so the schema version
+    does not change.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -139,6 +162,8 @@ class BrokerAccountState:
             "daily_orders_count": self.daily_orders_count,
             "daily_orders_date": self.daily_orders_date,
             "protection_order_pairs": {k: dict(v) for k, v in sorted(self.protection_order_pairs.items())},
+            "protection_levels": {k: dict(v) for k, v in sorted(self.protection_levels.items())},
+            "protection_residuals": {k: dict(v) for k, v in sorted(self.protection_residuals.items())},
         }
 
     @classmethod
@@ -163,6 +188,12 @@ class BrokerAccountState:
         protection_pairs = payload.get("protection_order_pairs") or {}
         if not isinstance(protection_pairs, dict):
             raise BrokerStateError("broker state 'protection_order_pairs' must be a mapping")
+        protection_levels = payload.get("protection_levels") or {}
+        if not isinstance(protection_levels, dict):
+            raise BrokerStateError("broker state 'protection_levels' must be a mapping")
+        protection_residuals = payload.get("protection_residuals") or {}
+        if not isinstance(protection_residuals, dict):
+            raise BrokerStateError("broker state 'protection_residuals' must be a mapping")
         return cls(
             schema_version=version,
             endpoint=payload.get("endpoint", ""),
@@ -182,6 +213,8 @@ class BrokerAccountState:
             daily_orders_count=_as_non_negative_int(payload.get("daily_orders_count"), 0),
             daily_orders_date=payload.get("daily_orders_date") or None,
             protection_order_pairs={k: dict(v) for k, v in protection_pairs.items()},
+            protection_levels={k: dict(v) for k, v in protection_levels.items()},
+            protection_residuals={k: dict(v) for k, v in protection_residuals.items()},
         )
 
 

@@ -140,6 +140,32 @@ back rather than being quietly retired.
 _ACTIVE_PROJECT_STATUSES = frozenset({"accepted", "partially_filled"})
 """An order in one of these is live at the venue: it may still fill."""
 
+#: The statuses that **prove** an order is finished at the venue.
+_TERMINAL_PROJECT_STATUSES = frozenset(
+    {
+        "filled",
+        "cancelled",
+        "partially_filled_cancelled",
+        "rejected",
+    }
+)
+"""A status in this set is the venue's own confirmation that the order is over.
+
+This set is the **only** way a protection pair may be marked resolved. It is
+deliberately an allow-list rather than "anything that is not active": a status
+the venue did not report, or one this project does not recognise, is
+**unknown**, and unknown is not evidence that anything finished.
+
+The difference matters for an OCO pair. When one leg trades, its counterpart
+must be cancelled, and the pair may only be called settled once the venue has
+confirmed the counterpart is gone. Reading "the counterpart is not in the
+active set" proves nothing: a missing order, a truncated history read and a
+status this project has never seen all look exactly the same, and all three
+mean the counterpart may still be working. Treating any of them as terminal
+would retire a pair whose second leg is still live, and the position would be
+left half-guarded with the system believing it is settled.
+"""
+
 
 class BrokerError(RuntimeError):
     """A broker-backed demo path could not proceed."""
@@ -324,6 +350,96 @@ def _as_float(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return number if math.isfinite(number) else 0.0
+
+
+def _slug(value: float) -> str:
+    """Render a number as a short, readable token for an order id.
+
+    A residual protection's client order id has to be **deterministic**: the
+    same partial fill must produce the same id on every cycle, or the venue
+    would be asked for a new pair each time. The quantity is the thing that
+    distinguishes one residual from another, so it is what the token carries.
+
+    The value is rendered in plain decimal notation, never in scientific
+    notation: ``str(0.00001)`` is ``1e-05``, and an order id that says
+    ``1e-05`` is both unreadable and a different token from the venue's own
+    ``0.00001``.
+    """
+    return format(Decimal(str(value)), "f").replace(".", "p")
+
+
+def _select_leg(legs: Any) -> dict | None:
+    """Pick the one leg that best covers the position.
+
+    A symbol can carry **several** orders of the same kind: after a partial
+    fill the original pair is replaced by a residual pair, so both may be
+    visible at the venue for a moment. The read keeps them all, and this
+    helper picks the one that matters.
+
+    The pick is the leg that is still **working** and covers the **most**
+    quantity: that is the one that actually guards the position. A working
+    leg is preferred over a finished one, because a filled leg protects
+    nothing, and among working legs the larger one covers more of what is
+    held. When no leg is working, the largest finished leg is returned so the
+    caller can say *which* finished leg it found.
+
+    The choice is made on what the venue reports, never on which row came
+    last: the order of the venue's list is not a fact about the protection.
+    """
+    if not isinstance(legs, list):
+        # A caller may hold the single-leg shape from an older read.
+        return legs if isinstance(legs, dict) else None
+    if not legs:
+        return None
+    working = [leg for leg in legs if isinstance(leg, dict) and leg.get("is_active")]
+    pool = working or [leg for leg in legs if isinstance(leg, dict)]
+    if not pool:
+        return None
+    return max(pool, key=lambda leg: _as_float(leg.get("quantity")))
+
+
+def _find_leg_by_client_id(legs: Any, client_order_id: str) -> dict | None:
+    """Find the one leg that carries this exact client order id.
+
+    A specific order is confirmed by its **id**, never by its kind: two
+    orders of the same kind can sit side by side (the original pair and the
+    residual pair that replaced it), and only the id says which one the
+    caller means. An empty id matches nothing, so a caller that does not
+    know which order it created is told "not found" rather than being handed
+    an arbitrary order of that kind.
+    """
+    if not client_order_id:
+        return None
+    if isinstance(legs, dict):
+        legs = [legs]
+    if not isinstance(legs, list):
+        return None
+    for leg in legs:
+        if isinstance(leg, dict) and str(leg.get("order_link_id") or "") == client_order_id:
+            return leg
+    return None
+
+
+def _working_quantity(legs: Any) -> float:
+    """The total quantity the **working** legs of one kind cover.
+
+    A finished leg protects nothing, so it contributes nothing to the
+    coverage. The quantity of a working leg is what it still holds open for
+    the position, which is its own quantity less what has already traded --
+    a partially filled stop still guards only what is left of it.
+    """
+    if isinstance(legs, dict):
+        legs = [legs]
+    if not isinstance(legs, list):
+        return 0.0
+    total = 0.0
+    for leg in legs:
+        if not isinstance(leg, dict) or not leg.get("is_active"):
+            continue
+        quantity = _as_float(leg.get("quantity"))
+        filled = _as_float(leg.get("filled_quantity"))
+        total += max(0.0, quantity - filled)
+    return total
 
 
 def _as_optional_float(value: Any) -> float | None:
@@ -574,11 +690,15 @@ class BrokerPosition:
         as still working. The ``is_active`` flag is the broker's own answer
         mapped into this project's vocabulary, so a leg the venue has not
         confirmed as working never counts as protection.
+
+        A symbol can carry several orders of the same kind (a residual pair
+        beside the original one), so the legs are looked up through the shared
+        selection helper rather than assumed to be a single row.
         """
         if not self.protection_orders:
             return False
-        sl = self.protection_orders.get("stop_loss")
-        tp = self.protection_orders.get("take_profit")
+        sl = _select_leg(self.protection_orders.get("stop_loss"))
+        tp = _select_leg(self.protection_orders.get("take_profit"))
         # Both must exist and be in active/pending state at the broker
         if not sl or not tp:
             return False
@@ -1216,31 +1336,34 @@ class BybitDemoBroker:
             else:
                 continue
 
-            protection_orders[raw_symbol][leg] = {
-                "order_id": entry.get("orderId"),
-                "order_link_id": entry.get("orderLinkId"),
-                "symbol": raw_symbol,
-                "order_type": leg_type,
-                "trigger_price": trigger_price,
-                "quantity": _as_float(entry.get("qty")),
-                "filled_quantity": _as_float(entry.get("cumExecQty")),
-                "leaves_quantity": _as_float(entry.get("leavesQty")),
-                # ``status`` is the venue's own spelling, lower-cased, so the
-                # record says exactly what Bybit said. ``mapped_status`` is the
-                # same fact in this project's vocabulary. Both are kept: the
-                # first is the evidence, the second is what the project
-                # reasons about, and neither is derived from the other.
-                "status": order_status.lower(),
-                "venue_status": order_status,
-                "mapped_status": mapped_status,
-                "side": entry.get("side"),
-                "time_in_force": entry.get("timeInForce"),
-                "created_at": entry.get("createdTime"),
-                "updated_at": entry.get("updatedTime"),
-                # An order that is still working at the venue: it has not
-                # filled, has not been cancelled and has not been rejected.
-                "is_active": mapped_status in _ACTIVE_PROJECT_STATUSES,
-            }
+            protection_orders[raw_symbol].setdefault(leg, []).append(
+                {
+                    "order_id": entry.get("orderId"),
+                    "order_link_id": entry.get("orderLinkId"),
+                    "symbol": raw_symbol,
+                    "order_type": leg_type,
+                    "trigger_price": trigger_price,
+                    "quantity": _as_float(entry.get("qty")),
+                    "filled_quantity": _as_float(entry.get("cumExecQty")),
+                    "leaves_quantity": _as_float(entry.get("leavesQty")),
+                    # ``status`` is the venue's own spelling, lower-cased, so
+                    # the record says exactly what Bybit said. ``mapped_status``
+                    # is the same fact in this project's vocabulary. Both are
+                    # kept: the first is the evidence, the second is what the
+                    # project reasons about, and neither is derived from the
+                    # other.
+                    "status": order_status.lower(),
+                    "venue_status": order_status,
+                    "mapped_status": mapped_status,
+                    "side": entry.get("side"),
+                    "time_in_force": entry.get("timeInForce"),
+                    "created_at": entry.get("createdTime"),
+                    "updated_at": entry.get("updatedTime"),
+                    # An order that is still working at the venue: it has not
+                    # filled, has not been cancelled and has not been rejected.
+                    "is_active": mapped_status in _ACTIVE_PROJECT_STATUSES,
+                }
+            )
         for symbol_rows in protection_orders.values():
             symbol_rows["truncated"] = truncated
         return protection_orders
@@ -2198,6 +2321,16 @@ class BybitDemoBroker:
                 "position_qty": position_quantity,
                 "created_at": datetime.now(UTC).isoformat(),
             }
+            # The levels the pair covers are kept so that a **partial** fill
+            # can be re-protected with the very levels the strategy derived.
+            # The broker never invents a level, and a residual may only be
+            # guarded by the levels this pair was created from.
+            self._state.protection_levels[symbol] = {
+                "stop_loss": stop_loss_price,
+                "take_profit": take_profit_price,
+                "position_qty": position_quantity,
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
             if self._store:
                 self._store.save(self._state)
 
@@ -2211,7 +2344,11 @@ class BybitDemoBroker:
 
         return created_orders
 
-    def verify_protection_orders(self, symbol: str) -> dict[str, BrokerOrder | None]:
+    def verify_protection_orders(
+        self,
+        symbol: str,
+        client_order_ids: dict[str, str] | None = None,
+    ) -> dict[str, BrokerOrder | None]:
         """Verify protection orders exist and are active at the broker.
 
         Reads from /v5/order/realtime and checks for StopLoss/TakeProfit orders
@@ -2220,6 +2357,15 @@ class BybitDemoBroker:
         A **truncated** read verifies nothing: the leg that is missing may
         simply be on a page that was not read, so both legs are reported as
         ``None`` rather than one of them being confirmed off a partial read.
+
+        ``client_order_ids`` names the **specific** legs to confirm, keyed by
+        ``"stop_loss"`` and ``"take_profit"``. Without it the read picks the
+        best leg of each kind for the symbol, which is right for "is this
+        position guarded?" but wrong for "did *these* orders take?": a symbol
+        can carry the original pair and a residual pair at once, and the
+        original is the larger one. A caller that created a specific pair
+        therefore asks about that pair by id, and a leg that is not there is
+        reported as absent rather than silently replaced by another order.
 
         Returns dict with 'stop_loss' and 'take_profit' BrokerOrder objects,
         or None if not found/verified.
@@ -2237,7 +2383,11 @@ class BybitDemoBroker:
 
         result = {}
         for key in ("stop_loss", "take_profit"):
-            order_data = prot.get(key)
+            if client_order_ids is not None:
+                wanted = str(client_order_ids.get(key) or "")
+                order_data = _find_leg_by_client_id(prot.get(key), wanted)
+            else:
+                order_data = _select_leg(prot.get(key))
             # Use is_active flag (based on orderStatus) for verification
             if order_data and order_data.get("is_active", False):
                 result[key] = BrokerOrder(
@@ -2289,6 +2439,15 @@ class BybitDemoBroker:
 
         If SL or TP fills (fully or partially), cancel the counterpart order.
         This prevents selling more than the position quantity.
+
+        A **partial** fill is not the end of the story. The leg that traded
+        sold part of the position, and the part that did not trade is still
+        held and still needs a guard. So the counterpart is cancelled (it
+        would otherwise sell the whole position a second time) and the
+        **residual** is protected afresh. The residual work is delegated to
+        :meth:`_protect_residual_after_partial_fill`, which either creates and
+        verifies a new pair or leaves the position unprotected and the entry
+        gate closed.
         """
         # Find the protection pair this order belongs to
         for prefix, pair in self._state.protection_order_pairs.items():
@@ -2298,19 +2457,230 @@ class BybitDemoBroker:
             if order.client_order_id == sl_client_id:
                 # SL filled, cancel TP
                 self._cancel_counterpart_protection(prefix, tp_client_id, pair.get("symbol"), "TP cancelled due to SL fill")
+                self._protect_residual_after_partial_fill(prefix, pair, order)
                 break
             elif order.client_order_id == tp_client_id:
                 # TP filled, cancel SL
                 self._cancel_counterpart_protection(prefix, sl_client_id, pair.get("symbol"), "SL cancelled due to TP fill")
+                self._protect_residual_after_partial_fill(prefix, pair, order)
                 break
+
+    def _protect_residual_after_partial_fill(
+        self,
+        prefix: str,
+        pair: dict,
+        order: BrokerOrder,
+    ) -> dict[str, Any]:
+        """Protect the quantity a **partial** protection fill left behind.
+
+        A protection order that fills partly has sold part of the position.
+        The counterpart is cancelled, so the quantity that is still held has
+        **no guard at all**: cancelling the other leg removes a duplicate sell,
+        it does not protect what is left. Leaving that silent is the defect
+        this method exists to close -- the position would sit there with no
+        stop and no target while the system reported the pair as settled.
+
+        So the residual is worked out from two independent facts and then
+        guarded:
+
+        - the **executed** quantity comes from the venue's execution history
+          (``/v5/execution/list``), which is the per-trade record and the only
+          place that distinguishes "sold 0.4 of 1" from "sold all of it";
+        - the **residual** comes from the position the venue actually holds
+          now, read fresh from the wallet balance.
+
+        The residual is the venue's holding, not ``position_qty - executed``:
+        the venue is the authority on what is held, and the two can disagree
+        if anything else traded in between.
+
+        Two things are refused rather than guessed at:
+
+        - a **truncated** read of the executions proves nothing about what
+          traded, so no new order is placed and the position is left
+          unprotected;
+        - a coin whose balance could not be read is an **unknown** balance,
+          and an unknown balance cannot be sized against. The coin's
+          availability is also what decides whether the venue would accept a
+          sell of the residual at all, so an uncertain balance is not
+          something to place an order against.
+
+        Either way the outcome is the same: the position is reported
+        **unprotected**, the entry gate closes, and the next cycle tries
+        again. The guard never claims a protection it did not prove at the
+        venue.
+        """
+        symbol = str(pair.get("symbol") or order.symbol or "").upper()
+        outcome: dict[str, Any] = {
+            "symbol": symbol,
+            "protected": False,
+            "residual_quantity": None,
+            "executed_quantity": None,
+            "reason": None,
+            "created": False,
+            "verified": False,
+        }
+        if not symbol:
+            outcome["reason"] = "the protection pair carries no symbol"
+            self._state.protection_residuals[prefix] = outcome
+            return outcome
+
+        # -- the quantity that actually traded ----------------------------
+        executed_qty, executions_truncated = self._read_order_executions(symbol=symbol)
+        if executions_truncated:
+            outcome["reason"] = (
+                "the execution read was truncated; the traded quantity is unproven, "
+                "so no new protection order was placed"
+            )
+            self._state.protection_residuals[prefix] = outcome
+            return outcome
+        executed = executed_qty.get(order.client_order_id)
+        if executed is None:
+            outcome["reason"] = (
+                f"the venue's execution history carries no record for {order.client_order_id}; "
+                "the traded quantity is unproven, so no new protection order was placed"
+            )
+            self._state.protection_residuals[prefix] = outcome
+            return outcome
+        outcome["executed_quantity"] = executed
+
+        # -- the quantity the venue still holds ----------------------------
+        try:
+            balances = self._read_wallet_balances("SPOT")
+        except Exception as exc:  # noqa: BLE001 - an unreadable balance is unknown
+            outcome["reason"] = (
+                f"the coin balance could not be read ({type(exc).__name__}: {exc}); "
+                "the residual is unknown, so no new protection order was placed"
+            )
+            self._state.protection_residuals[prefix] = outcome
+            return outcome
+
+        base_asset = symbol.split("/")[0] if "/" in symbol else symbol
+        balance = balances.get(base_asset)
+        if balance is None:
+            outcome["reason"] = (
+                f"the venue's balance carries no {base_asset} entry; the residual is unknown, "
+                "so no new protection order was placed"
+            )
+            self._state.protection_residuals[prefix] = outcome
+            return outcome
+
+        held = _as_float(balance.get("wallet_balance"))
+        if not math.isfinite(held) or held < 0:
+            outcome["reason"] = (
+                f"the venue's {base_asset} balance is not a usable number; the residual is "
+                "unknown, so no new protection order was placed"
+            )
+            self._state.protection_residuals[prefix] = outcome
+            return outcome
+        outcome["residual_quantity"] = held
+
+        if held <= 0:
+            # The position is gone: the leg filled the whole of it, or
+            # something else closed it. There is no residual to protect, and
+            # nothing is left unguarded.
+            outcome["protected"] = True
+            outcome["reason"] = (
+                "the venue holds no residual position; there is nothing left to protect"
+            )
+            self._state.protection_residuals[prefix] = outcome
+            return outcome
+
+        # -- the levels for the residual -----------------------------------
+        levels = self._state.protection_levels.get(symbol, {})
+        stop_loss = levels.get("stop_loss")
+        take_profit = levels.get("take_profit")
+        if stop_loss is None or take_profit is None:
+            outcome["reason"] = (
+                "the residual has no recorded stop loss and take profit, so no "
+                "protection order could be created for it"
+            )
+            self._state.protection_residuals[prefix] = outcome
+            return outcome
+
+        # -- create and verify a new pair for the residual -----------------
+        residual_prefix = f"{prefix}-residual-{_slug(executed)}"
+        try:
+            created = self.create_protection_orders(
+                symbol=symbol,
+                position_quantity=held,
+                stop_loss_price=float(stop_loss),
+                take_profit_price=float(take_profit),
+                client_order_id_prefix=residual_prefix,
+                allow_orders=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed creation leaves it unprotected
+            outcome["reason"] = (
+                f"the protection for the residual could not be created ({type(exc).__name__}: {exc}); "
+                "the position is unprotected"
+            )
+            self._state.protection_residuals[prefix] = outcome
+            return outcome
+        outcome["created"] = True
+
+        # The new pair counts only once the **venue** confirms it. A created
+        # order is a request, not a proof. The confirmation asks about these
+        # **specific** legs: the symbol may still carry the original pair, and
+        # confirming "some stop and some target" would prove nothing about
+        # the replacement.
+        sl_client_id = str(created["stop_loss"].client_order_id) if created.get("stop_loss") else ""
+        tp_client_id = str(created["take_profit"].client_order_id) if created.get("take_profit") else ""
+        verified = self.verify_protection_orders(
+            symbol,
+            client_order_ids={
+                "stop_loss": sl_client_id,
+                "take_profit": tp_client_id,
+            },
+        )
+        sl_order = verified.get("stop_loss")
+        tp_order = verified.get("take_profit")
+        if (
+            sl_order is None
+            or tp_order is None
+            or sl_order.client_order_id != sl_client_id
+            or tp_order.client_order_id != tp_client_id
+        ):
+            outcome["reason"] = (
+                "the venue did not confirm both legs of the residual protection; "
+                "the position is unprotected"
+            )
+            self._state.protection_residuals[prefix] = outcome
+            return outcome
+
+        # The legs have to cover the residual, not merely exist.
+        for label, order_obj in (("stop loss", sl_order), ("take profit", tp_order)):
+            covered = _as_float(order_obj.quantity)
+            if covered + 1e-12 < held:
+                outcome["reason"] = (
+                    f"the residual {label} covers {covered} of the {held} the venue still holds; "
+                    "the position is unprotected"
+                )
+                self._state.protection_residuals[prefix] = outcome
+                return outcome
+
+        outcome["verified"] = True
+        outcome["protected"] = True
+        outcome["reason"] = f"the residual {held} was re-protected and confirmed at the venue"
+        self._state.protection_residuals[prefix] = outcome
+        if self._store:
+            self._store.save(self._state)
+        return outcome
+
 
     def _cancel_counterpart_protection(self, prefix: str, client_order_id: str, symbol: str, reason: str) -> None:
         """Cancel the counterpart protection order (SL or TP).
 
         The pair is only marked resolved once the venue has confirmed the
-        counterpart is no longer working. A cancel request that was accepted
-        is not the same fact as a cancelled order, and a cancel that failed
-        leaves the pair unresolved so the next cycle tries again.
+        counterpart is **finished**. A cancel request that was accepted is not
+        the same fact as a cancelled order, and a cancel that failed leaves
+        the pair unresolved so the next cycle tries again.
+
+        The confirmation has to be a **terminal status the venue stated**. The
+        counterpart's absence from the live list is not a confirmation: the
+        live list only carries the orders that are still working, so a
+        missing order is equally consistent with "cancelled", "never read",
+        and "a read that did not reach it". The order **history** is the
+        source that carries the finished legs, so it is read too, and the pair
+        stays unresolved unless one of the two carries a terminal status.
         """
         if not client_order_id or not symbol:
             return
@@ -2327,16 +2697,37 @@ class BybitDemoBroker:
             return
 
         # The cancel was accepted: ask the venue whether the counterpart is
-        # really gone before declaring the pair resolved.
+        # really finished before declaring the pair resolved.
         bybit_symbol = self._to_bybit_symbol(symbol.upper())
         live = self._read_protection_orders().get(bybit_symbol, {})
-        still_working = False
+        terminal_orders, history_truncated = self._read_terminal_orders(symbol=symbol)
+
+        status: str | None = None
         for leg in ("stop_loss", "take_profit"):
-            candidate = live.get(leg)
-            if candidate and candidate.get("order_link_id") == client_order_id:
-                still_working = candidate.get("is_active", False)
+            candidates = live.get(leg)
+            if not isinstance(candidates, list):
+                candidates = [candidates] if candidates else []
+            for candidate in candidates:
+                if isinstance(candidate, dict) and candidate.get("order_link_id") == client_order_id:
+                    status = candidate.get("mapped_status")
+                    break
+            if status is not None:
                 break
-        if still_working:
+        if status is None:
+            terminal = terminal_orders.get(client_order_id)
+            if terminal is not None:
+                status = self._map_status(terminal.get("orderStatus"))
+
+        if status is None:
+            # Neither the live list nor the history carries the counterpart.
+            # That is unknown, not terminal: the pair stays unresolved.
+            return
+        if status in _ACTIVE_PROJECT_STATUSES:
+            # Still working at the venue: the cancel has not taken effect yet.
+            return
+        if status not in _TERMINAL_PROJECT_STATUSES:
+            # A status this project does not recognise. Unknown is not
+            # terminal, so the pair stays unresolved.
             return
         self._mark_protection_pair_resolved(prefix, reason)
 
@@ -2420,9 +2811,14 @@ class BybitDemoBroker:
                 return {"known": False, "status": None, "mapped_status": None, "executed": 0.0}
             live_row = None
             for leg in ("stop_loss", "take_profit"):
-                candidate = live_rows.get(leg)
-                if candidate and candidate.get("order_link_id") == client_id:
-                    live_row = candidate
+                candidates = live_rows.get(leg)
+                if not isinstance(candidates, list):
+                    candidates = [candidates] if candidates else []
+                for candidate in candidates:
+                    if isinstance(candidate, dict) and candidate.get("order_link_id") == client_id:
+                        live_row = candidate
+                        break
+                if live_row is not None:
                     break
             if live_row is not None:
                 return {
@@ -2457,7 +2853,10 @@ class BybitDemoBroker:
         if not pairs:
             # No pair is recorded for this symbol: there is nothing to
             # reconcile against, and the live view is still reported.
-            for key, data in (("stop_loss", live.get("stop_loss")), ("take_profit", live.get("take_profit"))):
+            for key, data in (
+                ("stop_loss", _select_leg(live.get("stop_loss"))),
+                ("take_profit", _select_leg(live.get("take_profit"))),
+            ):
                 if data:
                     result[key] = {
                         "order_id": data.get("order_id"),
@@ -2506,9 +2905,31 @@ class BybitDemoBroker:
                 if not counterpart_id:
                     continue
                 counterpart_state = leg_state(counterpart_id, live)
-                if counterpart_state["mapped_status"] not in _ACTIVE_PROJECT_STATUSES:
-                    # The counterpart is already finished: nothing to cancel.
+                if not counterpart_state["known"]:
+                    # The venue does not carry the counterpart in either the
+                    # live list or the history. That is **not** proof that it
+                    # finished: the read may have been truncated, or the order
+                    # may simply be one this project has never seen. The pair
+                    # stays unresolved, so the protection is still unproven
+                    # and the next cycle reads the venue again.
+                    result["errors"].append(
+                        f"the {counterpart_key} could not be read after the {filled_key} traded; "
+                        "the protection stays unproven"
+                    )
+                    continue
+                if counterpart_state["mapped_status"] in _TERMINAL_PROJECT_STATUSES:
+                    # The venue has confirmed the counterpart is finished:
+                    # nothing to cancel, and the pair is settled.
                     self._mark_protection_pair_resolved(prefix, f"{counterpart_key} was already {counterpart_state['mapped_status']}")
+                    continue
+                if counterpart_state["mapped_status"] not in _ACTIVE_PROJECT_STATUSES:
+                    # The status is one this project does not recognise. It is
+                    # **unknown**, and unknown is not terminal: the order may
+                    # still be working, so the pair stays unresolved.
+                    result["errors"].append(
+                        f"the {counterpart_key} reads as {counterpart_state['mapped_status']!r}, "
+                        "which is not a confirmed terminal status; the protection stays unproven"
+                    )
                     continue
                 # The counterpart is still working, and the position may only
                 # be sold once: cancel it.
@@ -2553,6 +2974,19 @@ class BybitDemoBroker:
                 if not after_state["known"]:
                     result["errors"].append(
                         f"the {counterpart_key} could not be read after the cancel request; "
+                        "the protection stays unproven"
+                    )
+                    continue
+                if after_state["mapped_status"] not in _TERMINAL_PROJECT_STATUSES:
+                    # The cancel was accepted and the order is no longer in the
+                    # live list, but the venue has not stated a status this
+                    # project recognises as terminal. It may be a status this
+                    # project has never seen, or a read that did not reach the
+                    # record. Unknown is not terminal, so the pair stays
+                    # unresolved and the protection stays unproven.
+                    result["errors"].append(
+                        f"the {counterpart_key} reads as {after_state['mapped_status']!r} after the "
+                        "cancel request, which is not a confirmed terminal status; "
                         "the protection stays unproven"
                     )
                     continue
@@ -2612,15 +3046,22 @@ class BybitDemoBroker:
         if prot.get("truncated"):
             return False, "the protection order read was truncated; the protection is unproven"
 
-        sl_data = prot.get("stop_loss")
-        tp_data = prot.get("take_profit")
+        sl_legs = prot.get("stop_loss")
+        tp_legs = prot.get("take_profit")
 
         position_qty = position.quantity
 
         # Both SL and TP must exist and be active
-        if not sl_data:
+        if not sl_legs:
             return False, "stop_loss missing"
-        if not tp_data:
+        if not tp_legs:
+            return False, "take_profit missing"
+
+        sl_data = _select_leg(sl_legs)
+        tp_data = _select_leg(tp_legs)
+        if sl_data is None:
+            return False, "stop_loss missing"
+        if tp_data is None:
             return False, "take_profit missing"
 
         if not sl_data.get("is_active", False):
@@ -2628,9 +3069,23 @@ class BybitDemoBroker:
         if not tp_data.get("is_active", False):
             return False, f"take_profit not active (status: {tp_data.get('status')})"
 
-        # Verify quantities match position (allow small rounding differences)
-        sl_qty = sl_data.get("quantity", 0)
-        tp_qty = tp_data.get("quantity", 0)
+        # A residual whose replacement protection could not be proven leaves
+        # the position unguarded even though an old pair may still be visible
+        # at the venue. The recorded residual is the authority on that, and it
+        # is checked **before** the coverage arithmetic: the coverage is
+        # expected to be wrong in exactly this case, and the specific reason
+        # is the one the operator needs.
+        residual = self._unprotected_residual_for(symbol)
+        if residual is not None:
+            return False, residual
+
+        # The legs have to cover the position **as it is now**. After a
+        # partial fill the venue holds less than the pair was created for, and
+        # the residual pair covers that smaller amount; the coverage is
+        # therefore the sum of every **working** leg of that kind, not the
+        # quantity of whichever row happened to come last.
+        sl_qty = _working_quantity(sl_legs)
+        tp_qty = _working_quantity(tp_legs)
 
         # Both should cover the full position (Bybit TP/SL are full-position by default)
         # Allow 1% tolerance for rounding
@@ -2644,6 +3099,29 @@ class BybitDemoBroker:
             return False, "protection order side mismatch (expected Sell for long)"
 
         return True, "protected"
+
+    def _unprotected_residual_for(self, symbol: str) -> str | None:
+        """The reason a symbol's residual is unprotected, if it is.
+
+        A partial fill leaves the residual recorded in the broker's state. If
+        that residual could not be re-protected, the position is **not**
+        protected, even when the venue still shows the original pair. The
+        original pair covered the quantity that was sold; the quantity that
+        is still held is what the residual is about.
+
+        Returns the reason, or ``None`` when every residual for the symbol
+        was either re-protected or did not leave anything behind.
+        """
+        for _prefix, outcome in sorted(self._state.protection_residuals.items()):
+            if not isinstance(outcome, dict):
+                continue
+            if str(outcome.get("symbol") or "").upper() != symbol.upper():
+                continue
+            if outcome.get("protected"):
+                continue
+            reason = outcome.get("reason") or "the residual after the partial fill is unprotected"
+            return f"the residual after a partial fill is unprotected: {reason}"
+        return None
 
     # -- diagnostic ---------------------------------------------------------
 
