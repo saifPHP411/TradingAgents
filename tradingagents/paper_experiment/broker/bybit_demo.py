@@ -852,13 +852,20 @@ class BybitDemoBroker:
                 continue
 
             # Check orderFilter for conditional orders (Bybit V5 Spot)
-            # Bybit V5 Spot conditional orders use orderFilter=StopLoss/TakeProfit
-            order_filter = str(entry.get("orderFilter", "")).lower()
-            stop_order_type = str(entry.get("stopOrderType", "")).lower()
-            order_type = str(entry.get("orderType", "")).lower()
+            # Bybit V5 Spot conditional orders use orderFilter=StopLoss/TakeProfit (capitalized)
+            order_filter = str(entry.get("orderFilter", ""))
 
-            # A protection order has orderFilter set (V5), or stopOrderType (legacy), or is a conditional order type
-            if not (order_filter in ("stoploss", "takeprofit") or stop_order_type in ("stoploss", "takeprofit") or order_type in ("stoploss", "takeprofit", "conditional")):
+            # A protection order has orderFilter set (V5 Spot) or stopOrderType (legacy), or is a conditional order type
+            order_type = str(entry.get("orderType", "")).lower()
+            stop_order_type = str(entry.get("stopOrderType", "")).lower()
+
+            # Check if this is a conditional/protection order
+            is_protection = (
+                order_filter in ("StopLoss", "TakeProfit") or
+                stop_order_type in ("stoploss", "takeprofit") or
+                order_type in ("stoploss", "takeprofit", "conditional")
+            )
+            if not is_protection:
                 continue
 
             if raw_symbol not in protection_orders:
@@ -866,9 +873,9 @@ class BybitDemoBroker:
 
             trigger_price = float(entry.get("triggerPrice", "0"))
 
-            # Determine if it's SL or TP using orderFilter primarily (V5), then stopOrderType (legacy)
-            is_sl = order_filter == "stoploss" or stop_order_type == "stoploss" or order_type == "stoploss"
-            is_tp = order_filter == "takeprofit" or stop_order_type == "takeprofit" or order_type == "takeprofit"
+            # Determine if it's SL or TP using orderFilter primarily (V5 Spot), then stopOrderType (legacy)
+            is_sl = order_filter == "StopLoss" or stop_order_type == "stoploss" or order_type == "stoploss"
+            is_tp = order_filter == "TakeProfit" or stop_order_type == "takeprofit" or order_type == "takeprofit"
 
             if is_sl:
                 protection_orders[raw_symbol]["stop_loss"] = {
@@ -1302,14 +1309,11 @@ class BybitDemoBroker:
             "timeInForce": tif,
             "orderLinkId": client_order_id,
         }
-        # For Spot Market orders, specify marketUnit:
-        # - Market Buy: qty in quote currency (USDT) -> marketUnit="quoteCoin"
-        # - Market Sell: qty in base currency (BTC) -> marketUnit="baseCoin"
+        # For Spot Market orders, use marketUnit="baseCoin" because RiskEngine
+        # always passes quantity in base currency (BTC, ETH, etc.), not quote currency.
+        # This ensures the actual order value matches the notional approved by RiskEngine.
         if order_type.lower() == "market":
-            if side.lower() == "buy":
-                body["marketUnit"] = "quoteCoin"
-            else:
-                body["marketUnit"] = "baseCoin"
+            body["marketUnit"] = "baseCoin"
         if order_type.lower() == "limit":
             # Limit orders require a price parameter
             # The caller must provide reference_price as the limit price
@@ -1586,7 +1590,8 @@ class BybitDemoBroker:
         created_orders = {}
 
         try:
-            # Create StopLoss order
+            # Create StopLoss order - Bybit V5 Spot conditional order
+            # Uses orderFilter=StopLoss (capitalized per V5 docs), no triggerDirection for Spot
             sl_client_id = f"{client_order_id_prefix}-sl"
             sl_body = {
                 "category": SPOT_CATEGORY,
@@ -1598,7 +1603,6 @@ class BybitDemoBroker:
                 "orderLinkId": sl_client_id,
                 "orderFilter": "StopLoss",
                 "triggerPrice": sl_price_str,
-                "triggerDirection": 2,  # 1: price rises, 2: price falls (for long SL)
             }
 
             sl_payload = self._request("POST", "/v5/order/create", json_body=sl_body, signed=True)
@@ -1610,7 +1614,8 @@ class BybitDemoBroker:
             self._record_order(sl_order)
             created_orders["stop_loss"] = sl_order
 
-            # Create TakeProfit order
+            # Create TakeProfit order - Bybit V5 Spot conditional order
+            # Uses orderFilter=TakeProfit (capitalized per V5 docs), no triggerDirection for Spot
             tp_client_id = f"{client_order_id_prefix}-tp"
             tp_body = {
                 "category": SPOT_CATEGORY,
@@ -1622,7 +1627,6 @@ class BybitDemoBroker:
                 "orderLinkId": tp_client_id,
                 "orderFilter": "TakeProfit",
                 "triggerPrice": tp_price_str,
-                "triggerDirection": 1,  # 1: price rises, 2: price falls (for long TP)
             }
 
             tp_payload = self._request("POST", "/v5/order/create", json_body=tp_body, signed=True)
