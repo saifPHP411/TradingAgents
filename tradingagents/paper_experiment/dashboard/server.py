@@ -45,6 +45,8 @@ from ..broker import (
     DECISION_SOURCE_HISTORY,
     DEFAULT_MAX_PRICE_DEVIATION,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+    EXECUTION_PROVIDER_ALPACA_PAPER,
+    EXECUTION_PROVIDER_CHOICES,
     MARKET_DATA_CHOICES,
     MAX_PRICE_DEVIATION_ENV,
     PROVIDER_BAR_OPEN,
@@ -58,13 +60,16 @@ from ..crypto_symbol_config import (
 from ..experiment import ExperimentConfig, PaperExperiment
 from ..market_data_wiring import (
     DECISION_SOURCE_ENV,
+    EXECUTION_PROVIDER_ENV,
     FRACTIONAL_SHARES_ENV,
     MARKET_DATA_ENV,
     SNAPSHOT_MAX_AGE_ENV,
     MarketDataWiringError,
     describe_decision_source,
+    describe_execution_provider,
     describe_provider,
     market_data_factory_for,
+    resolve_execution_provider,
     resolve_paper_settings,
     resolve_settings,
 )
@@ -256,6 +261,7 @@ class Dashboard:
         paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
         paper_decision_source: str = DECISION_SOURCE_HISTORY,
         paper_max_price_deviation: float = DEFAULT_MAX_PRICE_DEVIATION,
+        paper_execution_provider: str = EXECUTION_PROVIDER_ALPACA_PAPER,
         crypto_engine=None,
         crypto_symbols: tuple[str, ...] = (),
         refresh_policy=None,
@@ -283,6 +289,9 @@ class Dashboard:
             market_data_max_age_seconds=paper_market_data_max_age_seconds,
             decision_source_kind=paper_decision_source,
             max_price_deviation=paper_max_price_deviation,
+            # The execution broker. Alpaca Paper is the default; Bybit Demo is
+            # an explicit opt-in that never falls back to Alpaca.
+            execution_provider=paper_execution_provider,
         )
         # The crypto half of the dashboard: a read-only view over the live crypto
         # engine (Binance public market data) and the worker's recorded status.
@@ -620,6 +629,21 @@ def _crypto_symbols(args) -> tuple[str, ...]:
     return parse_symbol_list(raw)
 
 
+def _resolve_execution_provider(args) -> str:
+    """Which broker the paper worker places orders with.
+
+    The flag wins, then the environment variable, then the default
+    (``alpaca_paper``). A bad value is a loud error: a typo must not silently
+    trade somewhere the operator did not choose.
+    """
+    raw = getattr(args, "paper_execution_provider", None)
+    if raw is None:
+        raw = os.environ.get(EXECUTION_PROVIDER_ENV, "").strip()
+    if raw == "":
+        return EXECUTION_PROVIDER_ALPACA_PAPER
+    return resolve_execution_provider(raw)
+
+
 def _resolve_max_price_deviation(args) -> float:
     """The largest gap tolerated between the decision price and the execution price.
 
@@ -815,6 +839,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--paper-execution-provider",
+        choices=EXECUTION_PROVIDER_CHOICES,
+        default=None,
+        help=(
+            "which broker the paper worker places orders with (default: "
+            f"${EXECUTION_PROVIDER_ENV}, else alpaca_paper). 'alpaca_paper' is the "
+            "existing Alpaca Paper path and stays the default. 'bybit_demo' is the "
+            "Bybit DEMO Spot broker (crypto Spot only, demo trading, long-only); it "
+            "needs BYBIT_DEMO_API_KEY / BYBIT_DEMO_API_SECRET and never falls back "
+            "to Alpaca when they are missing."
+        ),
+    )
+    parser.add_argument(
         "--paper-max-price-deviation",
         type=float,
         default=None,
@@ -912,6 +949,7 @@ def main(argv: list[str] | None = None) -> int:
         decision_source = resolve_paper_settings(
             decision_source=args.paper_decision_source,
         )[3]
+        execution_provider = _resolve_execution_provider(args)
         max_price_deviation = _resolve_max_price_deviation(args)
     except MarketDataWiringError as exc:
         parser.error(str(exc))
@@ -925,6 +963,10 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
     print(f"paper decision source: {describe_decision_source(decision_source)}", file=sys.stderr)
+    print(
+        f"paper execution provider: {describe_execution_provider(execution_provider)}",
+        file=sys.stderr,
+    )
     crypto_symbols = _crypto_symbols(args)
     try:
         serve(
@@ -944,6 +986,7 @@ def main(argv: list[str] | None = None) -> int:
             paper_market_data_max_age_seconds=max_age,
             paper_decision_source=decision_source,
             paper_max_price_deviation=max_price_deviation,
+            paper_execution_provider=execution_provider,
             crypto_symbols=crypto_symbols,
             crypto_live=bool(getattr(args, "crypto_live", False)),
         )
@@ -973,6 +1016,7 @@ def serve(
     paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     paper_decision_source: str = DECISION_SOURCE_HISTORY,
     paper_max_price_deviation: float = DEFAULT_MAX_PRICE_DEVIATION,
+    paper_execution_provider: str = EXECUTION_PROVIDER_ALPACA_PAPER,
     crypto_symbols: tuple[str, ...] = (),
     crypto_live: bool = False,
 ) -> None:
@@ -1020,6 +1064,7 @@ def serve(
         paper_market_data_max_age_seconds=paper_market_data_max_age_seconds,
         paper_decision_source=paper_decision_source,
         paper_max_price_deviation=paper_max_price_deviation,
+        paper_execution_provider=paper_execution_provider,
         crypto_engine=crypto_engine,
         crypto_symbols=tuple(crypto_symbols),
     )

@@ -27,11 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-BROKER_STATE_SCHEMA_VERSION = 2
-"""The on-disk broker state format. Bumped when a reader must know the shape changed.
-
-Version 2 adds protection_order_pairs for OCO handling of SL/TP orders.
-"""
+BROKER_STATE_SCHEMA_VERSION = 1
+"""The on-disk broker state format. Bumped when a reader must know the shape changed."""
 
 
 class BrokerStateError(RuntimeError):
@@ -113,13 +110,14 @@ class BrokerAccountState:
     explicit reset. Additive and optional: an older state file without these
     fields reads back as "no orders today", so the schema version does not change.
     """
-    """Protection order pairs (SL/TP) for OCO handling.
-
-    Keyed by the client_order_id_prefix used when creating the pair. Contains
-    the client_order_ids for both SL and TP, the symbol, and position quantity.
-    This enables cancelling the counterpart when one leg fills.
-    """
     protection_order_pairs: dict[str, dict] = field(default_factory=dict)
+    """Protection order pairs (SL/TP), keyed by the prefix used to create them.
+
+    Each entry holds the client order ids of both legs, the symbol and the
+    position quantity they cover, so the counterpart can be cancelled when one
+    leg fills. Additive and optional: an older state file without this field
+    reads back with no pairs, so the schema version does not change.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         return {

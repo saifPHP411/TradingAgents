@@ -188,6 +188,27 @@ This seam answers "what is the price now" from Bybit's demo market data host,
 validated for freshness before an order is sized. It is a market-data seam only
 and never reaches an order endpoint.
 """
+
+EXECUTION_PROVIDER_ALPACA_PAPER = "alpaca_paper"
+"""The execution broker: Alpaca Paper. The default.
+
+Every existing wiring keeps this broker, so adding Bybit changes nothing
+until an operator opts into it explicitly.
+"""
+
+EXECUTION_PROVIDER_BYBIT_DEMO = "bybit_demo"
+"""The execution broker: Bybit Demo Spot. Opt-in.
+
+A demo-only Spot broker. It is never a fallback for Alpaca: if it is
+selected and its credentials are missing, the run stops.
+"""
+
+EXECUTION_PROVIDER_CHOICES = (
+    EXECUTION_PROVIDER_ALPACA_PAPER,
+    EXECUTION_PROVIDER_BYBIT_DEMO,
+)
+"""The execution brokers this project can place a paper order with."""
+
 PROVIDER_ALPACA_CRYPTO = "alpaca_crypto"
 """A current price on the **execution** venue (Alpaca crypto), for the pair traded.
 
@@ -2017,6 +2038,13 @@ class PaperTradingConfig:
     long-only rule are unchanged by this setting.
     """
     base_url: str = PAPER_BASE_URL
+    """The execution broker's REST endpoint.
+
+    The default is Alpaca Paper's. When ``execution_provider`` is
+    ``bybit_demo`` and no endpoint was given, the Bybit **Demo** endpoint is
+    used instead: the two brokers live on different hosts, and a Bybit
+    selection must never be pointed at Alpaca's.
+    """
     limits: PaperRiskLimits = field(default_factory=PaperRiskLimits)
     state_path: str | os.PathLike | None = None
     poll_interval_seconds: float = 60.0
@@ -2136,10 +2164,10 @@ class PaperTradingConfig:
                 f"unknown decision_source {self.decision_source!r}; expected one of "
                 f"{', '.join(DECISION_SOURCE_CHOICES)}"
             )
-        if self.execution_provider not in ("alpaca_paper", "bybit_demo"):
+        if self.execution_provider not in EXECUTION_PROVIDER_CHOICES:
             raise WorkerError(
                 f"unknown execution_provider {self.execution_provider!r}; expected "
-                f"alpaca_paper or bybit_demo"
+                f"one of {', '.join(EXECUTION_PROVIDER_CHOICES)}"
             )
         if self.market_data_max_age_seconds is not None and not (
             self.market_data_max_age_seconds > 0
@@ -2154,13 +2182,19 @@ class PaperTradingConfig:
                 "max_price_deviation must be a finite, non-negative fraction, got "
                 f"{self.max_price_deviation!r}"
             )
-        # Validate the endpoint based on the execution provider
-        if self.execution_provider == "alpaca_paper":
-            assert_paper_endpoint(self.base_url)
-        else:
-            # For bybit_demo, the base_url should be the Bybit demo endpoint
-            from .bybit_demo import assert_demo_endpoint
+        # The endpoint follows the broker. A Bybit selection that inherited
+        # Alpaca's default endpoint would send Bybit credentials to Alpaca,
+        # so the default is resolved per provider rather than inherited.
+        if self.execution_provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+            from .bybit_demo import DEMO_BASE_URL, assert_demo_endpoint
+
+            if self.base_url == PAPER_BASE_URL:
+                # The default was never overridden, so the Bybit Demo endpoint
+                # is the right one.
+                self.base_url = DEMO_BASE_URL
             assert_demo_endpoint(self.base_url)
+        else:
+            assert_paper_endpoint(self.base_url)
 
         # If symbol mappings are provided, populate allowed_symbols in limits
         if self.symbol_mappings:
@@ -4052,6 +4086,27 @@ class PaperTradingWorker:
             return record
 
         record["held_quantity"] = held
+
+        # A broker that carries protection **orders** of its own is the
+        # authority on whether the position is guarded, because the guard is
+        # those orders: a level in this state says what would be done, and
+        # only the venue says whether it can be done. Alpaca Paper has no
+        # such orders (its guard is the exit monitor), so it does not expose
+        # this hook and the check below is skipped -- its behaviour is
+        # unchanged.
+        broker_verdict = self._broker_protection_verdict(symbol)
+        if broker_verdict is not None:
+            protected, detail = broker_verdict
+            if not protected:
+                record["status"] = PROTECTION_STATUS_UNPROTECTED
+                record["reason_code"] = NO_TRADE_PROTECTION_UNAVAILABLE
+                record["detail"] = detail
+                record["checked_at"] = now
+                self.state.protections[symbol] = record
+                self._roll_up_protection_status()
+                self._save()
+                return record
+
         if expected is not None and abs(float(expected) - held) > 1e-6:
             # The broker holds a different quantity than the entry filled. The
             # levels are still the right ones, but the protection is stated
@@ -4072,6 +4127,31 @@ class PaperTradingWorker:
         self._roll_up_protection_status()
         self._save()
         return record
+
+    def _broker_protection_verdict(self, symbol: str) -> tuple[bool, str] | None:
+        """The broker's own verdict on whether a position is protected.
+
+        Returns ``None`` when the broker does not carry protection orders of
+        its own, which means the worker's own exit-monitor check stands. When
+        the broker does carry them, its verdict is the authority: the guard
+        *is* those orders, so a broker that cannot confirm them says the
+        position is unprotected, and the entry gate closes.
+
+        A broker whose check raises is treated as saying "not protected":
+        "I could not check" is never allowed to look like "it is safe".
+        """
+        broker = self._broker
+        check = getattr(broker, "is_position_protected", None)
+        if check is None:
+            return None
+        try:
+            outcome = check(symbol)
+        except Exception as exc:  # noqa: BLE001 - an unreadable venue is unknown
+            return False, f"the broker could not confirm the protection: {type(exc).__name__}: {exc}"
+        if not isinstance(outcome, tuple) or len(outcome) != 2:
+            return False, "the broker returned an unreadable protection verdict"
+        protected, detail = outcome
+        return bool(protected), str(detail)
 
     def _roll_up_protection_status(self) -> None:
         """Set the worker-level verdict from the per-position verdicts.
@@ -5402,6 +5482,11 @@ class PaperTradingWorker:
                 step()
             except Exception as exc:  # noqa: BLE001 - a stale view is better than a crash
                 self.state.last_error = f"{type(exc).__name__}: {exc}"
+        # The protection is reconciled **before** it is verified. A venue
+        # whose protection orders need reconciling (one leg has traded and
+        # the other must be cancelled) must have that settled first, or the
+        # verification below would read a stale view of the pair.
+        self._reconcile_protection_orders()
         # The protection is re-verified on every refresh, so the dashboard's
         # "last protection check" is a real check and not a timestamp of when
         # the state file was written. Contained like the reads above: a failed
@@ -5414,6 +5499,47 @@ class PaperTradingWorker:
                 self.state.protection_status = PROTECTION_STATUS_UNPROTECTED
                 self.state.protection_detail = (
                     f"the protection could not be verified: {type(exc).__name__}: {exc}"
+                )
+
+    def _reconcile_protection_orders(self) -> None:
+        """Reconcile the broker's protection orders, for a broker that has them.
+
+        Not every broker carries protection orders of its own: Alpaca Paper's
+        protection is the exit monitor, which the worker's own exit path
+        enforces. A broker that *does* carry them (Bybit Demo Spot) exposes
+        ``reconcile_protection_orders``, and the worker calls it so a pair
+        whose one leg has traded has its counterpart cancelled.
+
+        The call is **fail-closed**: a broker that cannot reconcile its
+        protection leaves the position's protection unproven, which blocks a
+        new entry. An adapter method that is present but broken is not
+        allowed to look like a broker that has no protection orders at all.
+        """
+        broker = self._broker
+        reconcile = getattr(broker, "reconcile_protection_orders", None)
+        if reconcile is None:
+            return
+        for symbol in sorted(self.state.stops or {}):
+            try:
+                outcome = reconcile(symbol)
+            except Exception as exc:  # noqa: BLE001 - an unreadable venue is unknown
+                self.state.last_error = f"{type(exc).__name__}: {exc}"
+                self._mark_protection_unverifiable(
+                    symbol,
+                    NO_TRADE_PROTECTION_UNAVAILABLE,
+                    f"the protection orders could not be reconciled: {type(exc).__name__}: {exc}",
+                )
+                continue
+            if not isinstance(outcome, dict):
+                continue
+            errors = outcome.get("errors") or []
+            if errors:
+                # The reconciliation could not settle the pair. The protection
+                # is therefore unproven, and the entry gate closes.
+                self._mark_protection_unverifiable(
+                    symbol,
+                    NO_TRADE_PROTECTION_UNAVAILABLE,
+                    "; ".join(str(error) for error in errors),
                 )
 
     def _no_decision_outcome(self) -> tuple[str, str]:
@@ -5484,6 +5610,17 @@ class PaperTradingWorker:
         if isinstance(code, str) and code:
             return code
         return NO_TRADE_NO_DECISION_DUE
+
+    @classmethod
+    def load(cls, path: str | os.PathLike) -> WorkerState:
+        """Load the persisted worker state, always as ``STOPPED``.
+
+        A restart must never resume trading by itself: the state is returned with
+        its order memory intact but its status forced to ``STOPPED``.
+        """
+        state = WorkerStateStore(path).load()
+        state.status = STATUS_STOPPED
+        return state
 
 
 class BybitDemoMarketData:
@@ -5811,28 +5948,3 @@ def _as_positive_float(value: Any) -> float | None:
         return None
     return number
 
-
-def _status_for(exc: MarketDataError) -> str:
-    """Map a MarketDataError to a status code."""
-    text = str(exc).lower()
-    if "stale" in text:
-        return MARKET_DATA_STATUS_STALE
-    if "future" in text:
-        return MARKET_DATA_STATUS_FUTURE
-    if "malformed" in text or "timestamp" in text:
-        return MARKET_DATA_STATUS_MALFORMED
-    if "no data" in text or "no ticker" in text or "no current price" in text:
-        return MARKET_DATA_STATUS_NO_DATA
-    return MARKET_DATA_STATUS_ERROR
-
-
-@classmethod
-def load(cls, path: str | os.PathLike) -> WorkerState:
-        """Load the persisted worker state, always as ``STOPPED``.
-
-        A restart must never resume trading by itself: the state is returned with
-        its order memory intact but its status forced to ``STOPPED``.
-        """
-        state = WorkerStateStore(path).load()
-        state.status = STATUS_STOPPED
-        return state

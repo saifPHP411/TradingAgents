@@ -42,6 +42,8 @@ from pathlib import Path
 from .broker import (
     DECISION_SOURCE_CHOICES,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+    EXECUTION_PROVIDER_ALPACA_PAPER,
+    EXECUTION_PROVIDER_CHOICES,
     EXPERIMENT_SYMBOLS_ENV,
     MARKET_DATA_CHOICES,
     BrokerError,
@@ -51,13 +53,16 @@ from .experiment import ExperimentError, PaperExperiment
 from .journal import JournalError
 from .market_data_wiring import (
     DECISION_SOURCE_ENV,
+    EXECUTION_PROVIDER_ENV,
     FRACTIONAL_SHARES_ENV,
     MARKET_DATA_ENV,
     SNAPSHOT_MAX_AGE_ENV,
     MarketDataWiringError,
     describe_decision_source,
+    describe_execution_provider,
     describe_provider,
     market_data_factory_for,
+    resolve_execution_provider,
     resolve_paper_settings,
     resolve_settings,
 )
@@ -391,6 +396,32 @@ def _announce_paper_decision_source(source: str) -> None:
     print(f"paper decision source: {describe_decision_source(source)}", file=sys.stderr)
 
 
+def _paper_execution_provider(args) -> str:
+    """Resolve the paper worker's execution broker from the CLI/environment.
+
+    ``alpaca_paper`` (the default) keeps the existing path; ``bybit_demo``
+    opts into the Bybit Demo Spot broker. A bad value raises rather than
+    falling back, so a typo cannot silently switch which broker the worker
+    places orders with.
+    """
+    try:
+        return resolve_execution_provider(
+            getattr(args, "paper_execution_provider", None)
+            or os.environ.get(EXECUTION_PROVIDER_ENV, "").strip()
+            or EXECUTION_PROVIDER_ALPACA_PAPER
+        )
+    except MarketDataWiringError as exc:
+        raise RunnerError(str(exc)) from exc
+
+
+def _announce_paper_execution_provider(provider: str) -> None:
+    """Print the effective execution broker to stderr, so a start log names it."""
+    print(
+        f"paper execution provider: {describe_execution_provider(provider)}",
+        file=sys.stderr,
+    )
+
+
 def _serve(args) -> int:
     """Run the local dashboard. Simulation-only monitoring and control.
 
@@ -417,8 +448,10 @@ def _serve(args) -> int:
     root = _root(args)
     provider, max_age, whole_shares = _paper_market_data_settings(args)
     decision_source = _paper_decision_source(args)
+    execution_provider = _paper_execution_provider(args)
     _announce_paper_market_data(provider, max_age)
     _announce_paper_decision_source(decision_source)
+    _announce_paper_execution_provider(execution_provider)
     # Honour a platform-provided port (Railway sets $PORT) when --port is omitted.
     port = args.port if args.port is not None else int(os.environ.get("PORT", "8000"))
     try:
@@ -438,6 +471,7 @@ def _serve(args) -> int:
             paper_market_data_provider=provider,
             paper_market_data_max_age_seconds=max_age,
             paper_decision_source=decision_source,
+            paper_execution_provider=execution_provider,
         )
     except DashboardAuthError as exc:
         raise RunnerError(str(exc)) from exc
@@ -592,8 +626,10 @@ def _paper_trade(args) -> int:
     root = _root(args)
     provider, max_age, whole_shares = _paper_market_data_settings(args)
     decision_source = _paper_decision_source(args)
+    execution_provider = _paper_execution_provider(args)
     _announce_paper_market_data(provider, max_age)
     _announce_paper_decision_source(decision_source)
+    _announce_paper_execution_provider(execution_provider)
     controller = PaperTradingController(
         root,
         enabled=True,
@@ -603,6 +639,7 @@ def _paper_trade(args) -> int:
         market_data_provider=provider,
         market_data_max_age_seconds=max_age,
         decision_source_kind=decision_source,
+        execution_provider=execution_provider,
     )
     if getattr(args, "dry_run", False):
         worker = controller._ensure_worker()  # noqa: SLF001 - the CLI owns the worker
@@ -898,6 +935,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "'crypto' is that same unchanged TJR rule chain over current Binance "
             "public INTRADAY 1m/5m crypto bars (no API key), gated on a 24/7 clock "
             "and the RiskEngine; pair it with --paper-market-data binance_snapshot."
+        ),
+    )
+    parser.add_argument(
+        "--paper-execution-provider",
+        choices=EXECUTION_PROVIDER_CHOICES,
+        default=None,
+        help=(
+            "serve / paper-trade: which broker the paper worker places orders with "
+            f"(default: ${EXECUTION_PROVIDER_ENV}, else alpaca_paper). 'alpaca_paper' "
+            "is the existing Alpaca Paper path and stays the default. 'bybit_demo' is "
+            "the Bybit DEMO Spot broker (crypto Spot only, demo trading, long-only); "
+            "it needs BYBIT_DEMO_API_KEY / BYBIT_DEMO_API_SECRET and never falls back "
+            "to Alpaca when they are missing."
         ),
     )
     parser.add_argument(

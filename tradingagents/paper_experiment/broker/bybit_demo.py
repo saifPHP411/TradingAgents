@@ -61,6 +61,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+from urllib.parse import quote
 
 from tradingagents.crypto.symbols import try_parse_pair
 
@@ -96,6 +97,49 @@ DEFAULT_TIME_IN_FORCE = "GTC"
 # Bybit uses client order ID for idempotency
 _CLIENT_ORDER_ID_RE = re.compile(r"^[A-Za-z0-9_\-:.]{1,36}$")
 
+# -- order status vocabulary ------------------------------------------------
+# Bybit V5 spells its statuses in CamelCase, while this project's own order
+# statuses are lower snake_case. The mapping is explicit rather than a
+# lower-cased comparison, because ``PartiallyFilled`` lower-cases to
+# ``partiallyfilled`` and ``PartiallyFilledCanceled`` to
+# ``partiallyfilledcanceled`` -- neither of which matches the snake_case
+# spelling this project uses, so a naive ``.lower()`` sent a real Bybit
+# partial fill to "unknown".
+#
+# Source: https://bybit-exchange.github.io/docs/v5/enum (orderStatus)
+BYBIT_ORDER_STATUS_NEW = "New"
+BYBIT_ORDER_STATUS_PARTIALLY_FILLED = "PartiallyFilled"
+BYBIT_ORDER_STATUS_UNTRIGGERED = "Untriggered"
+BYBIT_ORDER_STATUS_REJECTED = "Rejected"
+BYBIT_ORDER_STATUS_PARTIALLY_FILLED_CANCELED = "PartiallyFilledCanceled"
+BYBIT_ORDER_STATUS_FILLED = "Filled"
+BYBIT_ORDER_STATUS_CANCELLED = "Cancelled"
+BYBIT_ORDER_STATUS_TRIGGERED = "Triggered"
+BYBIT_ORDER_STATUS_DEACTIVATED = "Deactivated"
+
+_BYBIT_STATUS_TO_PROJECT: dict[str, str] = {
+    "new": "accepted",
+    "partiallyfilled": "partially_filled",
+    "partiallyfilledcanceled": "partially_filled_cancelled",
+    "untriggered": "accepted",
+    "triggered": "accepted",
+    "filled": "filled",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+    "rejected": "rejected",
+    "deactivated": "cancelled",
+}
+"""Bybit's ``orderStatus`` mapped onto this project's order statuses.
+
+A status the venue reports that is not in this table is **unknown**, not
+guessed at. ``unknown`` is not terminal, so such an order keeps being read
+back rather than being quietly retired.
+"""
+
+#: The statuses this project treats as "the order is still working".
+_ACTIVE_PROJECT_STATUSES = frozenset({"accepted", "partially_filled"})
+"""An order in one of these is live at the venue: it may still fill."""
+
 
 class BrokerError(RuntimeError):
     """A broker-backed demo path could not proceed."""
@@ -121,8 +165,37 @@ class InsufficientFundsError(BrokerRejectedError):
     """The account had no buying power for the order."""
 
 
+class BrokerRateLimitedError(BrokerError):
+    """The venue refused the request because a rate limit was exceeded.
+
+    The request was **not** accepted, so the same intent may be tried again
+    after a wait. This is different from a rejection: a rejection means the
+    venue saw the order and said no, and this one means the venue never
+    considered it.
+    """
+
+
+class DuplicateOrderError(BrokerRejectedError):
+    """The venue reports this request as a duplicate of one it already saw.
+
+    The order may well exist at the venue, so the answer is to **reconcile**
+    by client order id, never to submit the order again.
+    """
+
+
 class PaperRiskRejected(BrokerError):
     """A locally-enforced paper risk limit refused the order before submission."""
+
+
+_LOCAL_REFUSAL_STATUS = "refused_locally"
+"""The marker for a refusal that never reached the venue.
+
+A *local* refusal and the venue's own *rejected* are different facts. A
+local refusal means nothing exists at the broker, so the same intent may be
+tried again. The venue's ``rejected`` means the venue saw the order and
+refused it: it exists and must be reconciled, never re-submitted. The
+marker is this project's own so the two are never confused.
+"""
 
 
 _INSUFFICIENT_FUNDS_MARKERS = (
@@ -144,6 +217,130 @@ def _is_insufficient_funds(body: str) -> bool:
 
 def _host_of(url: str) -> str:
     return (urllib.parse.urlsplit(url).hostname or "").lower()
+
+
+def _encode_query_string(params: Mapping) -> str:
+    """The query string exactly as it will be sent.
+
+    The keys are sorted and the values are URL-encoded, which is what the
+    HTTP client does when it builds the query from a mapping. The signature
+    is computed over this string, so it has to be the same string.
+    """
+    return "&".join(
+        f"{quote(str(key), safe='')}={quote(str(params[key]), safe='')}"
+        for key in sorted(params, key=str)
+    )
+
+
+def _encode_json_body(body: Any) -> str:
+    """The JSON body exactly as it will be sent.
+
+    ``json.dumps`` with its default separators is what the HTTP client
+    writes when it is handed a mapping for ``json=``, so the signature is
+    computed over that form.
+    """
+    return json.dumps(body, allow_nan=False)
+
+
+_OCO_LEG_LABELS = {"stop_loss": "SL", "take_profit": "TP"}
+"""How the two legs of a protection pair are named in the audit trail."""
+
+
+def _oco_action_message(counterpart_key: str, filled_key: str) -> str:
+    """The audit line for a counterpart leg that was cancelled.
+
+    The wording is fixed so the dashboard and the tests read the same fact:
+    ``"TP cancelled after SL fill"``.
+    """
+    counterpart = _OCO_LEG_LABELS.get(counterpart_key, counterpart_key)
+    filled = _OCO_LEG_LABELS.get(filled_key, filled_key)
+    return f"{counterpart} cancelled after {filled} fill"
+
+
+# The business error codes Bybit documents for V5. A V5 answer carries the
+# outcome in ``retCode``; the HTTP status alone does not say whether the
+# request was accepted. These are the codes that change what the adapter
+# does next.
+BYBIT_RATE_LIMIT_CODES = frozenset({10006, 10018})
+"""``retCode`` values that mean the request was throttled.
+
+Bybit's own error table: ``10006`` is "Exceeded the API Rate Limit" and
+``10018`` is "Exceeded the IP Rate Limit". Both are retryable **after a
+wait**, and neither means the venue saw the order.
+"""
+
+BYBIT_AUTH_ERROR_CODES = frozenset({10003, 10004, 10005, 10007, 10010, -2015})
+"""``retCode`` values that mean the credential or the signature is wrong.
+
+``10004`` is "Error sign, please check your signature generation algorithm",
+which is the code a mismatched signature produces.
+"""
+
+BYBIT_INSUFFICIENT_FUNDS_CODES = frozenset({110007, 170131})
+"""``retCode`` values that mean the account cannot cover the order.
+
+``110007`` is "Available balance is insufficient" and ``170131`` is
+"Balance insufficient".
+"""
+
+BYBIT_DUPLICATE_ORDER_CODES = frozenset({10014, 20006})
+"""``retCode`` values that mean the request duplicated one already seen.
+
+``10014`` is "Invalid duplicate request" and ``20006`` is "reqId is
+duplicated". The order may exist at the venue, so the answer is to
+**reconcile**, never to submit again.
+"""
+
+
+def _bybit_error_code(payload: Any) -> int | None:
+    """The business error code in a V5 answer, if it carries one.
+
+    A successful answer has ``retCode == 0``. An answer with no ``retCode``
+    is not treated as an error: some endpoints answer with a plain body.
+    """
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("retCode")
+    if raw is None:
+        return None
+    try:
+        code = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return code or None
+
+
+def _as_float(value: Any) -> float:
+    """Read a numeric field from a Bybit payload as a float.
+
+    Bybit sends quantities as decimal strings. A missing or blank field is
+    ``0.0``; a value that is not a finite number is ``0.0`` too, because a
+    non-finite quantity that reached the ledger would poison cash and equity.
+    """
+    if value is None:
+        return 0.0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
+def _as_optional_float(value: Any) -> float | None:
+    """Read a numeric field that may be absent, as a float or ``None``.
+
+    Bybit reports an average execution price as ``"0"`` until the order has
+    traded, so a zero is "not known yet" rather than "the price was zero".
+    """
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number == 0.0:
+        return None
+    return number
 
 
 def assert_demo_endpoint(base_url: str) -> str:
@@ -344,7 +541,13 @@ class BrokerPosition:
 
     @property
     def is_protected(self) -> bool:
-        """Whether this position has verified protection orders from the broker."""
+        """Whether this position has verified protection orders from the broker.
+
+        Both legs must be present **and** the broker must have reported them
+        as still working. The ``is_active`` flag is the broker's own answer
+        mapped into this project's vocabulary, so a leg the venue has not
+        confirmed as working never counts as protection.
+        """
         if not self.protection_orders:
             return False
         sl = self.protection_orders.get("stop_loss")
@@ -352,7 +555,7 @@ class BrokerPosition:
         # Both must exist and be in active/pending state at the broker
         if not sl or not tp:
             return False
-        return sl.get("status") in ("active", "untriggered", "new") and tp.get("status") in ("active", "untriggered", "new")
+        return bool(sl.get("is_active")) and bool(tp.get("is_active"))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -486,14 +689,26 @@ def _default_transport(
 ) -> BrokerHttpResponse:
     import requests
 
-    response = requests.request(
-        method,
-        url,
-        headers=dict(headers),
-        params=dict(params or {}),
-        json=json_body,
-        timeout=timeout,
-    )
+    # The signed bytes and the sent bytes must be the same. The query string
+    # and the JSON body are therefore built here with the same helpers the
+    # signature used, and passed to the client as ready-made text rather than
+    # as a mapping the client would re-encode.
+    query = _encode_query_string(params) if params else ""
+    if query:
+        url = f"{url}?{query}"
+
+    request_kwargs: dict[str, Any] = {
+        "headers": dict(headers),
+        "timeout": timeout,
+    }
+    if json_body:
+        # Send the exact bytes that were signed.
+        request_kwargs["data"] = _encode_json_body(json_body).encode("utf-8")
+        request_kwargs["headers"] = {**dict(headers), "Content-Type": "application/json"}
+    else:
+        request_kwargs["params"] = dict(params or {})
+
+    response = requests.request(method, url, **request_kwargs)
     return BrokerHttpResponse(response.status_code, response.text)
 
 
@@ -608,7 +823,21 @@ class BybitDemoBroker:
 
         headers = {}
         if signed:
-            payload = json.dumps(json_body or {}, separators=(",", ":")) if json_body else ""
+            # Bybit's rule: the signature covers ``timestamp + api_key +
+            # recv_window + payload``, where the payload is the **query string**
+            # for a GET and the **JSON body** for a POST.
+            #
+            # The bytes that are signed must be the bytes that go on the wire.
+            # The query string is therefore built here in the same form the
+            # transport will send it, and the body is serialised by the same
+            # helper the transport uses -- otherwise the venue computes a
+            # signature over a different string and refuses every request.
+            if json_body:
+                payload = _encode_json_body(json_body)
+            elif params:
+                payload = _encode_query_string(params)
+            else:
+                payload = ""
             headers = self._headers(timestamp, recv_window)
             headers["X-BAPI-SIGN"] = self._sign(payload, timestamp, recv_window)
         else:
@@ -651,11 +880,45 @@ class BybitDemoBroker:
         if not response.text:
             return {}
         try:
-            return json.loads(response.text)
+            payload = json.loads(response.text)
         except (json.JSONDecodeError, TypeError):
             raise BrokerError(
                 f"the broker did not answer with JSON for {path}"
             ) from None
+
+        # A V5 answer carries the outcome in ``retCode``, and a business error
+        # arrives with **HTTP 200**. Reading only the HTTP status would treat
+        # "order does not exist" or "error sign" as a success, so the code is
+        # checked here, before any caller can read the answer as an order.
+        code = _bybit_error_code(payload)
+        if code is not None:
+            raise self._business_error(code, payload, path)
+        return payload
+
+    def _business_error(self, code: int, payload: dict, path: str) -> BrokerError:
+        """Turn a V5 business error into the error the caller should act on.
+
+        The code decides the *kind* of failure, because the kind decides
+        whether the request may be retried, must be reconciled, or is simply
+        a refusal.
+        """
+        message = self._redact(str(payload.get("retMsg") or "unknown error"))
+        detail = f"Bybit refused {path} (retCode {code}): {message}"
+
+        if code in BYBIT_RATE_LIMIT_CODES:
+            return BrokerRateLimitedError(
+                f"{detail}; the request was not accepted, so it may be retried after a wait"
+            )
+        if code in BYBIT_DUPLICATE_ORDER_CODES:
+            return DuplicateOrderError(
+                f"{detail}; the order may already exist at the venue, so it must be "
+                "reconciled by client order id and never submitted again"
+            )
+        if code in BYBIT_INSUFFICIENT_FUNDS_CODES:
+            return InsufficientFundsError(detail)
+        if code in BYBIT_AUTH_ERROR_CODES:
+            return BrokerRejectedError(f"{detail}; check the demo credential and its signature")
+        return BrokerRejectedError(detail)
 
     # -- account ------------------------------------------------------------
 
@@ -836,6 +1099,13 @@ class BybitDemoBroker:
         Returns dict mapping Bybit symbol to dict with 'stop_loss' and 'take_profit' keys.
         Each contains the order details from the broker.
 
+        The read is **complete or it is not trusted**: the venue's pagination is
+        followed until it stops handing back a cursor, but the walk is bounded.
+        If a cursor is still outstanding when the bound is reached, the result
+        is marked ``truncated`` and every consumer must treat the protection as
+        **unproven**. A partial read that happened not to include the stop
+        order would otherwise look exactly like a position with no stop.
+
         Per Bybit V5 docs: https://bybit-exchange.github.io/docs/v5/order/open-order
         Response includes: orderId, orderLinkId, symbol, side, orderType, qty, timeInForce,
         orderStatus, orderFilter, stopOrderType, triggerPrice, createdTime, updatedTime
@@ -845,6 +1115,7 @@ class BybitDemoBroker:
         cursor: str | None = None
         max_pages = 10  # Safety limit to avoid infinite loops
         pages_read = 0
+        truncated = False
 
         while pages_read < max_pages:
             params = {"category": SPOT_CATEGORY}
@@ -855,6 +1126,7 @@ class BybitDemoBroker:
             result = payload.get("result", {})
             order_list = result.get("list", [])
             if not isinstance(order_list, list):
+                truncated = True
                 break
 
             all_orders.extend(order_list)
@@ -865,6 +1137,10 @@ class BybitDemoBroker:
             if not next_cursor:
                 break
             cursor = next_cursor
+        else:
+            # The bound was reached with a cursor still outstanding: the read
+            # is incomplete, and an incomplete read cannot prove a protection.
+            truncated = bool(cursor)
 
         protection_orders: dict[str, dict] = {}
         for entry in all_orders:
@@ -874,66 +1150,68 @@ class BybitDemoBroker:
             if not raw_symbol:
                 continue
 
-            # Check orderFilter for conditional orders (Bybit V5 Spot)
-            # Bybit V5 Spot TP/SL orders use orderFilter="tpslOrder" with stopOrderType="StopLoss"/"TakeProfit"
+            # A Spot TP/SL order is reported by the venue with
+            # ``orderFilter="tpslOrder"`` and a ``stopOrderType`` of
+            # ``StopLoss`` or ``TakeProfit``. ``stopOrderType`` is a *response*
+            # field: the create-order endpoint does not accept it.
             order_filter = str(entry.get("orderFilter", ""))
             stop_order_type = str(entry.get("stopOrderType", ""))
-            order_type = str(entry.get("orderType", "")).lower()
-            order_status = str(entry.get("orderStatus", "")).lower()
+            order_status = str(entry.get("orderStatus", ""))
+            mapped_status = self._map_status(order_status)
 
-            # A protection order has orderFilter="tpslOrder" with stopOrderType set,
-            # or stopOrderType (legacy), or is a conditional order type
-            is_protection = (
-                (order_filter == "tpslOrder" and stop_order_type in ("StopLoss", "TakeProfit")) or
-                stop_order_type.lower() in ("stoploss", "takeprofit") or
-                order_type in ("stoploss", "takeprofit", "conditional")
+            stop_kind = re.sub(r"[^a-z]", "", stop_order_type.lower())
+            is_tpsl = order_filter == "tpslOrder" or stop_kind in (
+                "stoploss",
+                "takeprofit",
+                "partialstoploss",
+                "partialtakeprofit",
             )
-            if not is_protection:
+            if not is_tpsl:
                 continue
 
             if raw_symbol not in protection_orders:
                 protection_orders[raw_symbol] = {}
 
-            trigger_price = float(entry.get("triggerPrice", "0"))
+            trigger_price = _as_float(entry.get("triggerPrice"))
+            # The venue's own classification is what distinguishes the stop
+            # from the target. When it is absent, the order is **not** guessed
+            # into a leg: an unclassifiable order proves nothing either way.
+            if stop_kind in ("stoploss", "partialstoploss"):
+                leg = "stop_loss"
+                leg_type = "StopLoss"
+            elif stop_kind in ("takeprofit", "partialtakeprofit"):
+                leg = "take_profit"
+                leg_type = "TakeProfit"
+            else:
+                continue
 
-            # Determine if it's SL or TP using stopOrderType primarily (V5 Spot tpslOrder),
-            # then stopOrderType (legacy), then orderType
-            is_sl = (order_filter == "tpslOrder" and stop_order_type == "StopLoss") or stop_order_type.lower() == "stoploss" or order_type == "stoploss"
-            is_tp = (order_filter == "tpslOrder" and stop_order_type == "TakeProfit") or stop_order_type.lower() == "takeprofit" or order_type == "takeprofit"
-
-            # Valid active statuses for protection orders
-            active_statuses = ("active", "untriggered", "new", "partially_filled")
-
-            if is_sl:
-                protection_orders[raw_symbol]["stop_loss"] = {
-                    "order_id": entry.get("orderId"),
-                    "order_link_id": entry.get("orderLinkId"),
-                    "symbol": raw_symbol,
-                    "order_type": "StopLoss",
-                    "trigger_price": trigger_price,
-                    "quantity": float(entry.get("qty", "0")),
-                    "status": order_status,
-                    "side": entry.get("side"),
-                    "time_in_force": entry.get("timeInForce"),
-                    "created_at": entry.get("createdTime"),
-                    "updated_at": entry.get("updatedTime"),
-                    "is_active": order_status in active_statuses,
-                }
-            elif is_tp:
-                protection_orders[raw_symbol]["take_profit"] = {
-                    "order_id": entry.get("orderId"),
-                    "order_link_id": entry.get("orderLinkId"),
-                    "symbol": raw_symbol,
-                    "order_type": "TakeProfit",
-                    "trigger_price": trigger_price,
-                    "quantity": float(entry.get("qty", "0")),
-                    "status": order_status,
-                    "side": entry.get("side"),
-                    "time_in_force": entry.get("timeInForce"),
-                    "created_at": entry.get("createdTime"),
-                    "updated_at": entry.get("updatedTime"),
-                    "is_active": order_status in active_statuses,
-                }
+            protection_orders[raw_symbol][leg] = {
+                "order_id": entry.get("orderId"),
+                "order_link_id": entry.get("orderLinkId"),
+                "symbol": raw_symbol,
+                "order_type": leg_type,
+                "trigger_price": trigger_price,
+                "quantity": _as_float(entry.get("qty")),
+                "filled_quantity": _as_float(entry.get("cumExecQty")),
+                "leaves_quantity": _as_float(entry.get("leavesQty")),
+                # ``status`` is the venue's own spelling, lower-cased, so the
+                # record says exactly what Bybit said. ``mapped_status`` is the
+                # same fact in this project's vocabulary. Both are kept: the
+                # first is the evidence, the second is what the project
+                # reasons about, and neither is derived from the other.
+                "status": order_status.lower(),
+                "venue_status": order_status,
+                "mapped_status": mapped_status,
+                "side": entry.get("side"),
+                "time_in_force": entry.get("timeInForce"),
+                "created_at": entry.get("createdTime"),
+                "updated_at": entry.get("updatedTime"),
+                # An order that is still working at the venue: it has not
+                # filled, has not been cancelled and has not been rejected.
+                "is_active": mapped_status in _ACTIVE_PROJECT_STATUSES,
+            }
+        for symbol_rows in protection_orders.values():
+            symbol_rows["truncated"] = truncated
         return protection_orders
 
     def _fetch_mark_prices(self, coins: list[str]) -> dict[str, float]:
@@ -1052,40 +1330,172 @@ class BybitDemoBroker:
         limit: int = 50,
         cursor: str | None = None,
     ) -> VenueOrderPage:
-        """Read orders from the broker with pagination."""
+        """Read the venue's orders: the ones still working and the finished ones.
+
+        A V5 order lives in one of two places. ``GET /v5/order/realtime``
+        carries the orders that are **still working**, and
+        ``GET /v5/order/history`` carries the ones that have **finished**. A
+        read of only one of them misses half of the book -- an open order
+        that is not in the history, and a filled order that has left the
+        realtime list -- so both are read and the two lists are merged.
+
+        The merge is keyed by client order id: an order that appears in both
+        (it was working and then finished) is one order, not two.
+        """
         params: dict[str, Any] = {"category": SPOT_CATEGORY, "limit": limit}
         if symbol:
             params["symbol"] = self._to_bybit_symbol(symbol.upper())
         if cursor:
             params["cursor"] = cursor
 
-        payload = self._request("GET", "/v5/order/history", params=params, signed=True)
-        result = payload.get("result", {})
-        order_list = result.get("list", [])
-        if not isinstance(order_list, list):
-            raise BrokerError("the broker orders response was not the expected list")
-
         orders: list[BrokerOrder] = []
         unclassified: list[dict[str, Any]] = []
-        next_cursor = result.get("nextPageCursor")
+        seen: set[str] = set()
+        pages_read = 0
+        next_cursor: str | None = None
 
-        for entry in order_list:
-            if not isinstance(entry, dict):
-                continue
-            client_id = str(entry.get("orderLinkId", "")).strip()
-            if not client_id:
-                unclassified.append(entry)
-                continue
-            str(entry.get("orderStatus", ""))
-            order = self._parse_order(entry, client_id)
-            orders.append(order)
+        for path in ("/v5/order/realtime", "/v5/order/history"):
+            payload = self._request("GET", path, params=params, signed=True)
+            result = payload.get("result", {})
+            order_list = result.get("list", [])
+            if not isinstance(order_list, list):
+                raise BrokerError("the broker orders response was not the expected list")
+            pages_read += 1
+
+            for entry in order_list:
+                if not isinstance(entry, dict):
+                    continue
+                client_id = str(entry.get("orderLinkId", "")).strip()
+                if not client_id:
+                    # An order nobody can identify is a finding, not noise:
+                    # it is kept so the report can say so.
+                    unclassified.append(entry)
+                    continue
+                if client_id in seen:
+                    continue
+                seen.add(client_id)
+                orders.append(self._parse_order(entry, client_id))
+
+            if path == "/v5/order/history":
+                next_cursor = result.get("nextPageCursor")
 
         return VenueOrderPage(
             orders=orders,
             unclassified=unclassified,
-            pages_read=1,
+            pages_read=pages_read,
             truncated=bool(next_cursor),
         )
+
+    def _read_terminal_orders(
+        self,
+        *,
+        symbol: str | None = None,
+        max_pages: int = 10,
+    ) -> tuple[dict[str, dict], bool]:
+        """Read the **closed** orders of a symbol, keyed by client order id.
+
+        ``GET /v5/order/realtime`` only carries the orders that are still
+        working. An order that has already filled has left that list, so a
+        reconciliation that reads only the live orders can never discover that
+        a stop loss triggered -- the very event the reconciliation exists to
+        notice. The venue's **order history** (``GET /v5/order/history``) is
+        the source that carries those finished orders.
+
+        The second element of the returned pair says whether the read was
+        **complete**. A truncated read is not evidence of anything: the order
+        that filled may simply be on a page that was not read, so a truncated
+        read must not be used to claim a leg is still working.
+        """
+        all_orders: list[dict] = []
+        cursor: str | None = None
+        pages_read = 0
+        truncated = False
+
+        while pages_read < max_pages:
+            params: dict[str, Any] = {"category": SPOT_CATEGORY, "limit": 50}
+            if symbol:
+                params["symbol"] = self._to_bybit_symbol(symbol.upper())
+            if cursor:
+                params["cursor"] = cursor
+
+            payload = self._request("GET", "/v5/order/history", params=params, signed=True)
+            result = payload.get("result", {})
+            order_list = result.get("list", [])
+            if not isinstance(order_list, list):
+                truncated = True
+                break
+
+            all_orders.extend(order_list)
+            pages_read += 1
+
+            next_cursor = result.get("nextPageCursor")
+            if not next_cursor:
+                break
+            cursor = next_cursor
+        else:
+            truncated = bool(cursor)
+
+        by_client_id: dict[str, dict] = {}
+        for entry in all_orders:
+            if not isinstance(entry, dict):
+                continue
+            client_id = str(entry.get("orderLinkId", "")).strip()
+            if not client_id:
+                continue
+            by_client_id[client_id] = entry
+        return by_client_id, truncated
+
+    def _read_order_executions(self, *, symbol: str | None = None, max_pages: int = 10) -> tuple[dict[str, float], bool]:
+        """Read the venue's **executions** for a symbol, keyed by client order id.
+
+        ``GET /v5/order/execution`` is the per-trade record: one row per
+        execution, with ``execQty`` and ``execPrice``. It is the source that
+        says *how much* actually traded, which the order list alone does not
+        distinguish from a status string.
+
+        The returned quantity is the sum of the executed quantities per order,
+        so a partial fill that arrived in two executions is reported as the
+        total that traded. The second element says whether the read was
+        complete.
+        """
+        all_rows: list[dict] = []
+        cursor: str | None = None
+        pages_read = 0
+        truncated = False
+
+        while pages_read < max_pages:
+            params: dict[str, Any] = {"category": SPOT_CATEGORY, "limit": 100}
+            if symbol:
+                params["symbol"] = self._to_bybit_symbol(symbol.upper())
+            if cursor:
+                params["cursor"] = cursor
+
+            payload = self._request("GET", "/v5/order/execution", params=params, signed=True)
+            result = payload.get("result", {})
+            row_list = result.get("list", [])
+            if not isinstance(row_list, list):
+                truncated = True
+                break
+
+            all_rows.extend(row_list)
+            pages_read += 1
+
+            next_cursor = result.get("nextPageCursor")
+            if not next_cursor:
+                break
+            cursor = next_cursor
+        else:
+            truncated = bool(cursor)
+
+        executed: dict[str, float] = {}
+        for row in all_rows:
+            if not isinstance(row, dict):
+                continue
+            client_id = str(row.get("orderLinkId", "")).strip()
+            if not client_id:
+                continue
+            executed[client_id] = executed.get(client_id, 0.0) + _as_float(row.get("execQty"))
+        return executed, truncated
 
     def _parse_order(self, payload: Any, fallback_client_id: str | None = None) -> BrokerOrder:
         if not isinstance(payload, dict):
@@ -1096,10 +1506,10 @@ class BybitDemoBroker:
         raw_status = payload.get("orderStatus")
         symbol = self._to_canonical_symbol(str(payload.get("symbol", "")))
         side = str(payload.get("side", "")).lower()
-        qty = float(payload.get("qty", "0"))
-        filled_qty = float(payload.get("cumExecQty", "0"))
+        qty = _as_float(payload.get("qty"))
+        filled_qty = _as_float(payload.get("cumExecQty"))
         filled_avg = payload.get("avgPrice")
-        filled_avg_price = float(filled_avg) if filled_avg not in (None, "", "0") else None
+        filled_avg_price = _as_optional_float(filled_avg)
         order_type = str(payload.get("orderType", "Market")).lower()
         time_in_force = str(payload.get("timeInForce", "GTC"))
         created_time = payload.get("createdTime")
@@ -1107,6 +1517,19 @@ class BybitDemoBroker:
         if created_time:
             with contextlib.suppress(ValueError, TypeError):
                 submitted_at = datetime.fromtimestamp(int(created_time) / 1000, tz=UTC).isoformat()
+
+        status = self._map_status(raw_status)
+        # A venue that says "filled" but reports no executed quantity has not
+        # told us what traded. Reporting zero filled against a full status
+        # would make the order look complete with nothing behind it, so the
+        # status is downgraded to reflect what the numbers actually support.
+        if status == "filled" and filled_qty <= 0:
+            status = "accepted" if qty > 0 else "unknown"
+        # A partial fill is not a full fill. If the venue reports a partial
+        # status but the executed quantity covers the whole order, the
+        # quantity is the stronger statement, and the order is complete.
+        if status == "partially_filled" and qty > 0 and filled_qty >= qty:
+            status = "filled"
 
         return BrokerOrder(
             client_order_id=client_id,
@@ -1116,7 +1539,7 @@ class BybitDemoBroker:
             quantity=qty,
             filled_quantity=filled_qty,
             filled_avg_price=filled_avg_price,
-            status=self._map_status(raw_status),
+            status=status,
             order_type=order_type,
             time_in_force=time_in_force,
             submitted_at=submitted_at,
@@ -1124,18 +1547,25 @@ class BybitDemoBroker:
         )
 
     def _map_status(self, raw: str | None) -> str:
+        """Map Bybit's ``orderStatus`` onto this project's order statuses.
+
+        Bybit spells its statuses in CamelCase (``PartiallyFilled``), while
+        this project uses lower snake_case (``partially_filled``). The old
+        comparison lower-cased the venue's value and compared it against
+        snake_case literals, so ``PartiallyFilled`` -- a status Bybit really
+        does return -- never matched and became ``unknown``. A partial fill is
+        not a full fill and not a dead order either: it is a live order that
+        has already traded part of its quantity, so it maps to
+        ``partially_filled``.
+
+        The map is keyed on the case-folded value with the separators removed,
+        so ``PartiallyFilled``, ``partially_filled`` and ``PARTIALLYFILLED``
+        all land on the same answer.
+        """
         if not raw:
             return "unknown"
-        raw_lower = str(raw).lower()
-        if raw_lower in ("new", "partially_filled", "untriggered"):
-            return "accepted"
-        if raw_lower == "filled":
-            return "filled"
-        if raw_lower in ("cancelled", "partially_filled_cancelled"):
-            return "cancelled"
-        if raw_lower == "rejected":
-            return "rejected"
-        return "unknown"
+        key = re.sub(r"[^a-z]", "", str(raw).lower())
+        return _BYBIT_STATUS_TO_PROJECT.get(key, "unknown")
 
     def _check_risk(
         self,
@@ -1259,7 +1689,7 @@ class BybitDemoBroker:
         # Idempotency: a client_order_id we already know is never re-submitted.
         known = self._state.orders.get(client_order_id)
         if known is not None:
-            if known.get("status") == "refused_locally":
+            if known.get("status") == _LOCAL_REFUSAL_STATUS:
                 self._state.orders.pop(client_order_id, None)
                 if self._store:
                     self._store.save(self._state)
@@ -1362,29 +1792,47 @@ class BybitDemoBroker:
             payload = self._request("POST", "/v5/order/create", json_body=body, signed=True, reconcile_ok=True)
         except _TransportTimeout:
             return self._reconcile(client_order_id)
+        except DuplicateOrderError:
+            # The venue says this request duplicated one it already saw, so
+            # the order may exist. It is **not** a local refusal: marking it
+            # one would let the next attempt submit the order again. The
+            # intent stays open, so the next attempt reconciles it.
+            raise
         except BrokerRejectedError:
-            self._state.orders[client_order_id]["status"] = "refused_locally"
+            # A refusal the venue made means nothing exists at the broker, so
+            # the same intent may be tried again once the cause is gone. The
+            # marker is this project's own, not the venue's "rejected".
+            self._state.orders[client_order_id]["status"] = _LOCAL_REFUSAL_STATUS
             if self._store:
                 self._store.save(self._state)
             raise
 
         result = payload.get("result", {})
         order_id = result.get("orderId")
-        order_link_id = result.get("orderLinkId")
 
-        # Reconcile to get the actual order status from the broker
-        if order_link_id:
-            try:
-                order = self._reconcile(order_link_id)
-                return order
-            except Exception:
-                # If reconciliation fails, fall back to parsing the create response
-                pass
+        # The venue's own order id is recorded on the intent before the
+        # reconcile, so a later read can name the order even if the client id
+        # is all that is known.
+        if order_id:
+            self._state.orders[client_order_id]["broker_order_id"] = str(order_id)
+            if self._store:
+                self._store.save(self._state)
 
-        order = self._parse_order(
-            {"orderId": order_id, "orderLinkId": order_link_id, "symbol": bybit_symbol, **body},
-            fallback_client_id=client_order_id,
-        )
+        # The order is reconciled under the client id **this adapter sent**.
+        # The venue echoes its own ``orderLinkId`` back, and that value is not
+        # guaranteed to be the one that was sent -- so it is never used as the
+        # key. Using the venue's echo would record the order under a
+        # different key from the persisted intent, and the intent would stay
+        # stuck at "submitting" while the venue held a filled order: exactly
+        # the shape of a duplicate on the next attempt.
+        try:
+            order = self._reconcile(client_order_id)
+        except Exception:
+            # If reconciliation fails, fall back to parsing the create response.
+            order = self._parse_order(
+                {"orderId": order_id, "orderLinkId": client_order_id, "symbol": bybit_symbol, **body},
+                fallback_client_id=client_order_id,
+            )
         self._record_order(order)
         self._record_daily_order()
         return order
@@ -1472,7 +1920,17 @@ class BybitDemoBroker:
         if not order_list:
             # Still not found - return last known state
             if known:
-                return BrokerOrder(
+                # "submitting" is the marker for an intent whose outcome the
+                # venue has not confirmed yet. It is not one of the project's
+                # order statuses, so it is mapped to the project's own
+                # "unknown" -- an order whose fate is not known is not
+                # reported as accepted.
+                status = (
+                    "unknown"
+                    if known.get("status") == "submitting"
+                    else known.get("status", "unknown")
+                )
+                order = BrokerOrder(
                     client_order_id=known["client_order_id"],
                     broker_order_id=known.get("broker_order_id"),
                     symbol=known["symbol"],
@@ -1480,11 +1938,16 @@ class BybitDemoBroker:
                     quantity=known["quantity"],
                     filled_quantity=known.get("filled_quantity", 0.0),
                     filled_avg_price=known.get("filled_avg_price"),
-                    status=known.get("status", "unknown"),
+                    status=status,
                     order_type=known.get("order_type", "market"),
                     time_in_force=known.get("time_in_force", "GTC"),
                     submitted_at=known.get("submitted_at"),
                 )
+                # The persisted intent is brought in line with what is now
+                # known, so it does not stay stuck at "submitting" and read
+                # as an order that is still on its way.
+                self._record_order(order)
+                return order
             raise BrokerError(f"order {client_order_id} not found at broker")
 
         order = self._parse_order(order_list[0], fallback_client_id=client_order_id)
@@ -1518,7 +1981,17 @@ class BybitDemoBroker:
             self._store.save(self._state)
 
     def cancel_order(self, *, client_order_id: str, symbol: str) -> BrokerOrder:
-        """Cancel an order by client_order_id."""
+        """Request the cancellation of an order, by client order id.
+
+        The venue's cancel endpoint is **asynchronous**: its acknowledgement
+        says the *request* was accepted, not that the order is cancelled. So
+        the order is not reported as ``cancelled`` here -- the order is read
+        back from the venue, and the venue's own answer is what is reported.
+
+        Reporting ``cancelled`` from the acknowledgement alone would let a
+        cancelled-but-still-working order be counted as gone, which is how a
+        protection leg ends up believed to be settled while it is still live.
+        """
         if not self._state.confirmed:
             raise BrokerError("the account has not been confirmed; call connect() first")
 
@@ -1528,14 +2001,9 @@ class BybitDemoBroker:
             "symbol": bybit_symbol,
             "orderLinkId": client_order_id,
         }
-        payload = self._request("POST", "/v5/order/cancel", json_body=body, signed=True)
-        result = payload.get("result", {})
-        order = self._parse_order(
-            {"orderId": result.get("orderId"), "orderLinkId": client_order_id, "symbol": bybit_symbol, "orderStatus": "Cancelled"},
-            fallback_client_id=client_order_id,
-        )
-        self._record_order(order)
-        return order
+        self._request("POST", "/v5/order/cancel", json_body=body, signed=True)
+        # The acknowledgement carried no state. Read the venue's answer.
+        return self._reconcile(client_order_id)
 
     def create_protection_orders(
         self,
@@ -1547,14 +2015,22 @@ class BybitDemoBroker:
         client_order_id_prefix: str,
         allow_orders: bool = False,
     ) -> dict[str, BrokerOrder]:
-        """Create StopLoss and TakeProfit conditional orders for a Spot position.
+        """Create a StopLoss and a TakeProfit order for a Spot position.
 
-        Bybit Spot supports conditional orders via /v5/order/create with:
-        - orderType=Market (or Limit) + stopOrderType=StopLoss/TakeProfit
-        - triggerPrice: the price that triggers the order
-        - orderLinkId: unique client order id
+        The request uses **only** parameters the V5 Spot create-order endpoint
+        documents. ``POST /v5/order/create`` accepts ``orderFilter`` with the
+        values ``Order``, ``tpslOrder`` and ``StopOrder``; it does **not**
+        accept ``stopOrderType`` as a request parameter -- that field appears
+        only in the *response* and in the enum, where the venue reports how it
+        classified the order it created.
 
-        Both orders are created and verified. If either fails, the created one is cancelled.
+        So the two legs are created as standalone Spot TP/SL orders
+        (``orderFilter="tpslOrder"``), distinguished by their trigger price,
+        and the venue's own ``stopOrderType`` is what classifies them on
+        read-back. The legs are therefore **verified against the venue** before
+        they are accepted as protection: if the venue cannot confirm that both
+        a stop and a target exist for the position, the protection is refused
+        rather than assumed.
 
         Args:
             symbol: Canonical symbol (e.g., BTC/USDT)
@@ -1619,20 +2095,22 @@ class BybitDemoBroker:
         created_orders = {}
 
         try:
-            # Create StopLoss order - Bybit V5 Spot TP/SL order
-            # Per https://bybit-exchange.github.io/docs/v5/order/create-order
-            # orderFilter="tpslOrder", stopOrderType="StopLoss", orderType="Market"
+            # Create the StopLoss leg.
+            # Per https://bybit-exchange.github.io/docs/v5/order/create-order the
+            # documented Spot TP/SL parameters are: category, symbol, side,
+            # orderType, qty, timeInForce, orderLinkId, orderFilter=tpslOrder
+            # and triggerPrice. No stopOrderType is sent -- the endpoint does
+            # not accept one and the venue classifies the order itself.
             sl_client_id = f"{client_order_id_prefix}-sl"
             sl_body = {
                 "category": SPOT_CATEGORY,
                 "symbol": bybit_symbol,
-                "side": "Sell",  # SL for long is sell
+                "side": "Sell",  # SL for a long position is a sell
                 "orderType": "Market",
                 "qty": qty_str,
                 "timeInForce": "GTC",
                 "orderLinkId": sl_client_id,
                 "orderFilter": "tpslOrder",
-                "stopOrderType": "StopLoss",
                 "triggerPrice": sl_price_str,
             }
 
@@ -1645,18 +2123,17 @@ class BybitDemoBroker:
             self._record_order(sl_order)
             created_orders["stop_loss"] = sl_order
 
-            # Create TakeProfit order - Bybit V5 Spot TP/SL order
+            # Create the TakeProfit leg.
             tp_client_id = f"{client_order_id_prefix}-tp"
             tp_body = {
                 "category": SPOT_CATEGORY,
                 "symbol": bybit_symbol,
-                "side": "Sell",  # TP for long is sell
+                "side": "Sell",  # TP for a long position is a sell
                 "orderType": "Market",
                 "qty": qty_str,
                 "timeInForce": "GTC",
                 "orderLinkId": tp_client_id,
                 "orderFilter": "tpslOrder",
-                "stopOrderType": "TakeProfit",
                 "triggerPrice": tp_price_str,
             }
 
@@ -1697,16 +2174,23 @@ class BybitDemoBroker:
         Reads from /v5/order/realtime and checks for StopLoss/TakeProfit orders
         matching the given symbol.
 
+        A **truncated** read verifies nothing: the leg that is missing may
+        simply be on a page that was not read, so both legs are reported as
+        ``None`` rather than one of them being confirmed off a partial read.
+
         Returns dict with 'stop_loss' and 'take_profit' BrokerOrder objects,
         or None if not found/verified.
         """
         if not self._state.confirmed:
             raise BrokerError("the account has not been confirmed; call connect() first")
 
-        bybit_symbol = self._to_bybit_symbol(symbol.upper())
+        symbol = symbol.upper()
+        bybit_symbol = self._to_bybit_symbol(symbol)
         protection_orders = self._read_protection_orders()
 
         prot = protection_orders.get(bybit_symbol, {})
+        if prot.get("truncated"):
+            return {"stop_loss": None, "take_profit": None}
 
         result = {}
         for key in ("stop_loss", "take_profit"):
@@ -1719,9 +2203,9 @@ class BybitDemoBroker:
                     symbol=symbol,
                     side="sell",
                     quantity=order_data.get("quantity", 0.0),
-                    filled_quantity=0.0,
+                    filled_quantity=order_data.get("filled_quantity", 0.0),
                     filled_avg_price=None,
-                    status=order_data.get("status", "unknown"),
+                    status=order_data.get("mapped_status", "unknown"),
                     order_type=order_data.get("order_type", "").lower(),
                     time_in_force=order_data.get("time_in_force", "GTC"),
                     submitted_at=order_data.get("created_at"),
@@ -1732,7 +2216,19 @@ class BybitDemoBroker:
         return result
 
     def apply_fill(self, order: BrokerOrder) -> bool:
-        """Mark an order's fill applied exactly once. Returns whether it was new."""
+        """Mark an order's fill applied exactly once. Returns whether it was new.
+
+        The guard is keyed on the client order id, which is what makes it
+        idempotent across a restart. A **partial** fill is applied the same
+        way: the id is recorded the first time it is seen, so the same partial
+        fill is not applied a second time when the order is read back on the
+        next cycle with the same (or a larger) executed quantity.
+
+        That also means a partial fill is never *re*-applied for the extra
+        quantity it later trades. The venue is the authority on what the
+        position actually holds, so the correction is made by reading the
+        position back, not by replaying the fill.
+        """
         if order.status not in ("filled", "partially_filled"):
             return False
         if order.client_order_id in self._state.applied_fills:
@@ -1766,7 +2262,13 @@ class BybitDemoBroker:
                 break
 
     def _cancel_counterpart_protection(self, prefix: str, client_order_id: str, symbol: str, reason: str) -> None:
-        """Cancel the counterpart protection order (SL or TP)."""
+        """Cancel the counterpart protection order (SL or TP).
+
+        The pair is only marked resolved once the venue has confirmed the
+        counterpart is no longer working. A cancel request that was accepted
+        is not the same fact as a cancelled order, and a cancel that failed
+        leaves the pair unresolved so the next cycle tries again.
+        """
         if not client_order_id or not symbol:
             return
 
@@ -1775,99 +2277,300 @@ class BybitDemoBroker:
             order_state = self._state.orders.get(client_order_id)
             if order_state and order_state.get("status") in ("active", "untriggered", "new", "submitting", "accepted"):
                 self.cancel_order(client_order_id=client_order_id, symbol=symbol)
-                # Mark the pair as resolved
-                if prefix in self._state.protection_order_pairs:
-                    self._state.protection_order_pairs[prefix]["resolved"] = True
-                    self._state.protection_order_pairs[prefix]["resolution_reason"] = reason
-                    self._state.protection_order_pairs[prefix]["resolved_at"] = datetime.now(UTC).isoformat()
-                    if self._store:
-                        self._store.save(self._state)
         except Exception:
-            # Log but don't raise - cancellation failure shouldn't break fill processing
-            pass
+            # The cancellation did not happen. The pair stays unresolved, so
+            # the reconciliation tries again on the next cycle and the
+            # protection is not claimed to be settled.
+            return
+
+        # The cancel was accepted: ask the venue whether the counterpart is
+        # really gone before declaring the pair resolved.
+        bybit_symbol = self._to_bybit_symbol(symbol.upper())
+        live = self._read_protection_orders().get(bybit_symbol, {})
+        still_working = False
+        for leg in ("stop_loss", "take_profit"):
+            candidate = live.get(leg)
+            if candidate and candidate.get("order_link_id") == client_order_id:
+                still_working = candidate.get("is_active", False)
+                break
+        if still_working:
+            return
+        self._mark_protection_pair_resolved(prefix, reason)
 
     def reconcile_protection_orders(self, symbol: str) -> dict[str, Any]:
-        """Reconcile protection orders with the broker and handle OCO logic.
+        """Reconcile the protection orders of a symbol with the venue.
 
-        This should be called periodically to:
-        1. Verify protection orders are still active
-        2. Cancel counterpart if one leg has filled
-        3. Detect partial fills and adjust
+        The live order list (``/v5/order/realtime``) only carries the orders
+        that are still working, so a stop loss that has already triggered has
+        **left** that list. Reading only it can never notice the event the
+        reconciliation exists to notice. So the venue's **order history**
+        (``/v5/order/history``) is read as well, and it is the source that
+        carries the finished legs.
 
-        Returns dict with status of protection orders and any actions taken.
+        What the reconciliation does:
+
+        - a leg that the venue reports as filled (or partially filled) has its
+          **counterpart** cancelled, because both legs would otherwise sell
+          the same position twice;
+        - the cancellation is **verified** at the venue before the pair is
+          marked resolved. A cancel that failed, or whose outcome could not be
+          read, leaves the pair unresolved, so the next cycle tries again
+          rather than the pair being quietly forgotten;
+        - the executed quantity comes from the venue's **execution** records,
+          so a partial fill is recognised as a partial fill and not as a full
+          one;
+        - a **truncated** read (the venue still had a page outstanding) is
+          reported as incomplete, and an incomplete read never confirms that a
+          leg is still working.
+
+        Returns a dict describing the legs and the actions taken.
         """
         if not self._state.confirmed:
-            return {"error": "not confirmed"}
+            return {"error": "not confirmed", "complete": False}
 
-        bybit_symbol = self._to_bybit_symbol(symbol.upper())
-        protection_orders = self._read_protection_orders()
-        prot = protection_orders.get(bybit_symbol, {})
+        symbol = symbol.upper()
+        bybit_symbol = self._to_bybit_symbol(symbol)
 
-        result = {
+        result: dict[str, Any] = {
             "symbol": symbol,
             "stop_loss": None,
             "take_profit": None,
             "actions_taken": [],
+            "errors": [],
+            "complete": True,
         }
 
-        sl_data = prot.get("stop_loss")
-        tp_data = prot.get("take_profit")
+        live_rows = self._read_protection_orders()
+        live = live_rows.get(bybit_symbol, {})
+        if live.get("truncated"):
+            result["complete"] = False
+            result["errors"].append(
+                "the live protection order read was truncated; the protection is unproven"
+            )
 
-        # Check if SL filled and TP still active
-        if sl_data and sl_data.get("status") in ("filled", "partiallyfilled") and tp_data and tp_data.get("is_active", False):
-            # Cancel TP
-            tp_client_id = tp_data.get("order_link_id")
-            if tp_client_id:
+        terminal_orders, history_truncated = self._read_terminal_orders(symbol=symbol)
+        if history_truncated:
+            result["complete"] = False
+            result["errors"].append(
+                "the order history read was truncated; a finished leg may not have been seen"
+            )
+
+        executed_qty, executions_truncated = self._read_order_executions(symbol=symbol)
+        if executions_truncated:
+            result["complete"] = False
+            result["errors"].append(
+                "the execution read was truncated; the traded quantity is unproven"
+            )
+
+        def leg_state(client_id: str | None, live_rows: dict[str, dict]) -> dict[str, Any]:
+            """The venue's answer about one leg of the pair.
+
+            The live list wins for an order that is still working; the history
+            carries the legs that have finished. When neither carries the
+            order, the leg is **unknown** -- never assumed to be working.
+
+            The traded quantity comes from the venue's execution records when
+            it has them, because they are the per-trade record and the order
+            row only carries a running total.
+            """
+            if not client_id:
+                return {"known": False, "status": None, "mapped_status": None, "executed": 0.0}
+            live_row = None
+            for leg in ("stop_loss", "take_profit"):
+                candidate = live_rows.get(leg)
+                if candidate and candidate.get("order_link_id") == client_id:
+                    live_row = candidate
+                    break
+            if live_row is not None:
+                return {
+                    "known": True,
+                    "status": live_row.get("status"),
+                    "mapped_status": live_row.get("mapped_status"),
+                    "executed": _as_float(live_row.get("filled_quantity")),
+                    "row": live_row,
+                }
+            terminal = terminal_orders.get(client_id)
+            if terminal is not None:
+                return {
+                    "known": True,
+                    "status": terminal.get("orderStatus"),
+                    "mapped_status": self._map_status(terminal.get("orderStatus")),
+                    "executed": _as_float(terminal.get("cumExecQty")),
+                    "row": terminal,
+                }
+            return {"known": False, "status": None, "mapped_status": None, "executed": 0.0}
+
+        def executed_for(client_id: str, fallback: float) -> float:
+            """The quantity the venue says actually traded for an order."""
+            if client_id in executed_qty:
+                return executed_qty[client_id]
+            return fallback
+
+        pairs = [
+            (prefix, pair)
+            for prefix, pair in sorted(self._state.protection_order_pairs.items())
+            if str(pair.get("symbol", "")).upper() == symbol
+        ]
+        if not pairs:
+            # No pair is recorded for this symbol: there is nothing to
+            # reconcile against, and the live view is still reported.
+            for key, data in (("stop_loss", live.get("stop_loss")), ("take_profit", live.get("take_profit"))):
+                if data:
+                    result[key] = {
+                        "order_id": data.get("order_id"),
+                        "order_link_id": data.get("order_link_id"),
+                        "status": data.get("status"),
+                        "quantity": data.get("quantity"),
+                        "trigger_price": data.get("trigger_price"),
+                        "is_active": data.get("is_active", False),
+                    }
+            return result
+
+        for prefix, pair in pairs:
+            sl_client_id = str(pair.get("sl_client_id") or "")
+            tp_client_id = str(pair.get("tp_client_id") or "")
+            sl_state = leg_state(sl_client_id, live)
+            tp_state = leg_state(tp_client_id, live)
+
+            for key, state, client_id in (
+                ("stop_loss", sl_state, sl_client_id),
+                ("take_profit", tp_state, tp_client_id),
+            ):
+                if state["known"]:
+                    result[key] = {
+                        "order_link_id": client_id,
+                        "status": state["status"],
+                        "mapped_status": state["mapped_status"],
+                        "executed_quantity": executed_for(client_id, state["executed"]),
+                        "is_active": state["mapped_status"] in _ACTIVE_PROJECT_STATUSES,
+                    }
+                else:
+                    result[key] = None
+
+            if pair.get("resolved"):
+                continue
+
+            # A leg that traded (fully or partly) makes its counterpart
+            # unwanted: both legs would sell the same position.
+            for filled_key, counterpart_key, filled_state, counterpart_id in (
+                ("stop_loss", "take_profit", sl_state, tp_client_id),
+                ("take_profit", "stop_loss", tp_state, sl_client_id),
+            ):
+                if not filled_state["known"]:
+                    continue
+                if filled_state["mapped_status"] not in ("filled", "partially_filled"):
+                    continue
+                if not counterpart_id:
+                    continue
+                counterpart_state = leg_state(counterpart_id, live)
+                if counterpart_state["mapped_status"] not in _ACTIVE_PROJECT_STATUSES:
+                    # The counterpart is already finished: nothing to cancel.
+                    self._mark_protection_pair_resolved(prefix, f"{counterpart_key} was already {counterpart_state['mapped_status']}")
+                    continue
+                # The counterpart is still working, and the position may only
+                # be sold once: cancel it.
                 try:
-                    self.cancel_order(client_order_id=tp_client_id, symbol=symbol)
-                    result["actions_taken"].append("TP cancelled after SL fill")
-                except Exception as e:
-                    result["actions_taken"].append(f"Failed to cancel TP: {e}")
+                    self.cancel_order(client_order_id=counterpart_id, symbol=symbol)
+                except Exception as exc:  # noqa: BLE001 - a failed cancel must not raise
+                    # The cancellation did not happen, so the pair is **not**
+                    # resolved. The next cycle reads the venue again and tries
+                    # again, and until then the protection stays unproven.
+                    result["errors"].append(
+                        f"failed to cancel the {counterpart_key} after the {filled_key} traded: {exc}"
+                    )
+                    result["actions_taken"].append(f"{counterpart_key} cancel failed after {filled_key} fill")
+                    continue
 
-        # Check if TP filled and SL still active
-        if tp_data and tp_data.get("status") in ("filled", "partiallyfilled") and sl_data and sl_data.get("is_active", False):
-            # Cancel SL
-            sl_client_id = sl_data.get("order_link_id")
-            if sl_client_id:
-                try:
-                    self.cancel_order(client_order_id=sl_client_id, symbol=symbol)
-                    result["actions_taken"].append("SL cancelled after TP fill")
-                except Exception as e:
-                    result["actions_taken"].append(f"Failed to cancel SL: {e}")
-
-        # Build result with current status
-        for key, data in [("stop_loss", sl_data), ("take_profit", tp_data)]:
-            if data:
-                result[key] = {
-                    "order_id": data.get("order_id"),
-                    "order_link_id": data.get("order_link_id"),
-                    "status": data.get("status"),
-                    "quantity": data.get("quantity"),
-                    "trigger_price": data.get("trigger_price"),
-                    "is_active": data.get("is_active", False),
+                # The cancel was accepted. The pair is only resolved once the
+                # venue confirms the counterpart is no longer working: an
+                # accepted cancel request is not the same fact as a
+                # cancelled order. The venue is read again for the answer.
+                fresh_live = self._read_protection_orders().get(bybit_symbol, {})
+                fresh_terminal, fresh_truncated = self._read_terminal_orders(symbol=symbol)
+                if fresh_truncated:
+                    result["complete"] = False
+                    result["errors"].append(
+                        "the order history read was truncated while verifying the cancellation"
+                    )
+                after_state = leg_state(counterpart_id, fresh_live)
+                if not after_state["known"] and counterpart_id in fresh_terminal:
+                    after_state = {
+                        "known": True,
+                        "status": fresh_terminal[counterpart_id].get("orderStatus"),
+                        "mapped_status": self._map_status(fresh_terminal[counterpart_id].get("orderStatus")),
+                        "executed": _as_float(fresh_terminal[counterpart_id].get("cumExecQty")),
+                        "row": fresh_terminal[counterpart_id],
+                    }
+                if after_state["mapped_status"] in _ACTIVE_PROJECT_STATUSES:
+                    result["errors"].append(
+                        f"the {counterpart_key} still reads as working after the cancel request; "
+                        "the protection stays unproven"
+                    )
+                    continue
+                if not after_state["known"]:
+                    result["errors"].append(
+                        f"the {counterpart_key} could not be read after the cancel request; "
+                        "the protection stays unproven"
+                    )
+                    continue
+                self._mark_protection_pair_resolved(prefix, f"{counterpart_key} cancelled after {filled_key} fill")
+                result["actions_taken"].append(_oco_action_message(counterpart_key, filled_key))
+                # The result carries the venue's **confirmed** answer for the
+                # leg, not the one it had before the cancel was requested.
+                result[counterpart_key] = {
+                    "order_link_id": counterpart_id,
+                    "status": after_state["status"],
+                    "mapped_status": after_state["mapped_status"],
+                    "executed_quantity": executed_for(counterpart_id, after_state["executed"]),
+                    "is_active": after_state["mapped_status"] in _ACTIVE_PROJECT_STATUSES,
                 }
 
         return result
 
+    def _mark_protection_pair_resolved(self, prefix: str, reason: str) -> None:
+        """Record that a protection pair no longer needs reconciling."""
+        pair = self._state.protection_order_pairs.get(prefix)
+        if pair is None:
+            return
+        pair["resolved"] = True
+        pair["resolution_reason"] = reason
+        pair["resolved_at"] = datetime.now(UTC).isoformat()
+        if self._store:
+            self._store.save(self._state)
+
     def is_position_protected(self, symbol: str) -> tuple[bool, str]:
         """Check if a position is properly protected with both SL and TP.
 
-        Returns (is_protected, reason). If not protected, reason explains why.
+        Returns ``(is_protected, reason)``. If not protected, the reason
+        explains why.
+
+        The check is **fail-closed**: it only answers "protected" when the
+        venue has been read completely and has confirmed both legs, live, for
+        the quantity actually held. A truncated read, an unreadable position,
+        a missing leg, an inactive leg, a quantity that does not cover the
+        position, or a leg on the wrong side all answer "not protected".
         """
         if not self._state.confirmed:
             return False, "broker not confirmed"
 
-        bybit_symbol = self._to_bybit_symbol(symbol.upper())
+        symbol = symbol.upper()
+        bybit_symbol = self._to_bybit_symbol(symbol)
+
+        # Check position exists
+        position = self._positions.get(symbol) if self._positions else None
+        if not position or position.quantity <= 0:
+            return False, "no open position"
+
         protection_orders = self._read_protection_orders()
         prot = protection_orders.get(bybit_symbol, {})
 
+        # A truncated read is not evidence: the leg that is missing may simply
+        # be on a page that was not read, so nothing can be confirmed.
+        if prot.get("truncated"):
+            return False, "the protection order read was truncated; the protection is unproven"
+
         sl_data = prot.get("stop_loss")
         tp_data = prot.get("take_profit")
-
-        # Check position exists
-        position = self._positions.get(symbol.upper()) if self._positions else None
-        if not position or position.quantity <= 0:
-            return False, "no open position"
 
         position_qty = position.quantity
 

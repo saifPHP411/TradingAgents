@@ -43,6 +43,7 @@ from ..broker import (
     DECISION_SOURCE_TJR,
     DEFAULT_MAX_PRICE_DEVIATION,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+    EXECUTION_PROVIDER_ALPACA_PAPER,
     PROVIDER_BAR_OPEN,
     STATUS_STOPPED,
     AlpacaPaperBroker,
@@ -194,6 +195,7 @@ class PaperTradingController:
         crypto_data_factory: Callable[..., Any] | None = None,
         crypto_market_hours_gate: Callable[[], Any] | None = None,
         max_price_deviation: float = DEFAULT_MAX_PRICE_DEVIATION,
+        execution_provider: str = EXECUTION_PROVIDER_ALPACA_PAPER,
     ) -> None:
         self.root = Path(root)
         self.enabled = enabled
@@ -232,6 +234,11 @@ class PaperTradingController:
         # The largest permitted gap between the decision price (market-data venue)
         # and the execution price (execution venue). Beyond it, no order is placed.
         self.max_price_deviation = max_price_deviation
+        # Which execution broker the worker places orders with. Alpaca Paper is
+        # the default, so the existing path is unchanged; ``bybit_demo`` is an
+        # explicit opt-in. It is recorded here so a read-only status view can
+        # name the configured provider without building a worker.
+        self.execution_provider = execution_provider
         # The resolved symbol configuration, once the worker has been built. It
         # records which symbols were accepted on both venues and which were
         # rejected, so a status view can report both without re-reading the
@@ -296,6 +303,10 @@ class PaperTradingController:
             # view reports the settings the worker enforces. Alpaca's crypto
             # orders take only 'gtc'/'ioc'; the equity path keeps 'day'.
             crypto=self.decision_source_kind == DECISION_SOURCE_CRYPTO,
+            # The execution broker the worker places orders with. The status
+            # view and the worker must agree on it, or the view reports
+            # settings the worker does not enforce.
+            execution_provider=self.execution_provider,
         )
 
     def _reload_experiment(self):

@@ -310,15 +310,38 @@ MOCK_ORDER_REALTIME_RESPONSE = {
 
 
 class MockTransport:
-    """A mock HTTP transport that records calls and returns canned responses."""
+    """A mock HTTP transport that records calls and returns canned responses.
+
+    The transport is **stateful** for the order book: a created order joins
+    the open-order list, and a cancel removes it. Bybit's cancel endpoint is
+    asynchronous -- its acknowledgement only says the request was accepted --
+    so a test that wants to observe a *cancelled* order has to model the
+    venue's state, not just return a canned body.
+
+    A canned response registered for a path still wins, so a test can pin an
+    exact payload where it needs one.
+    """
 
     def __init__(self):
         self.calls: list[dict] = []
         self.responses: dict[tuple[str, str], dict] = {}
         self.call_count = 0
+        self.open_orders: list[dict] = []
+        self.history_orders: list[dict] = []
+        self.executions: list[dict] = []
+        self._next_order_id = 1000
 
     def add_response(self, method: str, path: str, response: dict):
         self.responses[(method.upper(), path)] = response
+
+    def _default_order_list(self, path: str) -> list[dict]:
+        if path == "/v5/order/realtime":
+            return self.open_orders
+        if path == "/v5/order/history":
+            return self.history_orders
+        if path == "/v5/order/execution":
+            return self.executions
+        return []
 
     def __call__(
         self,
@@ -343,14 +366,103 @@ class MockTransport:
             }
         )
 
-        # Find matching response
         path = url.split("?")[0].replace("https://api-demo.bybit.com", "")
         key = (method.upper(), path)
+
+        # A created order joins the venue's open-order list.
+        if key == ("POST", "/v5/order/create") and "orderFilter" in (json_body or {}):
+            self._next_order_id += 1
+            order_id = f"mock-{self._next_order_id}"
+            record = {
+                "orderId": order_id,
+                "orderLinkId": json_body.get("orderLinkId", ""),
+                "symbol": json_body.get("symbol", ""),
+                "side": json_body.get("side", ""),
+                "orderType": json_body.get("orderType", "Market"),
+                "qty": json_body.get("qty", "0"),
+                "timeInForce": json_body.get("timeInForce", "GTC"),
+                "orderStatus": "Untriggered",
+                "orderFilter": json_body.get("orderFilter", ""),
+                "triggerPrice": json_body.get("triggerPrice", "0"),
+                "cumExecQty": "0",
+                "leavesQty": json_body.get("qty", "0"),
+                "createdTime": "1700000000000",
+                "updatedTime": "1700000000000",
+            }
+            # The venue classifies a Spot TP/SL order by its trigger direction
+            # relative to the last price: a trigger below the market is a stop
+            # loss, a trigger above it is a take profit.
+            if record["orderFilter"] == "tpslOrder":
+                record["stopOrderType"] = self._classify_tpsl(record)
+            self.open_orders.append(record)
+            return BrokerHttpResponse(
+                200,
+                json.dumps(
+                    {
+                        "retCode": 0,
+                        "retMsg": "OK",
+                        "result": {"orderId": order_id, "orderLinkId": record["orderLinkId"]},
+                    }
+                ),
+            )
+
+        # A cancel moves the order out of the open list and into the history.
+        if key == ("POST", "/v5/order/cancel"):
+            link_id = (json_body or {}).get("orderLinkId", "")
+            for record in list(self.open_orders):
+                if record.get("orderLinkId") == link_id:
+                    self.open_orders.remove(record)
+                    finished = dict(record)
+                    finished["orderStatus"] = "Cancelled"
+                    finished["cumExecQty"] = finished.get("cumExecQty", "0")
+                    self.history_orders.append(finished)
+                    return BrokerHttpResponse(
+                        200,
+                        json.dumps(
+                            {
+                                "retCode": 0,
+                                "retMsg": "OK",
+                                "result": {"orderId": record.get("orderId"), "orderLinkId": link_id},
+                            }
+                        ),
+                    )
+            return BrokerHttpResponse(
+                200,
+                json.dumps({"retCode": 110001, "retMsg": "order does not exist", "result": {}}),
+            )
+
+        # A registered response wins, so a test can pin an exact payload.
         if key in self.responses:
             return BrokerHttpResponse(200, json.dumps(self.responses[key]))
 
+        if key[0] == "GET" and path in (
+            "/v5/order/realtime",
+            "/v5/order/history",
+            "/v5/order/execution",
+        ):
+            rows = self._default_order_list(path)
+            link_id = (params or {}).get("orderLinkId")
+            if link_id:
+                rows = [row for row in rows if row.get("orderLinkId") == link_id]
+            symbol = (params or {}).get("symbol")
+            if symbol:
+                rows = [row for row in rows if row.get("symbol") == symbol]
+            return BrokerHttpResponse(200, json.dumps({"retCode": 0, "retMsg": "OK", "result": {"list": rows}}))
+
         # Default fallback
         return BrokerHttpResponse(200, json.dumps({"retCode": 0, "retMsg": "OK", "result": {}}))
+
+    @staticmethod
+    def _classify_tpsl(record: dict) -> str:
+        """How the venue classifies a Spot TP/SL order.
+
+        Bybit derives the stop/target from the trigger's side of the market,
+        so the mock uses the same rule: a trigger below the last price is a
+        stop loss, a trigger at or above it is a take profit.
+        """
+        trigger = float(record.get("triggerPrice") or 0)
+        last = 50000.0
+        return "TakeProfit" if trigger >= last else "StopLoss"
 
 
 def _make_client(transport: MockTransport | None = None, **kwargs) -> BybitDemoBroker:
@@ -625,18 +737,47 @@ class TestOrders:
             )
 
     def test_cancel_order(self):
+        """A cancel is confirmed at the venue, not assumed from the acknowledgement.
+
+        Bybit's cancel endpoint is asynchronous: the acknowledgement says the
+        *request* was accepted, and the order's real status has to be read
+        back. So the transport models a venue that actually cancels the order,
+        and the test asserts the confirmed answer.
+        """
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
-        transport.add_response("POST", "/v5/order/cancel", MOCK_ORDER_CANCEL_RESPONSE)
         client = _make_client(transport)
 
         client.connect()
+        # The order exists at the venue before the cancel is requested.
+        transport.open_orders.append(
+            {
+                "orderId": "bybit-order-123",
+                "orderLinkId": "pt-test-client-id",
+                "symbol": "BTCUSDT",
+                "side": "Buy",
+                "orderType": "Market",
+                "qty": "0.001",
+                "timeInForce": "GTC",
+                "orderStatus": "New",
+                "cumExecQty": "0",
+                "leavesQty": "0.001",
+            }
+        )
         order = client.cancel_order(client_order_id="pt-test-client-id", symbol="BTC/USDT")
 
         assert order.client_order_id == "pt-test-client-id"
+        # The venue confirmed the cancellation.
         assert order.status == "cancelled"
+        # And the order is no longer in the live list.
+        assert transport.open_orders == []
 
     def test_list_orders(self):
+        """Both the working orders and the finished ones are read.
+
+        A V5 order lives in exactly one of the two lists, so reading only one
+        of them misses half of the book.
+        """
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
         transport.add_response("GET", "/v5/order/history", MOCK_ORDER_HISTORY_RESPONSE)
@@ -645,7 +786,8 @@ class TestOrders:
         client.connect()
         page = client.list_orders()
 
-        assert page.pages_read == 1
+        # The realtime list and the history list are both read.
+        assert page.pages_read == 2
         assert len(page.orders) == 1
         assert page.orders[0].client_order_id == "pt-test-client-id"
 
@@ -1262,10 +1404,12 @@ class TestProtection:
 
         assert verified["stop_loss"] is not None
         assert verified["stop_loss"].client_order_id == "pt-test-sl"
-        assert verified["stop_loss"].status == "untriggered"
+        # ``status`` is this project's vocabulary: an untriggered stop is an
+        # order the venue is still working, so it is "accepted".
+        assert verified["stop_loss"].status == "accepted"
         assert verified["take_profit"] is not None
         assert verified["take_profit"].client_order_id == "pt-test-tp"
-        assert verified["take_profit"].status == "untriggered"
+        assert verified["take_profit"].status == "accepted"
 
     def test_verify_protection_orders_missing(self):
         """Test verifying when no protection orders exist."""
@@ -1688,52 +1832,51 @@ class TestProtectionOrderComprehensive:
         assert prot["BTCUSDT"]["stop_loss"] is not None
 
     def test_sl_filled_tp_cancelled(self):
-        """Test OCO: SL fills, TP should be cancelled."""
+        """OCO: when the stop loss fills, the take profit is cancelled.
+
+        The venue is modelled as a real one: the stop has left the live list
+        and is in the **history** (a filled order is no longer open), the
+        target is still working, and the cancel is asynchronous -- so the
+        target only leaves the live list once the cancel is requested.
+        """
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
         transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
-        transport.add_response("GET", "/v5/order/realtime", {
-            "retCode": 0,
-            "result": {
-                "list": [
-                    {
-                        "orderId": "bybit-sl-123",
-                        "orderLinkId": "pt-test-sl",
-                        "symbol": "BTCUSDT",
-                        "side": "Sell",
-                        "orderType": "Market",
-                        "qty": "0.1",
-                        "timeInForce": "GTC",
-                        "orderStatus": "Filled",
-                        "orderFilter": "tpslOrder",
-                        "stopOrderType": "StopLoss",
-                        "triggerPrice": "45000",
-                        "createdTime": "1700000000000",
-                        "updatedTime": "1700000000000",
-                    },
-                    {
-                        "orderId": "bybit-tp-123",
-                        "orderLinkId": "pt-test-tp",
-                        "symbol": "BTCUSDT",
-                        "side": "Sell",
-                        "orderType": "Market",
-                        "qty": "0.1",
-                        "timeInForce": "GTC",
-                        "orderStatus": "Untriggered",
-                        "orderFilter": "tpslOrder",
-                        "stopOrderType": "TakeProfit",
-                        "triggerPrice": "55000",
-                        "createdTime": "1700000000000",
-                        "updatedTime": "1700000000000",
-                    },
-                ]
-            }
+        # The stop has filled: it is in the order history, not the live list.
+        transport.history_orders.append({
+            "orderId": "bybit-sl-123",
+            "orderLinkId": "pt-test-sl",
+            "symbol": "BTCUSDT",
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": "0.1",
+            "timeInForce": "GTC",
+            "orderStatus": "Filled",
+            "orderFilter": "tpslOrder",
+            "stopOrderType": "StopLoss",
+            "triggerPrice": "45000",
+            "cumExecQty": "0.1",
+            "leavesQty": "0",
+            "createdTime": "1700000000000",
+            "updatedTime": "1700000000000",
         })
-        # Cancel TP response
-        transport.add_response("POST", "/v5/order/cancel", {
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": {"orderId": "bybit-tp-123", "orderLinkId": "pt-test-tp"}
+        # The target is still working.
+        transport.open_orders.append({
+            "orderId": "bybit-tp-123",
+            "orderLinkId": "pt-test-tp",
+            "symbol": "BTCUSDT",
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": "0.1",
+            "timeInForce": "GTC",
+            "orderStatus": "Untriggered",
+            "orderFilter": "tpslOrder",
+            "stopOrderType": "TakeProfit",
+            "triggerPrice": "55000",
+            "cumExecQty": "0",
+            "leavesQty": "0.1",
+            "createdTime": "1700000000000",
+            "updatedTime": "1700000000000",
         })
 
         client = _make_client(transport)
@@ -1751,63 +1894,61 @@ class TestProtectionOrderComprehensive:
 
         result = client.reconcile_protection_orders("BTC/USDT")
 
-        assert result["stop_loss"]["status"] == "filled"
-        assert result["take_profit"]["status"] == "untriggered"
+        # The stop is reported from the history, the target from the live list.
+        assert result["stop_loss"]["status"] == "Filled"
+        assert result["stop_loss"]["mapped_status"] == "filled"
+        assert result["stop_loss"]["executed_quantity"] == 0.1
         assert "TP cancelled after SL fill" in result["actions_taken"]
+        # The venue confirmed the cancel: the target is no longer working.
+        assert result["take_profit"]["mapped_status"] == "cancelled"
+        assert result["take_profit"]["is_active"] is False
+        # And the pair is settled, so the next cycle does not cancel again.
+        assert client._state.protection_order_pairs["pt-test"]["resolved"] is True
+        assert transport.open_orders == []
 
     def test_tp_filled_sl_cancelled(self):
-        """Test OCO: TP fills, SL should be cancelled."""
+        """OCO: when the take profit fills, the stop loss is cancelled."""
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
         transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
-        transport.add_response("GET", "/v5/order/realtime", {
-            "retCode": 0,
-            "result": {
-                "list": [
-                    {
-                        "orderId": "bybit-sl-123",
-                        "orderLinkId": "pt-test-sl",
-                        "symbol": "BTCUSDT",
-                        "side": "Sell",
-                        "orderType": "Market",
-                        "qty": "0.1",
-                        "timeInForce": "GTC",
-                        "orderStatus": "Untriggered",
-                        "orderFilter": "tpslOrder",
-                        "stopOrderType": "StopLoss",
-                        "triggerPrice": "45000",
-                        "createdTime": "1700000000000",
-                        "updatedTime": "1700000000000",
-                    },
-                    {
-                        "orderId": "bybit-tp-123",
-                        "orderLinkId": "pt-test-tp",
-                        "symbol": "BTCUSDT",
-                        "side": "Sell",
-                        "orderType": "Market",
-                        "qty": "0.1",
-                        "timeInForce": "GTC",
-                        "orderStatus": "Filled",
-                        "orderFilter": "tpslOrder",
-                        "stopOrderType": "TakeProfit",
-                        "triggerPrice": "55000",
-                        "createdTime": "1700000000000",
-                        "updatedTime": "1700000000000",
-                    },
-                ]
-            }
+        transport.history_orders.append({
+            "orderId": "bybit-tp-123",
+            "orderLinkId": "pt-test-tp",
+            "symbol": "BTCUSDT",
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": "0.1",
+            "timeInForce": "GTC",
+            "orderStatus": "Filled",
+            "orderFilter": "tpslOrder",
+            "stopOrderType": "TakeProfit",
+            "triggerPrice": "55000",
+            "cumExecQty": "0.1",
+            "leavesQty": "0",
+            "createdTime": "1700000000000",
+            "updatedTime": "1700000000000",
         })
-        # Cancel SL response
-        transport.add_response("POST", "/v5/order/cancel", {
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": {"orderId": "bybit-sl-123", "orderLinkId": "pt-test-sl"}
+        transport.open_orders.append({
+            "orderId": "bybit-sl-123",
+            "orderLinkId": "pt-test-sl",
+            "symbol": "BTCUSDT",
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": "0.1",
+            "timeInForce": "GTC",
+            "orderStatus": "Untriggered",
+            "orderFilter": "tpslOrder",
+            "stopOrderType": "StopLoss",
+            "triggerPrice": "45000",
+            "cumExecQty": "0",
+            "leavesQty": "0.1",
+            "createdTime": "1700000000000",
+            "updatedTime": "1700000000000",
         })
 
         client = _make_client(transport)
         client.connect()
 
-        # Set up protection pair
         client._state.protection_order_pairs["pt-test"] = {
             "sl_client_id": "pt-test-sl",
             "tp_client_id": "pt-test-tp",
@@ -1818,57 +1959,58 @@ class TestProtectionOrderComprehensive:
 
         result = client.reconcile_protection_orders("BTC/USDT")
 
-        assert result["take_profit"]["status"] == "filled"
-        assert result["stop_loss"]["status"] == "untriggered"
+        assert result["take_profit"]["status"] == "Filled"
+        assert result["take_profit"]["mapped_status"] == "filled"
         assert "SL cancelled after TP fill" in result["actions_taken"]
+        assert result["stop_loss"]["mapped_status"] == "cancelled"
+        assert result["stop_loss"]["is_active"] is False
+        assert client._state.protection_order_pairs["pt-test"]["resolved"] is True
+        assert transport.open_orders == []
 
     def test_partial_fill_sl(self):
-        """Test partial fill of SL - counterpart should still be cancelled for safety."""
+        """A **partial** fill of the stop still cancels the target.
+
+        A partial stop fill has already sold part of the position, so the
+        target would sell the rest -- and then the leftover of the stop
+        order would sell more than the position holds. The counterpart is
+        therefore cancelled on a partial fill too.
+        """
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
         transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
-        transport.add_response("GET", "/v5/order/realtime", {
-            "retCode": 0,
-            "result": {
-                "list": [
-                    {
-                        "orderId": "bybit-sl-123",
-                        "orderLinkId": "pt-test-sl",
-                        "symbol": "BTCUSDT",
-                        "side": "Sell",
-                        "orderType": "Market",
-                        "qty": "0.1",
-                        "timeInForce": "GTC",
-                        "orderStatus": "PartiallyFilled",  # Bybit uses PartiallyFilled
-                        "orderFilter": "tpslOrder",
-                        "stopOrderType": "StopLoss",
-                        "triggerPrice": "45000",
-                        "createdTime": "1700000000000",
-                        "updatedTime": "1700000000000",
-                    },
-                    {
-                        "orderId": "bybit-tp-123",
-                        "orderLinkId": "pt-test-tp",
-                        "symbol": "BTCUSDT",
-                        "side": "Sell",
-                        "orderType": "Market",
-                        "qty": "0.1",
-                        "timeInForce": "GTC",
-                        "orderStatus": "Untriggered",
-                        "orderFilter": "tpslOrder",
-                        "stopOrderType": "TakeProfit",
-                        "triggerPrice": "55000",
-                        "createdTime": "1700000000000",
-                        "updatedTime": "1700000000000",
-                    },
-                ]
-            }
+        transport.history_orders.append({
+            "orderId": "bybit-sl-123",
+            "orderLinkId": "pt-test-sl",
+            "symbol": "BTCUSDT",
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": "0.1",
+            "timeInForce": "GTC",
+            "orderStatus": "PartiallyFilled",
+            "orderFilter": "tpslOrder",
+            "stopOrderType": "StopLoss",
+            "triggerPrice": "45000",
+            "cumExecQty": "0.04",
+            "leavesQty": "0.06",
+            "createdTime": "1700000000000",
+            "updatedTime": "1700000000000",
         })
-        # Cancel TP response
-        transport.add_response("POST", "/v5/order/cancel", {
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": {"orderId": "bybit-tp-123", "orderLinkId": "pt-test-tp"}
+        transport.open_orders.append({
+            "orderId": "bybit-tp-123",
+            "orderLinkId": "pt-test-tp",
+            "symbol": "BTCUSDT",
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": "0.1",
+            "timeInForce": "GTC",
+            "orderStatus": "Untriggered",
+            "orderFilter": "tpslOrder",
+            "stopOrderType": "TakeProfit",
+            "triggerPrice": "55000",
+            "cumExecQty": "0",
+            "leavesQty": "0.1",
+            "createdTime": "1700000000000",
+            "updatedTime": "1700000000000",
         })
 
         client = _make_client(transport)
@@ -1884,8 +2026,12 @@ class TestProtectionOrderComprehensive:
 
         result = client.reconcile_protection_orders("BTC/USDT")
 
-        assert result["stop_loss"]["status"] == "partiallyfilled"
+        # The venue's CamelCase status maps onto this project's vocabulary.
+        assert result["stop_loss"]["status"] == "PartiallyFilled"
+        assert result["stop_loss"]["mapped_status"] == "partially_filled"
+        assert result["stop_loss"]["executed_quantity"] == 0.04
         assert "TP cancelled after SL fill" in result["actions_taken"]
+        assert transport.open_orders == []
 
     def test_restart_recovery_reads_protection_pairs(self):
         """Test that protection order pairs are persisted and recovered on restart."""
@@ -2244,10 +2390,12 @@ class TestProtectionOrderComprehensive:
 
         assert verified["stop_loss"] is not None
         assert verified["stop_loss"].client_order_id == "pt-test-sl"
-        assert verified["stop_loss"].status == "untriggered"
+        # ``status`` is this project's vocabulary: an untriggered stop is an
+        # order the venue is still working, so it is "accepted".
+        assert verified["stop_loss"].status == "accepted"
         assert verified["take_profit"] is not None
         assert verified["take_profit"].client_order_id == "pt-test-tp"
-        assert verified["take_profit"].status == "untriggered"
+        assert verified["take_profit"].status == "accepted"
 
 
 if __name__ == "__main__":
