@@ -37,6 +37,7 @@ import argparse
 import json
 import os
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 from .broker import (
@@ -81,6 +82,25 @@ from .sources import FrozenPriceSource, PriceSource, PriceSourceError
 
 class RunnerError(RuntimeError):
     """A command could not proceed."""
+
+
+BYBIT_REPORT_PAIRS = (
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT",
+    "XRP/USDT",
+    "DOGE/USDT",
+    "AVAX/USDT",
+    "LINK/USDT",
+    "LTC/USDT",
+    "BCH/USDT",
+)
+"""The pairs the Bybit instrument report covers by default.
+
+Each pair is read from the venue's own instrument record, so the report states
+what the venue enforces for that pair rather than a shared default. A pair the
+venue does not describe is named as such and no minimum is assumed for it.
+"""
 
 
 DEFAULT_EXPERIMENT_SYMBOL = "SPY"
@@ -670,6 +690,80 @@ def _paper_trade(args) -> int:
     return 0
 
 
+def _plain(value: float | None) -> str:
+    """A number in plain decimal form, never scientific notation.
+
+    ``str(0.000001)`` is ``1e-06``, which reads as a different number than the
+    venue's ``0.000001``. A step or a tick is a decimal quantity, so it is
+    printed as one.
+    """
+    if value is None:
+        return "-"
+    return format(Decimal(str(value)), "f")
+
+
+def _bybit_instruments(args) -> int:
+    """Read-only Bybit **Spot** instrument report. Places no order, changes nothing.
+
+    Prints the venue's own trading rules for each requested pair: the status,
+    the minimum order amount, the minimum and maximum order quantity, the
+    quantity step and the tick size. These are the values the broker enforces,
+    read from ``GET /v5/market/instruments-info`` -- never a default this
+    project invented, and never a constant shared across pairs.
+
+    The Spot shape is the one the venue documents: a ``lotSizeFilter`` with no
+    ``qtyStep`` (the step is ``basePrecision``), and ``minOrderQty`` /
+    ``maxOrderQty`` deprecated in favour of ``minOrderAmt``. The report names
+    which field each value came from, so a reader can tell a real value from
+    an absent one.
+
+    The market endpoint is public, so no credential is needed and none is
+    read. No order is placed by this command.
+    """
+    from tradingagents.crypto.bybit import BybitPublicClient
+    from tradingagents.crypto.transport import CryptoDataError
+
+    from .broker.bybit_demo import DEMO_BASE_URL
+
+    pairs = list(getattr(args, "pairs", None) or BYBIT_REPORT_PAIRS)
+    client = BybitPublicClient(base_url=DEMO_BASE_URL)
+    try:
+        registry = client.instruments_info(category="spot")
+    except CryptoDataError as exc:
+        print(f"bybit instruments failed: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"bybit spot endpoint: {DEMO_BASE_URL}")
+    print(f"venue instruments described: {len(registry.rules)}")
+    header = (
+        f"{'pair':<12} {'status':>8} {'minOrderAmt':>12} {'minOrderQty':>12} "
+        f"{'qtyStep':>12} {'tickSize':>12}"
+    )
+    print(header)
+    print("-" * len(header))
+    missing: list[str] = []
+    for pair in pairs:
+        symbol = pair.replace("/", "").replace("-", "").upper()
+        # The registry is keyed by the canonical pair, so the lookup uses the
+        # canonical spelling and the report prints the venue's own symbol.
+        rules = registry.get(pair)
+        if rules is None:
+            missing.append(symbol)
+            print(f"{symbol:<12} {'NOT DESCRIBED BY THE VENUE'}")
+            continue
+        print(
+            f"{symbol:<12} {str(rules.status):>8} {_plain(rules.min_notional):>12} "
+            f"{_plain(rules.min_quantity):>12} {_plain(rules.quantity_step):>12} "
+            f"{_plain(rules.price_tick):>12}"
+        )
+    if missing:
+        print()
+        print("not described by the venue (no minimum is assumed for these):")
+        for symbol in missing:
+            print(f"  {symbol}")
+    return 0
+
+
 def _broker_check(args) -> int:
     """Read-only Alpaca **paper** diagnostic. Places no order, changes nothing.
 
@@ -774,8 +868,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "diagnose",
             "broker-check",
             "alpaca-diagnose",
+            "bybit-instruments",
             "paper-trade",
             "serve",
+        ),
+    )
+    parser.add_argument(
+        "--pairs",
+        nargs="+",
+        default=None,
+        help=(
+            "bybit-instruments: the pairs to report (e.g., BTC/USDT ETH/USDT). "
+            "Each pair's minimums are read from the venue's own instrument record; "
+            "no default minimum is shared across pairs."
         ),
     )
     parser.add_argument(
@@ -1021,6 +1126,7 @@ def main(argv: list[str] | None = None) -> int:
         "diagnose": _diagnose,
         "broker-check": _broker_check,
         "alpaca-diagnose": _broker_check,  # an explicit, discoverable alias
+        "bybit-instruments": _bybit_instruments,
         "paper-trade": _paper_trade,
         "serve": _serve,
     }

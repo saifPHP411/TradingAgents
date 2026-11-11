@@ -308,3 +308,97 @@ class TestTheStartLogNamesTheBroker:
         text = describe_execution_provider(EXECUTION_PROVIDER_BYBIT_DEMO)
         assert "BYBIT_DEMO_API_KEY" in text
         assert "BYBIT_DEMO_API_SECRET" in text
+
+
+# ---------------------------------------------------------------------------
+# The per-pair minimum report
+# ---------------------------------------------------------------------------
+
+
+class TestTheInstrumentsReport:
+    """The report states what the venue enforces for each pair, pair by pair.
+
+    The point of the report is that a reader can see a *real* value next to an
+    absent one, so the report never prints a made-up default for a pair the
+    venue does not describe.
+    """
+
+    def test_the_command_is_offered(self):
+        from tradingagents.paper_experiment.__main__ import _build_parser
+
+        parser = _build_parser()
+        args = parser.parse_args(["bybit-instruments", "--pairs", "BTC/USDT", "ETH/USDT"])
+        assert args.command == "bybit-instruments"
+        assert args.pairs == ["BTC/USDT", "ETH/USDT"]
+
+    def test_the_default_pairs_are_the_ones_under_review(self):
+        from tradingagents.paper_experiment.__main__ import BYBIT_REPORT_PAIRS
+
+        assert BYBIT_REPORT_PAIRS == (
+            "BTC/USDT",
+            "ETH/USDT",
+            "SOL/USDT",
+            "XRP/USDT",
+            "DOGE/USDT",
+            "AVAX/USDT",
+            "LINK/USDT",
+            "LTC/USDT",
+            "BCH/USDT",
+        )
+
+    def test_the_report_reads_the_public_market_endpoint(self, monkeypatch, capsys):
+        """The market endpoint is public: no credential is read and none needed."""
+        import json
+
+        from tradingagents.paper_experiment.__main__ import _bybit_instruments
+
+        payload = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "status": "Trading",
+                        "baseCoin": "BTC",
+                        "quoteCoin": "USDT",
+                        "lotSizeFilter": {
+                            "basePrecision": "0.000001",
+                            "minOrderQty": "0.00001",
+                            "maxOrderQty": "63.01155123",
+                            "minOrderAmt": "1",
+                        },
+                        "priceFilter": {"tickSize": "0.01"},
+                    }
+                ]
+            },
+        }
+        body = json.dumps(payload)
+
+        from tradingagents.crypto.transport import HttpResponse
+
+        class FakeTransport:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, *, url, params, headers, timeout):
+                self.calls.append((url, params))
+                return HttpResponse(200, body)
+
+        transport = FakeTransport()
+        monkeypatch.setattr(
+            "tradingagents.crypto.transport._default_transport",
+            lambda **kwargs: transport(**kwargs),
+        )
+
+        class Args:
+            pairs = ["BTC/USDT", "PEPE/USDT"]
+
+        assert _bybit_instruments(Args()) == 0
+        out = capsys.readouterr().out
+        # The venue's own values are reported, in the plain decimal form.
+        assert "BTCUSDT" in out
+        assert "0.000001" in out
+        # A pair the venue does not describe is named, not given a default.
+        assert "PEPEUSDT" in out
+        assert "NOT DESCRIBED BY THE VENUE" in out

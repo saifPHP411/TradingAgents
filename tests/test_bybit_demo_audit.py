@@ -1043,6 +1043,35 @@ class TestTheDocumentedDemoRoutes:
 
         assert executed["abc"] == pytest.approx(0.15)
 
+    def test_a_pair_the_venue_does_not_describe_is_refused(self):
+        """No made-up minimum: an undescribed pair is a refusal, not a guess."""
+        transport = RecordingTransport()
+        transport.add(
+            "GET",
+            "/v5/market/instruments-info",
+            instruments_response([spot_instrument("BTCUSDT")]),
+        )
+        transport.add(
+            "GET",
+            "/v5/account/wallet-balance",
+            wallet_response({"USDT": {"walletBalance": "1000"}}),
+        )
+        broker = make_broker(transport)
+        broker.connect()
+
+        with pytest.raises(PaperRiskRejected) as caught:
+            broker.submit_order(
+                symbol="PEPE/USDT",
+                side="buy",
+                quantity=1.0,
+                reference_price=0.0000012,
+                client_order_id="bybit-undescribed",
+                allow_orders=True,
+            )
+
+        assert "not found in Bybit instruments" in str(caught.value)
+        assert transport.calls_to("POST", "/v5/order/create") == []
+
     def test_a_market_order_uses_the_documented_ioc_time_in_force(self):
         """The venue documents that a Market order always uses ``IOC``."""
         transport = RecordingTransport()
@@ -1740,3 +1769,83 @@ class TestProtectionIsProven:
             assert "triggerDirection" not in body
             assert body["triggerPrice"] in ("45000", "55000")
 
+
+
+# ---------------------------------------------------------------------------
+# The public market-data client
+# ---------------------------------------------------------------------------
+
+
+class TestThePublicInstrumentParser:
+    """The public client parses the venue's Spot shape into the project's rules.
+
+    The rule object is shared with every other venue, so a parser that names
+    its fields wrongly does not fail loudly at the boundary — it fails when the
+    rule is read. These tests read the parsed rule, not just the parse call.
+    """
+
+    def _parse(self, entry: dict) -> Any:
+        from tradingagents.crypto.bybit import BybitPublicClient
+
+        client = BybitPublicClient()
+        rules = client._parse_bybit_instruments([entry])
+        return rules["BTC/USDT"]
+
+    def _spot_entry(self, **lot: Any) -> dict:
+        base = {
+            "symbol": "BTCUSDT",
+            "status": "Trading",
+            "baseCoin": "BTC",
+            "quoteCoin": "USDT",
+            "lotSizeFilter": {
+                "basePrecision": "0.000001",
+                "minOrderQty": "0.00001",
+                "maxOrderQty": "63.01155123",
+                "minOrderAmt": "1",
+            },
+            "priceFilter": {"tickSize": "0.01"},
+        }
+        base["lotSizeFilter"].update(lot)
+        return base
+
+    def test_the_step_comes_from_the_base_precision(self):
+        rules = self._parse(self._spot_entry())
+        assert rules.quantity_step == pytest.approx(0.000001)
+
+    def test_the_minimum_notional_is_the_min_order_amount(self):
+        rules = self._parse(self._spot_entry())
+        assert rules.min_notional == pytest.approx(1.0)
+
+    def test_the_price_tick_is_the_tick_size(self):
+        rules = self._parse(self._spot_entry())
+        assert rules.price_tick == pytest.approx(0.01)
+
+    def test_the_pair_is_keyed_by_its_canonical_spelling(self):
+        rules = self._parse(self._spot_entry())
+        assert rules.symbol == "BTC/USDT"
+        assert rules.base_asset == "BTC"
+        assert rules.quote_asset == "USDT"
+
+    def test_a_missing_bound_is_unstated_not_zero(self):
+        entry = self._spot_entry()
+        entry["lotSizeFilter"].pop("minOrderAmt")
+        entry["priceFilter"].pop("tickSize")
+        rules = self._parse(entry)
+        assert rules.min_notional is None
+        assert rules.price_tick is None
+
+    def test_a_fractional_step_makes_the_pair_fractionable(self):
+        rules = self._parse(self._spot_entry())
+        assert rules.fractionable is True
+
+    def test_a_step_of_one_is_not_fractionable(self):
+        rules = self._parse(self._spot_entry(basePrecision="1"))
+        assert rules.fractionable is False
+
+    def test_an_entry_without_a_quote_coin_is_skipped(self):
+        from tradingagents.crypto.bybit import BybitPublicClient
+
+        client = BybitPublicClient()
+        entry = self._spot_entry()
+        entry["quoteCoin"] = ""
+        assert client._parse_bybit_instruments([entry]) == {}

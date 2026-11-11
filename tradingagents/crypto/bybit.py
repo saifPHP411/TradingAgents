@@ -20,12 +20,11 @@ so every branch is exercised offline with a mocked response.
 from __future__ import annotations
 
 import contextlib
-import math
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from .instruments import InstrumentRegistry
+from .instruments import STATUS_UNKNOWN, InstrumentRegistry
 from .symbols import SymbolError, parse_pair
 from .transport import CryptoDataError, CryptoRateLimitedError, fetch_json
 
@@ -41,26 +40,6 @@ REQUEST_TIMEOUT = 15.0
 def _classify_status(status: int, body: str) -> None:
     if status == 429:
         raise CryptoRateLimitedError(f"the venue throttled the request (HTTP 429): {body}")
-
-
-def _spot_qty_step(lot_filter: dict[str, Any]) -> float:
-    """The quantity step for a Spot instrument, from the venue's own fields.
-
-    A Spot ``lotSizeFilter`` carries **no** ``qtyStep``; the venue expresses
-    the step as ``basePrecision``, the precision of the base coin. An explicit
-    ``qtyStep`` is preferred when a shape carries one.
-    """
-    for field_name in ("qtyStep", "basePrecision"):
-        raw = lot_filter.get(field_name)
-        if raw is None or raw == "":
-            continue
-        try:
-            step = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if step > 0 and math.isfinite(step):
-            return step
-    return 0.0
 
 
 def bybit_symbol(symbol: str) -> str:
@@ -159,7 +138,31 @@ class BybitPublicClient:
         return registry
 
     def _parse_bybit_instruments(self, instrument_list: list) -> dict:
-        """Parse Bybit instruments into trading rules."""
+        """Parse Bybit instruments into trading rules.
+
+        The venue's Spot ``lotSizeFilter`` carries **no** ``qtyStep``: the step
+        is ``basePrecision``, the precision of the base coin (the documented
+        BTCUSDT Spot example shows ``basePrecision`` ``0.000001``). The step is
+        read from ``qtyStep`` when a non-Spot shape carries it, and from
+        ``basePrecision`` otherwise.
+
+        ``minOrderQty`` and ``maxOrderQty`` are **deprecated** for Spot: the
+        venue documents that it no longer checks them and checks ``minOrderAmt``
+        instead, so ``minOrderAmt`` is the minimum notional that is enforced.
+        The deprecated pair is still read, because a venue that does state a
+        maximum is worth knowing, but it is not what the order check uses.
+
+        Every bound is the venue's own number. An absent bound is ``None``
+        (unstated), never ``0.0`` (a stated zero), so the order check can tell
+        "the venue did not say" from "the venue said zero".
+        """
+        from .instruments import (
+            TradingRules,
+            _as_float,
+            _decimals,
+            _fractionable_from_step,
+        )
+
         rules = {}
         for entry in instrument_list:
             if not isinstance(entry, dict):
@@ -167,29 +170,38 @@ class BybitPublicClient:
             symbol = str(entry.get("symbol", "")).upper()
             if not symbol:
                 continue
+            base = str(entry.get("baseCoin", "")).upper()
+            quote = str(entry.get("quoteCoin", "")).upper()
+            if not base or not quote:
+                continue
             status = str(entry.get("status", ""))
-            _base_coin = str(entry.get("baseCoin", ""))
-            _quote_coin = str(entry.get("quoteCoin", ""))
             lot_filter = entry.get("lotSizeFilter", {})
             price_filter = entry.get("priceFilter", {})
 
-            min_order_qty = float(lot_filter.get("minOrderQty", "0"))
-            _max_order_qty = float(lot_filter.get("maxOrderQty", "0"))
-            qty_step = _spot_qty_step(lot_filter)
-            min_order_amt = float(lot_filter.get("minOrderAmt", "0"))
-            tick_size = float(price_filter.get("tickSize", "0"))
-
-            tradable = status == "Trading"
-            from .instruments import TradingRules
-            rules[symbol] = TradingRules(
-                symbol=symbol,
-                venue="bybit",
-                tradable=tradable,
-                min_qty=min_order_qty,
-                step_size=qty_step,
-                tick_size=tick_size,
-                min_notional=min_order_amt,
-                raw=entry,
+            # The step is the venue's own decimal string: ``basePrecision`` for
+            # Spot, ``qtyStep`` when a shape carries one. It is kept as the
+            # string the venue sent, so the decimals are the venue's own and
+            # not a float's rendering of them.
+            step_text = str(
+                lot_filter.get("qtyStep") or lot_filter.get("basePrecision") or ""
+            )
+            tick_text = str(price_filter.get("tickSize") or "")
+            rules[f"{base}/{quote}"] = TradingRules(
+                symbol=f"{base}/{quote}",
+                base_asset=base,
+                quote_asset=quote,
+                status=status.upper() or STATUS_UNKNOWN,
+                min_quantity=_as_float(lot_filter.get("minOrderQty")),
+                max_quantity=_as_float(lot_filter.get("maxOrderQty")),
+                quantity_step=_as_float(step_text) if step_text else None,
+                price_tick=_as_float(tick_text) if tick_text else None,
+                min_notional=_as_float(lot_filter.get("minOrderAmt")),
+                order_types=("market", "limit"),
+                quote_precision=_decimals(tick_text) if tick_text else 0,
+                base_precision=_decimals(step_text) if step_text else 0,
+                # A Spot pair trades fractional quantities whenever the step
+                # is smaller than one unit; an integral step means whole units.
+                fractionable=_fractionable_from_step(step_text),
             )
         return rules
 
