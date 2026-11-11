@@ -851,13 +851,14 @@ class BybitDemoBroker:
             if not raw_symbol:
                 continue
 
-            # Check stopOrderType for conditional orders
-            # Bybit conditional orders have orderType=Market (or Limit) + stopOrderType=StopLoss/TakeProfit
+            # Check orderFilter for conditional orders (Bybit V5 Spot)
+            # Bybit V5 Spot conditional orders use orderFilter=StopLoss/TakeProfit
+            order_filter = str(entry.get("orderFilter", "")).lower()
             stop_order_type = str(entry.get("stopOrderType", "")).lower()
             order_type = str(entry.get("orderType", "")).lower()
 
-            # A protection order has stopOrderType set, or is a conditional order type
-            if not (stop_order_type in ("stoploss", "takeprofit") or order_type in ("stoploss", "takeprofit", "conditional")):
+            # A protection order has orderFilter set (V5), or stopOrderType (legacy), or is a conditional order type
+            if not (order_filter in ("stoploss", "takeprofit") or stop_order_type in ("stoploss", "takeprofit") or order_type in ("stoploss", "takeprofit", "conditional")):
                 continue
 
             if raw_symbol not in protection_orders:
@@ -865,9 +866,9 @@ class BybitDemoBroker:
 
             trigger_price = float(entry.get("triggerPrice", "0"))
 
-            # Determine if it's SL or TP using stopOrderType primarily
-            is_sl = stop_order_type == "stoploss" or order_type == "stoploss"
-            is_tp = stop_order_type == "takeprofit" or order_type == "takeprofit"
+            # Determine if it's SL or TP using orderFilter primarily (V5), then stopOrderType (legacy)
+            is_sl = order_filter == "stoploss" or stop_order_type == "stoploss" or order_type == "stoploss"
+            is_tp = order_filter == "takeprofit" or stop_order_type == "takeprofit" or order_type == "takeprofit"
 
             if is_sl:
                 protection_orders[raw_symbol]["stop_loss"] = {
@@ -951,6 +952,13 @@ class BybitDemoBroker:
                 if wallet_balance <= 0:
                     continue
 
+                # Verify this coin has a valid Spot trading pair on Bybit
+                bybit_symbol = f"{coin}USDT"
+                instrument = self.get_instrument(bybit_symbol)
+                if not instrument or not instrument.tradable:
+                    # Skip coins without a valid Spot trading pair (dust, unsupported assets)
+                    continue
+
                 # Calculate available quantity (wallet - locked from open orders)
                 # The locked field in balance should already reflect this, but we verify
                 locked = balance.get("locked", 0.0)
@@ -958,9 +966,6 @@ class BybitDemoBroker:
 
                 # Get mark price
                 mark_price = mark_prices.get(coin)
-
-                # Build Bybit symbol for this coin/USDT pair
-                bybit_symbol = f"{coin}USDT"
 
                 # Get protection orders for this symbol
                 prot = protection_orders.get(bybit_symbol, {})
@@ -1297,6 +1302,14 @@ class BybitDemoBroker:
             "timeInForce": tif,
             "orderLinkId": client_order_id,
         }
+        # For Spot Market orders, specify marketUnit:
+        # - Market Buy: qty in quote currency (USDT) -> marketUnit="quoteCoin"
+        # - Market Sell: qty in base currency (BTC) -> marketUnit="baseCoin"
+        if order_type.lower() == "market":
+            if side.lower() == "buy":
+                body["marketUnit"] = "quoteCoin"
+            else:
+                body["marketUnit"] = "baseCoin"
         if order_type.lower() == "limit":
             # Limit orders require a price parameter
             # The caller must provide reference_price as the limit price
@@ -1583,7 +1596,7 @@ class BybitDemoBroker:
                 "qty": qty_str,
                 "timeInForce": "GTC",
                 "orderLinkId": sl_client_id,
-                "stopOrderType": "StopLoss",
+                "orderFilter": "StopLoss",
                 "triggerPrice": sl_price_str,
                 "triggerDirection": 2,  # 1: price rises, 2: price falls (for long SL)
             }
@@ -1607,7 +1620,7 @@ class BybitDemoBroker:
                 "qty": qty_str,
                 "timeInForce": "GTC",
                 "orderLinkId": tp_client_id,
-                "stopOrderType": "TakeProfit",
+                "orderFilter": "TakeProfit",
                 "triggerPrice": tp_price_str,
                 "triggerDirection": 1,  # 1: price rises, 2: price falls (for long TP)
             }

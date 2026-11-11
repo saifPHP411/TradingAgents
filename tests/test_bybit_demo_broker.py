@@ -512,8 +512,10 @@ class TestPositions:
         transport = MockTransport()
         # Account response with BTC balance
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
         # No open orders
         transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
         client = _make_client(transport)
 
         client.connect()
@@ -1229,7 +1231,7 @@ class TestProtection:
                         "qty": "0.1",
                         "timeInForce": "GTC",
                         "orderStatus": "Untriggered",
-                        "stopOrderType": "StopLoss",
+                        "orderFilter": "StopLoss",
                         "triggerPrice": "45000",
                         "createdTime": "1700000000000",
                         "updatedTime": "1700000000000",
@@ -1243,7 +1245,7 @@ class TestProtection:
                         "qty": "0.1",
                         "timeInForce": "GTC",
                         "orderStatus": "Untriggered",
-                        "stopOrderType": "TakeProfit",
+                        "orderFilter": "TakeProfit",
                         "triggerPrice": "55000",
                         "createdTime": "1700000000000",
                         "updatedTime": "1700000000000",
@@ -1281,6 +1283,7 @@ class TestProtection:
         """Test that position.is_protected returns True when SL/TP are verified."""
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
         transport.add_response("GET", "/v5/order/realtime", {
             "retCode": 0,
             "result": {
@@ -1294,7 +1297,7 @@ class TestProtection:
                         "qty": "0.1",
                         "timeInForce": "GTC",
                         "orderStatus": "Untriggered",
-                        "stopOrderType": "StopLoss",
+                        "orderFilter": "StopLoss",
                         "triggerPrice": "45000",
                     },
                     {
@@ -1306,7 +1309,7 @@ class TestProtection:
                         "qty": "0.1",
                         "timeInForce": "GTC",
                         "orderStatus": "Untriggered",
-                        "stopOrderType": "TakeProfit",
+                        "orderFilter": "TakeProfit",
                         "triggerPrice": "55000",
                     },
                 ]
@@ -1328,6 +1331,7 @@ class TestProtection:
         """Test that position.is_protected returns False when SL or TP missing."""
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
         transport.add_response("GET", "/v5/order/realtime", {
             "retCode": 0,
             "result": {
@@ -1341,7 +1345,7 @@ class TestProtection:
                         "qty": "0.1",
                         "timeInForce": "GTC",
                         "orderStatus": "Untriggered",
-                        "stopOrderType": "StopLoss",
+                        "orderFilter": "StopLoss",
                         "triggerPrice": "45000",
                     }
                     # No TakeProfit
@@ -1361,6 +1365,7 @@ class TestProtection:
         """Test that position.is_protected returns False when orders are rejected."""
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
         transport.add_response("GET", "/v5/order/realtime", {
             "retCode": 0,
             "result": {
@@ -1374,7 +1379,7 @@ class TestProtection:
                         "qty": "0.1",
                         "timeInForce": "GTC",
                         "orderStatus": "Rejected",
-                        "stopOrderType": "StopLoss",
+                        "orderFilter": "StopLoss",
                         "triggerPrice": "45000",
                     },
                     {
@@ -1386,7 +1391,7 @@ class TestProtection:
                         "qty": "0.1",
                         "timeInForce": "GTC",
                         "orderStatus": "Untriggered",
-                        "stopOrderType": "TakeProfit",
+                        "orderFilter": "TakeProfit",
                         "triggerPrice": "55000",
                     },
                 ]
