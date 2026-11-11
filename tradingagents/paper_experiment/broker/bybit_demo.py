@@ -852,17 +852,16 @@ class BybitDemoBroker:
                 continue
 
             # Check orderFilter for conditional orders (Bybit V5 Spot)
-            # Bybit V5 Spot conditional orders use orderFilter=StopLoss/TakeProfit (capitalized)
+            # Bybit V5 Spot TP/SL orders use orderFilter="tpslOrder" with stopOrderType="StopLoss"/"TakeProfit"
             order_filter = str(entry.get("orderFilter", ""))
-
-            # A protection order has orderFilter set (V5 Spot) or stopOrderType (legacy), or is a conditional order type
+            stop_order_type = str(entry.get("stopOrderType", ""))
             order_type = str(entry.get("orderType", "")).lower()
-            stop_order_type = str(entry.get("stopOrderType", "")).lower()
 
-            # Check if this is a conditional/protection order
+            # A protection order has orderFilter="tpslOrder" with stopOrderType set,
+            # or stopOrderType (legacy), or is a conditional order type
             is_protection = (
-                order_filter in ("StopLoss", "TakeProfit") or
-                stop_order_type in ("stoploss", "takeprofit") or
+                (order_filter == "tpslOrder" and stop_order_type in ("StopLoss", "TakeProfit")) or
+                stop_order_type.lower() in ("stoploss", "takeprofit") or
                 order_type in ("stoploss", "takeprofit", "conditional")
             )
             if not is_protection:
@@ -873,9 +872,10 @@ class BybitDemoBroker:
 
             trigger_price = float(entry.get("triggerPrice", "0"))
 
-            # Determine if it's SL or TP using orderFilter primarily (V5 Spot), then stopOrderType (legacy)
-            is_sl = order_filter == "StopLoss" or stop_order_type == "stoploss" or order_type == "stoploss"
-            is_tp = order_filter == "TakeProfit" or stop_order_type == "takeprofit" or order_type == "takeprofit"
+            # Determine if it's SL or TP using stopOrderType primarily (V5 Spot tpslOrder),
+            # then stopOrderType (legacy), then orderType
+            is_sl = (order_filter == "tpslOrder" and stop_order_type == "StopLoss") or stop_order_type.lower() == "stoploss" or order_type == "stoploss"
+            is_tp = (order_filter == "tpslOrder" and stop_order_type == "TakeProfit") or stop_order_type.lower() == "takeprofit" or order_type == "takeprofit"
 
             if is_sl:
                 protection_orders[raw_symbol]["stop_loss"] = {
@@ -1590,8 +1590,8 @@ class BybitDemoBroker:
         created_orders = {}
 
         try:
-            # Create StopLoss order - Bybit V5 Spot conditional order
-            # Uses orderFilter=StopLoss (capitalized per V5 docs), no triggerDirection for Spot
+            # Create StopLoss order - Bybit V5 Spot TP/SL order
+            # Uses orderFilter="tpslOrder" (per V5 Spot docs) with stopOrderType="StopLoss"
             sl_client_id = f"{client_order_id_prefix}-sl"
             sl_body = {
                 "category": SPOT_CATEGORY,
@@ -1601,7 +1601,8 @@ class BybitDemoBroker:
                 "qty": qty_str,
                 "timeInForce": "GTC",
                 "orderLinkId": sl_client_id,
-                "orderFilter": "StopLoss",
+                "orderFilter": "tpslOrder",
+                "stopOrderType": "StopLoss",
                 "triggerPrice": sl_price_str,
             }
 
@@ -1614,8 +1615,8 @@ class BybitDemoBroker:
             self._record_order(sl_order)
             created_orders["stop_loss"] = sl_order
 
-            # Create TakeProfit order - Bybit V5 Spot conditional order
-            # Uses orderFilter=TakeProfit (capitalized per V5 docs), no triggerDirection for Spot
+            # Create TakeProfit order - Bybit V5 Spot TP/SL order
+            # Uses orderFilter="tpslOrder" (per V5 Spot docs) with stopOrderType="TakeProfit"
             tp_client_id = f"{client_order_id_prefix}-tp"
             tp_body = {
                 "category": SPOT_CATEGORY,
@@ -1625,7 +1626,8 @@ class BybitDemoBroker:
                 "qty": qty_str,
                 "timeInForce": "GTC",
                 "orderLinkId": tp_client_id,
-                "orderFilter": "TakeProfit",
+                "orderFilter": "tpslOrder",
+                "stopOrderType": "TakeProfit",
                 "triggerPrice": tp_price_str,
             }
 
