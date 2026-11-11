@@ -49,13 +49,20 @@ MOCK_ACCOUNT_RESPONSE = {
         "list": [
             {
                 "accountId": "12345",
-                "accountType": "UNIFIED",
+                "accountType": "SPOT",
                 "coin": [
                     {
                         "coin": "USDT",
                         "walletBalance": "10000.00",
                         "availableToWithdraw": "9500.00",
-                    }
+                        "locked": "500.00",
+                    },
+                    {
+                        "coin": "BTC",
+                        "walletBalance": "0.1",
+                        "availableToWithdraw": "0.08",
+                        "locked": "0.02",
+                    },
                 ],
             }
         ],
@@ -503,8 +510,10 @@ class TestInstruments:
 class TestPositions:
     def test_positions_read(self):
         transport = MockTransport()
+        # Account response with BTC balance
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
-        transport.add_response("GET", "/v5/position/list", MOCK_POSITIONS_RESPONSE)
+        # No open orders
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
         client = _make_client(transport)
 
         client.connect()
@@ -513,19 +522,37 @@ class TestPositions:
         assert "BTC/USDT" in positions
         pos = positions["BTC/USDT"]
         assert pos.quantity == 0.1
-        assert pos.avg_price == 50000.0
-        assert pos.mark_price == 51000.0
+        assert pos.available_quantity == 0.08
         assert pos.venue_symbol == "BTCUSDT"
+        assert pos.side == "buy"
+        assert pos.protection_orders is None
+        # mark_price is fetched from a separate public client (not mocked here)
 
     def test_positions_empty_when_flat(self):
-        empty_positions = {
+        flat_account = {
             "retCode": 0,
             "retMsg": "OK",
-            "result": {"list": []},
+            "result": {
+                "list": [
+                    {
+                        "accountId": "12345",
+                        "accountType": "SPOT",
+                        "coin": [
+                            {
+                                "coin": "USDT",
+                                "walletBalance": "10000.00",
+                                "availableToWithdraw": "10000.00",
+                                "locked": "0.00",
+                            }
+                        ],
+                    }
+                ],
+            },
         }
         transport = MockTransport()
-        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
-        transport.add_response("GET", "/v5/position/list", empty_positions)
+        transport.add_response("GET", "/v5/account/wallet-balance", flat_account)
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": []}})
         client = _make_client(transport)
 
         client.connect()
@@ -668,7 +695,8 @@ class TestRiskLimits:
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
         transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
-        transport.add_response("GET", "/v5/position/list", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": []}})
         client = _make_client(transport, limits=PaperRiskLimits(max_order_notional=25.0))
 
         client.connect()
@@ -690,21 +718,42 @@ class TestRiskLimits:
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
         transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
-        # Return 5 existing positions
-        five_positions = {
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/market/tickers", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {"symbol": "BTCUSDT", "lastPrice": "51000"},
+                    {"symbol": "ETHUSDT", "lastPrice": "3100"},
+                    {"symbol": "SOLUSDT", "lastPrice": "105"},
+                    {"symbol": "XRPUSDT", "lastPrice": "0.55"},
+                    {"symbol": "DOGEUSDT", "lastPrice": "0.11"},
+                    {"symbol": "AVAXUSDT", "lastPrice": "20"},
+                ]
+            }
+        })
+        # Mock account with 5 non-USDT coins
+        five_coin_account = {
             "retCode": 0,
             "retMsg": "OK",
             "result": {
                 "list": [
-                    {"symbol": "BTCUSDT", "size": "0.1", "side": "Buy", "avgPrice": "50000", "markPrice": "51000", "unrealisedPnl": "100"},
-                    {"symbol": "ETHUSDT", "size": "1.0", "side": "Buy", "avgPrice": "3000", "markPrice": "3100", "unrealisedPnl": "100"},
-                    {"symbol": "SOLUSDT", "size": "10.0", "side": "Buy", "avgPrice": "100", "markPrice": "105", "unrealisedPnl": "50"},
-                    {"symbol": "XRPUSDT", "size": "1000.0", "side": "Buy", "avgPrice": "0.5", "markPrice": "0.55", "unrealisedPnl": "50"},
-                    {"symbol": "DOGEUSDT", "size": "10000.0", "side": "Buy", "avgPrice": "0.1", "markPrice": "0.11", "unrealisedPnl": "100"},
+                    {
+                        "accountId": "12345",
+                        "accountType": "SPOT",
+                        "coin": [
+                            {"coin": "USDT", "walletBalance": "10000.00", "availableToWithdraw": "9500.00", "locked": "500.00"},
+                            {"coin": "BTC", "walletBalance": "0.1", "availableToWithdraw": "0.08", "locked": "0.02"},
+                            {"coin": "ETH", "walletBalance": "1.0", "availableToWithdraw": "0.9", "locked": "0.1"},
+                            {"coin": "SOL", "walletBalance": "10.0", "availableToWithdraw": "9.0", "locked": "1.0"},
+                            {"coin": "XRP", "walletBalance": "1000.0", "availableToWithdraw": "900.0", "locked": "100.0"},
+                            {"coin": "DOGE", "walletBalance": "10000.0", "availableToWithdraw": "9000.0", "locked": "1000.0"},
+                        ],
+                    }
                 ],
             },
         }
-        transport.add_response("GET", "/v5/position/list", five_positions)
+        transport.add_response("GET", "/v5/account/wallet-balance", five_coin_account)
         client = _make_client(transport, limits=PaperRiskLimits(max_open_positions=5))
 
         client.connect()
@@ -726,7 +775,11 @@ class TestRiskLimits:
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
         transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
-        transport.add_response("GET", "/v5/position/list", MOCK_POSITIONS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/market/tickers", {
+            "retCode": 0,
+            "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}
+        })
         client = _make_client(transport)
 
         client.connect()
@@ -745,10 +798,31 @@ class TestRiskLimits:
             )
 
     def test_sell_without_positions_refused(self):
+        flat_account = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "list": [
+                    {
+                        "accountId": "12345",
+                        "accountType": "SPOT",
+                        "coin": [
+                            {
+                                "coin": "USDT",
+                                "walletBalance": "10000.00",
+                                "availableToWithdraw": "10000.00",
+                                "locked": "0.00",
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
         transport = MockTransport()
-        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/account/wallet-balance", flat_account)
         transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
-        transport.add_response("GET", "/v5/position/list", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": []}})
         client = _make_client(transport)
 
         client.connect()
@@ -769,7 +843,8 @@ class TestRiskLimits:
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
         transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
-        transport.add_response("GET", "/v5/position/list", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": []}})
         transport.add_response("POST", "/v5/order/create", MOCK_ORDER_CREATE_RESPONSE)
         client = _make_client(transport)
 
@@ -993,6 +1068,338 @@ class TestProtection:
             refresh=True,
         )
         assert order is not None
+
+    def test_create_protection_orders_success(self):
+        """Test creating SL/TP conditional orders for a position."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
+
+        # Mock SL order creation response
+        transport.add_response("POST", "/v5/order/create", {
+            "retCode": 0, "retMsg": "OK",
+            "result": {"orderId": "bybit-sl-123", "orderLinkId": "pt-test-sl"}
+        })
+        # Mock TP order creation response
+        transport.add_response("POST", "/v5/order/create", {
+            "retCode": 0, "retMsg": "OK",
+            "result": {"orderId": "bybit-tp-123", "orderLinkId": "pt-test-tp"}
+        })
+
+        client = _make_client(transport)
+        client.connect()
+
+        # Create protection orders - MOCK_ACCOUNT_RESPONSE has 0.08 available BTC
+        prot = client.create_protection_orders(
+            symbol="BTC/USDT",
+            position_quantity=0.08,  # Use available quantity
+            stop_loss_price=45000,
+            take_profit_price=55000,
+            client_order_id_prefix="pt-test",
+            allow_orders=True,
+        )
+
+        assert "stop_loss" in prot
+        assert "take_profit" in prot
+        assert prot["stop_loss"].client_order_id == "pt-test-sl"
+        assert prot["take_profit"].client_order_id == "pt-test-tp"
+        # Newly created conditional orders have status "new" or "untriggered" which maps to "accepted"
+        assert prot["stop_loss"].status in ("accepted", "unknown")
+        assert prot["take_profit"].status in ("accepted", "unknown")
+
+    def test_create_protection_orders_fails_if_no_position(self):
+        """Test that creating protection fails if no position exists."""
+        flat_account = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "list": [
+                    {
+                        "accountId": "12345",
+                        "accountType": "SPOT",
+                        "coin": [
+                            {
+                                "coin": "USDT",
+                                "walletBalance": "10000.00",
+                                "availableToWithdraw": "10000.00",
+                                "locked": "0.00",
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", flat_account)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": []}})
+        client = _make_client(transport)
+        client.connect()
+
+        with pytest.raises(PaperRiskRejected, match="no position found"):
+            client.create_protection_orders(
+                symbol="BTC/USDT",
+                position_quantity=0.1,
+                stop_loss_price=45000,
+                take_profit_price=55000,
+                client_order_id_prefix="pt-test",
+                allow_orders=True,
+            )
+
+    def test_create_protection_orders_fails_if_insufficient_available(self):
+        """Test that creating protection fails if available qty < requested."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
+        client = _make_client(transport)
+        client.connect()
+
+        # Position has 0.08 available, try to protect 0.1
+        with pytest.raises(PaperRiskRejected, match="insufficient available quantity"):
+            client.create_protection_orders(
+                symbol="BTC/USDT",
+                position_quantity=0.1,
+                stop_loss_price=45000,
+                take_profit_price=55000,
+                client_order_id_prefix="pt-test",
+                allow_orders=True,
+            )
+
+    def test_create_protection_orders_validates_tick_size(self):
+        """Test that SL/TP prices must match tickSize."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
+        client = _make_client(transport)
+        client.connect()
+
+        # BTC has tickSize 0.1, so 45000.55 is invalid
+        with pytest.raises(PaperRiskRejected, match="does not match tickSize"):
+            client.create_protection_orders(
+                symbol="BTC/USDT",
+                position_quantity=0.08,
+                stop_loss_price=45000.55,  # Invalid tick size
+                take_profit_price=55000,
+                client_order_id_prefix="pt-test",
+                allow_orders=True,
+            )
+
+    def test_create_protection_orders_validates_sl_lt_tp(self):
+        """Test that stop_loss must be < take_profit for long positions."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
+        client = _make_client(transport)
+        client.connect()
+
+        with pytest.raises(PaperRiskRejected, match="must be less than take_profit"):
+            client.create_protection_orders(
+                symbol="BTC/USDT",
+                position_quantity=0.08,
+                stop_loss_price=55000,  # SL > TP is invalid
+                take_profit_price=45000,
+                client_order_id_prefix="pt-test",
+                allow_orders=True,
+            )
+
+    def test_verify_protection_orders(self):
+        """Test verifying protection orders from /v5/order/realtime."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                        "createdTime": "1700000000000",
+                        "updatedTime": "1700000000000",
+                    },
+                ]
+            }
+        })
+        client = _make_client(transport)
+        client.connect()
+
+        verified = client.verify_protection_orders("BTC/USDT")
+
+        assert verified["stop_loss"] is not None
+        assert verified["stop_loss"].client_order_id == "pt-test-sl"
+        assert verified["stop_loss"].status == "untriggered"
+        assert verified["take_profit"] is not None
+        assert verified["take_profit"].client_order_id == "pt-test-tp"
+        assert verified["take_profit"].status == "untriggered"
+
+    def test_verify_protection_orders_missing(self):
+        """Test verifying when no protection orders exist."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {"retCode": 0, "result": {"list": []}})
+        client = _make_client(transport)
+        client.connect()
+
+        verified = client.verify_protection_orders("BTC/USDT")
+
+        assert verified["stop_loss"] is None
+        assert verified["take_profit"] is None
+
+    def test_position_is_protected_when_sl_tp_exist(self):
+        """Test that position.is_protected returns True when SL/TP are verified."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                    },
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                    },
+                ]
+            }
+        })
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
+        client = _make_client(transport)
+        client.connect()
+
+        positions = client.positions(refresh=True)
+        pos = positions["BTC/USDT"]
+
+        assert pos.is_protected is True
+        assert pos.protection_orders is not None
+        assert pos.protection_orders.get("stop_loss") is not None
+        assert pos.protection_orders.get("take_profit") is not None
+
+    def test_position_not_protected_when_missing_sl_or_tp(self):
+        """Test that position.is_protected returns False when SL or TP missing."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                    }
+                    # No TakeProfit
+                ]
+            }
+        })
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
+        client = _make_client(transport)
+        client.connect()
+
+        positions = client.positions(refresh=True)
+        pos = positions["BTC/USDT"]
+
+        assert pos.is_protected is False
+
+    def test_position_not_protected_when_orders_rejected(self):
+        """Test that position.is_protected returns False when orders are rejected."""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "orderId": "bybit-sl-123",
+                        "orderLinkId": "pt-test-sl",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Rejected",
+                        "stopOrderType": "StopLoss",
+                        "triggerPrice": "45000",
+                    },
+                    {
+                        "orderId": "bybit-tp-123",
+                        "orderLinkId": "pt-test-tp",
+                        "symbol": "BTCUSDT",
+                        "side": "Sell",
+                        "orderType": "Market",
+                        "qty": "0.1",
+                        "timeInForce": "GTC",
+                        "orderStatus": "Untriggered",
+                        "stopOrderType": "TakeProfit",
+                        "triggerPrice": "55000",
+                    },
+                ]
+            }
+        })
+        transport.add_response("GET", "/v5/market/tickers", {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "51000"}]}})
+        client = _make_client(transport)
+        client.connect()
+
+        positions = client.positions(refresh=True)
+        pos = positions["BTC/USDT"]
+
+        assert pos.is_protected is False
 
 
 # ---------------------------------------------------------------------------

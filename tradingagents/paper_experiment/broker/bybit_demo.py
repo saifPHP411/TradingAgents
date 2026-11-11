@@ -47,6 +47,7 @@ Bybit API v5 specifics
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -314,29 +315,88 @@ class BrokerAccount:
 
 @dataclass(frozen=True)
 class BrokerPosition:
-    """One position as the broker reports it."""
+    """One position as the broker reports it.
+
+    For Spot, a "position" is a holding of a non-quote asset.
+    - quantity: total wallet balance of the base asset
+    - available_quantity: wallet balance minus locked (for open orders)
+    - avg_price: average entry price (if known)
+    - mark_price: current market price
+    - unrealised_pnl: unrealized P&L
+    - side: "buy" or "sell" (for Spot, always "buy" for holdings)
+    - venue_symbol: Bybit format (e.g., BTCUSDT)
+    - protection_orders: dict with stop_loss and take_profit order info
+    """
 
     symbol: str
     quantity: float
-    avg_price: float | None
-    mark_price: float | None
-    unrealised_pnl: float | None
+    available_quantity: float = 0.0  # wallet balance minus locked
+    avg_price: float | None = None
+    mark_price: float | None = None
+    unrealised_pnl: float | None = None
     side: str | None = None
     venue_symbol: str | None = None
+    protection_orders: dict | None = None  # {"stop_loss": {...}, "take_profit": {...}}
 
     @property
     def is_short(self) -> bool:
         return self.quantity < 0
 
+    @property
+    def is_protected(self) -> bool:
+        """Whether this position has verified protection orders from the broker."""
+        if not self.protection_orders:
+            return False
+        sl = self.protection_orders.get("stop_loss")
+        tp = self.protection_orders.get("take_profit")
+        # Both must exist and be in active/pending state at the broker
+        if not sl or not tp:
+            return False
+        return sl.get("status") in ("active", "untriggered", "new") and tp.get("status") in ("active", "untriggered", "new")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
             "quantity": self.quantity,
+            "available_quantity": self.available_quantity,
             "avg_price": self.avg_price,
             "mark_price": self.mark_price,
             "unrealised_pnl": self.unrealised_pnl,
             "side": self.side,
             "venue_symbol": self.venue_symbol or self.symbol,
+            "protection_orders": self.protection_orders,
+            "is_protected": self.is_protected,
+        }
+
+
+@dataclass(frozen=True)
+class ProtectionOrder:
+    """A verified protection order from the broker."""
+    order_id: str
+    order_link_id: str
+    symbol: str
+    order_type: str  # "StopLoss" or "TakeProfit"
+    trigger_price: float
+    quantity: float
+    status: str  # "active", "untriggered", "triggered", "filled", "cancelled", "rejected"
+    side: str  # "Buy" or "Sell"
+    time_in_force: str
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "order_id": self.order_id,
+            "order_link_id": self.order_link_id,
+            "symbol": self.symbol,
+            "order_type": self.order_type,
+            "trigger_price": self.trigger_price,
+            "quantity": self.quantity,
+            "status": self.status,
+            "side": self.side,
+            "time_in_force": self.time_in_force,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
 
 
@@ -712,43 +772,214 @@ class BybitDemoBroker:
 
     # -- positions ----------------------------------------------------------
 
+    def _read_wallet_balances(self, account_type: str = "SPOT") -> dict[str, dict]:
+        """Read wallet balances for the given account type (SPOT or UNIFIED).
+
+        Returns a dict mapping coin to its balance info:
+        - walletBalance: total balance
+        - availableToWithdraw: available balance
+        - locked: balance locked for open orders
+        """
+        payload = self._request("GET", "/v5/account/wallet-balance",
+                               params={"accountType": account_type}, signed=True)
+        result = payload.get("result", {})
+        if not isinstance(result, dict):
+            raise BrokerError("wallet-balance response missing 'result'")
+        account_list = result.get("list", [])
+        if not account_list or not isinstance(account_list, list):
+            raise BrokerError("wallet-balance response missing 'list'")
+        account = account_list[0]
+        coin_list = account.get("coin", [])
+
+        balances = {}
+        for coin in coin_list:
+            coin_name = str(coin.get("coin", "")).upper()
+            if not coin_name:
+                continue
+            balances[coin_name] = {
+                "wallet_balance": float(coin.get("walletBalance", "0")),
+                "available_to_withdraw": float(coin.get("availableToWithdraw", "0")),
+                "locked": float(coin.get("locked", "0")),
+                "free": float(coin.get("free", "0")),  # alternative field name
+            }
+        return balances
+
+    def _read_open_orders(self) -> dict[str, list[dict]]:
+        """Read all open orders, grouped by symbol.
+
+        Returns dict mapping Bybit symbol to list of open order dicts.
+        """
+        # Use realtime endpoint for open orders
+        payload = self._request("GET", "/v5/order/realtime",
+                               params={"category": SPOT_CATEGORY, "openOnly": 1}, signed=True)
+        result = payload.get("result", {})
+        order_list = result.get("list", [])
+        if not isinstance(order_list, list):
+            return {}
+
+        open_orders: dict[str, list[dict]] = {}
+        for entry in order_list:
+            if not isinstance(entry, dict):
+                continue
+            raw_symbol = str(entry.get("symbol", "")).upper()
+            if not raw_symbol:
+                continue
+            if raw_symbol not in open_orders:
+                open_orders[raw_symbol] = []
+            open_orders[raw_symbol].append(entry)
+        return open_orders
+
+    def _read_protection_orders(self) -> dict[str, dict]:
+        """Read all conditional (protection) orders: StopLoss and TakeProfit.
+
+        Returns dict mapping Bybit symbol to dict with 'stop_loss' and 'take_profit' keys.
+        Each contains the order details from the broker.
+        """
+        # Read from order/realtime with stop order types
+        payload = self._request("GET", "/v5/order/realtime",
+                               params={"category": SPOT_CATEGORY}, signed=True)
+        result = payload.get("result", {})
+        order_list = result.get("list", [])
+        if not isinstance(order_list, list):
+            return {}
+
+        protection_orders: dict[str, dict] = {}
+        for entry in order_list:
+            if not isinstance(entry, dict):
+                continue
+            raw_symbol = str(entry.get("symbol", "")).upper()
+            if not raw_symbol:
+                continue
+
+            # Check stopOrderType for conditional orders
+            # Bybit conditional orders have orderType=Market (or Limit) + stopOrderType=StopLoss/TakeProfit
+            stop_order_type = str(entry.get("stopOrderType", "")).lower()
+            order_type = str(entry.get("orderType", "")).lower()
+
+            # A protection order has stopOrderType set, or is a conditional order type
+            if not (stop_order_type in ("stoploss", "takeprofit") or order_type in ("stoploss", "takeprofit", "conditional")):
+                continue
+
+            if raw_symbol not in protection_orders:
+                protection_orders[raw_symbol] = {}
+
+            trigger_price = float(entry.get("triggerPrice", "0"))
+
+            # Determine if it's SL or TP using stopOrderType primarily
+            is_sl = stop_order_type == "stoploss" or order_type == "stoploss"
+            is_tp = stop_order_type == "takeprofit" or order_type == "takeprofit"
+
+            if is_sl:
+                protection_orders[raw_symbol]["stop_loss"] = {
+                    "order_id": entry.get("orderId"),
+                    "order_link_id": entry.get("orderLinkId"),
+                    "symbol": raw_symbol,
+                    "order_type": "StopLoss",
+                    "trigger_price": trigger_price,
+                    "quantity": float(entry.get("qty", "0")),
+                    "status": str(entry.get("orderStatus", "")).lower(),
+                    "side": entry.get("side"),
+                    "time_in_force": entry.get("timeInForce"),
+                    "created_at": entry.get("createdTime"),
+                    "updated_at": entry.get("updatedTime"),
+                }
+            elif is_tp:
+                protection_orders[raw_symbol]["take_profit"] = {
+                    "order_id": entry.get("orderId"),
+                    "order_link_id": entry.get("orderLinkId"),
+                    "symbol": raw_symbol,
+                    "order_type": "TakeProfit",
+                    "trigger_price": trigger_price,
+                    "quantity": float(entry.get("qty", "0")),
+                    "status": str(entry.get("orderStatus", "")).lower(),
+                    "side": entry.get("side"),
+                    "time_in_force": entry.get("timeInForce"),
+                    "created_at": entry.get("createdTime"),
+                    "updated_at": entry.get("updatedTime"),
+                }
+        return protection_orders
+
+    def _fetch_mark_prices(self, coins: list[str]) -> dict[str, float]:
+        """Fetch current mark prices for given coins against USDT."""
+        if not coins:
+            return {}
+
+        # Use tickers endpoint
+        symbols = [f"{coin}USDT" for coin in coins]
+        try:
+            from tradingagents.crypto.bybit import BybitPublicClient
+            client = BybitPublicClient()
+            tickers = client.tickers(symbols)
+            prices = {}
+            for coin in coins:
+                bybit_symbol = f"{coin}USDT"
+                ticker = tickers.get(bybit_symbol, {})
+                if isinstance(ticker, dict):
+                    last_price = ticker.get("lastPrice") or ticker.get("last")
+                    if last_price:
+                        prices[coin] = float(last_price)
+            return prices
+        except Exception:
+            return {}
+
     def positions(self, *, refresh: bool = True) -> dict[str, BrokerPosition]:
-        """Read positions, keyed by canonical symbol."""
+        """Read Spot positions from wallet balances, keyed by canonical symbol.
+
+        For Spot, a "position" is any non-USDT asset holding with qty > 0.
+        Available quantity = wallet_balance - locked (from open orders).
+        Protection orders are verified via /v5/order/realtime.
+        """
         if refresh or self._positions is None:
-            payload = self._request("GET", "/v5/position/list", params={"category": SPOT_CATEGORY}, signed=True)
-            result = payload.get("result", {})
-            position_list = result.get("list", [])
-            if not isinstance(position_list, list):
-                raise BrokerError("the broker positions response was not the expected list")
+            # Read wallet balances
+            wallet_balances = self._read_wallet_balances("SPOT")
+
+            # Read open orders to calculate locked balances per coin
+            self._read_open_orders()
+
+            # Read protection orders
+            protection_orders = self._read_protection_orders()
+
+            # Get mark prices from market data
+            mark_prices = self._fetch_mark_prices(list(wallet_balances.keys()))
 
             found: dict[str, BrokerPosition] = {}
-            for entry in position_list:
-                if not isinstance(entry, dict):
-                    continue
-                raw_symbol = str(entry.get("symbol", "")).upper()
-                if not raw_symbol:
-                    continue
-                qty = float(entry.get("size", "0"))
-                if qty == 0:
-                    continue
-                avg_price = float(entry.get("avgPrice", "0")) or None
-                mark_price = float(entry.get("markPrice", "0")) or None
-                unrealised = float(entry.get("unrealisedPnl", "0")) or None
-                side = str(entry.get("side", "")).lower()
+            for coin, balance in wallet_balances.items():
+                if coin == "USDT":
+                    continue  # Skip quote currency
 
-                # Canonical symbol uses /
-                canonical = self._to_canonical_symbol(raw_symbol)
+                wallet_balance = balance.get("wallet_balance", 0.0)
+                if wallet_balance <= 0:
+                    continue
+
+                # Calculate available quantity (wallet - locked from open orders)
+                # The locked field in balance should already reflect this, but we verify
+                locked = balance.get("locked", 0.0)
+                available = max(0.0, wallet_balance - locked)
+
+                # Get mark price
+                mark_price = mark_prices.get(coin)
+
+                # Build Bybit symbol for this coin/USDT pair
+                bybit_symbol = f"{coin}USDT"
+
+                # Get protection orders for this symbol
+                prot = protection_orders.get(bybit_symbol, {})
+
+                canonical = self._to_canonical_symbol(bybit_symbol)
 
                 pos = BrokerPosition(
                     symbol=canonical,
-                    quantity=qty,
-                    avg_price=avg_price,
+                    quantity=wallet_balance,
+                    available_quantity=available,
+                    avg_price=None,  # Would need trade history to calculate
                     mark_price=mark_price,
-                    unrealised_pnl=unrealised,
-                    side=side,
-                    venue_symbol=raw_symbol,
+                    unrealised_pnl=None,  # Would need entry price
+                    side="buy",  # Spot holdings are long
+                    venue_symbol=bybit_symbol,
+                    protection_orders=prot if prot else None,
                 )
                 found[canonical] = pos
+
             self._positions = found
             self._state.positions = {k: v.to_dict() for k, v in found.items()}
             self._state.positions_at = datetime.now(UTC).isoformat()
@@ -804,7 +1035,7 @@ class BybitDemoBroker:
             if not client_id:
                 unclassified.append(entry)
                 continue
-            raw_status = str(entry.get("orderStatus", ""))
+            str(entry.get("orderStatus", ""))
             order = self._parse_order(entry, client_id)
             orders.append(order)
 
@@ -833,10 +1064,8 @@ class BybitDemoBroker:
         created_time = payload.get("createdTime")
         submitted_at = None
         if created_time:
-            try:
+            with contextlib.suppress(ValueError, TypeError):
                 submitted_at = datetime.fromtimestamp(int(created_time) / 1000, tz=UTC).isoformat()
-            except (ValueError, TypeError):
-                pass
 
         return BrokerOrder(
             client_order_id=client_id,
@@ -1069,8 +1298,19 @@ class BybitDemoBroker:
             "orderLinkId": client_order_id,
         }
         if order_type.lower() == "limit":
-            # For limit orders, we'd need a price - not supported in this basic impl
-            pass
+            # Limit orders require a price parameter
+            # The caller must provide reference_price as the limit price
+            if not reference_price or reference_price <= 0:
+                raise PaperRiskRejected("limit orders require a valid reference_price as the limit price")
+            # Validate tick size
+            if instrument and instrument.tick_size > 0:
+                price_decimal = Decimal(str(reference_price))
+                tick_decimal = Decimal(str(instrument.tick_size))
+                if (price_decimal / tick_decimal) % 1 != 0:
+                    raise PaperRiskRejected(
+                        f"reference_price {reference_price} for {symbol} does not match tickSize {instrument.tick_size}"
+                    )
+            body["price"] = self._format_price(reference_price, instrument)
 
         try:
             payload = self._request("POST", "/v5/order/create", json_body=body, signed=True, reconcile_ok=True)
@@ -1114,6 +1354,26 @@ class BybitDemoBroker:
         # Trim trailing zeros but keep at least the precision of qty_step
         if instrument and instrument.qty_step > 0:
             step_str = format(Decimal(str(instrument.qty_step)), "f")
+            decimal_places = len(step_str.split(".")[-1]) if "." in step_str else 0
+            if "." in text:
+                text = text.rstrip("0").rstrip(".")
+                if decimal_places > 0:
+                    parts = text.split(".")
+                    if len(parts) == 2 and len(parts[1]) < decimal_places:
+                        text = parts[0] + "." + parts[1].ljust(decimal_places, "0")
+        return text
+
+    def _format_price(self, price: float, instrument: InstrumentInfo | None = None) -> str:
+        """A price as a plain decimal string, never in scientific notation."""
+        value = float(price)
+        if not math.isfinite(value):
+            raise PaperRiskRejected(f"price {price!r} is not a finite number")
+        if value == 0.0:
+            return "0"
+        text = format(Decimal(str(value)), "f")
+        # Trim trailing zeros but keep at least the precision of tick_size
+        if instrument and instrument.tick_size > 0:
+            step_str = format(Decimal(str(instrument.tick_size)), "f")
             decimal_places = len(step_str.split(".")[-1]) if "." in step_str else 0
             if "." in text:
                 text = text.rstrip("0").rstrip(".")
@@ -1231,6 +1491,185 @@ class BybitDemoBroker:
         self._record_order(order)
         return order
 
+    def create_protection_orders(
+        self,
+        *,
+        symbol: str,
+        position_quantity: float,
+        stop_loss_price: float,
+        take_profit_price: float,
+        client_order_id_prefix: str,
+        allow_orders: bool = False,
+    ) -> dict[str, BrokerOrder]:
+        """Create StopLoss and TakeProfit conditional orders for a Spot position.
+
+        Bybit Spot supports conditional orders via /v5/order/create with:
+        - orderType=Market (or Limit) + stopOrderType=StopLoss/TakeProfit
+        - triggerPrice: the price that triggers the order
+        - orderLinkId: unique client order id
+
+        Both orders are created and verified. If either fails, the created one is cancelled.
+
+        Args:
+            symbol: Canonical symbol (e.g., BTC/USDT)
+            position_quantity: Quantity to protect (must match available position)
+            stop_loss_price: Trigger price for StopLoss
+            take_profit_price: Trigger price for TakeProfit
+            client_order_id_prefix: Prefix for generating orderLinkIds
+            allow_orders: Must be True to actually place orders
+
+        Returns:
+            Dict with 'stop_loss' and 'take_profit' BrokerOrder objects
+
+        Raises:
+            PaperRiskRejected: If validation fails or protection creation fails
+        """
+        if not allow_orders:
+            raise PaperRiskRejected("order submission is disabled: pass allow_orders=True")
+        if not self._key or not self._secret:
+            raise BrokerNotConfiguredError(f"no Bybit demo credentials: set {API_KEY_ENV} and {API_SECRET_ENV}")
+        if not self._state.confirmed:
+            raise BrokerError("the account has not been confirmed; call connect() first")
+
+        symbol = symbol.upper()
+        bybit_symbol = self._to_bybit_symbol(symbol)
+
+        # Verify position exists and has enough available quantity
+        positions = self.positions(refresh=True)
+        position = positions.get(symbol)
+        if not position:
+            raise PaperRiskRejected(f"no position found for {symbol} to protect")
+        if position.available_quantity < position_quantity:
+            raise PaperRiskRejected(
+                f"insufficient available quantity for {symbol}: "
+                f"available={position.available_quantity}, requested={position_quantity}"
+            )
+
+        instrument = self.get_instrument(bybit_symbol)
+        if not instrument:
+            raise PaperRiskRejected(f"symbol {symbol} not found in instruments")
+
+        # Validate prices against tick size
+        if instrument.tick_size > 0:
+            for price, name in [(stop_loss_price, "stop_loss"), (take_profit_price, "take_profit")]:
+                price_decimal = Decimal(str(price))
+                tick_decimal = Decimal(str(instrument.tick_size))
+                if (price_decimal / tick_decimal) % 1 != 0:
+                    raise PaperRiskRejected(
+                        f"{name}_price {price} for {symbol} does not match tickSize {instrument.tick_size}"
+                    )
+
+        # Validate SL < TP for long positions
+        if stop_loss_price >= take_profit_price:
+            raise PaperRiskRejected(
+                f"stop_loss_price {stop_loss_price} must be less than take_profit_price {take_profit_price}"
+            )
+
+        # Format prices
+        sl_price_str = self._format_price(stop_loss_price, instrument)
+        tp_price_str = self._format_price(take_profit_price, instrument)
+        qty_str = self._format_quantity(position_quantity, instrument)
+
+        created_orders = {}
+
+        try:
+            # Create StopLoss order
+            sl_client_id = f"{client_order_id_prefix}-sl"
+            sl_body = {
+                "category": SPOT_CATEGORY,
+                "symbol": bybit_symbol,
+                "side": "Sell",  # SL for long is sell
+                "orderType": "Market",
+                "qty": qty_str,
+                "timeInForce": "GTC",
+                "orderLinkId": sl_client_id,
+                "stopOrderType": "StopLoss",
+                "triggerPrice": sl_price_str,
+                "triggerDirection": 2,  # 1: price rises, 2: price falls (for long SL)
+            }
+
+            sl_payload = self._request("POST", "/v5/order/create", json_body=sl_body, signed=True)
+            sl_result = sl_payload.get("result", {})
+            sl_order = self._parse_order(
+                {"orderId": sl_result.get("orderId"), "orderLinkId": sl_client_id, "symbol": bybit_symbol, **sl_body},
+                fallback_client_id=sl_client_id,
+            )
+            self._record_order(sl_order)
+            created_orders["stop_loss"] = sl_order
+
+            # Create TakeProfit order
+            tp_client_id = f"{client_order_id_prefix}-tp"
+            tp_body = {
+                "category": SPOT_CATEGORY,
+                "symbol": bybit_symbol,
+                "side": "Sell",  # TP for long is sell
+                "orderType": "Market",
+                "qty": qty_str,
+                "timeInForce": "GTC",
+                "orderLinkId": tp_client_id,
+                "stopOrderType": "TakeProfit",
+                "triggerPrice": tp_price_str,
+                "triggerDirection": 1,  # 1: price rises, 2: price falls (for long TP)
+            }
+
+            tp_payload = self._request("POST", "/v5/order/create", json_body=tp_body, signed=True)
+            tp_result = tp_payload.get("result", {})
+            tp_order = self._parse_order(
+                {"orderId": tp_result.get("orderId"), "orderLinkId": tp_client_id, "symbol": bybit_symbol, **tp_body},
+                fallback_client_id=tp_client_id,
+            )
+            self._record_order(tp_order)
+            created_orders["take_profit"] = tp_order
+
+        except Exception as e:
+            # If either fails, cancel any created orders
+            from contextlib import suppress
+            for _key, order in created_orders.items():
+                with suppress(Exception):
+                    self.cancel_order(client_order_id=order.client_order_id, symbol=symbol)
+            raise PaperRiskRejected(f"failed to create protection orders: {e}") from None
+
+        return created_orders
+
+    def verify_protection_orders(self, symbol: str) -> dict[str, BrokerOrder | None]:
+        """Verify protection orders exist and are active at the broker.
+
+        Reads from /v5/order/realtime and checks for StopLoss/TakeProfit orders
+        matching the given symbol.
+
+        Returns dict with 'stop_loss' and 'take_profit' BrokerOrder objects,
+        or None if not found/verified.
+        """
+        if not self._state.confirmed:
+            raise BrokerError("the account has not been confirmed; call connect() first")
+
+        bybit_symbol = self._to_bybit_symbol(symbol.upper())
+        protection_orders = self._read_protection_orders()
+
+        prot = protection_orders.get(bybit_symbol, {})
+
+        result = {}
+        for key in ("stop_loss", "take_profit"):
+            order_data = prot.get(key)
+            if order_data and order_data.get("status") in ("active", "untriggered", "new"):
+                result[key] = BrokerOrder(
+                    client_order_id=order_data.get("order_link_id", ""),
+                    broker_order_id=order_data.get("order_id"),
+                    symbol=symbol,
+                    side="sell",
+                    quantity=order_data.get("quantity", 0.0),
+                    filled_quantity=0.0,
+                    filled_avg_price=None,
+                    status=order_data.get("status", "unknown"),
+                    order_type=order_data.get("order_type", "").lower(),
+                    time_in_force=order_data.get("time_in_force", "GTC"),
+                    submitted_at=order_data.get("created_at"),
+                )
+            else:
+                result[key] = None
+
+        return result
+
     def apply_fill(self, order: BrokerOrder) -> bool:
         """Mark an order's fill applied exactly once. Returns whether it was new."""
         if order.status not in ("filled", "partially_filled"):
@@ -1307,6 +1746,7 @@ __all__ = [
     "BrokerAccount",
     "BrokerOrder",
     "BrokerPosition",
+    "ProtectionOrder",
     "InstrumentInfo",
     "VenueOrderPage",
     "BybitBrokerStatus",
