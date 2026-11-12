@@ -731,6 +731,44 @@ class TestExecutionProviderStateIsolation:
         assert status["positions"] == {}
         assert status["orders"] == {}
 
+    def test_bybit_strategy_evaluations_do_not_read_legacy_alpaca_source_state(
+        self, tmp_path
+    ):
+        root = _experiment_root(tmp_path)
+        # This file belongs to the pre-existing Alpaca worker.
+        (root / "crypto_source_state.json").write_text(
+            '{"records": {"BTC/USDT": {"stage": "ALPACA_OLD", "side": "buy"}}}',
+            encoding="utf-8",
+        )
+        controller = _controller(
+            root,
+            execution_provider=EXECUTION_PROVIDER_BYBIT_DEMO,
+            decision_source_kind="crypto",
+        )
+        assert controller.strategy_evaluations() == {}
+
+    def test_bybit_strategy_evaluations_read_only_bybit_source_state(self, tmp_path):
+        root = _experiment_root(tmp_path)
+        bybit_source = root / "execution_state" / "bybit_demo" / "crypto_source_state.json"
+        bybit_source.parent.mkdir(parents=True, exist_ok=True)
+        bybit_source.write_text(
+            '{"records": {"BTC/USDT": {"stage": "BYBIT_READY", "side": "buy"}}}',
+            encoding="utf-8",
+        )
+        (root / "crypto_source_state.json").write_text(
+            '{"records": {"ETH/USDT": {"stage": "ALPACA_OLD", "side": "buy"}}}',
+            encoding="utf-8",
+        )
+        controller = _controller(
+            root,
+            execution_provider=EXECUTION_PROVIDER_BYBIT_DEMO,
+            decision_source_kind="crypto",
+        )
+        rows = controller.strategy_evaluations()
+        assert "BTC/USDT" in rows
+        assert "ETH/USDT" not in rows
+        assert rows["BTC/USDT"]["stage"] == "BYBIT_READY"
+
     @pytest.mark.parametrize(
         ("decision_source", "filename"),
         [
