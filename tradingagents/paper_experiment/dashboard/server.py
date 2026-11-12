@@ -1538,6 +1538,10 @@ INDEX_HTML = """<!doctype html>
         <div id="ord-body"></div>
       </div>
       <div class="card" style="margin-top:12px">
+        <h2>Filled executions <span class="spacer"></span><span class="tag" id="exec-note"></span></h2>
+        <div id="exec-body"></div>
+      </div>
+      <div class="card" style="margin-top:12px">
         <h2>Settled trades <span class="spacer"></span><span class="tag" id="trade-note"></span></h2>
         <div id="trade-body"></div>
       </div>
@@ -2047,6 +2051,20 @@ async function refreshTrades(){
         <td><span class="pill s-${esc(o.status||"")}">${esc(o.status||"—")}</span></td>
       </tr>`).join("")}</tbody></table></div>`
       : empty("No orders submitted by the worker.");
+
+    const executions = t.executions || [];
+    $("exec-note").textContent = (t.filled_executions ?? executions.length) + " fills";
+    $("exec-body").innerHTML = executions.length ? `<div class="tablewrap"><table>
+      <thead><tr><th>Order time</th><th>Symbol</th><th>Side</th><th class="num">Filled qty</th>
+        <th class="num">Average fill</th><th>Order status</th><th>Broker order</th></tr></thead><tbody>${executions.map(x=>`<tr>
+        <td class="mono">${esc(x.order_timestamp||"—")}</td>
+        <td><b>${esc(x.symbol)}</b></td><td>${esc(x.side)}</td>
+        <td class="num">${num(x.filled_quantity,6)}</td>
+        <td class="num">${money(x.average_fill_price)}</td>
+        <td><span class="pill s-${esc(x.order_status||"")}">${esc(x.order_status||"—")}</span></td>
+        <td class="mono">${esc(x.broker_order_id||x.client_order_id||"—")}</td>
+      </tr>`).join("")}</tbody></table></div>`
+      : empty("No filled executions yet. Submitted or accepted orders are not fills.");
 
     const trades = t.trades || [];
     $("trade-note").textContent = t.settled_trades + " settled";
