@@ -755,11 +755,15 @@ class TestOrders:
         transport.add_response("GET", "/v5/market/instruments-info", instruments)
         transport.add_response("GET", "/v5/position/list", {"retCode": 0, "result": {"list": []}})
         transport.add_response("POST", "/v5/order/create", MOCK_ORDER_CREATE_RESPONSE)
-        transport.add_response("GET", "/v5/order/realtime", MOCK_ORDER_REALTIME_RESPONSE)
+        realtime = json.loads(json.dumps(MOCK_ORDER_REALTIME_RESPONSE))
+        realtime["result"]["list"][0]["orderLinkId"] = "pt-qty-step-test"
+        realtime["result"]["list"][0]["qty"] = "9.70"
+        realtime["result"]["list"][0]["cumExecQty"] = "9.70"
+        transport.add_response("GET", "/v5/order/realtime", realtime)
         client = _make_client(transport)
 
         client.connect()
-        client.submit_order(
+        order = client.submit_order(
             symbol="BTC/USDT",
             quantity=9.700261,
             side="buy",
@@ -769,6 +773,7 @@ class TestOrders:
             refresh=True,
             crypto=True,
         )
+        assert order.quantity == 9.70
 
         create_call = next(
             call for call in transport.calls
