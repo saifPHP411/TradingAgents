@@ -734,6 +734,7 @@ class TestOrders:
             order_type="Market",
             allow_orders=True,
             refresh=True,
+            crypto=True,
         )
 
         assert order.client_order_id == "pt-test-client-id"
@@ -742,6 +743,21 @@ class TestOrders:
         assert order.quantity == 0.001  # Broker reports actual executed qty
         assert order.filled_quantity == 0.001
         assert order.status == "filled"
+
+    def test_submit_order_refuses_non_crypto_orders(self):
+        transport = MockTransport()
+        client = _make_client(transport)
+
+        with pytest.raises(PaperRiskRejected, match="crypto spot orders only"):
+            client.submit_order(
+                symbol="BTC/USDT",
+                quantity=0.001,
+                side="buy",
+                reference_price=50000,
+                client_order_id="pt-test-client-id",
+                allow_orders=True,
+                crypto=False,
+            )
 
     def test_submit_order_refused_without_allow_orders(self):
         transport = MockTransport()
