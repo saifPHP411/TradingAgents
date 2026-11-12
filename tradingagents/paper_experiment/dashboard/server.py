@@ -52,6 +52,9 @@ from ..broker import (
     PROVIDER_BAR_OPEN,
     BrokerError,
     BrokerNotConfiguredError,
+    BybitDemoBroker,
+    BybitBrokerNotConfiguredError,
+    EXECUTION_PROVIDER_BYBIT_DEMO,
 )
 from ..crypto_symbol_config import (
     DEFAULT_MARKET_DATA_SYMBOLS,
@@ -500,6 +503,60 @@ def make_handler(dashboard: Dashboard):
                     )
                 elif path == "/api/paper/status":
                     self._send_json(200, dashboard.paper.status())
+                elif path == "/api/paper/account-check":
+                    if dashboard.paper.execution_provider != EXECUTION_PROVIDER_BYBIT_DEMO:
+                        self._send_json(409, {
+                            "ok": False,
+                            "error": "wrong_execution_provider",
+                            "message": "This read-only check is available only when Bybit Demo is selected.",
+                        })
+                        return
+                    try:
+                        # A fresh, stateless broker instance: connect() performs only
+                        # GET /v5/account/wallet-balance. No worker, order, or state
+                        # store is constructed or started by this diagnostic route.
+                        account = BybitDemoBroker().connect()
+                        self._send_json(200, {
+                            "ok": True,
+                            "provider": EXECUTION_PROVIDER_BYBIT_DEMO,
+                            "endpoint": "https://api-demo.bybit.com",
+                            "account": {
+                                "account_type": account.account_type,
+                                "currency": account.currency,
+                                "equity": account.equity,
+                                "available_balance": account.available_balance,
+                            },
+                        })
+                    except BybitBrokerNotConfiguredError:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "credentials_not_configured",
+                            "message": "Bybit Demo API credentials are not configured.",
+                        })
+                    except Exception as exc:  # noqa: BLE001 - return secret-free diagnosis
+                        import re
+                        message = str(exc)
+                        match = re.search(r"retCode (\\d+)", message)
+                        code = int(match.group(1)) if match else None
+                        diagnosis = "broker_or_transport_error"
+                        if code == 10004:
+                            diagnosis = "signature_error"
+                        elif code == 10005:
+                            diagnosis = "api_key_permission_denied"
+                        elif code == 10003:
+                            diagnosis = "api_key_invalid_or_wrong_environment"
+                        elif code == 10010:
+                            diagnosis = "ip_restriction"
+                        elif code == 10002:
+                            diagnosis = "timestamp_or_recv_window"
+                        elif "HTTP 401" in message or "HTTP 403" in message:
+                            diagnosis = "http_authentication_or_permission_rejected"
+                        self._send_json(502, {
+                            "ok": False,
+                            "error": diagnosis,
+                            "bybit_ret_code": code,
+                            "error_type": type(exc).__name__,
+                        })
                 elif path == "/api/engine":
                     self._send_json(200, dashboard.engine())
                 elif path == "/api/positions":
