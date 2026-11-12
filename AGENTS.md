@@ -792,6 +792,71 @@ is current: the age comes from the venue's own timestamp, and a missing or
 future timestamp is refused (fail-closed), so a stale observation is never
 stored at all.
 
+
+## The fill's identity is its quantity, not its order id
+
+An order that trades 0.4 and then trades 0.2 more carries the **same**
+client order id. So "have I applied this fill?" cannot be answered with the
+id alone: the second report is a **new quantity**, and keying on the id
+dropped it on the floor. The system believed it had sold 0.4 when the venue
+had sold 0.6.
+
+Two pieces of state, with different jobs:
+
+- `applied_fill_quantities` — the cumulative quantity already applied. A
+  report is new only when it carries **more** than what was applied before.
+- `applied_execution_ids` — the venue's per-trade execution ids. An
+  execution id names **one trade**, so it is the finest unit of
+  exactly-once accounting: the same trade is never counted twice, however
+  many times the list is read back.
+
+The tolerance on the comparison is `_FILL_EPSILON`: the venue reports
+quantities as decimal strings, so the same fill can come back with a
+different binary representation.
+
+**The worker has to tell the broker.** `apply_fill` is the broker's seam,
+and the worker only calls it where the venue's answer arrives —
+`reconcile_orders`. A broker that owns protection orders has work to do
+when one of them trades (cancel the counterpart, protect the residual), and
+that work is triggered by being told. A worker that records the order but
+never calls `apply_fill` leaves the broker permanently unaware.
+
+**A sell is sized against the venue's balance, not a cache.** The cached
+position set goes stale the moment anything trades: after a partial fill
+the cache still says 0.1 while the venue holds 0.06. A sell sized against
+the cache sells more than the account holds. An **unreadable** balance is
+not a zero balance and not permission to sell — it refuses.
+
+**The residual comes from the venue, not from arithmetic.** The executed
+quantity comes from `/v5/execution/list` (the per-trade record), and the
+residual is the **balance the venue holds now**. The residual is *not*
+`position_qty - executed`: the venue is the authority on what is held, and
+the two can disagree if anything else traded in between.
+
+## A protection replacement needs a confirmed cancel, not a sent cancel
+
+A protection leg that trades partly leaves the **rest** of the position with
+no guard: cancelling the counterpart removes a duplicate sell, it does not
+protect what is left. The counterpart has to be cancelled **and confirmed
+finished** before a replacement pair is created — otherwise two live sells
+face the same quantity, and the second to trigger sells more than the
+account holds.
+
+So the cancellation has an explicit outcome, not a boolean:
+
+- `confirmed_terminal` — the venue stated the counterpart is finished. The
+  residual is protected afresh.
+- `still_active` — the venue still shows it working. No replacement; the
+  position is reported unprotected.
+- `unknown` — its fate could not be established. No replacement; the
+  position is reported unprotected.
+
+In the last two cases the entry gate closes, because the system cannot say
+what the account would do. The outcome is recorded in
+`state.protection_cancel_outcomes`, so a restart knows **why** a position is
+unprotected.
+
+
 ## A stored order is a submit-time snapshot, not the venue's answer
 
 `state.orders` records what the order looked like **when it was sent**. The
