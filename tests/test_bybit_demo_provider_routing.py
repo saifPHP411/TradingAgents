@@ -47,6 +47,7 @@ from tradingagents.paper_experiment.dashboard.paper_control import (
 )
 from tradingagents.paper_experiment.inference import StubInference
 from tradingagents.paper_experiment.sources import StaticPriceSource
+from tradingagents.paper_experiment.broker.trading import WorkerState, WorkerStateStore
 
 SYMBOL = "SPY"
 NOW = pd.Timestamp("2024-01-01", tz="UTC")
@@ -632,3 +633,126 @@ class TestTheProviderLabels:
         for provider in (EXECUTION_PROVIDER_ALPACA_PAPER, EXECUTION_PROVIDER_BYBIT_DEMO):
             assert "NOT LIVE" in banner_for_provider(provider)
             assert mode_for_provider(provider) not in ("LIVE", "BYBIT_LIVE")
+
+
+
+# ---------------------------------------------------------------------------
+# Provider-scoped durable state: Alpaca and Bybit must never share a state file
+# ---------------------------------------------------------------------------
+
+
+class TestExecutionProviderStateIsolation:
+    def test_bybit_uses_a_separate_worker_state_namespace(self, tmp_path):
+        controller = _controller(
+            _experiment_root(tmp_path), execution_provider=EXECUTION_PROVIDER_BYBIT_DEMO
+        )
+        assert controller._worker_state_path() == (
+            controller.root / "execution_state" / "bybit_demo" / "worker_state.json"
+        )
+        assert controller._worker_state_path() != controller.root / "worker_state.json"
+
+    def test_alpaca_keeps_its_existing_worker_state_path(self, tmp_path):
+        controller = _controller(_experiment_root(tmp_path))
+        assert controller._worker_state_path() == controller.root / "worker_state.json"
+
+    def test_bybit_status_never_reads_legacy_alpaca_account_positions_or_orders(
+        self, tmp_path
+    ):
+        root = _experiment_root(tmp_path)
+        # Simulate the existing Railway Volume's Alpaca state.
+        alpaca_state = WorkerState(
+            strategy_id="legacy-alpaca",
+            account={"cash": "10.39", "equity": "50.20"},
+            positions={"BTC/USD": {"quantity": "0.0005", "side": "long"}},
+            orders={"alpaca-old-order": {"status": "filled"}},
+        )
+        WorkerStateStore(root / "worker_state.json").save(alpaca_state)
+
+        controller = _controller(root, execution_provider=EXECUTION_PROVIDER_BYBIT_DEMO)
+        status = controller.status()
+
+        assert status["execution_provider"] == EXECUTION_PROVIDER_BYBIT_DEMO
+        assert status["account"] == {}
+        assert status["positions"] == {}
+        assert status["orders"] == {}
+        assert status["strategy_id"] != "legacy-alpaca"
+        assert not controller._worker_state_path().exists()
+
+    def test_bybit_state_is_read_from_its_own_namespace(self, tmp_path):
+        root = _experiment_root(tmp_path)
+        bybit_state_path = (
+            root / "execution_state" / "bybit_demo" / "worker_state.json"
+        )
+        bybit_state = WorkerState(
+            strategy_id="bybit-demo",
+            account={"cash": "1000", "equity": "1000"},
+            positions={"BTC/USDT": {"quantity": "0.001", "side": "long"}},
+            orders={"bybit-demo-order": {"status": "filled"}},
+        )
+        WorkerStateStore(bybit_state_path).save(bybit_state)
+
+        # A conflicting legacy Alpaca state must not override the Bybit state.
+        WorkerStateStore(root / "worker_state.json").save(
+            WorkerState(
+                strategy_id="legacy-alpaca",
+                account={"cash": "1"},
+                positions={"BTC/USD": {"quantity": "9", "side": "long"}},
+                orders={"alpaca-order": {"status": "filled"}},
+            )
+        )
+
+        controller = _controller(root, execution_provider=EXECUTION_PROVIDER_BYBIT_DEMO)
+        status = controller.status()
+
+        assert status["account"]["cash"] == "1000"
+        assert "BTC/USDT" in status["positions"]
+        assert "BTC/USD" not in status["positions"]
+        assert "bybit-demo-order" in status["orders"]
+        assert "alpaca-order" not in status["orders"]
+
+    def test_alpaca_status_never_reads_bybit_state(self, tmp_path):
+        root = _experiment_root(tmp_path)
+        WorkerStateStore(
+            root / "execution_state" / "bybit_demo" / "worker_state.json"
+        ).save(
+            WorkerState(
+                strategy_id="bybit-demo",
+                account={"cash": "1000"},
+                positions={"BTC/USDT": {"quantity": "0.001", "side": "long"}},
+                orders={"bybit-order": {"status": "filled"}},
+            )
+        )
+
+        controller = _controller(root)
+        status = controller.status()
+
+        assert status["execution_provider"] == EXECUTION_PROVIDER_ALPACA_PAPER
+        assert status["account"] == {}
+        assert status["positions"] == {}
+        assert status["orders"] == {}
+
+    @pytest.mark.parametrize(
+        ("decision_source", "filename"),
+        [
+            (DECISION_SOURCE_CRYPTO, "crypto_source_state.json"),
+            (DECISION_SOURCE_TJR, "tjr_source_state.json"),
+            (DECISION_SOURCE_CURRENT_MARKET, "current_source_state.json"),
+            (DECISION_SOURCE_HISTORY, "session_state.json"),
+        ],
+    )
+    def test_source_memory_is_also_provider_scoped(
+        self, tmp_path, decision_source, filename
+    ):
+        root = _experiment_root(tmp_path)
+        bybit = _controller(
+            root,
+            execution_provider=EXECUTION_PROVIDER_BYBIT_DEMO,
+            decision_source_kind=decision_source,
+        )
+        alpaca = _controller(root, decision_source_kind=decision_source)
+
+        assert bybit._source_state_path(filename) == (
+            root / "execution_state" / "bybit_demo" / filename
+        )
+        assert alpaca._source_state_path(filename) == root / filename
+        assert bybit._source_state_path(filename) != alpaca._source_state_path(filename)
