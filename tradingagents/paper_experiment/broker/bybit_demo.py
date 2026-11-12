@@ -1215,17 +1215,23 @@ class BybitDemoBroker:
             lot_filter = entry.get("lotSizeFilter", {})
             price_filter = entry.get("priceFilter", {})
 
-            min_order_qty = float(lot_filter.get("minOrderQty", "0"))
-            max_order_qty = float(lot_filter.get("maxOrderQty", "0"))
+            # Exchange metadata may contain blank deprecated fields. Parse every
+            # numeric field defensively; missing required rules must make the pair
+            # non-tradable rather than crashing startup or silently disabling a guard.
+            min_order_qty = _as_float(lot_filter.get("minOrderQty"))
+            max_order_qty = _as_float(lot_filter.get("maxOrderQty"))
             qty_step = _spot_qty_step(lot_filter)
-            min_order_amt = float(lot_filter.get("minOrderAmt", "0"))
-            tick_size = float(price_filter.get("tickSize", "0"))
+            min_order_amt = _as_float(lot_filter.get("minOrderAmt"))
+            tick_size = _as_float(price_filter.get("tickSize"))
             # ``minOrderQty`` and ``maxOrderQty`` are **deprecated** for Spot:
             # the venue documents that it no longer checks them and checks
             # ``minOrderAmt`` instead. They are read and kept for the audit
             # record, but the bound that is enforced is ``minOrderAmt``.
 
-            tradable = status == "Trading"
+            # A status of Trading is not enough if the venue omitted the
+            # quantity increment or minimum notional: never send an order with
+            # unknown sizing rules. Tick size is checked separately for limit orders.
+            tradable = status == "Trading" and qty_step > 0 and min_order_amt > 0
             info = InstrumentInfo(
                 symbol=symbol,
                 status=status,
@@ -2051,7 +2057,10 @@ class BybitDemoBroker:
         if instrument is None:
             raise PaperRiskRejected(f"symbol {symbol} not found in Bybit instruments")
         if not instrument.tradable:
-            raise PaperRiskRejected(f"symbol {symbol} is not tradable on Bybit demo (status: {instrument.status})")
+            raise PaperRiskRejected(
+                f"symbol {symbol} is not tradable on Bybit demo or its required "
+                f"quantity/minimum-notional rules are unavailable (status: {instrument.status})"
+            )
 
         if refresh:
             self.refresh_account()
@@ -2132,6 +2141,10 @@ class BybitDemoBroker:
             # request says IOC rather than a time in force the venue ignores.
             body["timeInForce"] = "IOC"
         if order_type.lower() == "limit":
+            if instrument.tick_size <= 0:
+                raise PaperRiskRejected(
+                    f"Bybit did not provide a valid tickSize for limit order {symbol}"
+                )
             # Limit orders require a price parameter
             # The caller must provide reference_price as the limit price
             if not reference_price or reference_price <= 0:
