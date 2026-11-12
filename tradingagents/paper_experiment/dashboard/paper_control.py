@@ -261,6 +261,14 @@ class PaperTradingController:
         # explicit opt-in. It is recorded here so a read-only status view can
         # name the configured provider without building a worker.
         self.execution_provider = execution_provider
+        # Broker-owned durable state must never be shared across execution venues.
+        # Keep Alpaca's historical paths unchanged, but put Bybit Demo state in
+        # its own namespace so an existing Railway Volume cannot make old Alpaca
+        # orders, positions, fills, account snapshots or protections look like
+        # Bybit state (or vice versa).
+        #
+        # The experiment directory itself remains shared: it contains strategy
+        # inputs/decisions, not broker account or execution state.
         # The resolved symbol configuration, once the worker has been built. It
         # records which symbols were accepted on both venues and which were
         # rejected, so a status view can report both without re-reading the
@@ -284,6 +292,27 @@ class PaperTradingController:
         }
         self._worker: PaperTradingWorker | None = None
         self._lock = threading.Lock()
+
+    # -- provider-scoped durable state ----------------------------------
+
+    @property
+    def _provider_state_root(self) -> Path:
+        """Directory for state owned by the selected execution venue.
+
+        Alpaca retains the original root-level paths for backward compatibility.
+        Bybit Demo gets a fresh namespace; no Alpaca state is copied or migrated.
+        """
+        if self.execution_provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+            return self.root / "execution_state" / "bybit_demo"
+        return self.root
+
+    def _worker_state_path(self) -> Path:
+        """The selected venue's durable broker/worker state file."""
+        return self._provider_state_root / "worker_state.json"
+
+    def _source_state_path(self, filename: str) -> Path:
+        """Decision-source memory scoped to the selected execution venue."""
+        return self._provider_state_root / filename
 
     # -- worker construction ---------------------------------------------
 
@@ -317,7 +346,7 @@ class PaperTradingController:
             strategy_id=experiment.config.strategy_id,
             order_notional=self.order_notional,
             whole_shares=self.whole_shares,
-            state_path=self.root / "worker_state.json",
+            state_path=self._worker_state_path(),
             market_data_provider=self.market_data_provider,
             market_data_max_age_seconds=self.market_data_max_age_seconds,
             decision_source=self.decision_source_kind,
@@ -477,7 +506,7 @@ class PaperTradingController:
             strategy_id=experiment.config.strategy_id,
             order_notional=self.order_notional,
             whole_shares=self.whole_shares,
-            state_path=self.root / "worker_state.json",
+            state_path=self._worker_state_path(),
             market_data_provider=self.market_data_provider,
             market_data_max_age_seconds=self.market_data_max_age_seconds,
             decision_source=self.decision_source_kind,
@@ -583,7 +612,7 @@ class PaperTradingController:
             "order_notional": self.order_notional,
             "strategy_name": experiment.config.strategy_id,
             "is_consumed": lambda decision_id: holder["worker"].has_order_for(decision_id),
-            "state_path": self.root / "current_source_state.json",
+            "state_path": self._source_state_path("current_source_state.json"),
         }
         if self._current_source_factory is not None:
             return self._current_source_factory(**kwargs)
@@ -635,7 +664,7 @@ class PaperTradingController:
             "book_provider": _book,
             "price_provider": _price,
             "is_consumed": lambda decision_id: holder["worker"].has_order_for(decision_id),
-            "state_path": self.root / "tjr_source_state.json",
+            "state_path": self._source_state_path("tjr_source_state.json"),
         }
         if self._tjr_source_factory is not None:
             return self._tjr_source_factory(**kwargs)
@@ -730,7 +759,7 @@ class PaperTradingController:
             "price_provider": _price,
             "execution_price_provider": _execution_price,
             "is_consumed": lambda decision_id: holder["worker"].has_order_for(decision_id),
-            "state_path": self.root / "crypto_source_state.json",
+            "state_path": self._source_state_path("crypto_source_state.json"),
             # The same settings the crypto backtest measured. Without this the
             # live path would use the equity 15:30 ET entry cut and stop taking
             # entries eight hours before the session ends, so the backtest's
@@ -895,7 +924,7 @@ class PaperTradingController:
         except Exception as exc:  # noqa: BLE001 - a build failure is reported
             base.update({"status": "ERROR", "last_error": f"{type(exc).__name__}: {exc}"})
             return base
-        state = WorkerStateStore(self.root / "worker_state.json").load()
+        state = WorkerStateStore(self._worker_state_path()).load()
         # Nothing is running (no worker object exists), so the persisted state is
         # reported as STOPPED, never as a stale RUNNING from a previous process.
         state.status = STATUS_STOPPED
