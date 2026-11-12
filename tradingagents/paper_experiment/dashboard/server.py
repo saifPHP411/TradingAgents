@@ -536,7 +536,7 @@ def make_handler(dashboard: Dashboard):
                     except Exception as exc:  # noqa: BLE001 - return secret-free diagnosis
                         import re
                         message = str(exc)
-                        match = re.search(r"retCode (\\d+)", message)
+                        match = re.search(r"retCode (\d+)", message)
                         code = int(match.group(1)) if match else None
                         diagnosis = "broker_or_transport_error"
                         if code == 10004:
