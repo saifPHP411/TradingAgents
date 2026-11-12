@@ -95,3 +95,65 @@ def test_execution_is_not_mislabeled_as_a_settled_trade():
     assert result["executions"][0]["average_fill_price"] == 650
     assert result["trades"] == []
     assert result["settled_trades"] == 0
+
+
+
+def test_bybit_spot_position_uses_mark_price_and_worker_fill_cost_basis():
+    from tradingagents.paper_experiment.dashboard.engine_view import positions_view
+
+    status = {
+        "positions": {
+            "BNB/USDT": {
+                "symbol": "BNB/USDT",
+                "quantity": 0.0153,
+                "avg_price": None,
+                "mark_price": 660.0,
+                "unrealised_pnl": None,
+            }
+        },
+        "orders": {
+            "entry": {
+                "symbol": "BNB/USDT",
+                "side": "buy",
+                "filled_quantity": 0.0153,
+                "filled_avg_price": 652.57,
+            }
+        },
+    }
+
+    row = positions_view(status)[0]
+
+    assert row["entry_price"] == 652.57
+    assert row["current_price"] == 660.0
+    assert row["market_value"] == 0.0153 * 660.0
+    assert row["unrealized_pnl"] == (0.0153 * 660.0) - (0.0153 * 652.57)
+
+
+def test_bybit_spot_position_does_not_guess_cost_basis_from_partial_order_history():
+    from tradingagents.paper_experiment.dashboard.engine_view import positions_view
+
+    status = {
+        "positions": {
+            "BNB/USDT": {
+                "quantity": 0.02,
+                "avg_price": None,
+                "mark_price": 660.0,
+                "unrealised_pnl": None,
+            }
+        },
+        "orders": {
+            "entry": {
+                "symbol": "BNB/USDT",
+                "side": "buy",
+                "filled_quantity": 0.01,
+                "filled_avg_price": 652.57,
+            }
+        },
+    }
+
+    row = positions_view(status)[0]
+
+    assert row["entry_price"] is None
+    assert row["current_price"] == 660.0
+    assert row["market_value"] == 13.2
+    assert row["unrealized_pnl"] is None
