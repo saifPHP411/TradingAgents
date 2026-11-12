@@ -734,10 +734,10 @@ class TestExecutionProviderStateIsolation:
     @pytest.mark.parametrize(
         ("decision_source", "filename"),
         [
-            (DECISION_SOURCE_CRYPTO, "crypto_source_state.json"),
-            (DECISION_SOURCE_TJR, "tjr_source_state.json"),
-            (DECISION_SOURCE_CURRENT_MARKET, "current_source_state.json"),
-            (DECISION_SOURCE_HISTORY, "session_state.json"),
+            ("crypto", "crypto_source_state.json"),
+            ("tjr", "tjr_source_state.json"),
+            ("current_market", "current_source_state.json"),
+            ("history", "session_state.json"),
         ],
     )
     def test_source_memory_is_also_provider_scoped(
