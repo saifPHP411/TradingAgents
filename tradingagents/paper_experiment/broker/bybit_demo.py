@@ -2077,16 +2077,8 @@ class BybitDemoBroker:
                 f"quantity {quantity} for {symbol} is below the minimum usable qtyStep "
                 f"{format(step_decimal, 'f')}"
             )
-        if normalized_quantity < Decimal(str(instrument.min_order_qty)):
-            raise PaperRiskRejected(
-                f"quantity {format(normalized_quantity, 'f')} for {symbol} is below "
-                f"Bybit minOrderQty {instrument.min_order_qty}"
-            )
-        if instrument.max_order_qty > 0 and normalized_quantity > Decimal(str(instrument.max_order_qty)):
-            raise PaperRiskRejected(
-                f"quantity {format(normalized_quantity, 'f')} for {symbol} exceeds "
-                f"Bybit maxOrderQty {instrument.max_order_qty}"
-            )
+        # Bybit Spot documents minOrderQty/maxOrderQty as deprecated; minOrderAmt
+        # is the venue-enforced lower bound, while project risk caps bound the upper.
         quantity = float(normalized_quantity)
 
         notional = self._check_risk(
