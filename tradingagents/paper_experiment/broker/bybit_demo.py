@@ -59,7 +59,7 @@ import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import Any
 from urllib.parse import quote
 
@@ -2059,6 +2059,36 @@ class BybitDemoBroker:
             if self._state.account_blocked or self._state.trading_blocked:
                 raise BrokerError("the broker account is blocked from trading")
 
+        # Normalize to the venue's actual quantity step before risk checks and
+        # before persisting/submitting the intent. The worker may calculate six
+        # fractional decimals, while each Bybit symbol has its own qtyStep. Always
+        # round DOWN (never up), then re-check every venue and project limit against
+        # the exact quantity that will be sent.
+        quantity_decimal = Decimal(str(quantity))
+        step_decimal = Decimal(str(instrument.qty_step))
+        if not quantity_decimal.is_finite() or quantity_decimal <= 0:
+            raise PaperRiskRejected(f"quantity {quantity!r} for {symbol} must be a positive finite number")
+        if step_decimal <= 0:
+            raise PaperRiskRejected(f"Bybit returned an invalid qtyStep for {symbol}")
+        quantity_units = (quantity_decimal / step_decimal).to_integral_value(rounding=ROUND_DOWN)
+        normalized_quantity = quantity_units * step_decimal
+        if normalized_quantity <= 0:
+            raise PaperRiskRejected(
+                f"quantity {quantity} for {symbol} is below the minimum usable qtyStep "
+                f"{format(step_decimal, 'f')}"
+            )
+        if normalized_quantity < Decimal(str(instrument.min_order_qty)):
+            raise PaperRiskRejected(
+                f"quantity {format(normalized_quantity, 'f')} for {symbol} is below "
+                f"Bybit minOrderQty {instrument.min_order_qty}"
+            )
+        if instrument.max_order_qty > 0 and normalized_quantity > Decimal(str(instrument.max_order_qty)):
+            raise PaperRiskRejected(
+                f"quantity {format(normalized_quantity, 'f')} for {symbol} exceeds "
+                f"Bybit maxOrderQty {instrument.max_order_qty}"
+            )
+        quantity = float(normalized_quantity)
+
         notional = self._check_risk(
             symbol=symbol, quantity=quantity, side=side, reference_price=reference_price
         )
@@ -2069,16 +2099,6 @@ class BybitDemoBroker:
                 f"order notional {notional:.2f} USDT is below minimum {instrument.min_order_amt:.2f} USDT "
                 f"for {symbol} (BELOW_MIN_NOTIONAL)"
             )
-
-        # Check quantity step
-        if instrument and instrument.qty_step > 0:
-            qty_decimal = Decimal(str(quantity))
-            step_decimal = Decimal(str(instrument.qty_step))
-            if (qty_decimal / step_decimal) % 1 != 0:
-                raise PaperRiskRejected(
-                    f"quantity {quantity} for {symbol} does not match qtyStep "
-                    f"{format(Decimal(str(instrument.qty_step)), 'f')}"
-                )
 
         intent = {
             "client_order_id": client_order_id,
