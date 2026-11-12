@@ -58,10 +58,15 @@ class RecordingTransport:
         self.calls: list[dict[str, Any]] = []
         self._responses: dict[tuple[str, str], list[dict]] = {}
         self._raw: dict[tuple[str, str], str] = {}
+        self._failures: dict[tuple[str, str], list[Exception]] = {}
         self._default: dict = {"retCode": 0, "retMsg": "OK", "result": {}}
 
     def add(self, method: str, path: str, response: dict) -> None:
         self._responses.setdefault((method.upper(), path), []).append(response)
+
+    def fail(self, method: str, path: str, error: Exception) -> None:
+        """Make the next call to a path raise, to model an unreadable venue."""
+        self._failures.setdefault((method.upper(), path), []).append(error)
 
     def add_default(self, response: dict) -> None:
         self._default = response
@@ -101,6 +106,9 @@ class RecordingTransport:
         raw = self._raw.get((method.upper(), path))
         if raw is not None:
             return BrokerHttpResponse(200, raw)
+        failures = self._failures.get((method.upper(), path))
+        if failures:
+            raise failures.pop(0)
         queue = self._responses.get((method.upper(), path))
         payload = self._default
         if queue:

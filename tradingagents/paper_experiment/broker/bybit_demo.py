@@ -140,6 +140,39 @@ back rather than being quietly retired.
 _ACTIVE_PROJECT_STATUSES = frozenset({"accepted", "partially_filled"})
 """An order in one of these is live at the venue: it may still fill."""
 
+#: The outcome of a counterpart cancellation, in three closed cases.
+PROTECTION_CANCEL_CONFIRMED_TERMINAL = "confirmed_terminal"
+"""The venue stated the counterpart is finished.
+
+Only this outcome lets a replacement pair be created. The counterpart is
+gone, so the position's only guard is the one that traded, and the
+quantity it did not trade still needs a guard of its own.
+"""
+
+PROTECTION_CANCEL_STILL_ACTIVE = "still_active"
+"""The venue still shows the counterpart working.
+
+The cancel request was accepted, but the order has not finished. Creating
+a replacement now would leave **two** live sells against the same
+quantity, and the second one to trigger would sell more than the account
+holds. The pair stays unresolved and the next cycle tries again.
+"""
+
+PROTECTION_CANCEL_UNKNOWN = "unknown"
+"""The counterpart's fate could not be established.
+
+The cancel request failed, the venue could not be read, or the venue
+answered with a status this project does not recognise. None of those is
+evidence that the order is gone, and none of them is evidence that it is
+still live. The position is reported **unprotected** and the entry gate
+closes, because the system cannot say what the account would do.
+"""
+
+#: The tolerance used when comparing a reported cumulative fill with the
+#: quantity already applied. The venue reports quantities as decimal strings,
+#: so the same fill can come back with a different binary representation.
+_FILL_EPSILON = 1e-12
+
 #: The statuses that **prove** an order is finished at the venue.
 _TERMINAL_PROJECT_STATUSES = frozenset(
     {
@@ -1655,6 +1688,55 @@ class BybitDemoBroker:
             executed[client_id] = executed.get(client_id, 0.0) + _as_float(row.get("execQty"))
         return executed, truncated
 
+    def _read_execution_rows(
+        self,
+        *,
+        symbol: str | None = None,
+        max_pages: int = 10,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Read the venue's per-trade execution **rows**, with their ids.
+
+        :meth:`_read_order_executions` returns the summed quantity per order,
+        which is what the residual calculation needs. This returns the raw
+        rows, because the exactly-once accounting needs the **execution id**:
+        the id names one trade, so the same trade is never counted twice no
+        matter how many times the list is read.
+
+        The second element says whether the read was complete. A truncated
+        read is not evidence: a trade that was not read proves nothing about
+        what traded.
+        """
+        all_rows: list[dict[str, Any]] = []
+        cursor: str | None = None
+        pages_read = 0
+        truncated = False
+
+        while pages_read < max_pages:
+            params: dict[str, Any] = {"category": SPOT_CATEGORY, "limit": 100}
+            if symbol:
+                params["symbol"] = self._to_bybit_symbol(symbol.upper())
+            if cursor:
+                params["cursor"] = cursor
+
+            payload = self._request("GET", "/v5/execution/list", params=params, signed=True)
+            result = payload.get("result", {})
+            row_list = result.get("list", [])
+            if not isinstance(row_list, list):
+                truncated = True
+                break
+
+            all_rows.extend(row_list)
+            pages_read += 1
+
+            next_cursor = result.get("nextPageCursor")
+            if not next_cursor:
+                break
+            cursor = next_cursor
+        else:
+            truncated = bool(cursor)
+
+        return all_rows, truncated
+
     def _parse_order(self, payload: Any, fallback_client_id: str | None = None) -> BrokerOrder:
         if not isinstance(payload, dict):
             raise BrokerError("the broker order response was not the expected object")
@@ -1777,15 +1859,22 @@ class BybitDemoBroker:
             )
 
     def _check_sell_is_not_a_short(self, *, symbol: str, quantity: float) -> None:
-        """A SELL must not create a short unless shorting is explicitly allowed."""
-        if self._positions is None:
-            raise PaperRiskRejected(
-                "positions have not been read; refresh them before a sell so the held "
-                "quantity is known rather than assumed to be zero"
-            )
-        held = self._positions.get(symbol.upper())
-        held_quantity = held.quantity if held is not None else 0.0
-        if quantity <= held_quantity:
+        """A SELL must not create a short unless shorting is explicitly allowed.
+
+        The quantity that decides this is the one the **venue** holds, not the
+        one the worker's last read saw. The cached position set goes stale the
+        moment anything trades: after a partial fill the cache still says
+        0.1 while the venue holds 0.06, and a sell sized against the cache
+        would sell more than the account has. So the coin's balance is read
+        from the venue before the decision.
+
+        An **unreadable** balance is not a zero balance and not a permission
+        to sell: it is unknown, and an unknown balance cannot be sized
+        against. The sell is refused.
+        """
+        held_quantity = self._held_quantity_for_sell(symbol)
+
+        if quantity <= held_quantity + _FILL_EPSILON:
             return
         account = self._account
         account_allows_short = account is not None and getattr(account, "shorting_enabled", False)
@@ -1795,6 +1884,45 @@ class BybitDemoBroker:
                 "would open a short, which is refused (shorting is not enabled for this "
                 "account or allow_short is False)"
             )
+
+    def _held_quantity_for_sell(self, symbol: str) -> float:
+        """The quantity the venue actually holds of a symbol's base asset.
+
+        The venue's balance is the authority on what is held. The cached
+        position set is only consulted when the balance cannot be read, and
+        then only as a **lower** bound: a stale cache that says "more" would
+        let a sell through that the venue would refuse, and a stale cache
+        that says "less" would refuse a sell the venue would accept. The
+        balance is preferred for both reasons.
+
+        An unreadable balance raises, because an unknown balance cannot be
+        sized against. The caller turns that into a refusal.
+        """
+        canonical = symbol.upper()
+        base_asset = canonical.split("/")[0] if "/" in canonical else canonical
+        if not base_asset:
+            raise PaperRiskRejected(
+                f"symbol {symbol!r} carries no base asset, so the held quantity is unknown"
+            )
+        try:
+            balances = self._read_wallet_balances("SPOT")
+        except Exception as exc:  # noqa: BLE001 - an unreadable balance is unknown
+            raise PaperRiskRejected(
+                f"the {base_asset} balance could not be read ({type(exc).__name__}: {exc}); "
+                "the held quantity is unknown, so the sell is refused"
+            ) from exc
+
+        balance = balances.get(base_asset)
+        if balance is None:
+            # The venue carries no entry for the asset, so it holds none of it.
+            return 0.0
+        held = _as_float(balance.get("wallet_balance"))
+        if not math.isfinite(held) or held < 0:
+            raise PaperRiskRejected(
+                f"the venue's {base_asset} balance is not a usable number; "
+                "the held quantity is unknown, so the sell is refused"
+            )
+        return held
 
     def submit_order(
         self,
@@ -2409,30 +2537,119 @@ class BybitDemoBroker:
         return result
 
     def apply_fill(self, order: BrokerOrder) -> bool:
-        """Mark an order's fill applied exactly once. Returns whether it was new.
+        """Account for an order's fill exactly once. Returns whether it was new.
 
-        The guard is keyed on the client order id, which is what makes it
-        idempotent across a restart. A **partial** fill is applied the same
-        way: the id is recorded the first time it is seen, so the same partial
-        fill is not applied a second time when the order is read back on the
-        next cycle with the same (or a larger) executed quantity.
+        The guard is **not** keyed on the client order id alone. An order that
+        traded 0.4 and then traded 0.2 more carries the **same** id, and the
+        second report is a new quantity that has to be accounted for. Keying on
+        the id alone dropped that second report on the floor: the order was
+        marked "already applied" and the extra 0.2 never reached the
+        accounting, so the system believed it had sold 0.4 when it had sold
+        0.6.
 
-        That also means a partial fill is never *re*-applied for the extra
-        quantity it later trades. The venue is the authority on what the
-        position actually holds, so the correction is made by reading the
-        position back, not by replaying the fill.
+        So the guard is the **cumulative** quantity:
+
+        - the applied cumulative quantity for the order is read from the
+          durable state;
+        - a report whose cumulative quantity is **not greater** than what was
+          applied is the same fill seen again, and is not applied twice;
+        - a report whose cumulative quantity **is greater** is new: the
+          difference is the quantity that traded since the last report, and
+          only that difference is applied.
+
+        The quantity, not the id, is what makes the accounting exactly-once,
+        and it survives a restart because the applied cumulative quantity is
+        persisted with the rest of the state.
+
+        The venue remains the authority on what the position actually holds.
+        The correction for a partially filled **position** is therefore made
+        by reading the position back, not by replaying the fill -- but the
+        **protection** of a partially filled protection order is a different
+        question, and it is answered by
+        :meth:`_handle_protection_order_fill`, which works out the residual
+        from the venue's own execution record and balance.
         """
         if order.status not in ("filled", "partially_filled"):
             return False
-        if order.client_order_id in self._state.applied_fills:
+
+        client_order_id = order.client_order_id
+        applied = float(self._state.applied_fill_quantities.get(client_order_id, 0.0))
+        reported = float(order.filled_quantity or 0.0)
+
+        if not math.isfinite(reported) or reported < 0:
+            # A quantity that is not a usable number cannot be accounted for.
+            # Refusing it is safer than applying a NaN, which would poison
+            # every later comparison.
             return False
-        self._state.applied_fills.add(order.client_order_id)
+
+        if reported <= applied + _FILL_EPSILON:
+            # The same fill, seen again. Nothing new to account for.
+            self._state.applied_fills.add(client_order_id)
+            return False
+
+        self._state.applied_fill_quantities[client_order_id] = reported
+        self._state.applied_fills.add(client_order_id)
         if self._store:
             self._store.save(self._state)
 
         # If this was a protection order (SL or TP), check if we need to cancel the counterpart
         self._handle_protection_order_fill(order)
         return True
+
+    def apply_executions(self, executions: list[dict[str, Any]]) -> dict[str, Any]:
+        """Account for the venue's per-trade execution records, exactly once.
+
+        The venue's execution list (``/v5/execution/list``) is the per-trade
+        record: each row names one **execution id**, one symbol, one side and
+        one quantity. It is finer than the order, so it is the unit of
+        exactly-once accounting: the same execution id is never applied twice,
+        no matter how many times the list is read.
+
+        This is what makes a **growing** fill safe. An order that traded 0.4
+        and then 0.2 more is two executions, and each is applied once. Reading
+        the order's cumulative quantity instead would have to compare against
+        a stored number, which is exactly the comparison that fails when the
+        state is lost; the execution ids do not depend on any stored total.
+
+        Returns a summary of what was applied, what was skipped as already
+        applied, and what could not be read.
+        """
+        applied_ids = {
+            execution_id
+            for ids in self._state.applied_execution_ids.values()
+            for execution_id in ids
+        }
+        newly_applied: list[str] = []
+        already_applied: list[str] = []
+        skipped: list[str] = []
+
+        for row in executions:
+            if not isinstance(row, dict):
+                continue
+            execution_id = str(row.get("execId") or row.get("executionId") or "").strip()
+            if not execution_id:
+                # A record with no usable execution id cannot be applied
+                # exactly once, so it is skipped rather than guessed at.
+                skipped.append(str(row.get("orderLinkId") or ""))
+                continue
+            if execution_id in applied_ids:
+                already_applied.append(execution_id)
+                continue
+            applied_ids.add(execution_id)
+            newly_applied.append(execution_id)
+            link_id = str(row.get("orderLinkId") or "").strip()
+            if link_id:
+                known = self._state.applied_execution_ids.setdefault(link_id, [])
+                known.append(execution_id)
+
+        if newly_applied and self._store:
+            self._store.save(self._state)
+
+        return {
+            "newly_applied": newly_applied,
+            "already_applied": already_applied,
+            "skipped": skipped,
+        }
 
     def _handle_protection_order_fill(self, order: BrokerOrder) -> None:
         """Handle OCO logic when a protection order (SL/TP) fills.
@@ -2444,10 +2661,24 @@ class BybitDemoBroker:
         sold part of the position, and the part that did not trade is still
         held and still needs a guard. So the counterpart is cancelled (it
         would otherwise sell the whole position a second time) and the
-        **residual** is protected afresh. The residual work is delegated to
-        :meth:`_protect_residual_after_partial_fill`, which either creates and
-        verifies a new pair or leaves the position unprotected and the entry
-        gate closed.
+        **residual** is protected afresh.
+
+        The residual is only protected afresh once the counterpart is
+        **confirmed finished**. A replacement pair placed while the original
+        counterpart is still working would put two live sells against the
+        same quantity, and whichever triggered second would sell more than
+        the account holds. So the cancellation's outcome decides:
+
+        - ``confirmed_terminal`` -- the venue stated the counterpart is
+          finished, so the residual is protected afresh;
+        - ``still_active`` -- the venue still shows it working, so no
+          replacement is created and the position is reported unprotected
+          until the next cycle reconciles it;
+        - ``unknown`` -- the counterpart's fate could not be established, so
+          no replacement is created and the position is reported unprotected.
+
+        In the last two cases the entry gate closes, because the system
+        cannot say what the account would do.
         """
         # Find the protection pair this order belongs to
         for prefix, pair in self._state.protection_order_pairs.items():
@@ -2456,14 +2687,78 @@ class BybitDemoBroker:
 
             if order.client_order_id == sl_client_id:
                 # SL filled, cancel TP
-                self._cancel_counterpart_protection(prefix, tp_client_id, pair.get("symbol"), "TP cancelled due to SL fill")
-                self._protect_residual_after_partial_fill(prefix, pair, order)
+                outcome = self._cancel_counterpart_protection(
+                    prefix, tp_client_id, pair.get("symbol"), "TP cancelled due to SL fill"
+                )
+                if outcome == PROTECTION_CANCEL_CONFIRMED_TERMINAL:
+                    self._protect_residual_after_partial_fill(prefix, pair, order)
+                else:
+                    self._mark_residual_unprotected(
+                        prefix,
+                        pair,
+                        order,
+                        reason=(
+                            "the counterpart protection order was not confirmed finished "
+                            f"({outcome}); no replacement pair was created, so the quantity "
+                            "that is still held has no guard"
+                        ),
+                    )
                 break
             elif order.client_order_id == tp_client_id:
                 # TP filled, cancel SL
-                self._cancel_counterpart_protection(prefix, sl_client_id, pair.get("symbol"), "SL cancelled due to TP fill")
-                self._protect_residual_after_partial_fill(prefix, pair, order)
+                outcome = self._cancel_counterpart_protection(
+                    prefix, sl_client_id, pair.get("symbol"), "SL cancelled due to TP fill"
+                )
+                if outcome == PROTECTION_CANCEL_CONFIRMED_TERMINAL:
+                    self._protect_residual_after_partial_fill(prefix, pair, order)
+                else:
+                    self._mark_residual_unprotected(
+                        prefix,
+                        pair,
+                        order,
+                        reason=(
+                            "the counterpart protection order was not confirmed finished "
+                            f"({outcome}); no replacement pair was created, so the quantity "
+                            "that is still held has no guard"
+                        ),
+                    )
                 break
+
+    def _mark_residual_unprotected(
+        self,
+        prefix: str,
+        pair: dict,
+        order: BrokerOrder,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Record that the residual has no guard, and close the entry gate.
+
+        This is the outcome when the protection could **not** be established:
+        the counterpart could not be confirmed finished, the quantity could not
+        be proven, the replacement could not be created, or the venue did not
+        confirm the replacement. In every one of those cases the quantity that
+        is still held has no guard, so the position is reported unprotected and
+        the worker's entry gate closes.
+
+        The verdict is written to the same durable record the successful case
+        uses, so a restart knows why the position is unguarded rather than
+        finding an open position with no protection and no explanation.
+        """
+        symbol = str(pair.get("symbol") or order.symbol or "").upper()
+        outcome: dict[str, Any] = {
+            "symbol": symbol,
+            "protected": False,
+            "residual_quantity": None,
+            "executed_quantity": None,
+            "reason": reason,
+            "created": False,
+            "verified": False,
+        }
+        self._state.protection_residuals[prefix] = outcome
+        if self._store:
+            self._store.save(self._state)
+        return outcome
 
     def _protect_residual_after_partial_fill(
         self,
@@ -2666,41 +2961,60 @@ class BybitDemoBroker:
         return outcome
 
 
-    def _cancel_counterpart_protection(self, prefix: str, client_order_id: str, symbol: str, reason: str) -> None:
+    def _cancel_counterpart_protection(
+        self,
+        prefix: str,
+        client_order_id: str,
+        symbol: str,
+        reason: str,
+    ) -> str:
         """Cancel the counterpart protection order (SL or TP).
 
-        The pair is only marked resolved once the venue has confirmed the
-        counterpart is **finished**. A cancel request that was accepted is not
-        the same fact as a cancelled order, and a cancel that failed leaves
-        the pair unresolved so the next cycle tries again.
+        Returns one of three outcomes, and the caller is expected to act on
+        it rather than to ignore it:
 
-        The confirmation has to be a **terminal status the venue stated**. The
-        counterpart's absence from the live list is not a confirmation: the
-        live list only carries the orders that are still working, so a
-        missing order is equally consistent with "cancelled", "never read",
-        and "a read that did not reach it". The order **history** is the
-        source that carries the finished legs, so it is read too, and the pair
-        stays unresolved unless one of the two carries a terminal status.
+        - ``confirmed_terminal`` -- the venue **stated** the counterpart is
+          finished. Only then may a replacement pair be created;
+        - ``still_active`` -- the venue still shows the counterpart working.
+          The cancel request was accepted but has not taken effect, so a
+          replacement would put two live sells on the same quantity;
+        - ``unknown`` -- the counterpart's fate could not be established.
+
+        A cancel request that was **accepted** is not the same fact as a
+        cancelled order. The venue accepting the request says only that it
+        will try; the confirmation has to come from the venue's own state.
+        The counterpart's absence from the live list is not a confirmation
+        either: the live list only carries the orders that are still working,
+        so a missing order is equally consistent with "cancelled", "never
+        read", and "a read that did not reach it". The order **history** is
+        the source that carries the finished legs, so it is read too, and the
+        pair stays unresolved unless one of the two carries a terminal status.
         """
         if not client_order_id or not symbol:
-            return
+            # There is no counterpart to account for. That is not a
+            # confirmation, so the outcome stays unknown.
+            return PROTECTION_CANCEL_UNKNOWN
 
+        # -- ask the venue to cancel it -------------------------------------
+        cancel_error: str | None = None
         try:
             # Check if order is still active before cancelling
             order_state = self._state.orders.get(client_order_id)
             if order_state and order_state.get("status") in ("active", "untriggered", "new", "submitting", "accepted"):
                 self.cancel_order(client_order_id=client_order_id, symbol=symbol)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - an unreadable venue is unknown
             # The cancellation did not happen. The pair stays unresolved, so
             # the reconciliation tries again on the next cycle and the
             # protection is not claimed to be settled.
-            return
+            cancel_error = f"{type(exc).__name__}: {exc}"
 
-        # The cancel was accepted: ask the venue whether the counterpart is
-        # really finished before declaring the pair resolved.
+        # -- ask the venue what state it is actually in ----------------------
         bybit_symbol = self._to_bybit_symbol(symbol.upper())
-        live = self._read_protection_orders().get(bybit_symbol, {})
-        terminal_orders, history_truncated = self._read_terminal_orders(symbol=symbol)
+        try:
+            live = self._read_protection_orders().get(bybit_symbol, {})
+            terminal_orders, history_truncated = self._read_terminal_orders(symbol=symbol)
+        except Exception:  # noqa: BLE001 - an unreadable venue is unknown
+            return PROTECTION_CANCEL_UNKNOWN
 
         status: str | None = None
         for leg in ("stop_loss", "take_profit"):
@@ -2713,23 +3027,58 @@ class BybitDemoBroker:
                     break
             if status is not None:
                 break
-        if status is None:
+        if status is None and not history_truncated:
             terminal = terminal_orders.get(client_order_id)
             if terminal is not None:
                 status = self._map_status(terminal.get("orderStatus"))
 
         if status is None:
-            # Neither the live list nor the history carries the counterpart.
-            # That is unknown, not terminal: the pair stays unresolved.
-            return
+            # Neither the live list nor a **complete** history carries the
+            # counterpart. That is unknown, not terminal: the pair stays
+            # unresolved and the position is reported unprotected.
+            if cancel_error is not None:
+                self._state.protection_cancel_outcomes[prefix] = {
+                    "client_order_id": client_order_id,
+                    "symbol": symbol.upper(),
+                    "outcome": PROTECTION_CANCEL_UNKNOWN,
+                    "detail": f"the cancellation failed and the counterpart's state could not be read: {cancel_error}",
+                }
+            return PROTECTION_CANCEL_UNKNOWN
         if status in _ACTIVE_PROJECT_STATUSES:
             # Still working at the venue: the cancel has not taken effect yet.
-            return
+            self._state.protection_cancel_outcomes[prefix] = {
+                "client_order_id": client_order_id,
+                "symbol": symbol.upper(),
+                "outcome": PROTECTION_CANCEL_STILL_ACTIVE,
+                "detail": (
+                    f"the venue still shows {client_order_id} as {status}; "
+                    "the cancellation has not taken effect yet"
+                ),
+            }
+            return PROTECTION_CANCEL_STILL_ACTIVE
         if status not in _TERMINAL_PROJECT_STATUSES:
             # A status this project does not recognise. Unknown is not
             # terminal, so the pair stays unresolved.
-            return
+            self._state.protection_cancel_outcomes[prefix] = {
+                "client_order_id": client_order_id,
+                "symbol": symbol.upper(),
+                "outcome": PROTECTION_CANCEL_UNKNOWN,
+                "detail": (
+                    f"the venue reported {client_order_id} as {status!r}, a status "
+                    "this project does not recognise"
+                ),
+            }
+            return PROTECTION_CANCEL_UNKNOWN
+
+        # The venue stated the counterpart is finished.
+        self._state.protection_cancel_outcomes[prefix] = {
+            "client_order_id": client_order_id,
+            "symbol": symbol.upper(),
+            "outcome": PROTECTION_CANCEL_CONFIRMED_TERMINAL,
+            "detail": f"the venue confirmed {client_order_id} is {status}",
+        }
         self._mark_protection_pair_resolved(prefix, reason)
+        return PROTECTION_CANCEL_CONFIRMED_TERMINAL
 
     def reconcile_protection_orders(self, symbol: str) -> dict[str, Any]:
         """Reconcile the protection orders of a symbol with the venue.
@@ -2789,7 +3138,34 @@ class BybitDemoBroker:
                 "the order history read was truncated; a finished leg may not have been seen"
             )
 
-        executed_qty, executions_truncated = self._read_order_executions(symbol=symbol)
+        # Account for the trades, exactly once, before anything is decided
+        # from them. The execution id names one trade, so a trade that was
+        # already counted is never counted again, however many times this
+        # reconciliation runs. A leg that traded 0.4 and then 0.2 more is two
+        # trades, and both are counted.
+        try:
+            execution_rows, executions_truncated = self._read_execution_rows(symbol=symbol)
+            accounting = self.apply_executions(execution_rows)
+        except Exception as exc:  # noqa: BLE001 - an unreadable record is unknown
+            result["complete"] = False
+            result["errors"].append(
+                f"the execution records could not be accounted for ({type(exc).__name__}: {exc}); "
+                "the traded quantity is unproven"
+            )
+            execution_rows, executions_truncated = [], True
+            accounting = {"newly_applied": [], "already_applied": [], "skipped": []}
+        result["executions"] = accounting
+
+        executed_qty: dict[str, float] = {}
+        for row in execution_rows:
+            if not isinstance(row, dict):
+                continue
+            client_id = str(row.get("orderLinkId", "")).strip()
+            if not client_id:
+                continue
+            executed_qty[client_id] = executed_qty.get(client_id, 0.0) + _as_float(
+                row.get("execQty")
+            )
         if executions_truncated:
             result["complete"] = False
             result["errors"].append(
@@ -2840,7 +3216,15 @@ class BybitDemoBroker:
             return {"known": False, "status": None, "mapped_status": None, "executed": 0.0}
 
         def executed_for(client_id: str, fallback: float) -> float:
-            """The quantity the venue says actually traded for an order."""
+            """The quantity the venue says actually traded for an order.
+
+            The venue's **execution records** win over the order row's running
+            total. The order row carries a cumulative quantity that the venue
+            updates in place, so it cannot say *how much* traded since the
+            last read; the execution records are per-trade, so their sum is
+            the quantity that actually traded. The order row is the fallback
+            for an order whose trades are not in the read.
+            """
             if client_id in executed_qty:
                 return executed_qty[client_id]
             return fallback
@@ -3038,6 +3422,15 @@ class BybitDemoBroker:
         if not position or position.quantity <= 0:
             return False, "no open position"
 
+        # A residual whose protection could not be established is the **most
+        # specific** finding about this position, so it is reported first.
+        # The leg checks below would otherwise answer with a symptom of it --
+        # "take_profit missing" -- which does not tell the operator that the
+        # quantity left behind by a partial fill is the unguarded part.
+        residual = self._unprotected_residual_for(symbol)
+        if residual is not None:
+            return False, residual
+
         protection_orders = self._read_protection_orders()
         prot = protection_orders.get(bybit_symbol, {})
 
@@ -3068,16 +3461,6 @@ class BybitDemoBroker:
             return False, f"stop_loss not active (status: {sl_data.get('status')})"
         if not tp_data.get("is_active", False):
             return False, f"take_profit not active (status: {tp_data.get('status')})"
-
-        # A residual whose replacement protection could not be proven leaves
-        # the position unguarded even though an old pair may still be visible
-        # at the venue. The recorded residual is the authority on that, and it
-        # is checked **before** the coverage arithmetic: the coverage is
-        # expected to be wrong in exactly this case, and the specific reason
-        # is the one the operator needs.
-        residual = self._unprotected_residual_for(symbol)
-        if residual is not None:
-            return False, residual
 
         # The legs have to cover the position **as it is now**. After a
         # partial fill the venue holds less than the pair was created for, and

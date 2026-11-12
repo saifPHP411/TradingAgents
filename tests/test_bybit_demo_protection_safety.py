@@ -30,6 +30,9 @@ from tests.test_bybit_demo_audit import (
     wallet_response,
 )
 from tradingagents.paper_experiment.broker.bybit_demo import (
+    PROTECTION_CANCEL_CONFIRMED_TERMINAL,
+    PROTECTION_CANCEL_STILL_ACTIVE,
+    PROTECTION_CANCEL_UNKNOWN,
     BrokerOrder,
     BybitDemoBroker,
 )
@@ -52,6 +55,27 @@ def _execution_row(order_link_id: str, exec_qty: str, exec_price: str = "50000")
     }
 
 
+def _cancelled_tp_in_history() -> list[dict]:
+    """The venue's history after the counterpart take-profit was cancelled.
+
+    A cancelled order leaves the live list and shows up in the **history**
+    with a terminal status. That history row is what confirms the
+    cancellation: without it the counterpart's fate is unknown.
+    """
+    return [
+        order_row(
+            order_link_id="p-tp",
+            status="Cancelled",
+            side="Sell",
+            qty="0.1",
+            order_filter="tpslOrder",
+            stop_order_type="TakeProfit",
+            trigger_price="55000",
+            order_id="v-tp",
+        )
+    ]
+
+
 def _base_transport(
     *,
     btc_balance: str = "0.06",
@@ -64,12 +88,24 @@ def _base_transport(
     sl_cum_exec: str = "0",
     tp_cum_exec: str = "0",
     residual_legs: list[dict] | None = None,
+    history_legs: list[dict] | None = None,
+    counterpart_cancelled: bool = False,
 ) -> RecordingTransport:
     """A transport that models a BTC/USDT position with a protection pair.
 
     ``residual_legs`` are the replacement orders the venue carries once the
     residual pair has been created. They are what a real venue's live list
     would show after the replacement is accepted.
+
+    ``history_legs`` are the finished orders the venue's **order history**
+    carries. A counterpart that was cancelled leaves the live list and shows
+    up in the history with a terminal status, and that history read is what
+    confirms the cancellation.
+
+    ``counterpart_cancelled`` models exactly that: the take-profit is removed
+    from the live list and appears in the history as ``Cancelled``. It is the
+    state the venue is in after a stop loss traded and its counterpart was
+    cancelled.
     """
     transport = RecordingTransport()
     transport.add(
@@ -96,18 +132,21 @@ def _base_transport(
             trigger_price="45000",
             order_id="v-sl",
         ),
-        order_row(
-            order_link_id="p-tp",
-            status=tp_status,
-            side="Sell",
-            qty=tp_qty,
-            cum_exec_qty=tp_cum_exec,
-            order_filter="tpslOrder",
-            stop_order_type="TakeProfit",
-            trigger_price="55000",
-            order_id="v-tp",
-        ),
     ]
+    if not counterpart_cancelled:
+        live_legs.append(
+            order_row(
+                order_link_id="p-tp",
+                status=tp_status,
+                side="Sell",
+                qty=tp_qty,
+                cum_exec_qty=tp_cum_exec,
+                order_filter="tpslOrder",
+                stop_order_type="TakeProfit",
+                trigger_price="55000",
+                order_id="v-tp",
+            )
+        )
     live_legs.extend(residual_legs or [])
     transport.add(
         "GET",
@@ -117,6 +156,17 @@ def _base_transport(
             "result": {
                 "list": live_legs,
             },
+        },
+    )
+    history = list(history_legs or [])
+    if counterpart_cancelled:
+        history.extend(_cancelled_tp_in_history())
+    transport.add(
+        "GET",
+        "/v5/order/history",
+        {
+            "retCode": 0,
+            "result": {"list": history, "nextPageCursor": ""},
         },
     )
     transport.add(
@@ -286,6 +336,184 @@ class TestUnknownCounterpartDoesNotResolveThePair:
         assert "p" in broker._state.protection_order_pairs
 
 
+class TestTheCancelOutcomeDecidesTheResidual:
+    """The cancellation's outcome decides whether a replacement may be made.
+
+    A cancel request that was **accepted** is not the same fact as a
+    cancelled order. The venue accepting the request says only that it will
+    try. Creating a replacement pair while the original counterpart is still
+    working would put two live sells against the same quantity, and whichever
+    triggered second would sell more than the account holds. So the outcome
+    has to be explicit, and only a confirmed terminal status permits a
+    replacement.
+    """
+
+    def _broker(self, transport: RecordingTransport) -> BybitDemoBroker:
+        broker = make_broker(transport)
+        broker.connect()
+        broker._state.protection_order_pairs["p"] = {
+            "sl_client_id": "p-sl",
+            "tp_client_id": "p-tp",
+            "symbol": "BTC/USDT",
+            "position_qty": 0.1,
+        }
+        broker._state.orders["p-tp"] = {"status": "accepted"}
+        return broker
+
+    def _transport_with_tp_status(self, tp_status: str) -> RecordingTransport:
+        transport = RecordingTransport()
+        transport.add(
+            "GET",
+            "/v5/account/wallet-balance",
+            wallet_response(
+                {"USDT": {"walletBalance": "1000"}, "BTC": {"walletBalance": "0.1"}}
+            ),
+        )
+        transport.add(
+            "GET",
+            "/v5/market/instruments-info",
+            instruments_response([spot_instrument("BTCUSDT")]),
+        )
+        transport.add(
+            "GET",
+            "/v5/order/realtime",
+            {
+                "retCode": 0,
+                "result": {
+                    "list": [
+                        order_row(
+                            order_link_id="p-tp",
+                            status=tp_status,
+                            side="Sell",
+                            qty="0.1",
+                            order_filter="tpslOrder",
+                            stop_order_type="TakeProfit",
+                            trigger_price="55000",
+                            order_id="v-tp",
+                        )
+                    ]
+                },
+            },
+        )
+        transport.add(
+            "GET",
+            "/v5/order/history",
+            {"retCode": 0, "result": {"list": [], "nextPageCursor": ""}},
+        )
+        transport.add(
+            "GET",
+            "/v5/execution/list",
+            {"retCode": 0, "result": {"list": []}},
+        )
+        transport.add(
+            "POST",
+            "/v5/order/cancel",
+            {"retCode": 0, "retMsg": "OK", "result": {"orderId": "v-tp"}},
+        )
+        return transport
+
+    def test_a_confirmed_terminal_counterpart_permits_a_replacement(self):
+        transport = self._transport_with_tp_status("Cancelled")
+        broker = self._broker(transport)
+
+        outcome = broker._cancel_counterpart_protection("p", "p-tp", "BTC/USDT", "test")
+        assert outcome == PROTECTION_CANCEL_CONFIRMED_TERMINAL
+        assert broker._state.protection_cancel_outcomes["p"]["outcome"] == (
+            PROTECTION_CANCEL_CONFIRMED_TERMINAL
+        )
+
+    def test_a_counterpart_still_working_forbids_a_replacement(self):
+        transport = self._transport_with_tp_status("Untriggered")
+        broker = self._broker(transport)
+
+        outcome = broker._cancel_counterpart_protection("p", "p-tp", "BTC/USDT", "test")
+        assert outcome == PROTECTION_CANCEL_STILL_ACTIVE
+        assert broker._state.protection_cancel_outcomes["p"]["outcome"] == (
+            PROTECTION_CANCEL_STILL_ACTIVE
+        )
+
+    def test_an_unreadable_venue_is_unknown_not_terminal(self):
+        transport = self._transport_with_tp_status("Untriggered")
+        broker = self._broker(transport)
+        # The venue becomes unreadable **after** the account was confirmed.
+        # Both reads that establish the counterpart's state fail: the one
+        # inside the cancellation and the one that confirms it. An
+        # unreadable venue is unknown, and unknown is not terminal.
+        transport.fail(
+            "GET",
+            "/v5/order/realtime",
+            OSError("the venue could not be read"),
+        )
+        transport.fail(
+            "GET",
+            "/v5/order/realtime",
+            OSError("the venue could not be read"),
+        )
+
+        outcome = broker._cancel_counterpart_protection("p", "p-tp", "BTC/USDT", "test")
+        assert outcome == PROTECTION_CANCEL_UNKNOWN
+
+    def test_a_missing_counterpart_is_unknown_not_terminal(self):
+        transport = self._transport_with_tp_status("Untriggered")
+        broker = self._broker(transport)
+        # The counterpart is nowhere: neither live nor in the history.
+        transport.add(
+            "GET",
+            "/v5/order/realtime",
+            {"retCode": 0, "result": {"list": []}},
+        )
+
+        outcome = broker._cancel_counterpart_protection("p", "p-tp", "BTC/USDT", "test")
+        assert outcome == PROTECTION_CANCEL_UNKNOWN
+
+    def test_a_still_working_counterpart_leaves_the_position_unprotected(self):
+        """The whole point: no replacement while the original still works."""
+        transport = _base_transport(
+            sl_status="PartiallyFilled",
+            sl_cum_exec="0.04",
+            # The counterpart was NOT cancelled: the venue still shows it.
+            counterpart_cancelled=False,
+            executions=[_execution_row("p-sl", "0.04")],
+        )
+        broker = make_broker(transport)
+        broker.connect()
+        broker._state.protection_order_pairs["p"] = {
+            "sl_client_id": "p-sl",
+            "tp_client_id": "p-tp",
+            "symbol": "BTC/USDT",
+            "position_qty": 0.1,
+        }
+        broker._state.orders["p-tp"] = {"status": "accepted"}
+        broker._state.protection_levels["BTC/USDT"] = {
+            "stop_loss": 45000.0,
+            "take_profit": 55000.0,
+        }
+
+        partial = BrokerOrder(
+            client_order_id="p-sl",
+            broker_order_id="v-sl",
+            symbol="BTC/USDT",
+            side="sell",
+            quantity=0.1,
+            filled_quantity=0.04,
+            filled_avg_price=50000.0,
+            status="partially_filled",
+        )
+        broker.apply_fill(partial)
+
+        residual = broker._state.protection_residuals.get("p")
+        assert residual is not None
+        # No replacement pair was created, so the held quantity has no guard.
+        assert residual["protected"] is False
+        assert residual["created"] is False
+        assert "not confirmed finished" in residual["reason"]
+
+        # And the position is reported unprotected.
+        broker.positions(refresh=True)
+        protected, reason = broker.is_position_protected("BTC/USDT")
+        assert protected is False
+
+
 class TestPartialFillLeavesNoResidualUnprotected:
     """A partial fill must not leave the held quantity without a guard."""
 
@@ -317,6 +545,7 @@ class TestPartialFillLeavesNoResidualUnprotected:
             btc_balance="0.06",
             sl_status="PartiallyFilled",
             sl_cum_exec="0.04",
+            counterpart_cancelled=True,
             executions=[_execution_row("p-sl", "0.04")],
         )
         # The replacement pair cannot be created: the venue refuses it.
@@ -359,6 +588,7 @@ class TestPartialFillLeavesNoResidualUnprotected:
             btc_balance="0.06",
             sl_status="PartiallyFilled",
             sl_cum_exec="0.04",
+            counterpart_cancelled=True,
             executions=[_execution_row("p-sl", "0.04")],
             executions_cursor="page-2",
         )
@@ -388,6 +618,7 @@ class TestPartialFillLeavesNoResidualUnprotected:
         transport = _base_transport(
             sl_status="PartiallyFilled",
             sl_cum_exec="0.04",
+            counterpart_cancelled=True,
             executions=[_execution_row("p-sl", "0.04")],
         )
         # The coin list is gone: the balance cannot be read.
@@ -422,6 +653,7 @@ class TestPartialFillLeavesNoResidualUnprotected:
             btc_balance="0.06",
             sl_status="PartiallyFilled",
             sl_cum_exec="0.04",
+            counterpart_cancelled=True,
             executions=[],
         )
         broker = self._broker_with_partial_fill(transport)
@@ -455,6 +687,7 @@ class TestPartialFillLeavesNoResidualUnprotected:
             btc_balance="0.06",
             sl_status="PartiallyFilled",
             sl_cum_exec="0.04",
+            counterpart_cancelled=True,
             executions=[_execution_row("p-sl", "0.04")],
             residual_legs=[
                 order_row(
@@ -526,6 +759,7 @@ class TestPartialFillLeavesNoResidualUnprotected:
             btc_balance="0.06",
             sl_status="PartiallyFilled",
             sl_cum_exec="0.04",
+            counterpart_cancelled=True,
             executions=[_execution_row("p-sl", "0.04")],
         )
         transport.add(

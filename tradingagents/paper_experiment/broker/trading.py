@@ -5106,6 +5106,30 @@ class PaperTradingWorker:
         }
         self._save()
 
+    def _apply_broker_fill(self, order: BrokerOrder) -> None:
+        """Tell the broker that a fill has landed, exactly once.
+
+        A broker that carries protection orders of its own has work to do when
+        one of them trades: the counterpart has to be cancelled and the
+        residual has to be accounted for. The broker owns that work, so it is
+        told about the fill here -- at the point where the venue's answer
+        arrives, which is the only point where the answer is known.
+
+        The broker's own guard decides whether this is new. A broker that does
+        not carry the seam simply does not have it, and nothing happens.
+        """
+        broker = self._broker
+        apply_fill = getattr(broker, "apply_fill", None)
+        if apply_fill is None:
+            return
+        try:
+            apply_fill(order)
+        except Exception as exc:  # noqa: BLE001 - a failed accounting is reported
+            # The fill was seen but could not be accounted for. The order
+            # record is still written, and the failure is visible, so the
+            # next cycle can settle it.
+            self.state.last_error = f"{type(exc).__name__}: {exc}"
+
     def reconcile_orders(self) -> dict[str, str]:
         """Re-read every unsettled order from the broker and record what it says.
 
@@ -5127,6 +5151,11 @@ class PaperTradingWorker:
           not know better. It is not turned into ``filled`` or ``cancelled``.
         - **A terminal answer is final.** Once the broker says the order is
           filled, rejected or cancelled, it is not asked about again.
+
+        A fill that lands is also **accounted for**: the broker is told, so a
+        broker that owns protection orders can settle the pair it belongs to.
+        The broker's own guard makes that exactly-once, and a **growing**
+        cumulative quantity is a new quantity rather than a repeat.
 
         The recorded statuses are what the dashboard's trade view reads, so
         without this the view reported the moment of submission forever.
@@ -5151,6 +5180,7 @@ class PaperTradingWorker:
                 self.state.last_error = f"{type(exc).__name__}: {exc}"
                 continue
             self._record_order(order)
+            self._apply_broker_fill(order)
             outcomes[client_order_id] = str(order.status)
         if outcomes:
             self._save()
