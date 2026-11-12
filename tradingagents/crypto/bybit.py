@@ -235,6 +235,12 @@ class BybitPublicClient:
         if not isinstance(ticker_list, list):
             raise CryptoDataError("the tickers response missing 'list'")
 
+        # Bybit V5 puts the observation timestamp on the response envelope
+        # ("time"), not on each item in result.list. The execution-price
+        # freshness guard consumes a ticker-shaped mapping, so preserve that
+        # venue timestamp on each copied row. Do not substitute the local clock:
+        # if Bybit omits its timestamp, the downstream guard must still fail closed.
+        response_time = payload.get("time")
         out: dict[str, dict] = {}
         for row in ticker_list:
             if not isinstance(row, dict):
@@ -242,12 +248,16 @@ class BybitPublicClient:
             sym = str(row.get("symbol", "")).upper()
             if not sym:
                 continue
-            # Key by both canonical and venue spelling
-            out[sym] = row
+            normalized_row = dict(row)
+            if normalized_row.get("time") in (None, "") and response_time not in (None, ""):
+                normalized_row["time"] = response_time
+            # Key by both canonical and venue spelling. Both aliases point to
+            # the same normalized row, carrying the same response observation.
+            out[sym] = normalized_row
             # Also try to parse canonical
             try:
                 pair = parse_pair(sym)
-                out[pair.canonical] = row
+                out[pair.canonical] = normalized_row
             except SymbolError:
                 pass
 
