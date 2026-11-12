@@ -665,6 +665,26 @@ class BrokerAccount:
     trading_blocked: bool = False
     account_blocked: bool = False
 
+    @property
+    def status(self) -> str:
+        """Compatibility with the shared paper-worker account preflight.
+
+        Bybit's V5 wallet-balance response does not expose an Alpaca-style
+        account status. A successful authenticated wallet read is treated as
+        ACTIVE unless the adapter has explicitly marked the account blocked.
+        """
+        return "BLOCKED" if self.trading_blocked or self.account_blocked else "ACTIVE"
+
+    @property
+    def cash(self) -> float:
+        """USDT wallet balance, matching the Spot account's cash balance."""
+        return self.equity
+
+    @property
+    def buying_power(self) -> float:
+        """USDT available for new Spot orders after locked funds."""
+        return self.available_balance
+
     def restrictions(self) -> list[str]:
         active: list[str] = []
         if self.trading_blocked:
@@ -679,6 +699,9 @@ class BrokerAccount:
             "account_type": self.account_type,
             "equity": self.equity,
             "available_balance": self.available_balance,
+            "cash": self.cash,
+            "buying_power": self.buying_power,
+            "status": self.status,
             "currency": self.currency,
             "trading_blocked": self.trading_blocked,
             "account_blocked": self.account_blocked,
