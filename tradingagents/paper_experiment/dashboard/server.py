@@ -76,7 +76,7 @@ from ..market_data_wiring import (
 from ..providers.base import ProviderNotConfiguredError
 from .auth import DashboardAuthError, check_bearer, require_bindable, resolve_token
 from .crypto_view import CryptoViewService
-from .paper_control import PaperTradingController, PaperTradingDisabled
+from .paper_control import PaperTradingController, PaperTradingDisabled, _endpoint_for_provider
 from .state import DashboardStateError, ExperimentView
 
 DEFAULT_MAX_SESSIONS_PER_CALL = 50
@@ -965,6 +965,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"paper decision source: {describe_decision_source(decision_source)}", file=sys.stderr)
     print(
         f"paper execution provider: {describe_execution_provider(execution_provider)}",
+        file=sys.stderr,
+    )
+    # The endpoint the provider resolves to. The provider name alone does not say
+    # which host receives the order, and a mismatch between the two is exactly
+    # what made a Bybit selection appear to trade on Alpaca. Secret-free: a URL.
+    print(
+        "paper execution endpoint: "
+        f"{_endpoint_for_provider(execution_provider)}",
         file=sys.stderr,
     )
     crypto_symbols = _crypto_symbols(args)

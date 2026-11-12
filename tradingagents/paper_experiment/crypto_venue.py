@@ -154,7 +154,78 @@ def read_alpaca_execution_registry(
     return build_execution_registry(assets)
 
 
+def build_bybit_execution_registry(
+    instruments: dict[str, Any],
+    *,
+    fetched_at: str | None = None,
+) -> InstrumentRegistry:
+    """An :class:`InstrumentRegistry` from Bybit Demo's own Spot instrument list.
+
+    Bybit's ``instruments-info`` reports each pair's own numbers:
+    ``lotSizeFilter.minOrderQty``, ``lotSizeFilter.minOrderAmt``,
+    ``lotSizeFilter.qtyStep`` and ``priceFilter.tickSize``. They are carried
+    through as the venue stated them, so a pair's minimum is the venue's minimum
+    and never a project-wide default.
+
+    The symbol is written canonically as ``BASE/QUOTE`` so the registry speaks
+    the same vocabulary as every other registry in the project. Bybit's own
+    spelling (``BTCUSDT``) is kept in the rule's status-free fields only where
+    it is the venue's; the key is canonical because that is what
+    :meth:`InstrumentRegistry.get` looks up.
+    """
+    rules: dict[str, TradingRules] = {}
+    for info in instruments.values():
+        base = getattr(info, "base_coin", "") or ""
+        quote = getattr(info, "quote_coin", "") or ""
+        if not base or not quote:
+            continue
+        canonical = f"{base.upper()}/{quote.upper()}"
+        status = str(getattr(info, "status", "") or "unknown")
+        tradable = bool(getattr(info, "tradable", False))
+        rules[canonical] = TradingRules(
+            symbol=canonical,
+            base_asset=base.upper(),
+            quote_asset=quote.upper(),
+            status="TRADING" if tradable else status.upper(),
+            min_quantity=_as_float(getattr(info, "min_order_qty", None)),
+            max_quantity=_as_float(getattr(info, "max_order_qty", None)),
+            quantity_step=_as_float(getattr(info, "qty_step", None)),
+            price_tick=_as_float(getattr(info, "tick_size", None)),
+            min_notional=_as_float(getattr(info, "min_order_amt", None)),
+            # Bybit Spot states no fractionability field, so the answer is
+            # unknown. An unstated answer is not a refusal.
+            fractionable=None,
+        )
+    return InstrumentRegistry(
+        rules=rules,
+        venue="bybit_demo",
+        fetched_at=fetched_at or datetime.now(UTC).isoformat(),
+    )
+
+
+def read_bybit_execution_registry(
+    *,
+    base_url: str,
+    transport: Any | None = None,
+) -> InstrumentRegistry:
+    """Read Bybit Demo's own Spot instrument list and build the registry.
+
+    ``base_url`` is checked by the adapter's own demo-endpoint gate before any
+    request, so a live host cannot be reached through here. The read raises on
+    failure: a registry that could not be read is not an empty registry, and an
+    empty one would look like "this venue trades nothing", which is a different
+    and wrong claim.
+    """
+    from .broker.bybit_demo import DEMO_BASE_URL, BybitDemoBroker
+
+    demo_url = base_url or DEMO_BASE_URL
+    broker = BybitDemoBroker(base_url=demo_url, transport=transport)
+    return build_bybit_execution_registry(broker.load_instruments())
+
+
 __all__ = [
+    "build_bybit_execution_registry",
     "build_execution_registry",
     "read_alpaca_execution_registry",
+    "read_bybit_execution_registry",
 ]

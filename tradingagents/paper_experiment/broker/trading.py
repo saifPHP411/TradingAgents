@@ -118,7 +118,20 @@ WORKER_STATUSES = (
 )
 
 BANNER = "ALPACA PAPER — NOT LIVE"
-"""Shown wherever the worker's state is surfaced, so no view can imply live trading."""
+"""Shown wherever the worker's state is surfaced, so no view can imply live trading.
+
+This is Alpaca's banner. A view that reports a worker running on another broker
+must not show it, so the banner is derived from the *effective* provider by
+:func:`banner_for_provider` rather than hardcoded here.
+"""
+
+BYBIT_DEMO_BANNER = "BYBIT DEMO — NOT LIVE"
+"""Shown wherever a Bybit Demo worker's state is surfaced.
+
+Bybit Demo is a demo venue, so the banner says what it is and that it is not
+live. The demo endpoint is separately enforced by the adapter's own endpoint
+gate, so the label is not the guard — it is the honest description.
+"""
 
 # -- market-data freshness -------------------------------------------------------
 
@@ -208,6 +221,45 @@ EXECUTION_PROVIDER_CHOICES = (
     EXECUTION_PROVIDER_BYBIT_DEMO,
 )
 """The execution brokers this project can place a paper order with."""
+
+
+def banner_for_provider(execution_provider: str) -> str:
+    """The banner for the broker that is actually in use.
+
+    A view that shows Alpaca's banner beside a Bybit endpoint states something
+    false about where the worker's orders go. The banner is therefore derived
+    from the provider, so the label and the endpoint cannot disagree.
+    """
+    if execution_provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+        return BYBIT_DEMO_BANNER
+    return BANNER
+
+
+def mode_for_provider(execution_provider: str) -> str:
+    """The mode label for the broker that is actually in use.
+
+    ``ALPACA_PAPER`` and ``BYBIT_DEMO`` are the two paper modes. Both are
+    paper-only; neither is live, and the label says which venue the order
+    reaches.
+    """
+    if execution_provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+        return "BYBIT_DEMO"
+    return "ALPACA_PAPER"
+
+
+def is_paper_endpoint(execution_provider: str, base_url: str) -> bool:
+    """Whether ``base_url`` is a non-live venue for the given provider.
+
+    "Paper-only" is a claim about the *venue*, not about the provider name: a
+    Bybit Demo endpoint is just as non-live as Alpaca's paper host. Comparing
+    the URL against Alpaca's constant alone reported a demo venue as
+    ``paper_endpoint_only: NO``, which reads as "this may be live".
+    """
+    if execution_provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+        from .bybit_demo import DEMO_BASE_URL
+
+        return base_url == DEMO_BASE_URL
+    return base_url == PAPER_BASE_URL
 
 PROVIDER_ALPACA_CRYPTO = "alpaca_crypto"
 """A current price on the **execution** venue (Alpaca crypto), for the pair traded.
@@ -1692,6 +1744,282 @@ class AlpacaCryptoExecutionPrice:
             )
 
 
+class BybitDemoExecutionPrice:
+    """A current price on the **Bybit Demo execution venue**, for the pair traded.
+
+    The Bybit path trades the pair it analyses: the market-data venue is
+    Binance and the execution venue is Bybit Demo, but both carry the same
+    ``BASE/USDT`` pair, so a price for the execution pair is read from Bybit's
+    own ticker for that pair.
+
+    The freshness rule is the same one the Alpaca seam applies, for the same
+    reason: a price whose age cannot be verified must not size an order. Bybit's
+    ticker carries the venue's own ``time`` stamp; a missing or malformed one is
+    refused rather than replaced with the local clock, because a ticker with no
+    timestamp is *unverifiable*, not *current*.
+
+    The client is injectable, so every branch is exercised offline.
+    """
+
+    provider_name = "bybit_demo"
+    kind = MARKET_DATA_KIND_CURRENT
+
+    def __init__(
+        self,
+        symbols,
+        *,
+        client: Any | None = None,
+        max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+        future_tolerance_seconds: float = DEFAULT_SNAPSHOT_FUTURE_TOLERANCE_SECONDS,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.symbols = tuple(s.upper() for s in symbols)
+        self._client = client
+        self.max_age_seconds = max_age_seconds
+        self.future_tolerance_seconds = future_tolerance_seconds
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self.last_observation: SnapshotObservation | None = None
+        self.last_observed_at: str | None = None
+        self.last_status: str = MARKET_DATA_STATUS_NOT_STARTED
+        self.last_status_detail: str | None = None
+
+    def _client_or_build(self):
+        if self._client is None:
+            from tradingagents.crypto.bybit import BybitPublicClient
+
+            self._client = BybitPublicClient()
+        return self._client
+
+    # -- identity ---------------------------------------------------------
+
+    def describe(self) -> dict[str, Any]:
+        observation = self.last_observation
+        age = self.last_snapshot_age_seconds()
+        status, detail = _observation_status(
+            observation,
+            age_seconds=age,
+            max_age_seconds=self.max_age_seconds,
+            future_tolerance_seconds=self.future_tolerance_seconds,
+            read_status=self.last_status,
+            read_detail=self.last_status_detail,
+        )
+        return {
+            "market_data_detail": (
+                "a current price on the EXECUTION venue (Bybit Demo Spot), read for "
+                "the pair the order will actually trade; validated for freshness"
+            ),
+            "is_current_price": self._is_current_price(),
+            "execution_data_provider": self.provider_name,
+            "execution_data_max_snapshot_age_seconds": self.max_age_seconds,
+            "execution_data_last_snapshot_at": observation.as_of if observation else None,
+            "execution_data_last_snapshot_price": observation.price if observation else None,
+            "execution_data_last_snapshot_field": observation.field if observation else None,
+            "execution_data_last_snapshot_age_seconds": age,
+            "execution_data_last_observed_at": self.last_observed_at,
+            "execution_data_status": status,
+            "execution_data_status_detail": detail,
+        }
+
+    def _is_current_price(self) -> bool:
+        """Whether the execution price being reported is a current one.
+
+        Derived from the **same** observation the reported age is measured from,
+        so the two can never disagree. A seam that has read nothing yet is not
+        current either.
+        """
+        if self.last_observation is None:
+            return False
+        age = self.last_snapshot_age_seconds()
+        if age is None:
+            return False
+        if self.max_age_seconds is not None and age > self.max_age_seconds:
+            return False
+        return age >= -abs(self.future_tolerance_seconds)
+
+    def last_snapshot_age_seconds(self) -> float | None:
+        observation = self.last_observation
+        if observation is None or observation.as_of is None:
+            return None
+        parsed = _parse_utc(observation.as_of)
+        if parsed is None:
+            return None
+        return (self._clock() - parsed).total_seconds()
+
+    def available(self) -> bool:
+        """Whether a fresh execution price can be read for every configured symbol."""
+        if not self.symbols:
+            return False
+        try:
+            tickers = self._client_or_build().tickers(self.symbols)
+        except Exception:  # noqa: BLE001 - an unreachable source is "not available"
+            self._record_status(MARKET_DATA_STATUS_ERROR, "the execution price request failed")
+            return False
+        observations: list[SnapshotObservation] = []
+        for symbol in self.symbols:
+            try:
+                observations.append(self._observation_from(tickers, symbol))
+            except MarketDataError as exc:
+                self._record_status(_status_for(exc), str(exc))
+                return False
+        if observations:
+            self.last_observation = observations[0]
+            self.last_observed_at = self._clock().isoformat()
+        self._record_status(MARKET_DATA_STATUS_OK, None)
+        return True
+
+    def refresh(self) -> bool:
+        """Re-read the execution venue so the stored observation stays current."""
+        return self.available()
+
+    def price(self, symbol: str) -> float:
+        """The current, fresh execution-venue price for ``symbol``.
+
+        Raises :class:`MarketDataError` when Bybit cannot serve a usable, fresh
+        price. The worker then places **no** order: a market-data price is never
+        used as a substitute for the execution price.
+        """
+        symbol = symbol.upper()
+        try:
+            tickers = self._client_or_build().tickers((symbol,))
+        except MarketDataError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a source failure is surfaced
+            detail = (
+                f"the Bybit Demo execution-price request failed for {symbol!r}: "
+                f"{type(exc).__name__}"
+            )
+            self._record_status(MARKET_DATA_STATUS_ERROR, detail)
+            raise MarketDataError(detail) from None
+        observation = self._observation_from(tickers, symbol)
+        self.last_observation = observation
+        self.last_observed_at = self._clock().isoformat()
+        self._record_status(MARKET_DATA_STATUS_OK, None)
+        return observation.price
+
+    # -- internals --------------------------------------------------------
+
+    def _record_status(self, status: str, detail: str | None) -> None:
+        self.last_status = status
+        self.last_status_detail = detail
+
+    def _observation_from(
+        self, tickers: dict[str, Any], symbol: str
+    ) -> SnapshotObservation:
+        """The price and its own timestamp from Bybit's ticker for ``symbol``.
+
+        The ticker map is keyed by both spellings, so the lookup is on the
+        canonical pair and never on a loose prefix.
+        """
+        ticker = _find_ticker(tickers, symbol)
+        if ticker is None:
+            raise MarketDataError(
+                f"Bybit returned no execution ticker for {symbol!r}; no current price "
+                "is available on the execution venue, so no order can be sized"
+            )
+        if not isinstance(ticker, dict):
+            raise MarketDataError(
+                f"Bybit's execution ticker for {symbol!r} was not a JSON object"
+            )
+        price = _bybit_ticker_price(ticker)
+        if price is None:
+            raise MarketDataError(
+                f"Bybit's execution ticker for {symbol!r} carried no usable price "
+                "(no last trade and no coherent bid/ask)"
+            )
+        as_of = _bybit_ticker_time(ticker)
+        observation = SnapshotObservation(
+            price=price,
+            as_of=as_of,
+            field="lastPrice" if ticker.get("lastPrice") else "bid1Price",
+        )
+        self._assert_fresh(observation)
+        return observation
+
+    def _assert_fresh(self, observation: SnapshotObservation) -> None:
+        """Refuse an execution price whose timestamp is missing, stale or future-dated."""
+        if observation.as_of is None:
+            raise MarketDataError(
+                f"the execution ticker's {observation.field} carries no timestamp, so "
+                "its age cannot be verified; refusing to size an order from an "
+                "unverifiable execution price"
+            )
+        parsed = _parse_utc(observation.as_of)
+        if parsed is None:
+            raise MarketDataError(
+                f"the execution ticker's {observation.field} timestamp "
+                f"{observation.as_of!r} is malformed; refusing to size an order from an "
+                "unverifiable execution price"
+            )
+        age = (self._clock() - parsed).total_seconds()
+        if age < -abs(self.future_tolerance_seconds):
+            raise MarketDataError(
+                f"the execution ticker's {observation.field} timestamp is {-age:.1f}s "
+                "in the future, beyond the allowed clock skew; refusing to size an "
+                "order from a future-dated execution price"
+            )
+        if self.max_age_seconds is not None and age > self.max_age_seconds:
+            raise MarketDataError(
+                f"the execution price is stale: the {observation.field} is {age:.1f}s "
+                f"old, beyond the {self.max_age_seconds:.0f}s maximum; refusing to size "
+                "an order from a stale execution price"
+            )
+
+
+def _bybit_ticker_price(ticker: dict[str, Any]) -> float | None:
+    """A usable current price from a Bybit ticker row, or ``None``.
+
+    The last trade is preferred. Otherwise the quote midpoint is used when the
+    quote is coherent (``ask >= bid > 0``). A non-finite or non-positive price is
+    refused, so a NaN cannot pass and later poison a sizing step.
+    """
+    last = ticker.get("lastPrice")
+    if last is not None:
+        try:
+            value = float(last)
+        except (TypeError, ValueError):
+            value = float("nan")
+        if math.isfinite(value) and value > 0:
+            return value
+    bid = ticker.get("bid1Price")
+    ask = ticker.get("ask1Price")
+    if bid is None or ask is None:
+        return None
+    try:
+        bid_value = float(bid)
+        ask_value = float(ask)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(bid_value) and math.isfinite(ask_value)):
+        return None
+    if bid_value <= 0 or ask_value < bid_value:
+        return None
+    return (bid_value + ask_value) / 2.0
+
+
+def _bybit_ticker_time(ticker: dict[str, Any]) -> str | None:
+    """The ticker row's own timestamp as an ISO string, or ``None``.
+
+    Bybit's ticker carries an epoch-millisecond ``time``. It is converted to
+    ISO-8601 rather than compared as a raw number, so the same freshness rule
+    applies as on every other seam. A missing or unparsable stamp is ``None``,
+    which the caller refuses — a ticker with no timestamp is unverifiable, and
+    the local clock must never be substituted for it.
+    """
+    raw = ticker.get("time")
+    if raw is None:
+        return None
+    try:
+        epoch_ms = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(epoch_ms):
+        return None
+    try:
+        return datetime.fromtimestamp(epoch_ms / 1000.0, tz=UTC).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _find_ticker(tickers: dict[str, Any], symbol: str) -> Any:
     """The ticker for ``symbol``, whatever spelling either side used.
 
@@ -2824,13 +3152,16 @@ def worker_status_view(
     source_identity = dict(decision_source_identity or {})
     source_identity.setdefault("decision_source_kind", config.decision_source)
     return {
-        "banner": BANNER,
-        "mode": "ALPACA_PAPER",
+        "banner": banner_for_provider(config.execution_provider),
+        "mode": mode_for_provider(config.execution_provider),
         "live": False,
         "status": state.status,
         "strategy_id": state.strategy_id,
         "endpoint": config.base_url,
-        "paper_endpoint_only": config.base_url == PAPER_BASE_URL,
+        "paper_endpoint_only": is_paper_endpoint(config.execution_provider, config.base_url),
+        # The broker this view describes. Named explicitly so a view can never
+        # report one venue's label beside another venue's endpoint.
+        "execution_provider": config.execution_provider,
         "market_data_provider_configured": configured_provider,
         "market_data_max_age_seconds": config.market_data_max_age_seconds,
         "decision_source_configured": config.decision_source,

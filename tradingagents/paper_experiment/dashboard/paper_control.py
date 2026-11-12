@@ -36,7 +36,6 @@ from tradingagents.crypto.tjr_settings import crypto_tjr_settings
 from tradingagents.risk.paper_parity import WHOLE_SHARES
 
 from ..broker import (
-    BANNER,
     DECISION_SOURCE_CRYPTO,
     DECISION_SOURCE_CURRENT_MARKET,
     DECISION_SOURCE_HISTORY,
@@ -44,6 +43,7 @@ from ..broker import (
     DEFAULT_MAX_PRICE_DEVIATION,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     EXECUTION_PROVIDER_ALPACA_PAPER,
+    EXECUTION_PROVIDER_BYBIT_DEMO,
     PROVIDER_BAR_OPEN,
     STATUS_STOPPED,
     AlpacaPaperBroker,
@@ -52,6 +52,8 @@ from ..broker import (
     SourceMarketData,
     StaticMarketData,
     WorkerStateStore,
+    banner_for_provider,
+    mode_for_provider,
     worker_status_view,
 )
 from ..symbol_mapping import (
@@ -61,6 +63,26 @@ from ..symbol_mapping import (
 
 class PaperTradingDisabled(RuntimeError):
     """The dashboard was not started with paper trading enabled."""
+
+
+def _endpoint_for_provider(execution_provider: str) -> str:
+    """The endpoint the given provider trades on.
+
+    A status view has to name the venue, and it has to name the *right* one.
+    The endpoint follows the provider: a Bybit selection resolves to Bybit's
+    demo host and an Alpaca selection to Alpaca's paper host. It is derived
+    from the same rule the config applies, so the view and the worker cannot
+    disagree about which host receives the order.
+
+    Secret-free by construction: it is a public URL.
+    """
+    if execution_provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+        from ..broker.bybit_demo import DEMO_BASE_URL
+
+        return DEMO_BASE_URL
+    from ..broker.alpaca_paper import PAPER_BASE_URL
+
+    return PAPER_BASE_URL
 
 
 def _strategy_row_from_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -350,14 +372,26 @@ class PaperTradingController:
                 }
                 raise
 
-            # Get Alpaca registry - REQUIRED for crypto paper execution. It is read
-            # from the PAPER host's own asset list, through the paper endpoint gate,
-            # so a live host can never be reached from here.
-            from ..crypto_venue import read_alpaca_execution_registry
+            # The execution venue's own registry - REQUIRED for crypto paper
+            # execution. It is read from the *selected* venue's demo/paper host
+            # through that venue's endpoint gate, so a live host can never be
+            # reached from here. It used to read Alpaca's registry through a
+            # freshly built default config, so a Bybit selection still consulted
+            # Alpaca's listing and accepted pairs Alpaca alone served.
+            if self.execution_provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+                from ..crypto_venue import read_bybit_execution_registry
+
+                read_execution_registry = read_bybit_execution_registry
+                execution_base_url = _endpoint_for_provider(self.execution_provider)
+            else:
+                from ..crypto_venue import read_alpaca_execution_registry
+
+                read_execution_registry = read_alpaca_execution_registry
+                execution_base_url = _endpoint_for_provider(self.execution_provider)
 
             try:
-                alpaca_registry = read_alpaca_execution_registry(
-                    base_url=PaperTradingConfig().base_url
+                execution_registry = read_execution_registry(
+                    base_url=execution_base_url
                 )
             except Exception as exc:  # noqa: BLE001 - reported, never hidden
                 self.symbol_validation = {
@@ -381,7 +415,7 @@ class PaperTradingController:
             configuration = resolve_symbol_configuration(
                 list(experiment.config.symbols),
                 market_data_registry=binance_registry,
-                execution_registry=alpaca_registry,
+                execution_registry=execution_registry,
             )
             if configuration.rejected:
                 import logging
@@ -409,20 +443,30 @@ class PaperTradingController:
             if not symbol_mappings:
                 raise RuntimeError(
                     "No valid symbol mappings for crypto paper trading. "
-                    "All configured symbols were rejected. Check Alpaca credentials "
-                    "and ensure symbols are tradable on both Binance and Alpaca Paper."
+                    "All configured symbols were rejected. Check the "
+                    f"{self.execution_provider} credentials and ensure symbols are "
+                    "tradable on both the market-data venue and the execution venue."
                 )
 
-            # The execution-side price seam. The strategy analyses Binance's
-            # BTC/USDT and the order is placed on Alpaca's BTC/USD, so the order
-            # must be sized from a price of the pair that will actually trade,
-            # read from the execution venue itself.
-            from ..broker import AlpacaCryptoExecutionPrice
+            # The execution-side price seam. The order must be sized from a price
+            # of the pair that will actually trade, read from the *execution*
+            # venue itself. On Alpaca the strategy analyses Binance's BTC/USDT and
+            # the order is placed on Alpaca's BTC/USD; on Bybit both sides carry
+            # the same BASE/USDT pair. The seam follows the selected venue.
+            if self.execution_provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+                from ..broker import BybitDemoExecutionPrice
 
-            execution_price_seam = AlpacaCryptoExecutionPrice(
-                [m.execution_symbol for m in symbol_mappings],
-                max_age_seconds=self.market_data_max_age_seconds,
-            )
+                execution_price_seam = BybitDemoExecutionPrice(
+                    [m.execution_symbol for m in symbol_mappings],
+                    max_age_seconds=self.market_data_max_age_seconds,
+                )
+            else:
+                from ..broker import AlpacaCryptoExecutionPrice
+
+                execution_price_seam = AlpacaCryptoExecutionPrice(
+                    [m.execution_symbol for m in symbol_mappings],
+                    max_age_seconds=self.market_data_max_age_seconds,
+                )
 
         # Build the decision source from the persisted config, so the worker acts
         # on the same decisions the experiment recorded.
@@ -445,6 +489,13 @@ class PaperTradingController:
             # above is the only wiring that trades crypto, so this flag is set
             # there and only there.
             crypto=self.decision_source_kind == DECISION_SOURCE_CRYPTO,
+            # The execution broker the worker places orders with. This MUST be
+            # the provider the operator selected: the config resolves the
+            # endpoint from it (a Bybit selection gets Bybit's demo host, never
+            # Alpaca's) and the worker builds the broker from it. Omitting it
+            # left the config on its Alpaca default, so a Bybit selection
+            # silently traded on Alpaca Paper while the start log named Bybit.
+            execution_provider=self.execution_provider,
         )
         source = experiment.source
         sessions = source.sessions()
@@ -813,10 +864,18 @@ class PaperTradingController:
         operator presses START.
         """
         base: dict[str, Any] = {
-            "banner": BANNER,
+            # The banner and mode name the broker this controller was
+            # configured with. They were hardcoded to Alpaca, so a Bybit
+            # selection displayed "ALPACA PAPER — NOT LIVE" — a label that
+            # contradicts the endpoint the worker actually trades on.
+            "banner": banner_for_provider(self.execution_provider),
             "enabled": self.enabled,
-            "mode": "ALPACA_PAPER",
+            "mode": mode_for_provider(self.execution_provider),
             "live": False,
+            # The configured provider and the endpoint that provider resolves
+            # to. Both are secret-free: a URL and a label.
+            "execution_provider": self.execution_provider,
+            "endpoint": _endpoint_for_provider(self.execution_provider),
             # The symbol validation state, reported whether or not a worker was
             # ever built. It says whether the venues' own listings have been
             # read and which symbols they refused — an explicit "not validated
