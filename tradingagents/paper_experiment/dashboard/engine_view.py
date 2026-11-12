@@ -345,14 +345,61 @@ def positions_view(
         quantity = _opt_float(position.get("quantity")) or 0.0
         if quantity == 0:
             continue
-        entry = _opt_float(position.get("average_entry_price"))
+        # Bybit Spot positions use BrokerPosition's native field names
+        # (avg_price / mark_price / unrealised_pnl); Alpaca-style positions use
+        # average_entry_price / market_value. Read both without inventing data.
+        entry = _opt_float(
+            position.get("average_entry_price", position.get("avg_price"))
+        )
+        current_price = _opt_float(
+            position.get("current_price", position.get("mark_price"))
+        )
         market_value = _opt_float(position.get("market_value"))
-        current_price = None
-        if market_value is not None and quantity:
-            current_price = market_value / quantity
-        unrealized = None
-        if market_value is not None and entry is not None and quantity:
-            unrealized = market_value - entry * quantity
+        if market_value is None and current_price is not None:
+            market_value = abs(quantity) * current_price
+
+        # Bybit Spot currently has no wallet-level average cost field. A
+        # defensible entry estimate is possible only when this worker's recorded
+        # fills account for the entire held quantity and there are no sell fills
+        # for the symbol. Otherwise leave entry/uPnL unknown rather than present
+        # a partial or misleading cost basis.
+        if entry is None:
+            symbol_orders = [
+                order for order in _orders(status)
+                if order.get("symbol") == symbol
+                and _opt_float(order.get("filled_quantity")) is not None
+                and (_opt_float(order.get("filled_quantity")) or 0.0) > 0
+            ]
+            buy_qty = sum(
+                _opt_float(order.get("filled_quantity")) or 0.0
+                for order in symbol_orders if str(order.get("side", "")).lower() == "buy"
+            )
+            sell_qty = sum(
+                _opt_float(order.get("filled_quantity")) or 0.0
+                for order in symbol_orders if str(order.get("side", "")).lower() == "sell"
+            )
+            buy_cost = sum(
+                (_opt_float(order.get("filled_quantity")) or 0.0)
+                * (_opt_float(order.get("filled_avg_price")) or 0.0)
+                for order in symbol_orders if str(order.get("side", "")).lower() == "buy"
+                and _opt_float(order.get("filled_avg_price")) is not None
+            )
+            all_buys_priced = all(
+                _opt_float(order.get("filled_avg_price")) is not None
+                for order in symbol_orders if str(order.get("side", "")).lower() == "buy"
+            )
+            if (
+                symbol_orders and all_buys_priced and sell_qty == 0
+                and abs(buy_qty - abs(quantity)) <= max(1e-8, abs(quantity) * 1e-6)
+                and buy_qty > 0
+            ):
+                entry = buy_cost / buy_qty
+
+        unrealized = _opt_float(
+            position.get("unrealized_pnl", position.get("unrealised_pnl"))
+        )
+        if unrealized is None and market_value is not None and entry is not None and quantity:
+            unrealized = market_value - entry * abs(quantity)
         level = stops.get(symbol) if isinstance(stops.get(symbol), dict) else {}
         internal_row = internal.get(symbol) if isinstance(internal.get(symbol), dict) else {}
         internal_qty = _opt_float(internal_row.get("quantity")) if internal_row else None
