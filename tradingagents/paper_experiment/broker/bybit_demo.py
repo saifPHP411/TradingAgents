@@ -1987,6 +1987,7 @@ class BybitDemoBroker:
         time_in_force: str | None = None,
         allow_orders: bool = False,
         refresh: bool = False,
+        crypto: bool = True,
     ) -> BrokerOrder:
         """Submit a demo order, safely.
 
@@ -2004,6 +2005,10 @@ class BybitDemoBroker:
             raise PaperRiskRejected(
                 "order submission is disabled: pass allow_orders=True to place a demo "
                 "order deliberately. Construction alone never places an order."
+            )
+        if not crypto:
+            raise PaperRiskRejected(
+                "Bybit Demo broker supports crypto spot orders only; non-crypto orders are refused"
             )
         if not self._key or not self._secret:
             raise BrokerNotConfiguredError(
