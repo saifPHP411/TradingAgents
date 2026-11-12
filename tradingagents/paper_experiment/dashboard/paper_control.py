@@ -850,7 +850,7 @@ class PaperTradingController:
         view reports as "no evaluation" rather than as a no-signal with a reason
         invented for it.
         """
-        state_path = self.root / self._source_state_filename()
+        state_path = self._source_state_path(self._source_state_filename())
         try:
             payload = json.loads(state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
