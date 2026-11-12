@@ -885,9 +885,12 @@ def _default_transport(
         # Send the exact bytes that were signed.
         request_kwargs["data"] = _encode_json_body(json_body).encode("utf-8")
         request_kwargs["headers"] = {**dict(headers), "Content-Type": "application/json"}
-    else:
-        request_kwargs["params"] = dict(params or {})
 
+    # The query string has already been appended to the URL above. Passing
+    # params as well makes requests append it a second time, so Bybit
+    # receives e.g. accountType=UNIFIED&accountType=UNIFIED even though the
+    # signature covered only one copy. Keep the signed URL as the sole source
+    # of query parameters.
     response = requests.request(method, url, **request_kwargs)
     return BrokerHttpResponse(response.status_code, response.text)
 
