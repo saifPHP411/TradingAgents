@@ -565,6 +565,37 @@ class TestAccount:
         assert client._state.confirmed is True
         assert client._state.equity == 10000.0
 
+    def test_unified_wallet_blank_available_to_withdraw_uses_wallet_minus_locked(self):
+        response = json.loads(json.dumps(MOCK_ACCOUNT_RESPONSE))
+        usdt = response["result"]["list"][0]["coin"][0]
+        usdt["availableToWithdraw"] = ""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", response)
+        client = _make_client(transport)
+
+        account = client.connect()
+
+        assert account.equity == 10000.0
+        assert account.available_balance == 9500.0
+
+    def test_wallet_balance_reader_handles_blank_deprecated_fields(self):
+        response = json.loads(json.dumps(MOCK_ACCOUNT_RESPONSE))
+        usdt = response["result"]["list"][0]["coin"][0]
+        usdt["availableToWithdraw"] = ""
+        usdt["free"] = ""
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/account/wallet-balance", response)
+        client = _make_client(transport)
+
+        balances = client._read_wallet_balances()
+
+        assert balances["USDT"]["wallet_balance"] == 10000.0
+        assert balances["USDT"]["locked"] == 500.0
+        assert balances["USDT"]["available_to_withdraw"] == 9500.0
+        assert balances["USDT"]["free"] == 9500.0
+        call = next(c for c in transport.calls if "/v5/account/wallet-balance" in c["url"])
+        assert call["params"]["accountType"] == "UNIFIED"
+
 
 # ---------------------------------------------------------------------------
 # Instruments tests
