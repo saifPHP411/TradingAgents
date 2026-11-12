@@ -744,6 +744,38 @@ class TestOrders:
         assert order.filled_quantity == 0.001
         assert order.status == "filled"
 
+    def test_submit_order_floors_quantity_to_symbol_qty_step(self):
+        transport = MockTransport()
+        instruments = json.loads(json.dumps(MOCK_INSTRUMENTS_RESPONSE))
+        btc_rules = instruments["result"]["list"][0]["lotSizeFilter"]
+        btc_rules["minOrderQty"] = "0.01"
+        btc_rules["qtyStep"] = "0.01"
+        btc_rules["minOrderAmt"] = "5"
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", instruments)
+        transport.add_response("GET", "/v5/position/list", {"retCode": 0, "result": {"list": []}})
+        transport.add_response("POST", "/v5/order/create", MOCK_ORDER_CREATE_RESPONSE)
+        transport.add_response("GET", "/v5/order/realtime", MOCK_ORDER_REALTIME_RESPONSE)
+        client = _make_client(transport)
+
+        client.connect()
+        client.submit_order(
+            symbol="BTC/USDT",
+            quantity=9.700261,
+            side="buy",
+            reference_price=2.0,
+            client_order_id="pt-qty-step-test",
+            allow_orders=True,
+            refresh=True,
+            crypto=True,
+        )
+
+        create_call = next(
+            call for call in transport.calls
+            if call["method"] == "POST" and call["url"].endswith("/v5/order/create")
+        )
+        assert create_call["json_body"]["qty"] == "9.70"
+
     def test_submit_order_refuses_non_crypto_orders(self):
         transport = MockTransport()
         client = _make_client(transport)
