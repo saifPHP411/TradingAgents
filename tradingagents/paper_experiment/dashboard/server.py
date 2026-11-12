@@ -1479,6 +1479,10 @@ INDEX_HTML = """<!doctype html>
             <button class="act stop" id="pstop" onclick="doPaperStop()">STOP PAPER TRADING</button>
           </div>
           <p class="muted" id="pnote" style="margin:0 0 12px"></p>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 12px">
+            <button class="act" id="paccountcheck" onclick="doBybitAccountCheck()">READ BYBIT DEMO BALANCE ONLY</button>
+            <span class="muted" id="paccountcheck-result">No account check has been run.</span>
+          </div>
           <div id="eng-worker" class="kv"></div>
         </div>
         <div class="card">
@@ -1910,6 +1914,25 @@ async function doPaperStop(){
   try{ await api("/api/paper/stop", {method:"POST", headers:{"X-Paper-Confirm":"yes"}}); }
   catch(e){ showErr(e.message); }
   finally{ refreshEngine(); }
+}
+async function doBybitAccountCheck(){
+  const button = $("paccountcheck");
+  const result = $("paccountcheck-result");
+  button.disabled = true;
+  result.textContent = "Reading Bybit Demo wallet balance…";
+  try{
+    const data = await api("/api/paper/account-check");
+    const a = data.account || {};
+    result.textContent = "SUCCESS · " + a.currency + " equity: " +
+      money(a.equity) + " · available: " + money(a.available_balance);
+    result.className = "muted";
+  }catch(e){
+    result.textContent = "FAILED · " + e.message;
+    result.className = "muted";
+    showErr(e.message);
+  }finally{
+    button.disabled = false;
+  }
 }
 
 // -- Decisions --------------------------------------------------------------
