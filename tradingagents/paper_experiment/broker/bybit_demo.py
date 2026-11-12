@@ -1144,8 +1144,17 @@ class BybitDemoBroker:
         account = account_list[0]
         coin_list = account.get("coin", [])
         usdt_info = next((c for c in coin_list if c.get("coin") == "USDT"), {})
-        equity = float(usdt_info.get("walletBalance", "0"))
-        available = float(usdt_info.get("availableToWithdraw", "0"))
+        equity = _as_float(usdt_info.get("walletBalance"))
+        # Bybit deprecated availableToWithdraw for UNIFIED accounts and now
+        # returns an empty string. For this Spot-only broker, spendable USDT is
+        # the wallet balance less funds locked by open Spot orders.
+        locked = _as_float(usdt_info.get("locked"))
+        available_raw = usdt_info.get("availableToWithdraw")
+        available = (
+            _as_float(available_raw)
+            if available_raw not in (None, "")
+            else max(0.0, equity - locked)
+        )
         return BrokerAccount(
             account_id=str(account.get("accountId", "")),
             account_type=str(account.get("accountType", "")),
@@ -1246,11 +1255,27 @@ class BybitDemoBroker:
             coin_name = str(coin.get("coin", "")).upper()
             if not coin_name:
                 continue
+            wallet_balance = _as_float(coin.get("walletBalance"))
+            locked = _as_float(coin.get("locked"))
+            available_raw = coin.get("availableToWithdraw")
+            free_raw = coin.get("free")
+            # Both availableToWithdraw (UNIFIED) and free are deprecated
+            # and may be returned as "". Never float-convert those blanks.
+            available = (
+                _as_float(available_raw)
+                if available_raw not in (None, "")
+                else max(0.0, wallet_balance - locked)
+            )
+            free = (
+                _as_float(free_raw)
+                if free_raw not in (None, "")
+                else available
+            )
             balances[coin_name] = {
-                "wallet_balance": float(coin.get("walletBalance", "0")),
-                "available_to_withdraw": float(coin.get("availableToWithdraw", "0")),
-                "locked": float(coin.get("locked", "0")),
-                "free": float(coin.get("free", "0")),  # alternative field name
+                "wallet_balance": wallet_balance,
+                "available_to_withdraw": available,
+                "locked": locked,
+                "free": free,
             }
         return balances
 
