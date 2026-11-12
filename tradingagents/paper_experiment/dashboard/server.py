@@ -340,6 +340,39 @@ class Dashboard:
         from .engine_view import positions_view
 
         status = self.paper.status()
+
+        # A persisted worker snapshot can outlive the worker process. Refresh
+        # public Bybit Spot quotes for display without starting the worker,
+        # touching private account endpoints, or placing orders.
+        positions = status.get("positions") or {}
+        if self.paper.execution_provider == "bybit_demo" and positions:
+            try:
+                from tradingagents.crypto.bybit import BybitPublicClient
+
+                symbols = [
+                    str(row.get("venue_symbol") or symbol).replace("/", "")
+                    for symbol, row in positions.items()
+                    if isinstance(row, dict)
+                ]
+                tickers = BybitPublicClient().tickers(symbols)
+                for symbol, row in positions.items():
+                    if not isinstance(row, dict):
+                        continue
+                    venue_symbol = str(row.get("venue_symbol") or symbol).replace("/", "")
+                    ticker = tickers.get(venue_symbol, {})
+                    if isinstance(ticker, dict):
+                        price = ticker.get("lastPrice") or ticker.get("last")
+                        try:
+                            price = float(price)
+                        except (TypeError, ValueError):
+                            price = None
+                        if price is not None and price > 0:
+                            row["mark_price"] = price
+            except Exception:
+                # Keep the last known snapshot; the UI will continue to show
+                # N/A rather than fabricate a quote if the public feed is down.
+                pass
+
         rows = positions_view(status, self._internal_positions())
         return {
             "positions": rows,
