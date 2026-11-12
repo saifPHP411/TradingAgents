@@ -351,6 +351,12 @@ def positions_view(
         entry = _opt_float(
             position.get("average_entry_price", position.get("avg_price"))
         )
+        if entry is None:
+            # The worker records the actual average fill beside the protective
+            # levels when it accepts the entry. Prefer this exact fill over an
+            # unavailable wallet-level Spot cost basis.
+            level_for_entry = stops.get(symbol) if isinstance(stops.get(symbol), dict) else {}
+            entry = _opt_float(level_for_entry.get("entry_price"))
         current_price = _opt_float(
             position.get("current_price", position.get("mark_price"))
         )
