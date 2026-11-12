@@ -157,3 +157,21 @@ def test_bybit_spot_position_does_not_guess_cost_basis_from_partial_order_histor
     assert row["current_price"] == 660.0
     assert row["market_value"] == 13.2
     assert row["unrealized_pnl"] is None
+
+
+def test_position_view_uses_recorded_stop_entry_price_when_broker_cost_basis_missing():
+    from tradingagents.paper_experiment.dashboard.engine_view import positions_view
+
+    row = positions_view({
+        "positions": {"BNB/USDT": {
+            "quantity": 0.0153,
+            "avg_price": None,
+            "mark_price": 660.0,
+        }},
+        "stops": {"BNB/USDT": {"entry_price": 652.57}},
+    })[0]
+
+    assert row["entry_price"] == 652.57
+    assert row["current_price"] == 660.0
+    assert row["market_value"] == 0.0153 * 660.0
+    assert row["unrealized_pnl"] == (660.0 - 652.57) * 0.0153
