@@ -883,7 +883,7 @@ class TestTheRealSpotInstrumentShape:
         assert instrument is not None
         assert instrument.qty_step == pytest.approx(0.000001)
 
-    def test_a_quantity_off_the_step_is_refused_locally(self):
+    def test_a_quantity_off_the_step_is_floored_locally(self):
         transport = RecordingTransport()
         transport.add(
             "GET",
@@ -898,20 +898,20 @@ class TestTheRealSpotInstrumentShape:
         broker = make_broker(transport)
         broker.connect()
 
-        # 0.0001005 BTC at $50,000 is $5.025 -- over the pair's $5 minimum --
-        # but it is not a multiple of the 0.000001 step.
-        with pytest.raises(PaperRiskRejected) as caught:
-            broker.submit_order(
-                symbol="BTC/USDT",
-                side="buy",
-                quantity=0.0001005,
-                reference_price=50000.0,
-                client_order_id="bybit-off-step",
-                allow_orders=True,
-            )
+        # 0.0001005 BTC at $50,000 is $5.025. Flooring to the venue's
+        # 0.000001 step gives 0.000100 BTC ($5), still above minOrderAmt.
+        broker.submit_order(
+            symbol="BTC/USDT",
+            side="buy",
+            quantity=0.0001005,
+            reference_price=50000.0,
+            client_order_id="bybit-off-step",
+            allow_orders=True,
+        )
 
-        assert "0.000001" in str(caught.value)
-        assert transport.calls_to("POST", "/v5/order/create") == []
+        create_calls = transport.calls_to("POST", "/v5/order/create")
+        assert len(create_calls) == 1
+        assert create_calls[0]["json_body"]["qty"] == "0.000100"
 
     def test_a_quantity_on_the_step_is_accepted(self):
         transport = RecordingTransport()
@@ -1198,23 +1198,24 @@ class TestQuantitiesAndLimits:
         step = Decimal("0.00001")
         assert (Decimal(body["qty"]) / step) % 1 == 0
 
-    def test_a_quantity_that_breaks_the_step_is_refused(self):
+    def test_a_quantity_that_breaks_the_step_is_floored_down(self):
         transport = self._ready_transport(min_order_qty="0.01", qty_step="0.01", min_order_amt="5")
         broker = make_broker(transport)
         broker.connect()
-        # 0.0155 BTC breaks a 0.01 step. At 1000 USDT the notional is 15.50,
-        # so the size is inside the $25 cap and the step is the only fault.
-        with pytest.raises(PaperRiskRejected) as excinfo:
-            broker.submit_order(
-                symbol="BTC/USDT",
-                quantity=0.0155,
-                side="buy",
-                reference_price=1000,
-                client_order_id="frac-2",
-                allow_orders=True,
-                refresh=True,
-            )
-        assert "qtyStep" in str(excinfo.value)
+        # 0.0155 BTC breaks a 0.01 step. It is floored to 0.01, never rounded
+        # up, and the exact sent quantity remains inside the $25 cap.
+        broker.submit_order(
+            symbol="BTC/USDT",
+            quantity=0.0155,
+            side="buy",
+            reference_price=1000,
+            client_order_id="frac-2",
+            allow_orders=True,
+            refresh=True,
+        )
+        create_calls = transport.calls_to("POST", "/v5/order/create")
+        assert len(create_calls) == 1
+        assert create_calls[0]["json_body"]["qty"] == "0.01"
 
     def test_an_order_over_the_25_usd_cap_is_refused(self):
         transport = self._ready_transport(min_order_qty="0.00001", qty_step="0.00001", min_order_amt="5")
