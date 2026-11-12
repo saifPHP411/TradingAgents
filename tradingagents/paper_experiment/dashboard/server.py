@@ -346,7 +346,7 @@ class Dashboard:
             "count": len(rows),
             "positions_checked_at": status.get("positions_checked_at"),
             "positions_at": status.get("positions_at"),
-            "banner": BANNER,
+            "banner": banner_for_provider(self.paper.execution_provider),
             "live": False,
         }
 
@@ -360,7 +360,7 @@ class Dashboard:
         except Exception:  # noqa: BLE001 - no experiment yet is an empty journal
             decisions = []
         result = trades_view(decisions, status)
-        result["banner"] = BANNER
+        result["banner"] = banner_for_provider(self.paper.execution_provider)
         result["live"] = False
         return result
 
@@ -1949,8 +1949,29 @@ async function refreshDecisions(){
   try{
     const d = await api("/api/decisions");
     const list = d.decisions || [];
-    if(!list.length){ $("declist").innerHTML = `<div class="card">${empty("No decisions yet.")}</div>`; return; }
-    $("declist").innerHTML = list.map(x=>`<div class="card">
+    let liveHtml = "";
+    try{
+      const live = await api("/api/crypto/strategy");
+      const rows = live.symbols || [];
+      liveHtml = '<div class="card"><h2>Live strategy evaluations <span class="spacer"></span><span class="tag">'+esc(live.status||"—")+'</span></h2>' +
+        (rows.length ? rows.map(x=>`<div class="card" style="margin-top:10px">
+          <h2>${esc(x.symbol)} <span class="spacer"></span><span class="pill ${x.actionable?"state-OK":"state-STOPPED"}">${esc(x.stage||"NO_SIGNAL")}</span>
+          ${x.direction?`<span class="tag">${esc(x.direction)}</span>`:""}</h2>
+          <div class="kv">
+            <div class="k">Reason</div><div class="v">${esc(x.reason_code||"—")}</div>
+            <div class="k">Detail</div><div class="v">${esc(x.detail||"—")}</div>
+            <div class="k">Entry</div><div class="v">${x.entry===null||x.entry===undefined?"N/A":num(x.entry,4)}</div>
+            <div class="k">Stop loss</div><div class="v">${x.stop_loss===null||x.stop_loss===undefined?"N/A":num(x.stop_loss,4)}</div>
+            <div class="k">Take profit</div><div class="v">${x.take_profit===null||x.take_profit===undefined?"N/A":num(x.take_profit,4)}</div>
+            <div class="k">Risk / reward</div><div class="v">${x.risk_reward===null||x.risk_reward===undefined?"N/A":num(x.risk_reward,2)}</div>
+            <div class="k">Evaluated at</div><div class="v">${esc(when(x.evaluated_at))}</div>
+          </div></div>`).join("") : '<p class="muted">No live strategy evaluation has been recorded yet.</p>') +
+        '</div>';
+    }catch(e){
+      liveHtml = '<div class="card"><h2>Live strategy evaluations</h2><p class="muted">'+esc(e.message)+'</p></div>';
+    }
+    const historyHtml = list.length
+      ? '<div class="sec-title">Historical experiment decisions</div>' + list.map(x=>`<div class="card">
         <h2>${esc(x.symbol)} <span class="spacer"></span>
           <span class="tag">${esc(x.decision_session)}</span>
           <span class="pill s-${esc(x.state)}">${esc(x.state)}</span></h2>
@@ -1969,7 +1990,9 @@ async function refreshDecisions(){
         ${indicatorChips(x.indicators)}
         ${x.evaluation?`<div class="mono" style="margin-top:8px">outcome: net ${money(x.evaluation.net_pnl)}${(x.evaluation.return_pct!==null&&x.evaluation.return_pct!==undefined)?" ("+pct(x.evaluation.return_pct)+")":""} · exit ${esc(x.evaluation.evaluation_session||"—")}</div>`:""}
         ${x.record?"":'<div class="mono" style="margin-top:8px">no journal record found for this decision — provenance unavailable</div>'}
-      </div>`).join("");
+      </div>`).join("")
+      : '<div class="sec-title">Historical experiment decisions</div><div class="card">'+empty("No historical experiment decisions yet.")+'</div>';
+    $("declist").innerHTML = liveHtml + historyHtml;
   }catch(e){ showErr(e.message); }
 }
 
