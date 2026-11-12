@@ -1102,6 +1102,31 @@ class TestRiskLimits:
 
 
 class TestMinOrderRules:
+    def test_blank_required_instrument_rules_fail_closed(self):
+        transport = MockTransport()
+        instruments = json.loads(json.dumps(MOCK_INSTRUMENTS_RESPONSE))
+        instruments["result"]["list"][0]["lotSizeFilter"]["minOrderAmt"] = ""
+        transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
+        transport.add_response("GET", "/v5/market/instruments-info", instruments)
+        client = _make_client(transport)
+
+        client.connect()
+
+        with pytest.raises(PaperRiskRejected, match="required quantity/minimum-notional rules"):
+            client.submit_order(
+                symbol="BTC/USDT",
+                quantity=0.0005,
+                side="buy",
+                reference_price=50000,
+                client_order_id="pt-missing-minimum",
+                allow_orders=True,
+                refresh=True,
+            )
+        assert not [
+            call for call in transport.calls
+            if call["method"] == "POST" and call["url"].endswith("/v5/order/create")
+        ]
+
     def test_below_min_notional_rejected(self):
         transport = MockTransport()
         transport.add_response("GET", "/v5/account/wallet-balance", MOCK_ACCOUNT_RESPONSE)
