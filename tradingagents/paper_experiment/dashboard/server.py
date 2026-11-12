@@ -2052,7 +2052,7 @@ async function refreshPositions(){
     $("pos-body").innerHTML = rows.length ? `<div class="tablewrap"><table>
       <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry</th>
         <th class="num">Current</th><th class="num">Value</th><th class="num">uP&L</th>
-        <th class="num">Stop</th><th class="num">Target</th><th>Ledger</th></tr></thead>
+        <th class="num">Stop</th><th class="num">Target</th><th>Protection</th><th>Ledger</th></tr></thead>
       <tbody>${rows.map(x=>`<tr>
         <td><b>${esc(x.symbol)}</b><div class="mono">${esc(x.side)}</div></td>
         <td class="num">${num(x.quantity,4)}</td>
@@ -2062,6 +2062,7 @@ async function refreshPositions(){
         <td class="num ${cls(x.unrealized_pnl)}">${sgn(x.unrealized_pnl)}</td>
         <td class="num">${money(x.stop_loss)}</td>
         <td class="num">${money(x.take_profit)}</td>
+        <td title="${esc(x.protection_reason || "")}">${x.protected?'<span class="pill s-evaluated">verified</span>':'<span class="pill s-unevaluable">not verified</span>'}<div class="mono">${esc(x.protection_state || "UNKNOWN")}</div></td>
         <td>${x.reconciled?'<span class="pill s-evaluated">matched</span>':'<span class="pill s-unevaluable">broker only</span>'}</td>
       </tr>`).join("")}</tbody></table></div>`
       : empty("No open positions on the paper account.");
