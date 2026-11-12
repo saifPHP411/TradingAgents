@@ -37,11 +37,14 @@ import argparse
 import json
 import os
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 from .broker import (
     DECISION_SOURCE_CHOICES,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+    EXECUTION_PROVIDER_ALPACA_PAPER,
+    EXECUTION_PROVIDER_CHOICES,
     EXPERIMENT_SYMBOLS_ENV,
     MARKET_DATA_CHOICES,
     BrokerError,
@@ -51,13 +54,16 @@ from .experiment import ExperimentError, PaperExperiment
 from .journal import JournalError
 from .market_data_wiring import (
     DECISION_SOURCE_ENV,
+    EXECUTION_PROVIDER_ENV,
     FRACTIONAL_SHARES_ENV,
     MARKET_DATA_ENV,
     SNAPSHOT_MAX_AGE_ENV,
     MarketDataWiringError,
     describe_decision_source,
+    describe_execution_provider,
     describe_provider,
     market_data_factory_for,
+    resolve_execution_provider,
     resolve_paper_settings,
     resolve_settings,
 )
@@ -76,6 +82,25 @@ from .sources import FrozenPriceSource, PriceSource, PriceSourceError
 
 class RunnerError(RuntimeError):
     """A command could not proceed."""
+
+
+BYBIT_REPORT_PAIRS = (
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT",
+    "XRP/USDT",
+    "DOGE/USDT",
+    "AVAX/USDT",
+    "LINK/USDT",
+    "LTC/USDT",
+    "BCH/USDT",
+)
+"""The pairs the Bybit instrument report covers by default.
+
+Each pair is read from the venue's own instrument record, so the report states
+what the venue enforces for that pair rather than a shared default. A pair the
+venue does not describe is named as such and no minimum is assumed for it.
+"""
 
 
 DEFAULT_EXPERIMENT_SYMBOL = "SPY"
@@ -391,6 +416,32 @@ def _announce_paper_decision_source(source: str) -> None:
     print(f"paper decision source: {describe_decision_source(source)}", file=sys.stderr)
 
 
+def _paper_execution_provider(args) -> str:
+    """Resolve the paper worker's execution broker from the CLI/environment.
+
+    ``alpaca_paper`` (the default) keeps the existing path; ``bybit_demo``
+    opts into the Bybit Demo Spot broker. A bad value raises rather than
+    falling back, so a typo cannot silently switch which broker the worker
+    places orders with.
+    """
+    try:
+        return resolve_execution_provider(
+            getattr(args, "paper_execution_provider", None)
+            or os.environ.get(EXECUTION_PROVIDER_ENV, "").strip()
+            or EXECUTION_PROVIDER_ALPACA_PAPER
+        )
+    except MarketDataWiringError as exc:
+        raise RunnerError(str(exc)) from exc
+
+
+def _announce_paper_execution_provider(provider: str) -> None:
+    """Print the effective execution broker to stderr, so a start log names it."""
+    print(
+        f"paper execution provider: {describe_execution_provider(provider)}",
+        file=sys.stderr,
+    )
+
+
 def _serve(args) -> int:
     """Run the local dashboard. Simulation-only monitoring and control.
 
@@ -417,8 +468,10 @@ def _serve(args) -> int:
     root = _root(args)
     provider, max_age, whole_shares = _paper_market_data_settings(args)
     decision_source = _paper_decision_source(args)
+    execution_provider = _paper_execution_provider(args)
     _announce_paper_market_data(provider, max_age)
     _announce_paper_decision_source(decision_source)
+    _announce_paper_execution_provider(execution_provider)
     # Honour a platform-provided port (Railway sets $PORT) when --port is omitted.
     port = args.port if args.port is not None else int(os.environ.get("PORT", "8000"))
     try:
@@ -438,6 +491,7 @@ def _serve(args) -> int:
             paper_market_data_provider=provider,
             paper_market_data_max_age_seconds=max_age,
             paper_decision_source=decision_source,
+            paper_execution_provider=execution_provider,
         )
     except DashboardAuthError as exc:
         raise RunnerError(str(exc)) from exc
@@ -592,8 +646,10 @@ def _paper_trade(args) -> int:
     root = _root(args)
     provider, max_age, whole_shares = _paper_market_data_settings(args)
     decision_source = _paper_decision_source(args)
+    execution_provider = _paper_execution_provider(args)
     _announce_paper_market_data(provider, max_age)
     _announce_paper_decision_source(decision_source)
+    _announce_paper_execution_provider(execution_provider)
     controller = PaperTradingController(
         root,
         enabled=True,
@@ -603,6 +659,7 @@ def _paper_trade(args) -> int:
         market_data_provider=provider,
         market_data_max_age_seconds=max_age,
         decision_source_kind=decision_source,
+        execution_provider=execution_provider,
     )
     if getattr(args, "dry_run", False):
         worker = controller._ensure_worker()  # noqa: SLF001 - the CLI owns the worker
@@ -630,6 +687,80 @@ def _paper_trade(args) -> int:
     finally:
         controller.stop()
     print(json.dumps(cycle, indent=2, default=str))
+    return 0
+
+
+def _plain(value: float | None) -> str:
+    """A number in plain decimal form, never scientific notation.
+
+    ``str(0.000001)`` is ``1e-06``, which reads as a different number than the
+    venue's ``0.000001``. A step or a tick is a decimal quantity, so it is
+    printed as one.
+    """
+    if value is None:
+        return "-"
+    return format(Decimal(str(value)), "f")
+
+
+def _bybit_instruments(args) -> int:
+    """Read-only Bybit **Spot** instrument report. Places no order, changes nothing.
+
+    Prints the venue's own trading rules for each requested pair: the status,
+    the minimum order amount, the minimum and maximum order quantity, the
+    quantity step and the tick size. These are the values the broker enforces,
+    read from ``GET /v5/market/instruments-info`` -- never a default this
+    project invented, and never a constant shared across pairs.
+
+    The Spot shape is the one the venue documents: a ``lotSizeFilter`` with no
+    ``qtyStep`` (the step is ``basePrecision``), and ``minOrderQty`` /
+    ``maxOrderQty`` deprecated in favour of ``minOrderAmt``. The report names
+    which field each value came from, so a reader can tell a real value from
+    an absent one.
+
+    The market endpoint is public, so no credential is needed and none is
+    read. No order is placed by this command.
+    """
+    from tradingagents.crypto.bybit import BybitPublicClient
+    from tradingagents.crypto.transport import CryptoDataError
+
+    from .broker.bybit_demo import DEMO_BASE_URL
+
+    pairs = list(getattr(args, "pairs", None) or BYBIT_REPORT_PAIRS)
+    client = BybitPublicClient(base_url=DEMO_BASE_URL)
+    try:
+        registry = client.instruments_info(category="spot")
+    except CryptoDataError as exc:
+        print(f"bybit instruments failed: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"bybit spot endpoint: {DEMO_BASE_URL}")
+    print(f"venue instruments described: {len(registry.rules)}")
+    header = (
+        f"{'pair':<12} {'status':>8} {'minOrderAmt':>12} {'minOrderQty':>12} "
+        f"{'qtyStep':>12} {'tickSize':>12}"
+    )
+    print(header)
+    print("-" * len(header))
+    missing: list[str] = []
+    for pair in pairs:
+        symbol = pair.replace("/", "").replace("-", "").upper()
+        # The registry is keyed by the canonical pair, so the lookup uses the
+        # canonical spelling and the report prints the venue's own symbol.
+        rules = registry.get(pair)
+        if rules is None:
+            missing.append(symbol)
+            print(f"{symbol:<12} {'NOT DESCRIBED BY THE VENUE'}")
+            continue
+        print(
+            f"{symbol:<12} {str(rules.status):>8} {_plain(rules.min_notional):>12} "
+            f"{_plain(rules.min_quantity):>12} {_plain(rules.quantity_step):>12} "
+            f"{_plain(rules.price_tick):>12}"
+        )
+    if missing:
+        print()
+        print("not described by the venue (no minimum is assumed for these):")
+        for symbol in missing:
+            print(f"  {symbol}")
     return 0
 
 
@@ -737,8 +868,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "diagnose",
             "broker-check",
             "alpaca-diagnose",
+            "bybit-instruments",
             "paper-trade",
             "serve",
+        ),
+    )
+    parser.add_argument(
+        "--pairs",
+        nargs="+",
+        default=None,
+        help=(
+            "bybit-instruments: the pairs to report (e.g., BTC/USDT ETH/USDT). "
+            "Each pair's minimums are read from the venue's own instrument record; "
+            "no default minimum is shared across pairs."
         ),
     )
     parser.add_argument(
@@ -901,6 +1043,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--paper-execution-provider",
+        choices=EXECUTION_PROVIDER_CHOICES,
+        default=None,
+        help=(
+            "serve / paper-trade: which broker the paper worker places orders with "
+            f"(default: ${EXECUTION_PROVIDER_ENV}, else alpaca_paper). 'alpaca_paper' "
+            "is the existing Alpaca Paper path and stays the default. 'bybit_demo' is "
+            "the Bybit DEMO Spot broker (crypto Spot only, demo trading, long-only); "
+            "it needs BYBIT_DEMO_API_KEY / BYBIT_DEMO_API_SECRET and never falls back "
+            "to Alpaca when they are missing."
+        ),
+    )
+    parser.add_argument(
         "--paper-fractional-shares",
         action="store_true",
         default=None,
@@ -971,6 +1126,7 @@ def main(argv: list[str] | None = None) -> int:
         "diagnose": _diagnose,
         "broker-check": _broker_check,
         "alpaca-diagnose": _broker_check,  # an explicit, discoverable alias
+        "bybit-instruments": _bybit_instruments,
         "paper-trade": _paper_trade,
         "serve": _serve,
     }

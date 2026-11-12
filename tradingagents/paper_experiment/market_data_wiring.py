@@ -26,6 +26,9 @@ from .broker import (
     DECISION_SOURCE_HISTORY,
     DECISION_SOURCE_TJR,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+    EXECUTION_PROVIDER_ALPACA_PAPER,
+    EXECUTION_PROVIDER_BYBIT_DEMO,
+    EXECUTION_PROVIDER_CHOICES,
     MARKET_DATA_CHOICES,
     PROVIDER_ALPACA_SNAPSHOT,
     PROVIDER_BAR_OPEN,
@@ -37,6 +40,9 @@ MARKET_DATA_ENV = "TRADINGAGENTS_PAPER_MARKET_DATA"
 
 DECISION_SOURCE_ENV = "TRADINGAGENTS_PAPER_DECISION_SOURCE"
 """Environment variable the entrypoints read the decision-source choice from."""
+
+EXECUTION_PROVIDER_ENV = "TRADINGAGENTS_PAPER_EXECUTION_PROVIDER"
+"""Environment variable the entrypoints read the execution-broker choice from."""
 
 FRACTIONAL_SHARES_ENV = "TRADINGAGENTS_PAPER_FRACTIONAL_SHARES"
 """Environment variable that opts into fractional sizing (default: fractional, the
@@ -128,6 +134,42 @@ def resolve_decision_source(choice: str | None) -> str:
 def env_decision_source(default: str = DECISION_SOURCE_HISTORY) -> str:
     """The decision source named by :data:`DECISION_SOURCE_ENV`, or ``default``."""
     return resolve_decision_source(os.environ.get(DECISION_SOURCE_ENV) or default)
+
+
+def resolve_execution_provider(choice: str | None) -> str:
+    """Validate an explicit execution-broker choice, or raise.
+
+    No default is applied here: the caller supplies the default
+    (``alpaca_paper``), so a bad value from a flag or an environment variable
+    is a loud error rather than a silent fall-back to a different broker.
+
+    There is deliberately **no** fall-back from ``bybit_demo`` to
+    ``alpaca_paper``: a Bybit selection whose credentials are missing stops the
+    run rather than trading somewhere the operator did not choose.
+    """
+    if choice is None:
+        raise MarketDataWiringError("no execution provider was given")
+    if choice not in EXECUTION_PROVIDER_CHOICES:
+        raise MarketDataWiringError(
+            f"unknown execution provider {choice!r}; expected one of "
+            f"{', '.join(EXECUTION_PROVIDER_CHOICES)}"
+        )
+    return choice
+
+
+def env_execution_provider(default: str = EXECUTION_PROVIDER_ALPACA_PAPER) -> str:
+    """The execution broker named by :data:`EXECUTION_PROVIDER_ENV`, or ``default``."""
+    return resolve_execution_provider(os.environ.get(EXECUTION_PROVIDER_ENV) or default)
+
+
+def describe_execution_provider(provider: str) -> str:
+    """A one-line description of an execution broker, for a start log."""
+    if provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+        return (
+            "bybit_demo (Bybit Demo Spot only: crypto Spot, demo trading, long-only; "
+            "needs BYBIT_DEMO_API_KEY / BYBIT_DEMO_API_SECRET)"
+        )
+    return "alpaca_paper (Alpaca Paper; the default)"
 
 
 def env_fractional(default: bool = FRACTIONAL_SHARES) -> bool:

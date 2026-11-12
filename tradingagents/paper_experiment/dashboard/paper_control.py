@@ -36,13 +36,14 @@ from tradingagents.crypto.tjr_settings import crypto_tjr_settings
 from tradingagents.risk.paper_parity import WHOLE_SHARES
 
 from ..broker import (
-    BANNER,
     DECISION_SOURCE_CRYPTO,
     DECISION_SOURCE_CURRENT_MARKET,
     DECISION_SOURCE_HISTORY,
     DECISION_SOURCE_TJR,
     DEFAULT_MAX_PRICE_DEVIATION,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+    EXECUTION_PROVIDER_ALPACA_PAPER,
+    EXECUTION_PROVIDER_BYBIT_DEMO,
     PROVIDER_BAR_OPEN,
     STATUS_STOPPED,
     AlpacaPaperBroker,
@@ -51,6 +52,8 @@ from ..broker import (
     SourceMarketData,
     StaticMarketData,
     WorkerStateStore,
+    banner_for_provider,
+    mode_for_provider,
     worker_status_view,
 )
 from ..symbol_mapping import (
@@ -60,6 +63,26 @@ from ..symbol_mapping import (
 
 class PaperTradingDisabled(RuntimeError):
     """The dashboard was not started with paper trading enabled."""
+
+
+def _endpoint_for_provider(execution_provider: str) -> str:
+    """The endpoint the given provider trades on.
+
+    A status view has to name the venue, and it has to name the *right* one.
+    The endpoint follows the provider: a Bybit selection resolves to Bybit's
+    demo host and an Alpaca selection to Alpaca's paper host. It is derived
+    from the same rule the config applies, so the view and the worker cannot
+    disagree about which host receives the order.
+
+    Secret-free by construction: it is a public URL.
+    """
+    if execution_provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+        from ..broker.bybit_demo import DEMO_BASE_URL
+
+        return DEMO_BASE_URL
+    from ..broker.alpaca_paper import PAPER_BASE_URL
+
+    return PAPER_BASE_URL
 
 
 def _strategy_row_from_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -194,6 +217,7 @@ class PaperTradingController:
         crypto_data_factory: Callable[..., Any] | None = None,
         crypto_market_hours_gate: Callable[[], Any] | None = None,
         max_price_deviation: float = DEFAULT_MAX_PRICE_DEVIATION,
+        execution_provider: str = EXECUTION_PROVIDER_ALPACA_PAPER,
     ) -> None:
         self.root = Path(root)
         self.enabled = enabled
@@ -232,6 +256,19 @@ class PaperTradingController:
         # The largest permitted gap between the decision price (market-data venue)
         # and the execution price (execution venue). Beyond it, no order is placed.
         self.max_price_deviation = max_price_deviation
+        # Which execution broker the worker places orders with. Alpaca Paper is
+        # the default, so the existing path is unchanged; ``bybit_demo`` is an
+        # explicit opt-in. It is recorded here so a read-only status view can
+        # name the configured provider without building a worker.
+        self.execution_provider = execution_provider
+        # Broker-owned durable state must never be shared across execution venues.
+        # Keep Alpaca's historical paths unchanged, but put Bybit Demo state in
+        # its own namespace so an existing Railway Volume cannot make old Alpaca
+        # orders, positions, fills, account snapshots or protections look like
+        # Bybit state (or vice versa).
+        #
+        # The experiment directory itself remains shared: it contains strategy
+        # inputs/decisions, not broker account or execution state.
         # The resolved symbol configuration, once the worker has been built. It
         # records which symbols were accepted on both venues and which were
         # rejected, so a status view can report both without re-reading the
@@ -255,6 +292,27 @@ class PaperTradingController:
         }
         self._worker: PaperTradingWorker | None = None
         self._lock = threading.Lock()
+
+    # -- provider-scoped durable state ----------------------------------
+
+    @property
+    def _provider_state_root(self) -> Path:
+        """Directory for state owned by the selected execution venue.
+
+        Alpaca retains the original root-level paths for backward compatibility.
+        Bybit Demo gets a fresh namespace; no Alpaca state is copied or migrated.
+        """
+        if self.execution_provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+            return self.root / "execution_state" / "bybit_demo"
+        return self.root
+
+    def _worker_state_path(self) -> Path:
+        """The selected venue's durable broker/worker state file."""
+        return self._provider_state_root / "worker_state.json"
+
+    def _source_state_path(self, filename: str) -> Path:
+        """Decision-source memory scoped to the selected execution venue."""
+        return self._provider_state_root / filename
 
     # -- worker construction ---------------------------------------------
 
@@ -288,7 +346,7 @@ class PaperTradingController:
             strategy_id=experiment.config.strategy_id,
             order_notional=self.order_notional,
             whole_shares=self.whole_shares,
-            state_path=self.root / "worker_state.json",
+            state_path=self._worker_state_path(),
             market_data_provider=self.market_data_provider,
             market_data_max_age_seconds=self.market_data_max_age_seconds,
             decision_source=self.decision_source_kind,
@@ -296,6 +354,10 @@ class PaperTradingController:
             # view reports the settings the worker enforces. Alpaca's crypto
             # orders take only 'gtc'/'ioc'; the equity path keeps 'day'.
             crypto=self.decision_source_kind == DECISION_SOURCE_CRYPTO,
+            # The execution broker the worker places orders with. The status
+            # view and the worker must agree on it, or the view reports
+            # settings the worker does not enforce.
+            execution_provider=self.execution_provider,
         )
 
     def _reload_experiment(self):
@@ -339,14 +401,26 @@ class PaperTradingController:
                 }
                 raise
 
-            # Get Alpaca registry - REQUIRED for crypto paper execution. It is read
-            # from the PAPER host's own asset list, through the paper endpoint gate,
-            # so a live host can never be reached from here.
-            from ..crypto_venue import read_alpaca_execution_registry
+            # The execution venue's own registry - REQUIRED for crypto paper
+            # execution. It is read from the *selected* venue's demo/paper host
+            # through that venue's endpoint gate, so a live host can never be
+            # reached from here. It used to read Alpaca's registry through a
+            # freshly built default config, so a Bybit selection still consulted
+            # Alpaca's listing and accepted pairs Alpaca alone served.
+            if self.execution_provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+                from ..crypto_venue import read_bybit_execution_registry
+
+                read_execution_registry = read_bybit_execution_registry
+                execution_base_url = _endpoint_for_provider(self.execution_provider)
+            else:
+                from ..crypto_venue import read_alpaca_execution_registry
+
+                read_execution_registry = read_alpaca_execution_registry
+                execution_base_url = _endpoint_for_provider(self.execution_provider)
 
             try:
-                alpaca_registry = read_alpaca_execution_registry(
-                    base_url=PaperTradingConfig().base_url
+                execution_registry = read_execution_registry(
+                    base_url=execution_base_url
                 )
             except Exception as exc:  # noqa: BLE001 - reported, never hidden
                 self.symbol_validation = {
@@ -370,7 +444,7 @@ class PaperTradingController:
             configuration = resolve_symbol_configuration(
                 list(experiment.config.symbols),
                 market_data_registry=binance_registry,
-                execution_registry=alpaca_registry,
+                execution_registry=execution_registry,
             )
             if configuration.rejected:
                 import logging
@@ -398,20 +472,30 @@ class PaperTradingController:
             if not symbol_mappings:
                 raise RuntimeError(
                     "No valid symbol mappings for crypto paper trading. "
-                    "All configured symbols were rejected. Check Alpaca credentials "
-                    "and ensure symbols are tradable on both Binance and Alpaca Paper."
+                    "All configured symbols were rejected. Check the "
+                    f"{self.execution_provider} credentials and ensure symbols are "
+                    "tradable on both the market-data venue and the execution venue."
                 )
 
-            # The execution-side price seam. The strategy analyses Binance's
-            # BTC/USDT and the order is placed on Alpaca's BTC/USD, so the order
-            # must be sized from a price of the pair that will actually trade,
-            # read from the execution venue itself.
-            from ..broker import AlpacaCryptoExecutionPrice
+            # The execution-side price seam. The order must be sized from a price
+            # of the pair that will actually trade, read from the *execution*
+            # venue itself. On Alpaca the strategy analyses Binance's BTC/USDT and
+            # the order is placed on Alpaca's BTC/USD; on Bybit both sides carry
+            # the same BASE/USDT pair. The seam follows the selected venue.
+            if self.execution_provider == EXECUTION_PROVIDER_BYBIT_DEMO:
+                from ..broker import BybitDemoExecutionPrice
 
-            execution_price_seam = AlpacaCryptoExecutionPrice(
-                [m.execution_symbol for m in symbol_mappings],
-                max_age_seconds=self.market_data_max_age_seconds,
-            )
+                execution_price_seam = BybitDemoExecutionPrice(
+                    [m.execution_symbol for m in symbol_mappings],
+                    max_age_seconds=self.market_data_max_age_seconds,
+                )
+            else:
+                from ..broker import AlpacaCryptoExecutionPrice
+
+                execution_price_seam = AlpacaCryptoExecutionPrice(
+                    [m.execution_symbol for m in symbol_mappings],
+                    max_age_seconds=self.market_data_max_age_seconds,
+                )
 
         # Build the decision source from the persisted config, so the worker acts
         # on the same decisions the experiment recorded.
@@ -422,7 +506,7 @@ class PaperTradingController:
             strategy_id=experiment.config.strategy_id,
             order_notional=self.order_notional,
             whole_shares=self.whole_shares,
-            state_path=self.root / "worker_state.json",
+            state_path=self._worker_state_path(),
             market_data_provider=self.market_data_provider,
             market_data_max_age_seconds=self.market_data_max_age_seconds,
             decision_source=self.decision_source_kind,
@@ -434,6 +518,13 @@ class PaperTradingController:
             # above is the only wiring that trades crypto, so this flag is set
             # there and only there.
             crypto=self.decision_source_kind == DECISION_SOURCE_CRYPTO,
+            # The execution broker the worker places orders with. This MUST be
+            # the provider the operator selected: the config resolves the
+            # endpoint from it (a Bybit selection gets Bybit's demo host, never
+            # Alpaca's) and the worker builds the broker from it. Omitting it
+            # left the config on its Alpaca default, so a Bybit selection
+            # silently traded on Alpaca Paper while the start log named Bybit.
+            execution_provider=self.execution_provider,
         )
         source = experiment.source
         sessions = source.sessions()
@@ -521,7 +612,7 @@ class PaperTradingController:
             "order_notional": self.order_notional,
             "strategy_name": experiment.config.strategy_id,
             "is_consumed": lambda decision_id: holder["worker"].has_order_for(decision_id),
-            "state_path": self.root / "current_source_state.json",
+            "state_path": self._source_state_path("current_source_state.json"),
         }
         if self._current_source_factory is not None:
             return self._current_source_factory(**kwargs)
@@ -573,7 +664,7 @@ class PaperTradingController:
             "book_provider": _book,
             "price_provider": _price,
             "is_consumed": lambda decision_id: holder["worker"].has_order_for(decision_id),
-            "state_path": self.root / "tjr_source_state.json",
+            "state_path": self._source_state_path("tjr_source_state.json"),
         }
         if self._tjr_source_factory is not None:
             return self._tjr_source_factory(**kwargs)
@@ -668,7 +759,7 @@ class PaperTradingController:
             "price_provider": _price,
             "execution_price_provider": _execution_price,
             "is_consumed": lambda decision_id: holder["worker"].has_order_for(decision_id),
-            "state_path": self.root / "crypto_source_state.json",
+            "state_path": self._source_state_path("crypto_source_state.json"),
             # The same settings the crypto backtest measured. Without this the
             # live path would use the equity 15:30 ET entry cut and stop taking
             # entries eight hours before the session ends, so the backtest's
@@ -759,7 +850,7 @@ class PaperTradingController:
         view reports as "no evaluation" rather than as a no-signal with a reason
         invented for it.
         """
-        state_path = self.root / self._source_state_filename()
+        state_path = self._source_state_path(self._source_state_filename())
         try:
             payload = json.loads(state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -802,10 +893,18 @@ class PaperTradingController:
         operator presses START.
         """
         base: dict[str, Any] = {
-            "banner": BANNER,
+            # The banner and mode name the broker this controller was
+            # configured with. They were hardcoded to Alpaca, so a Bybit
+            # selection displayed "ALPACA PAPER — NOT LIVE" — a label that
+            # contradicts the endpoint the worker actually trades on.
+            "banner": banner_for_provider(self.execution_provider),
             "enabled": self.enabled,
-            "mode": "ALPACA_PAPER",
+            "mode": mode_for_provider(self.execution_provider),
             "live": False,
+            # The configured provider and the endpoint that provider resolves
+            # to. Both are secret-free: a URL and a label.
+            "execution_provider": self.execution_provider,
+            "endpoint": _endpoint_for_provider(self.execution_provider),
             # The symbol validation state, reported whether or not a worker was
             # ever built. It says whether the venues' own listings have been
             # read and which symbols they refused — an explicit "not validated
@@ -825,7 +924,7 @@ class PaperTradingController:
         except Exception as exc:  # noqa: BLE001 - a build failure is reported
             base.update({"status": "ERROR", "last_error": f"{type(exc).__name__}: {exc}"})
             return base
-        state = WorkerStateStore(self.root / "worker_state.json").load()
+        state = WorkerStateStore(self._worker_state_path()).load()
         # Nothing is running (no worker object exists), so the persisted state is
         # reported as STOPPED, never as a stale RUNNING from a previous process.
         state.status = STATUS_STOPPED

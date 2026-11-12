@@ -26,6 +26,12 @@ from .binance import (
     kline_stream_names,
     trade_stream_names,
 )
+from .bybit import (
+    DEMO_REST_HOST,
+    LIVE_REST_HOST,
+    BybitPublicClient,
+    bybit_symbol,
+)
 from .engine import CryptoMarketDataEngine, SymbolState, build_frame
 from .instruments import (
     ORDER_REASONS,
@@ -129,4 +135,9 @@ __all__ = [
     "trade_stream_names",
     "try_parse_pair",
     "validate_order",
+    # Bybit
+    "DEMO_REST_HOST",
+    "LIVE_REST_HOST",
+    "BybitPublicClient",
+    "bybit_symbol",
 ]

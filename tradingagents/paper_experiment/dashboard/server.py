@@ -40,16 +40,21 @@ from tradingagents.risk.paper_parity import WHOLE_SHARES
 
 from ...crypto.symbols import parse_pair
 from ..broker import (
-    BANNER,
+    banner_for_provider,
     DECISION_SOURCE_CHOICES,
     DECISION_SOURCE_HISTORY,
     DEFAULT_MAX_PRICE_DEVIATION,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
+    EXECUTION_PROVIDER_ALPACA_PAPER,
+    EXECUTION_PROVIDER_CHOICES,
     MARKET_DATA_CHOICES,
     MAX_PRICE_DEVIATION_ENV,
     PROVIDER_BAR_OPEN,
     BrokerError,
     BrokerNotConfiguredError,
+    BybitDemoBroker,
+    BybitBrokerNotConfiguredError,
+    EXECUTION_PROVIDER_BYBIT_DEMO,
 )
 from ..crypto_symbol_config import (
     DEFAULT_MARKET_DATA_SYMBOLS,
@@ -58,20 +63,23 @@ from ..crypto_symbol_config import (
 from ..experiment import ExperimentConfig, PaperExperiment
 from ..market_data_wiring import (
     DECISION_SOURCE_ENV,
+    EXECUTION_PROVIDER_ENV,
     FRACTIONAL_SHARES_ENV,
     MARKET_DATA_ENV,
     SNAPSHOT_MAX_AGE_ENV,
     MarketDataWiringError,
     describe_decision_source,
+    describe_execution_provider,
     describe_provider,
     market_data_factory_for,
+    resolve_execution_provider,
     resolve_paper_settings,
     resolve_settings,
 )
 from ..providers.base import ProviderNotConfiguredError
 from .auth import DashboardAuthError, check_bearer, require_bindable, resolve_token
 from .crypto_view import CryptoViewService
-from .paper_control import PaperTradingController, PaperTradingDisabled
+from .paper_control import PaperTradingController, PaperTradingDisabled, _endpoint_for_provider
 from .state import DashboardStateError, ExperimentView
 
 DEFAULT_MAX_SESSIONS_PER_CALL = 50
@@ -256,6 +264,7 @@ class Dashboard:
         paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
         paper_decision_source: str = DECISION_SOURCE_HISTORY,
         paper_max_price_deviation: float = DEFAULT_MAX_PRICE_DEVIATION,
+        paper_execution_provider: str = EXECUTION_PROVIDER_ALPACA_PAPER,
         crypto_engine=None,
         crypto_symbols: tuple[str, ...] = (),
         refresh_policy=None,
@@ -283,6 +292,9 @@ class Dashboard:
             market_data_max_age_seconds=paper_market_data_max_age_seconds,
             decision_source_kind=paper_decision_source,
             max_price_deviation=paper_max_price_deviation,
+            # The execution broker. Alpaca Paper is the default; Bybit Demo is
+            # an explicit opt-in that never falls back to Alpaca.
+            execution_provider=paper_execution_provider,
         )
         # The crypto half of the dashboard: a read-only view over the live crypto
         # engine (Binance public market data) and the worker's recorded status.
@@ -328,13 +340,55 @@ class Dashboard:
         from .engine_view import positions_view
 
         status = self.paper.status()
+
+        # A persisted worker snapshot can outlive the worker process. Refresh
+        # public Bybit Spot quotes for display without starting the worker,
+        # touching private account endpoints, or placing orders.
+        positions = status.get("positions") or {}
+        quote_checked_at = None
+        quote_refresh_status = "not_applicable"
+        if self.paper.execution_provider == "bybit_demo" and positions:
+            quote_refresh_status = "error"
+            try:
+                from tradingagents.crypto.bybit import BybitPublicClient
+
+                symbols = [
+                    str(row.get("venue_symbol") or symbol).replace("/", "")
+                    for symbol, row in positions.items()
+                    if isinstance(row, dict)
+                ]
+                tickers = BybitPublicClient().tickers(symbols)
+                quote_checked_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                updated_quotes = 0
+                for symbol, row in positions.items():
+                    if not isinstance(row, dict):
+                        continue
+                    venue_symbol = str(row.get("venue_symbol") or symbol).replace("/", "")
+                    ticker = tickers.get(venue_symbol, {})
+                    if isinstance(ticker, dict):
+                        price = ticker.get("lastPrice") or ticker.get("last")
+                        try:
+                            price = float(price)
+                        except (TypeError, ValueError):
+                            price = None
+                        if price is not None and price > 0:
+                            row["mark_price"] = price
+                            updated_quotes += 1
+                quote_refresh_status = "ok" if updated_quotes else "no_quote"
+            except Exception:
+                # Keep the last known broker snapshot; never label its timestamp
+                # as a fresh broker sync merely because a public quote was fetched.
+                quote_refresh_status = "error"
+
         rows = positions_view(status, self._internal_positions())
         return {
             "positions": rows,
             "count": len(rows),
             "positions_checked_at": status.get("positions_checked_at"),
             "positions_at": status.get("positions_at"),
-            "banner": BANNER,
+            "quote_checked_at": quote_checked_at,
+            "quote_refresh_status": quote_refresh_status,
+            "banner": banner_for_provider(self.paper.execution_provider),
             "live": False,
         }
 
@@ -348,7 +402,7 @@ class Dashboard:
         except Exception:  # noqa: BLE001 - no experiment yet is an empty journal
             decisions = []
         result = trades_view(decisions, status)
-        result["banner"] = BANNER
+        result["banner"] = banner_for_provider(self.paper.execution_provider)
         result["live"] = False
         return result
 
@@ -491,6 +545,60 @@ def make_handler(dashboard: Dashboard):
                     )
                 elif path == "/api/paper/status":
                     self._send_json(200, dashboard.paper.status())
+                elif path == "/api/paper/account-check":
+                    if dashboard.paper.execution_provider != EXECUTION_PROVIDER_BYBIT_DEMO:
+                        self._send_json(409, {
+                            "ok": False,
+                            "error": "wrong_execution_provider",
+                            "message": "This read-only check is available only when Bybit Demo is selected.",
+                        })
+                        return
+                    try:
+                        # A fresh, stateless broker instance: connect() performs only
+                        # GET /v5/account/wallet-balance. No worker, order, or state
+                        # store is constructed or started by this diagnostic route.
+                        account = BybitDemoBroker().connect()
+                        self._send_json(200, {
+                            "ok": True,
+                            "provider": EXECUTION_PROVIDER_BYBIT_DEMO,
+                            "endpoint": "https://api-demo.bybit.com",
+                            "account": {
+                                "account_type": account.account_type,
+                                "currency": account.currency,
+                                "equity": account.equity,
+                                "available_balance": account.available_balance,
+                            },
+                        })
+                    except BybitBrokerNotConfiguredError:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "credentials_not_configured",
+                            "message": "Bybit Demo API credentials are not configured.",
+                        })
+                    except Exception as exc:  # noqa: BLE001 - return secret-free diagnosis
+                        import re
+                        message = str(exc)
+                        match = re.search(r"retCode (\d+)", message)
+                        code = int(match.group(1)) if match else None
+                        diagnosis = "broker_or_transport_error"
+                        if code == 10004:
+                            diagnosis = "signature_error"
+                        elif code == 10005:
+                            diagnosis = "api_key_permission_denied"
+                        elif code == 10003:
+                            diagnosis = "api_key_invalid_or_wrong_environment"
+                        elif code == 10010:
+                            diagnosis = "ip_restriction"
+                        elif code == 10002:
+                            diagnosis = "timestamp_or_recv_window"
+                        elif "HTTP 401" in message or "HTTP 403" in message:
+                            diagnosis = "http_authentication_or_permission_rejected"
+                        self._send_json(502, {
+                            "ok": False,
+                            "error": diagnosis,
+                            "bybit_ret_code": code,
+                            "error_type": type(exc).__name__,
+                        })
                 elif path == "/api/engine":
                     self._send_json(200, dashboard.engine())
                 elif path == "/api/positions":
@@ -618,6 +726,21 @@ def _crypto_symbols(args) -> tuple[str, ...]:
     if raw is None:
         raw = os.environ.get(CRYPTO_SYMBOLS_ENV, "")
     return parse_symbol_list(raw)
+
+
+def _resolve_execution_provider(args) -> str:
+    """Which broker the paper worker places orders with.
+
+    The flag wins, then the environment variable, then the default
+    (``alpaca_paper``). A bad value is a loud error: a typo must not silently
+    trade somewhere the operator did not choose.
+    """
+    raw = getattr(args, "paper_execution_provider", None)
+    if raw is None:
+        raw = os.environ.get(EXECUTION_PROVIDER_ENV, "").strip()
+    if raw == "":
+        return EXECUTION_PROVIDER_ALPACA_PAPER
+    return resolve_execution_provider(raw)
 
 
 def _resolve_max_price_deviation(args) -> float:
@@ -815,6 +938,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--paper-execution-provider",
+        choices=EXECUTION_PROVIDER_CHOICES,
+        default=None,
+        help=(
+            "which broker the paper worker places orders with (default: "
+            f"${EXECUTION_PROVIDER_ENV}, else alpaca_paper). 'alpaca_paper' is the "
+            "existing Alpaca Paper path and stays the default. 'bybit_demo' is the "
+            "Bybit DEMO Spot broker (crypto Spot only, demo trading, long-only); it "
+            "needs BYBIT_DEMO_API_KEY / BYBIT_DEMO_API_SECRET and never falls back "
+            "to Alpaca when they are missing."
+        ),
+    )
+    parser.add_argument(
         "--paper-max-price-deviation",
         type=float,
         default=None,
@@ -912,6 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
         decision_source = resolve_paper_settings(
             decision_source=args.paper_decision_source,
         )[3]
+        execution_provider = _resolve_execution_provider(args)
         max_price_deviation = _resolve_max_price_deviation(args)
     except MarketDataWiringError as exc:
         parser.error(str(exc))
@@ -922,9 +1059,18 @@ def main(argv: list[str] | None = None) -> int:
             if provider == "alpaca_snapshot" and max_age is not None
             else ""
         ),
-        file=sys.stderr,
     )
-    print(f"paper decision source: {describe_decision_source(decision_source)}", file=sys.stderr)
+    print(f"paper decision source: {describe_decision_source(decision_source)}")
+    print(
+        f"paper execution provider: {describe_execution_provider(execution_provider)}",
+    )
+    # The endpoint the provider resolves to. The provider name alone does not say
+    # which host receives the order, and a mismatch between the two is exactly
+    # what made a Bybit selection appear to trade on Alpaca. Secret-free: a URL.
+    print(
+        "paper execution endpoint: "
+        f"{_endpoint_for_provider(execution_provider)}",
+    )
     crypto_symbols = _crypto_symbols(args)
     try:
         serve(
@@ -944,6 +1090,7 @@ def main(argv: list[str] | None = None) -> int:
             paper_market_data_max_age_seconds=max_age,
             paper_decision_source=decision_source,
             paper_max_price_deviation=max_price_deviation,
+            paper_execution_provider=execution_provider,
             crypto_symbols=crypto_symbols,
             crypto_live=bool(getattr(args, "crypto_live", False)),
         )
@@ -973,6 +1120,7 @@ def serve(
     paper_market_data_max_age_seconds: float | None = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     paper_decision_source: str = DECISION_SOURCE_HISTORY,
     paper_max_price_deviation: float = DEFAULT_MAX_PRICE_DEVIATION,
+    paper_execution_provider: str = EXECUTION_PROVIDER_ALPACA_PAPER,
     crypto_symbols: tuple[str, ...] = (),
     crypto_live: bool = False,
 ) -> None:
@@ -987,8 +1135,8 @@ def serve(
     Run button uses. One process, one writer, so it cannot race the state file. It
     is off by default (``0``), which leaves the server a pure monitor.
 
-    ``allow_paper_trading`` enables the START/STOP control for the Alpaca paper
-    worker. It is off by default, so the dashboard cannot place a paper order
+    ``allow_paper_trading`` enables the START/STOP control for the configured
+    paper execution provider. It is off by default, so the dashboard cannot place a paper order
     unless the operator opts in; it never enables live trading.
 
     ``crypto_symbols`` selects the crypto pairs the live market section shows.
@@ -1020,6 +1168,7 @@ def serve(
         paper_market_data_max_age_seconds=paper_market_data_max_age_seconds,
         paper_decision_source=paper_decision_source,
         paper_max_price_deviation=paper_max_price_deviation,
+        paper_execution_provider=paper_execution_provider,
         crypto_engine=crypto_engine,
         crypto_symbols=tuple(crypto_symbols),
     )
@@ -1031,7 +1180,7 @@ def serve(
     print(
         "  paper trading: "
         + (
-            f"enabled ({BANNER}, order notional {paper_order_notional:g})"
+            f"enabled ({banner_for_provider(paper_execution_provider)}, order notional {paper_order_notional:g})"
             if allow_paper_trading
             else "disabled (pass --allow-paper-trading to enable)"
         )
@@ -1286,7 +1435,7 @@ INDEX_HTML = """<!doctype html>
 <div class="wrap">
   <div id="err" class="err"></div>
 
-  <div id="livewarn" class="banner"><span class="dot"></span>ALPACA PAPER — NOT LIVE</div>
+  <div id="livewarn" class="banner"><span class="dot"></span>PAPER TRADING — NOT LIVE</div>
 
   <div id="auth" class="card">
     <h2>Access token</h2>
@@ -1307,7 +1456,7 @@ INDEX_HTML = """<!doctype html>
         <p class="muted" id="ov-verdict" style="margin:12px 0 0"></p>
       </div>
       <div class="grid" style="margin-top:12px">
-        <div class="card"><h2>Account (Alpaca paper)</h2><div id="ov-account" class="stats"></div>
+        <div class="card"><h2>Account (paper broker)</h2><div id="ov-account" class="stats"></div>
           <div id="ov-account-note" class="muted" style="margin-top:10px"></div></div>
         <div class="card"><h2>Activity</h2><div id="ov-activity" class="stats"></div></div>
       </div>
@@ -1372,6 +1521,10 @@ INDEX_HTML = """<!doctype html>
             <button class="act stop" id="pstop" onclick="doPaperStop()">STOP PAPER TRADING</button>
           </div>
           <p class="muted" id="pnote" style="margin:0 0 12px"></p>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 12px">
+            <button class="act" id="paccountcheck" onclick="doBybitAccountCheck()">READ BYBIT DEMO BALANCE ONLY</button>
+            <span class="muted" id="paccountcheck-result">No account check has been run.</span>
+          </div>
           <div id="eng-worker" class="kv"></div>
         </div>
         <div class="card">
@@ -1425,6 +1578,10 @@ INDEX_HTML = """<!doctype html>
       <div class="card">
         <h2>Orders <span class="spacer"></span><span class="tag" id="ord-note"></span></h2>
         <div id="ord-body"></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h2>Filled executions <span class="spacer"></span><span class="tag" id="exec-note"></span></h2>
+        <div id="exec-body"></div>
       </div>
       <div class="card" style="margin-top:12px">
         <h2>Settled trades <span class="spacer"></span><span class="tag" id="trade-note"></span></h2>
@@ -1804,6 +1961,25 @@ async function doPaperStop(){
   catch(e){ showErr(e.message); }
   finally{ refreshEngine(); }
 }
+async function doBybitAccountCheck(){
+  const button = $("paccountcheck");
+  const result = $("paccountcheck-result");
+  button.disabled = true;
+  result.textContent = "Reading Bybit Demo wallet balance…";
+  try{
+    const data = await api("/api/paper/account-check");
+    const a = data.account || {};
+    result.textContent = "SUCCESS · " + a.currency + " equity: " +
+      money(a.equity) + " · available: " + money(a.available_balance);
+    result.className = "muted";
+  }catch(e){
+    result.textContent = "FAILED · " + e.message;
+    result.className = "muted";
+    showErr(e.message);
+  }finally{
+    button.disabled = false;
+  }
+}
 
 // -- Decisions --------------------------------------------------------------
 function indicatorChips(ind){
@@ -1819,8 +1995,29 @@ async function refreshDecisions(){
   try{
     const d = await api("/api/decisions");
     const list = d.decisions || [];
-    if(!list.length){ $("declist").innerHTML = `<div class="card">${empty("No decisions yet.")}</div>`; return; }
-    $("declist").innerHTML = list.map(x=>`<div class="card">
+    let liveHtml = "";
+    try{
+      const live = await api("/api/crypto/strategy");
+      const rows = live.symbols || [];
+      liveHtml = '<div class="card"><h2>Live strategy evaluations <span class="spacer"></span><span class="tag">'+esc(live.status||"—")+'</span></h2>' +
+        (rows.length ? rows.map(x=>`<div class="card" style="margin-top:10px">
+          <h2>${esc(x.symbol)} <span class="spacer"></span><span class="pill ${x.actionable?"state-OK":"state-STOPPED"}">${esc(x.stage||"NO_SIGNAL")}</span>
+          ${x.direction?`<span class="tag">${esc(x.direction)}</span>`:""}</h2>
+          <div class="kv">
+            <div class="k">Reason</div><div class="v">${esc(x.reason_code||"—")}</div>
+            <div class="k">Detail</div><div class="v">${esc(x.detail||"—")}</div>
+            <div class="k">Entry</div><div class="v">${x.entry===null||x.entry===undefined?"N/A":num(x.entry,4)}</div>
+            <div class="k">Stop loss</div><div class="v">${x.stop_loss===null||x.stop_loss===undefined?"N/A":num(x.stop_loss,4)}</div>
+            <div class="k">Take profit</div><div class="v">${x.take_profit===null||x.take_profit===undefined?"N/A":num(x.take_profit,4)}</div>
+            <div class="k">Risk / reward</div><div class="v">${x.risk_reward===null||x.risk_reward===undefined?"N/A":num(x.risk_reward,2)}</div>
+            <div class="k">Evaluated at</div><div class="v">${esc(when(x.evaluated_at))}</div>
+          </div></div>`).join("") : '<p class="muted">No live strategy evaluation has been recorded yet.</p>') +
+        '</div>';
+    }catch(e){
+      liveHtml = '<div class="card"><h2>Live strategy evaluations</h2><p class="muted">'+esc(e.message)+'</p></div>';
+    }
+    const historyHtml = list.length
+      ? '<div class="sec-title">Historical experiment decisions</div>' + list.map(x=>`<div class="card">
         <h2>${esc(x.symbol)} <span class="spacer"></span>
           <span class="tag">${esc(x.decision_session)}</span>
           <span class="pill s-${esc(x.state)}">${esc(x.state)}</span></h2>
@@ -1839,7 +2036,9 @@ async function refreshDecisions(){
         ${indicatorChips(x.indicators)}
         ${x.evaluation?`<div class="mono" style="margin-top:8px">outcome: net ${money(x.evaluation.net_pnl)}${(x.evaluation.return_pct!==null&&x.evaluation.return_pct!==undefined)?" ("+pct(x.evaluation.return_pct)+")":""} · exit ${esc(x.evaluation.evaluation_session||"—")}</div>`:""}
         ${x.record?"":'<div class="mono" style="margin-top:8px">no journal record found for this decision — provenance unavailable</div>'}
-      </div>`).join("");
+      </div>`).join("")
+      : '<div class="sec-title">Historical experiment decisions</div><div class="card">'+empty("No historical experiment decisions yet.")+'</div>';
+    $("declist").innerHTML = liveHtml + historyHtml;
   }catch(e){ showErr(e.message); }
 }
 
@@ -1849,11 +2048,11 @@ async function refreshPositions(){
     const [pos, p] = await Promise.all([api("/api/positions"), api("/api/paper/status")]);
     LAST.stops = p.stops;
     const rows = pos.positions || [];
-    $("pos-note").textContent = "synced " + rel(pos.positions_checked_at);
+    $("pos-note").textContent = "broker snapshot " + rel(pos.positions_checked_at) + (pos.quote_checked_at ? " · price checked " + rel(pos.quote_checked_at) : (pos.quote_refresh_status === "error" ? " · price refresh failed" : ""));
     $("pos-body").innerHTML = rows.length ? `<div class="tablewrap"><table>
       <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry</th>
         <th class="num">Current</th><th class="num">Value</th><th class="num">uP&L</th>
-        <th class="num">Stop</th><th class="num">Target</th><th>Ledger</th></tr></thead>
+        <th class="num">Stop</th><th class="num">Target</th><th>Protection</th><th>Ledger</th></tr></thead>
       <tbody>${rows.map(x=>`<tr>
         <td><b>${esc(x.symbol)}</b><div class="mono">${esc(x.side)}</div></td>
         <td class="num">${num(x.quantity,4)}</td>
@@ -1863,6 +2062,7 @@ async function refreshPositions(){
         <td class="num ${cls(x.unrealized_pnl)}">${sgn(x.unrealized_pnl)}</td>
         <td class="num">${money(x.stop_loss)}</td>
         <td class="num">${money(x.take_profit)}</td>
+        <td title="${esc(x.protection_reason || "")}">${x.protected?'<span class="pill s-evaluated">verified</span>':'<span class="pill s-unevaluable">not verified</span>'}<div class="mono">${esc(x.protection_state || "UNKNOWN")}</div></td>
         <td>${x.reconciled?'<span class="pill s-evaluated">matched</span>':'<span class="pill s-unevaluable">broker only</span>'}</td>
       </tr>`).join("")}</tbody></table></div>`
       : empty("No open positions on the paper account.");
@@ -1894,6 +2094,20 @@ async function refreshTrades(){
         <td><span class="pill s-${esc(o.status||"")}">${esc(o.status||"—")}</span></td>
       </tr>`).join("")}</tbody></table></div>`
       : empty("No orders submitted by the worker.");
+
+    const executions = t.executions || [];
+    $("exec-note").textContent = (t.filled_executions ?? executions.length) + " fills";
+    $("exec-body").innerHTML = executions.length ? `<div class="tablewrap"><table>
+      <thead><tr><th>Order time</th><th>Symbol</th><th>Side</th><th class="num">Filled qty</th>
+        <th class="num">Average fill</th><th>Order status</th><th>Broker order</th></tr></thead><tbody>${executions.map(x=>`<tr>
+        <td class="mono">${esc(x.order_timestamp||"—")}</td>
+        <td><b>${esc(x.symbol)}</b></td><td>${esc(x.side)}</td>
+        <td class="num">${num(x.filled_quantity,6)}</td>
+        <td class="num">${money(x.average_fill_price)}</td>
+        <td><span class="pill s-${esc(x.order_status||"")}">${esc(x.order_status||"—")}</span></td>
+        <td class="mono">${esc(x.broker_order_id||x.client_order_id||"—")}</td>
+      </tr>`).join("")}</tbody></table></div>`
+      : empty("No filled executions yet. Submitted or accepted orders are not fills.");
 
     const trades = t.trades || [];
     $("trade-note").textContent = t.settled_trades + " settled";
