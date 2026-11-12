@@ -554,7 +554,11 @@ class TestAccount:
         assert account.account_id == "12345"
         assert account.equity == 10000.0
         assert account.available_balance == 9500.0
+        assert account.cash == 10000.0
+        assert account.buying_power == 9500.0
+        assert account.status == "ACTIVE"
         assert account.currency == "USDT"
+        assert account.to_dict()["status"] == "ACTIVE"
 
     def test_refresh_account_updates_state(self):
         transport = MockTransport()
