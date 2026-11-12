@@ -40,7 +40,7 @@ from tradingagents.risk.paper_parity import WHOLE_SHARES
 
 from ...crypto.symbols import parse_pair
 from ..broker import (
-    BANNER,
+    banner_for_provider,
     DECISION_SOURCE_CHOICES,
     DECISION_SOURCE_HISTORY,
     DEFAULT_MAX_PRICE_DEVIATION,
@@ -960,12 +960,10 @@ def main(argv: list[str] | None = None) -> int:
             if provider == "alpaca_snapshot" and max_age is not None
             else ""
         ),
-        file=sys.stderr,
     )
-    print(f"paper decision source: {describe_decision_source(decision_source)}", file=sys.stderr)
+    print(f"paper decision source: {describe_decision_source(decision_source)}")
     print(
         f"paper execution provider: {describe_execution_provider(execution_provider)}",
-        file=sys.stderr,
     )
     # The endpoint the provider resolves to. The provider name alone does not say
     # which host receives the order, and a mismatch between the two is exactly
@@ -973,7 +971,6 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "paper execution endpoint: "
         f"{_endpoint_for_provider(execution_provider)}",
-        file=sys.stderr,
     )
     crypto_symbols = _crypto_symbols(args)
     try:
@@ -1039,8 +1036,8 @@ def serve(
     Run button uses. One process, one writer, so it cannot race the state file. It
     is off by default (``0``), which leaves the server a pure monitor.
 
-    ``allow_paper_trading`` enables the START/STOP control for the Alpaca paper
-    worker. It is off by default, so the dashboard cannot place a paper order
+    ``allow_paper_trading`` enables the START/STOP control for the configured
+    paper execution provider. It is off by default, so the dashboard cannot place a paper order
     unless the operator opts in; it never enables live trading.
 
     ``crypto_symbols`` selects the crypto pairs the live market section shows.
@@ -1084,7 +1081,7 @@ def serve(
     print(
         "  paper trading: "
         + (
-            f"enabled ({BANNER}, order notional {paper_order_notional:g})"
+            f"enabled ({banner_for_provider(paper_execution_provider)}, order notional {paper_order_notional:g})"
             if allow_paper_trading
             else "disabled (pass --allow-paper-trading to enable)"
         )
@@ -1339,7 +1336,7 @@ INDEX_HTML = """<!doctype html>
 <div class="wrap">
   <div id="err" class="err"></div>
 
-  <div id="livewarn" class="banner"><span class="dot"></span>ALPACA PAPER — NOT LIVE</div>
+  <div id="livewarn" class="banner"><span class="dot"></span>PAPER TRADING — NOT LIVE</div>
 
   <div id="auth" class="card">
     <h2>Access token</h2>
@@ -1360,7 +1357,7 @@ INDEX_HTML = """<!doctype html>
         <p class="muted" id="ov-verdict" style="margin:12px 0 0"></p>
       </div>
       <div class="grid" style="margin-top:12px">
-        <div class="card"><h2>Account (Alpaca paper)</h2><div id="ov-account" class="stats"></div>
+        <div class="card"><h2>Account (paper broker)</h2><div id="ov-account" class="stats"></div>
           <div id="ov-account-note" class="muted" style="margin-top:10px"></div></div>
         <div class="card"><h2>Activity</h2><div id="ov-activity" class="stats"></div></div>
       </div>
