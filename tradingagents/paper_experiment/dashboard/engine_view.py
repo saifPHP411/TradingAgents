@@ -458,11 +458,31 @@ def trades_view(
         )
     trades.sort(key=lambda t: str(t.get("entry_session") or ""), reverse=True)
 
+    # A broker fill is a real execution even before its position is closed.
+    # Keep it separate from settled round-trip trades: entry fills have no
+    # realized P&L or exit price yet, and must never be presented as closed trades.
+    executions = [
+        {
+            "client_order_id": order.get("client_order_id"),
+            "broker_order_id": order.get("broker_order_id"),
+            "symbol": order.get("symbol"),
+            "side": order.get("side"),
+            "filled_quantity": order["filled_quantity"],
+            "average_fill_price": order.get("average_fill_price"),
+            "order_timestamp": order.get("submitted_at"),
+            "order_status": order.get("status"),
+        }
+        for order in orders
+        if order["is_filled"]
+    ]
+
     return {
         "orders": orders,
+        "executions": executions,
         "trades": trades,
         "submitted_orders": len(orders),
-        "filled_orders": len([o for o in orders if o["is_filled"]]),
+        "filled_orders": len(executions),
+        "filled_executions": len(executions),
         "settled_trades": len(trades),
     }
 
