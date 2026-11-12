@@ -345,7 +345,10 @@ class Dashboard:
         # public Bybit Spot quotes for display without starting the worker,
         # touching private account endpoints, or placing orders.
         positions = status.get("positions") or {}
+        quote_checked_at = None
+        quote_refresh_status = "not_applicable"
         if self.paper.execution_provider == "bybit_demo" and positions:
+            quote_refresh_status = "error"
             try:
                 from tradingagents.crypto.bybit import BybitPublicClient
 
@@ -355,6 +358,8 @@ class Dashboard:
                     if isinstance(row, dict)
                 ]
                 tickers = BybitPublicClient().tickers(symbols)
+                quote_checked_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                updated_quotes = 0
                 for symbol, row in positions.items():
                     if not isinstance(row, dict):
                         continue
@@ -368,10 +373,12 @@ class Dashboard:
                             price = None
                         if price is not None and price > 0:
                             row["mark_price"] = price
+                            updated_quotes += 1
+                quote_refresh_status = "ok" if updated_quotes else "no_quote"
             except Exception:
-                # Keep the last known snapshot; the UI will continue to show
-                # N/A rather than fabricate a quote if the public feed is down.
-                pass
+                # Keep the last known broker snapshot; never label its timestamp
+                # as a fresh broker sync merely because a public quote was fetched.
+                quote_refresh_status = "error"
 
         rows = positions_view(status, self._internal_positions())
         return {
@@ -379,6 +386,8 @@ class Dashboard:
             "count": len(rows),
             "positions_checked_at": status.get("positions_checked_at"),
             "positions_at": status.get("positions_at"),
+            "quote_checked_at": quote_checked_at,
+            "quote_refresh_status": quote_refresh_status,
             "banner": banner_for_provider(self.paper.execution_provider),
             "live": False,
         }
@@ -2039,7 +2048,7 @@ async function refreshPositions(){
     const [pos, p] = await Promise.all([api("/api/positions"), api("/api/paper/status")]);
     LAST.stops = p.stops;
     const rows = pos.positions || [];
-    $("pos-note").textContent = "synced " + rel(pos.positions_checked_at);
+    $("pos-note").textContent = "broker snapshot " + rel(pos.positions_checked_at) + (pos.quote_checked_at ? " · price checked " + rel(pos.quote_checked_at) : (pos.quote_refresh_status === "error" ? " · price refresh failed" : ""));
     $("pos-body").innerHTML = rows.length ? `<div class="tablewrap"><table>
       <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry</th>
         <th class="num">Current</th><th class="num">Value</th><th class="num">uP&L</th>
