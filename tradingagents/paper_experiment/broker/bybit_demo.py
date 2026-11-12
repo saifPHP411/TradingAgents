@@ -1231,7 +1231,7 @@ class BybitDemoBroker:
 
     # -- positions ----------------------------------------------------------
 
-    def _read_wallet_balances(self, account_type: str = "SPOT") -> dict[str, dict]:
+    def _read_wallet_balances(self, account_type: str = "UNIFIED") -> dict[str, dict]:
         """Read wallet balances for the given account type (SPOT or UNIFIED).
 
         Returns a dict mapping coin to its balance info:
@@ -1461,7 +1461,7 @@ class BybitDemoBroker:
         """
         if refresh or self._positions is None:
             # Read wallet balances
-            wallet_balances = self._read_wallet_balances("SPOT")
+            wallet_balances = self._read_wallet_balances("UNIFIED")
 
             # Read open orders to calculate locked balances per coin
             self._read_open_orders()
