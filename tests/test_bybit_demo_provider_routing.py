@@ -650,6 +650,8 @@ class TestExecutionProviderStateIsolation:
             controller.root / "execution_state" / "bybit_demo" / "worker_state.json"
         )
         assert controller._worker_state_path() != controller.root / "worker_state.json"
+        config = controller._worker_config()
+        assert config.state_path == controller._worker_state_path()
 
     def test_alpaca_keeps_its_existing_worker_state_path(self, tmp_path):
         controller = _controller(_experiment_root(tmp_path))
