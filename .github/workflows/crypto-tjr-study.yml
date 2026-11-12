@@ -30,7 +30,7 @@ jobs:
           cache: pip
 
       - name: Install backtest dependencies
-        run: python -m pip install --upgrade pip pandas numpy requests python-dotenv
+        run: python -m pip install --upgrade pip pandas numpy requests python-dotenv pydantic
 
       - name: Fetch 30 days of public Binance candles
         run: |
