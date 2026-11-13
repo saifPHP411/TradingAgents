@@ -186,7 +186,7 @@ def run_backtest(
         signal = evaluate_ensemble(
             data.iloc[start : j + 1], signal_settings, mode=mode
         )
-        if position is not None and signal.action == "flat":
+        if position is not None and signal.should_exit:
             pending = {"action": "exit", "reason": "signal_flat"}
         elif position is None and signal.action == "long" and signal.stop is not None:
             pending = {"action": "entry", "stop": signal.stop}
