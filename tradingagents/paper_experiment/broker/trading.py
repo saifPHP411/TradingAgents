@@ -4786,12 +4786,6 @@ class PaperTradingWorker:
         except (TypeError, ValueError):
             min_notional = 0.0
 
-        def floor_to_step(value: float) -> float:
-            if step <= 0:
-                return math.floor(value * 1_000_000) / 1_000_000
-            units = (Decimal(str(value)) / step).to_integral_value(rounding=ROUND_DOWN)
-            return float(units * step)
-
         if reason != "take_profit" or not ladder or target is None:
             return float(held)
         remaining = [
@@ -4806,7 +4800,12 @@ class PaperTradingWorker:
         if len(remaining) <= 1:
             # The last target, or a single target: close what is left.
             return float(held)
-        held_decimal = Decimal(str(held))
+        try:
+            held_decimal = Decimal(str(held))
+        except (TypeError, ValueError, ArithmeticError):
+            return float(held)
+        if not held_decimal.is_finite() or held_decimal <= 0:
+            return float(held)
         base_value = entry_quantity if entry_quantity is not None else held
         try:
             base_decimal = Decimal(str(base_value))
