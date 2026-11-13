@@ -44,6 +44,8 @@ def run_ensemble_study(
         ],
     }
     btc_full = cache.load("BTC/USDT", "1h")
+    if any(parse_pair(symbol).canonical != "BTC/USDT" for symbol in symbols) and btc_full is None:
+        raise RuntimeError("BTC 1h history is required for the fail-closed altcoin risk overlay")
     for partition, (left, right) in partitions.items():
         report["partitions"][partition] = {}
         for raw in symbols:
