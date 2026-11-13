@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tradingagents.crypto.ensemble import EnsembleSettings
 from tradingagents.crypto.ensemble_backtest import BacktestSettings, compare_modes, run_backtest
 
 
@@ -117,6 +118,15 @@ def test_backtest_rejects_non_finite_or_non_integer_risk_settings():
         run_backtest(
             _flat_frame(),
             settings=BacktestSettings(max_hold_bars=1.5, warmup_bars=220),
+        )
+
+
+def test_single_symbol_backtest_rejects_invalid_signal_settings():
+    with pytest.raises(ValueError, match="finite"):
+        run_backtest(
+            _flat_frame(),
+            settings=BacktestSettings(warmup_bars=220),
+            signal_settings=EnsembleSettings(volume_multiple=float("nan")),
         )
 
 
