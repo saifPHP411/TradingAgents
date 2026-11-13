@@ -27,6 +27,8 @@ class PortfolioSettings:
     max_gross_exposure_fraction: float = 0.25
     daily_loss_limit_fraction: float | None = 0.02
     max_drawdown_fraction: float | None = 0.10
+    max_alt_correlation: float = 0.85
+    correlation_lookback: int = 168
 
 
 @dataclass
@@ -63,6 +65,10 @@ def _validate_portfolio_settings(settings: PortfolioSettings) -> None:
         or not 0 < settings.max_gross_exposure_fraction <= 1
     ):
         raise ValueError("max gross exposure fraction must be in (0, 1]")
+    if not isfinite(settings.max_alt_correlation) or not 0 < settings.max_alt_correlation <= 1:
+        raise ValueError("maximum altcoin correlation must be in (0, 1]")
+    if type(settings.correlation_lookback) is not int or settings.correlation_lookback < 20:
+        raise ValueError("correlation lookback must be an integer of at least 20")
     for name, value in (
         ("daily loss", settings.daily_loss_limit_fraction),
         ("maximum drawdown", settings.max_drawdown_fraction),
@@ -146,6 +152,7 @@ def run_portfolio_backtest(
         symbol: _indicators(frame, signal_settings)
         for symbol, frame in data.items()
     }
+    returns = {symbol: frame.close.pct_change() for symbol, frame in data.items()}
 
     cash = float(settings.initial_cash)
     positions: dict[str, dict] = {}
@@ -160,6 +167,7 @@ def run_portfolio_backtest(
         "daily_loss_limit": 0,
         "max_drawdown": 0,
         "btc_risk_filter": 0,
+        "alt_correlation": 0,
         "insufficient_cash_or_risk": 0,
     }
     total_fees = 0.0
@@ -233,6 +241,23 @@ def run_portfolio_backtest(
             if symbol != btc_symbol and alt_count >= portfolio_settings.max_alt_positions:
                 blocked["max_alt_positions"] += 1
                 continue
+            if symbol != btc_symbol:
+                # Entry fills at this bar's open: use returns only through j-1.
+                start = max(1, j - portfolio_settings.correlation_lookback)
+                candidate_returns = returns[symbol].iloc[start:j]
+                correlated = len(candidate_returns) < portfolio_settings.correlation_lookback
+                if not correlated:
+                    for held in positions:
+                        if held == btc_symbol:
+                            continue
+                        held_returns = returns[held].iloc[start:j]
+                        correlation = candidate_returns.corr(held_returns)
+                        if pd.isna(correlation) or correlation >= portfolio_settings.max_alt_correlation:
+                            correlated = True
+                            break
+                if correlated:
+                    blocked["alt_correlation"] += 1
+                    continue
 
             entry_raw = float(data[symbol].open.iloc[j])
             entry = entry_raw * (1.0 + slip)
@@ -282,6 +307,7 @@ def run_portfolio_backtest(
                 "entry_bar": j,
                 "qty": qty,
                 "stop": stop,
+                "highest_high": max(entry, float(data[symbol].high.iloc[j])),
                 "entry_fee": entry_fee,
                 "entry_slippage": entry_slippage,
             }
@@ -294,6 +320,18 @@ def run_portfolio_backtest(
                 raw_stop = min(float(data[symbol].open.iloc[j]), position["stop"])
                 close_position(symbol, timestamp, raw_stop, "atr_stop")
                 cooldown_until[symbol] = j + 1
+                continue
+            # New trailing levels are calculated after the intrabar stop check.
+            position["highest_high"] = max(
+                position["highest_high"], float(data[symbol].high.iloc[j])
+            )
+            current_atr = float(indicators[symbol].atr.iloc[j])
+            if isfinite(current_atr) and current_atr > 0:
+                trail = (
+                    position["highest_high"]
+                    - settings.trailing_stop_atr_multiple * current_atr
+                )
+                position["stop"] = max(position["stop"], trail)
 
         btc_risk_off = _btc_risk_off(
             indicators[btc_symbol], j, signal_settings.adx_trend_min
