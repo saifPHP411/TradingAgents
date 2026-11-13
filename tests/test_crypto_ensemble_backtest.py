@@ -177,6 +177,10 @@ def test_chandelier_trailing_stop_tightens_only_for_following_bar():
     )
     assert tight.trades == 1
     assert tight.trade_log[0]["reason"] == "atr_stop"
+    assert tight.trade_log[0]["final_stop"] > tight.trade_log[0]["initial_stop"]
     assert tight.trade_log[0]["raw_exit_price"] > tight.trade_log[0]["raw_entry_price"] * 0.97
     assert loose.trades == 1
     assert loose.trade_log[0]["reason"] == "end_of_data"
+    assert loose.trade_log[0]["final_stop"] == pytest.approx(
+        loose.trade_log[0]["initial_stop"]
+    )
