@@ -12,7 +12,7 @@ from math import isfinite
 
 import pandas as pd
 
-from .ensemble import EnsembleSettings, evaluate_ensemble
+from .ensemble import EnsembleSettings, _indicators, evaluate_ensemble
 
 
 @dataclass(frozen=True)
@@ -78,6 +78,7 @@ def run_backtest(
     mode: str = "ensemble",
     signal_settings: EnsembleSettings | None = None,
     settings: BacktestSettings = BacktestSettings(),
+    btc_frame: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """Run one symbol; each signal is acted on at the following bar's open."""
     if mode not in {"ensemble", "trend", "range", "breakout"}:
@@ -93,6 +94,10 @@ def run_backtest(
 
     signal_settings = signal_settings or EnsembleSettings()
     data = _validate(frame, settings)
+    btc_indicators = None
+    if btc_frame is not None:
+        btc_data = _validate(btc_frame, settings)
+        btc_indicators = _indicators(btc_data, signal_settings)
     cash = float(settings.initial_cash)
     position = None
     pending = None
@@ -166,6 +171,25 @@ def run_backtest(
                         }
             pending = None
 
+        # BTC is a fail-closed risk overlay for altcoins. Its state is read only
+        # at the same completed timestamp; missing BTC bars block new risk.
+        btc_risk_off = False
+        if btc_indicators is not None:
+            btc_position = btc_indicators.index.get_indexer([timestamp])[0]
+            if btc_position < 0:
+                btc_risk_off = True
+            else:
+                btc_row = btc_indicators.iloc[btc_position]
+                btc_required = ("close", "fast_ema", "slow_ema", "momentum",
+                                "plus_di", "minus_di", "adx")
+                btc_risk_off = any(pd.isna(btc_row[key]) for key in btc_required) or not (
+                    btc_row.close > btc_row.slow_ema
+                    and btc_row.fast_ema > btc_row.slow_ema
+                    and btc_row.momentum > 0
+                    and btc_row.plus_di > btc_row.minus_di
+                    and btc_row.adx >= signal_settings.adx_trend_min
+                )
+
         # Intrabar stop: if the bar gaps through the stop, use its open.
         if position is not None and float(row.low) <= position["stop"]:
             stop_fill = min(float(row.open), position["stop"])
@@ -186,9 +210,11 @@ def run_backtest(
         signal = evaluate_ensemble(
             data.iloc[start : j + 1], signal_settings, mode=mode
         )
-        if position is not None and signal.should_exit:
+        if btc_risk_off and position is not None:
+            pending = {"action": "exit", "reason": "btc_risk_filter"}
+        elif position is not None and signal.should_exit:
             pending = {"action": "exit", "reason": "signal_flat"}
-        elif position is None and signal.action == "long" and signal.stop is not None:
+        elif position is None and not btc_risk_off and signal.action == "long" and signal.stop is not None:
             pending = {"action": "entry", "stop": signal.stop}
 
     # If a position remains after the loop, close it at the last available close.
@@ -238,6 +264,7 @@ def compare_modes(
     *,
     signal_settings: EnsembleSettings | None = None,
     settings: BacktestSettings = BacktestSettings(),
+    btc_frame: pd.DataFrame | None = None,
 ) -> dict:
     """Run four comparable variants on identical bars and execution assumptions."""
     signal_settings = signal_settings or EnsembleSettings()
@@ -249,9 +276,11 @@ def compare_modes(
         "first_bar": frame.index[0].isoformat(),
         "last_bar": frame.index[-1].isoformat(),
         "execution": "signal_on_close_next_bar_open_stop_gap_aware",
+        "btc_risk_overlay": btc_frame is not None,
         "results": {
             mode: run_backtest(
-                frame, mode=mode, signal_settings=signal_settings, settings=settings
+                frame, mode=mode, signal_settings=signal_settings, settings=settings,
+                btc_frame=btc_frame,
             ).to_dict()
             for mode in modes
         },
