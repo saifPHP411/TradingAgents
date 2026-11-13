@@ -41,6 +41,7 @@ class BacktestResult:
     gross_profit: float
     gross_loss: float
     fees_paid: float
+    slippage_paid: float
     slippage_bps: float
     equity_curve: list[dict]
     trade_log: list[dict]
@@ -95,15 +96,18 @@ def run_backtest(
     trades: list[dict] = []
     curve: list[dict] = []
     total_fees = 0.0
+    total_slippage = 0.0
     slip = settings.slippage_bps / 10_000.0
     fee_rate = settings.fee_bps / 10_000.0
 
     def close_position(timestamp, raw_price: float, reason: str) -> None:
-        nonlocal cash, position, total_fees
+        nonlocal cash, position, total_fees, total_slippage
         if position is None:
             return
         fill = raw_price * (1.0 - slip)
         fee = position["qty"] * fill * fee_rate
+        exit_slippage = position["qty"] * (raw_price - fill)
+        total_slippage += exit_slippage
         cash += position["qty"] * fill - fee
         total_fees += fee
         pnl = (
@@ -121,6 +125,7 @@ def run_backtest(
             "net_pnl": pnl,
             "entry_fee": position["entry_fee"],
             "exit_fee": fee,
+            "slippage_paid": position["entry_slippage"] + exit_slippage,
             "reason": reason,
         })
         position = None
@@ -144,6 +149,8 @@ def run_backtest(
                     qty = min(risk_budget / risk_per_unit, notional_cap / entry)
                     if qty > 0 and isfinite(qty):
                         entry_fee = qty * entry * fee_rate
+                        entry_slippage = qty * (entry - float(row.open))
+                        total_slippage += entry_slippage
                         cash -= qty * entry + entry_fee
                         total_fees += entry_fee
                         position = {
@@ -152,6 +159,7 @@ def run_backtest(
                             "qty": qty,
                             "stop": stop,
                             "entry_fee": entry_fee,
+                            "entry_slippage": entry_slippage,
                         }
             pending = None
 
@@ -199,9 +207,7 @@ def run_backtest(
     losses = [p for p in pnls if p < 0]
     gross_profit = sum(wins)
     gross_loss = abs(sum(losses))
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else (
-        None if not wins else float("inf")
-    )
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
     final_equity = cash
     return BacktestResult(
         mode=mode,
@@ -217,6 +223,7 @@ def run_backtest(
         gross_profit=gross_profit,
         gross_loss=gross_loss,
         fees_paid=total_fees,
+        slippage_paid=total_slippage,
         slippage_bps=settings.slippage_bps,
         equity_curve=curve,
         trade_log=trades,
