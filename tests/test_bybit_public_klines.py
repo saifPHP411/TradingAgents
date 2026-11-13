@@ -47,7 +47,7 @@ def test_bybit_spot_klines_page_backwards_and_return_oldest_first():
     assert len(candles) == 1001
     assert candles[0].open_time == datetime.fromtimestamp(1000 * 60, tz=UTC)
     assert candles[-1].open_time == datetime.fromtimestamp(2000 * 60, tz=UTC)
-    assert all(left.open_time < right.open_time for left, right in zip(candles, candles[1:]))
+    assert all(left.open_time < right.open_time for left, right in zip(candles, candles[1:], strict=False))
     assert calls[0]["url"].endswith("/v5/market/kline")
     assert calls[0]["params"] == {
         "category": "spot",
