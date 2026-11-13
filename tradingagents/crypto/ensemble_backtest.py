@@ -200,7 +200,12 @@ def run_backtest(
                 if stop > 0 and risk_per_unit > 0 and equity_at_open > 0:
                     risk_budget = equity_at_open * settings.risk_fraction
                     notional_cap = equity_at_open * settings.max_notional_fraction
-                    qty = min(risk_budget / risk_per_unit, notional_cap / entry)
+                    cash_cap_qty = cash / (entry * (1.0 + fee_rate))
+                    qty = min(
+                        risk_budget / risk_per_unit,
+                        notional_cap / entry,
+                        cash_cap_qty,
+                    )
                     if qty > 0 and isfinite(qty):
                         entry_fee = qty * entry * fee_rate
                         entry_slippage = qty * (entry - float(row.open))
