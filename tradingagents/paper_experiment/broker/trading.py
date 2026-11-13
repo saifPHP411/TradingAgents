@@ -4758,7 +4758,6 @@ class PaperTradingWorker:
         ladder: list[Any],
         taken: list[Any],
         target: float | None,
-        entry_quantity: float | None = None,
         reference_price: float | None = None,
     ) -> float:
         """Size an exit on the venue's quantity grid without creating sellable dust.
@@ -4806,18 +4805,11 @@ class PaperTradingWorker:
             return float(held)
         if not held_decimal.is_finite() or held_decimal <= 0:
             return float(held)
-        base_value = entry_quantity if entry_quantity is not None else held
-        try:
-            base_decimal = Decimal(str(base_value))
-        except (TypeError, ValueError, ArithmeticError):
-            base_decimal = held_decimal
-        if not base_decimal.is_finite() or base_decimal <= 0:
-            base_decimal = held_decimal
-        # Each remaining rung keeps its share of the original entry quantity.
-        # If the broker now holds less than that share, the clamp below closes
-        # no more than the actual holding; it must not silently rebase every
-        # remaining target and leave an untradeable tail.
-        share = base_decimal / Decimal(len(remaining))
+        # Divide the currently held quantity across the remaining rungs.
+        # Flooring the slice to qty_step means the remainder is never smaller
+        # than the slice, so a valid partial order cannot create a smaller,
+        # untradeable tail.
+        share = held_decimal / Decimal(len(remaining))
         if not share.is_finite() or share <= 0:
             return float(held)
 
@@ -5127,9 +5119,6 @@ class PaperTradingWorker:
                 ladder=ladder,
                 taken=taken,
                 target=hit_target if reason == "take_profit" else None,
-                entry_quantity=_as_float(
-                    (self.state.protections.get(symbol) or {}).get("quantity")
-                ),
                 reference_price=exit_price,
             )
             try:
