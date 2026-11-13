@@ -20,6 +20,10 @@ on:
         required: true
         default: "BTC/USDT ETH/USDT BNB/USDT"
 
+concurrency:
+  group: crypto-rae-study-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
