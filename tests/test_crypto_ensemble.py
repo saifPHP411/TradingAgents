@@ -54,6 +54,22 @@ def test_trend_module_can_emit_a_long_signal():
     assert result.stop is not None and result.stop < result.close
 
 
+def test_trend_no_entry_is_not_mistaken_for_an_exit():
+    close = np.linspace(100, 130, 260)
+    close[-1] = close[-2] + 0.1
+    frame = pd.DataFrame({
+        "open": close - 0.05,
+        "high": close + 1.0,
+        "low": close - 1.0,
+        "close": close,
+        "volume": np.full(len(close), 1000.0),
+    })
+    result = evaluate_ensemble(frame)
+    assert result.regime == "trend"
+    assert result.action == "flat"
+    assert result.should_exit is False
+
+
 def test_range_module_can_emit_a_long_reversal():
     close = 100 + np.sin(np.arange(260) * 0.7) * 0.1
     close[-2] = 97.8
