@@ -994,7 +994,7 @@ class TestRiskLimits:
         with pytest.raises(PaperRiskRejected, match="exceed the open-position limit"):
             client.submit_order(
                 symbol="AVAX/USDT",
-                quantity=0.001,
+                quantity=0.01,  # valid AVAX Spot basePrecision; reach the position-limit check
                 side="buy",
                 reference_price=100,
                 client_order_id="pt-test-client-id",
