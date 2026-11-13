@@ -131,7 +131,10 @@ def test_portfolio_requires_aligned_hourly_history_and_btc():
     misaligned = frame.copy()
     misaligned.index = misaligned.index + pd.Timedelta(minutes=1)
     with pytest.raises(ValueError, match="identical hourly timestamps"):
-        run_portfolio_backtest({"BTC/USDT": frame, "ETH/USDT": misaligned})
+        run_portfolio_backtest(
+            {"BTC/USDT": frame, "ETH/USDT": misaligned},
+            settings=BacktestSettings(warmup_bars=220),
+        )
     with pytest.raises(ValueError, match="positive integer"):
         run_portfolio_backtest(
             {"BTC/USDT": frame},
