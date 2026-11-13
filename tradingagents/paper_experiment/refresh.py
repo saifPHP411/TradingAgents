@@ -394,7 +394,7 @@ def _rebuild_source(
     old_source = experiment.source
     old_provenance = getattr(old_source, "provenance", None)
     last_bar = str(merged.index[-1])[:10]
-    now = datetime.now(UTC)
+    now = now or datetime.now(UTC)
 
     provenance = old_provenance
     if old_provenance is not None:
