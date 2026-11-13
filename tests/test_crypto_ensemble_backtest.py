@@ -73,6 +73,9 @@ def test_backtest_rejects_bad_bar_order_and_negative_fees():
         run_backtest(frame, settings=BacktestSettings(warmup_bars=220))
     with pytest.raises(ValueError, match="fees"):
         run_backtest(_flat_frame(), settings=BacktestSettings(fee_bps=-1, warmup_bars=220))
+    gapped = _flat_frame().drop(index=120)
+    with pytest.raises(ValueError, match="contiguous 1h"):
+        run_backtest(gapped, settings=BacktestSettings(warmup_bars=220))
 
 
 
