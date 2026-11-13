@@ -121,6 +121,24 @@ def test_signal_is_based_on_last_bar_and_returns_a_defined_stop():
         assert result.module == "trend_donchian_momentum"
 
 
+def test_current_bar_high_is_excluded_from_its_donchian_breakout_threshold():
+    close = np.linspace(100, 130, 260)
+    close[-1] = close[-2] + 1.1
+    volume = np.full(len(close), 1000.0)
+    volume[-1] = 1500.0
+    frame = pd.DataFrame({
+        "open": close - 0.5,
+        "high": close + 1.0,
+        "low": close - 1.0,
+        "close": close,
+        "volume": volume,
+    })
+    frame.loc[259, "high"] = close[-1] + 4.0
+    result = evaluate_ensemble(frame)
+    assert result.action == "long"
+    assert result.module == "trend_donchian_momentum"
+
+
 def test_rejects_infinite_and_negative_volume():
     frame = _frame(np.linspace(100, 110, 240))
     frame.loc[239, "close"] = np.inf
