@@ -95,6 +95,10 @@ from .alpaca_paper import (
     canonical_position_symbol,
 )
 from .bybit_demo import (
+    BrokerError as BybitBrokerError,
+    BrokerRejectedError as BybitBrokerRejectedError,
+    InsufficientFundsError as BybitInsufficientFundsError,
+    PaperRiskRejected as BybitPaperRiskRejected,
     BybitDemoBroker,
 )
 
@@ -3529,7 +3533,7 @@ class PaperTradingWorker:
             self._save()
             try:
                 result = self.preflight()
-            except (BrokerError, PreflightError, WorkerError) as exc:
+            except (BrokerError, BybitBrokerError, PreflightError, WorkerError) as exc:
                 self.state.status = STATUS_ERROR
                 self.state.last_error = f"{type(exc).__name__}: {exc}"
                 self._save()
@@ -4070,7 +4074,14 @@ class PaperTradingWorker:
                 refresh=True,
                 crypto=self.config.crypto,
             )
-        except (PaperRiskRejected, BrokerRejectedError, BrokerError) as exc:
+        except (
+            PaperRiskRejected,
+            BybitPaperRiskRejected,
+            BrokerRejectedError,
+            BybitBrokerRejectedError,
+            BrokerError,
+            BybitBrokerError,
+        ) as exc:
             # A local refusal or a broker rejection is recorded, not hidden, and the
             # worker stays RUNNING so the next cycle can act.
             self.state.last_error = f"{type(exc).__name__}: {exc}"
@@ -4083,10 +4094,10 @@ class PaperTradingWorker:
             # from "the broker refused it".
             code = (
                 NO_TRADE_RISK_REJECTED
-                if isinstance(exc, PaperRiskRejected)
+                if isinstance(exc, (PaperRiskRejected, BybitPaperRiskRejected))
                 else (
                     NO_TRADE_INSUFFICIENT_FUNDS
-                    if isinstance(exc, InsufficientFundsError)
+                    if isinstance(exc, (InsufficientFundsError, BybitInsufficientFundsError))
                     else NO_TRADE_BROKER_REJECTED
                 )
             )
