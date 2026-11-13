@@ -4776,7 +4776,7 @@ class PaperTradingWorker:
         raw_step = getattr(instrument, "qty_step", None)
         try:
             step = Decimal(str(raw_step)) if raw_step is not None else Decimal("0")
-        except Exception:
+        except (TypeError, ValueError, ArithmeticError):
             step = Decimal("0")
         if not step.is_finite() or step <= 0:
             step = Decimal("0")
