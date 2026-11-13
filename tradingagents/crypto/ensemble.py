@@ -14,6 +14,7 @@ import pandas as pd
 
 Regime = Literal["trend", "range", "uncertain"]
 Action = Literal["long", "flat"]
+StrategyMode = Literal["ensemble", "trend", "range", "breakout"]
 
 
 @dataclass(frozen=True)
@@ -94,9 +95,14 @@ def _indicators(data: pd.DataFrame, s: EnsembleSettings) -> pd.DataFrame:
 
 
 def evaluate_ensemble(
-    frame: pd.DataFrame, settings: EnsembleSettings = EnsembleSettings()
+    frame: pd.DataFrame,
+    settings: EnsembleSettings = EnsembleSettings(),
+    *,
+    mode: StrategyMode = "ensemble",
 ) -> EnsembleSignal:
     """Evaluate the latest completed bar; callers must exclude any still-open candle."""
+    if mode not in {"ensemble", "trend", "range", "breakout"}:
+        raise ValueError("mode must be ensemble, trend, range, or breakout")
     data = _validate(frame)
     positive_periods = (
         settings.fast_ema, settings.slow_ema, settings.adx_period,
@@ -124,11 +130,16 @@ def evaluate_ensemble(
     else:
         regime = "uncertain"
 
-    if regime == "trend":
+    if regime == "trend" or mode == "breakout":
         aligned = row.fast_ema > row.slow_ema and row.plus_di > row.minus_di
         momentum_ok = row.momentum > 0
         breakout = close > row.prior_high
         extension_ok = (close - row.fast_ema) / atr <= settings.max_extension_atr
+        if mode == "range":
+            return EnsembleSignal("flat", regime, "range_mean_reversion", 0.0, close, None,
+                                  "range-only mode: trend regime is disabled")
+        if mode == "breakout":
+            aligned = True
         if aligned and momentum_ok and breakout and extension_ok:
             stop = close - settings.atr_stop_multiple * atr
             return EnsembleSignal("long", regime, "trend_donchian_momentum", 1.0,
@@ -136,7 +147,10 @@ def evaluate_ensemble(
         return EnsembleSignal("flat", regime, "trend_donchian_momentum", 0.0,
                               close, None, "trend regime lacks a fresh, non-extended confirmed breakout")
 
-    if regime == "range":
+    if regime == "range" or mode == "range":
+        if mode in {"trend", "breakout"}:
+            return EnsembleSignal("flat", regime, "trend_donchian_momentum", 0.0, close, None,
+                                  "trend-only mode: range regime is disabled")
         # Mean reversion is only allowed in a low-ADX regime. Never average down:
         # require a bullish close relative to the prior bar after a lower-band stretch.
         stretched = row.zscore <= -settings.range_zscore
