@@ -212,3 +212,22 @@ def test_single_symbol_stop_risk_budget_includes_fees_and_adverse_slippage():
     )
     assert estimated_loss == pytest.approx(trade["estimated_stop_risk"])
     assert estimated_loss <= trade["entry_equity"] * settings.risk_fraction + 1e-8
+
+
+def test_single_symbol_backtest_does_not_trade_before_oos_start():
+    frame = _rising_breakout_frame()
+    result = run_backtest(
+        frame,
+        settings=BacktestSettings(warmup_bars=220),
+        trading_start_ts=frame.index[260],
+    )
+    assert result.trades == 0
+
+
+def test_single_symbol_backtest_requires_timezone_aware_oos_start():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        run_backtest(
+            _rising_breakout_frame(),
+            settings=BacktestSettings(warmup_bars=220),
+            trading_start_ts="2025-01-12 00:00:00",
+        )
