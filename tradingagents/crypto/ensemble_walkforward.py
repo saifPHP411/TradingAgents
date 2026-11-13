@@ -113,6 +113,14 @@ def block_bootstrap_equity(
         raise ValueError("bootstrap segments must contain finite one-dimensional returns")
     if any((segment <= -1.0).any() for segment in return_segments):
         raise ValueError("bootstrap segment returns must be greater than -100%")
+    if segments is not None:
+        flattened_segments = (
+            np.concatenate(return_segments) if return_segments else np.asarray([], dtype=float)
+        )
+        if not np.array_equal(flattened_segments, returns):
+            raise ValueError(
+                "bootstrap segments must partition hourly_returns in chronological order"
+            )
     if not return_segments:
         return_segments = [np.asarray([], dtype=float)]
     lengths = np.asarray([len(segment) for segment in return_segments], dtype=int)
