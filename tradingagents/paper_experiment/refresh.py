@@ -387,7 +387,9 @@ def _merge_frames(
     return merged, tuple(new_labels), None
 
 
-def _rebuild_source(\n    experiment, symbol: str, merged: pd.DataFrame, *, now: datetime | None = None\n) -> PriceSource:
+def _rebuild_source(
+    experiment, symbol: str, merged: pd.DataFrame, *, now: datetime | None = None
+) -> PriceSource:
     """A source of the same kind/name as the experiment's, over the merged bars."""
     old_source = experiment.source
     old_provenance = getattr(old_source, "provenance", None)
