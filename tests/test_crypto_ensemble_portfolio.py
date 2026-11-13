@@ -350,3 +350,25 @@ def test_portfolio_gap_through_trailing_stop_fills_at_worse_open():
     assert result.trades == 1
     assert result.trade_log[0]["reason"] == "atr_stop"
     assert result.trade_log[0]["raw_exit_price"] == pytest.approx(gap_open)
+
+
+def test_portfolio_backtest_does_not_trade_before_oos_start():
+    frame = _rising_frame()
+    result = run_portfolio_backtest(
+        {"BTC/USDT": frame},
+        settings=BacktestSettings(warmup_bars=220),
+        trading_start_ts=frame.index[260],
+        portfolio_settings=PortfolioSettings(
+            daily_loss_limit_fraction=None,
+            max_drawdown_fraction=None,
+        ),
+    )
+    assert result.trades == 0
+
+
+def test_portfolio_backtest_requires_timezone_aware_oos_start():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        run_portfolio_backtest(
+            {"BTC/USDT": _rising_frame()},
+            trading_start_ts="2025-01-12 00:00:00",
+        )
