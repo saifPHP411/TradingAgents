@@ -85,6 +85,12 @@ def _validate(frame: pd.DataFrame, settings: BacktestSettings) -> pd.DataFrame:
     return data
 
 
+def _stop_risk_per_unit(entry: float, stop: float, fee_rate: float, slippage_rate: float) -> float:
+    """Estimate stop loss per unit after both fees and adverse exit slippage."""
+    stop_fill = stop * (1.0 - slippage_rate)
+    return max(entry * (1.0 + fee_rate) - stop_fill * (1.0 - fee_rate), 0.0)
+
+
 def run_backtest(
     frame: pd.DataFrame,
     *,
@@ -158,6 +164,8 @@ def run_backtest(
             "exit_price": fill,
             "raw_exit_price": raw_price,
             "quantity": position["qty"],
+            "entry_equity": position["entry_equity"],
+            "estimated_stop_risk": position["estimated_stop_risk"],
             "initial_stop": position["initial_stop"],
             "final_stop": position["stop"],
             "gross_pnl": position["qty"] * (raw_price - position["raw_entry"]),
@@ -182,7 +190,7 @@ def run_backtest(
                 entry = float(row.open) * (1.0 + slip)
                 stop = float(pending["stop"])
                 equity_at_open = cash
-                risk_per_unit = entry - stop
+                risk_per_unit = _stop_risk_per_unit(entry, stop, fee_rate, slip)
                 if stop > 0 and risk_per_unit > 0 and equity_at_open > 0:
                     risk_budget = equity_at_open * settings.risk_fraction
                     notional_cap = equity_at_open * settings.max_notional_fraction
@@ -204,6 +212,8 @@ def run_backtest(
                             "highest_high": max(entry, float(row.high)),
                             "entry_fee": entry_fee,
                             "entry_slippage": entry_slippage,
+                            "entry_equity": equity_at_open,
+                            "estimated_stop_risk": qty * risk_per_unit,
                         }
             pending = None
 
