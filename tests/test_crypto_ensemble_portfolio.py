@@ -260,3 +260,93 @@ def test_portfolio_rejects_invalid_total_open_risk_limit():
             {"BTC/USDT": _flat_frame()},
             portfolio_settings=PortfolioSettings(max_total_open_risk_fraction=0),
         )
+
+
+
+def test_portfolio_stop_risk_budget_includes_both_side_costs_and_reconciles_ledger():
+    initial_cash = 10_000.0
+    backtest_settings = BacktestSettings(
+        warmup_bars=220,
+        risk_fraction=0.005,
+        max_notional_fraction=1.0,
+        fee_bps=10.0,
+        slippage_bps=5.0,
+    )
+    result = run_portfolio_backtest(
+        {"BTC/USDT": _rising_frame()},
+        settings=backtest_settings,
+        portfolio_settings=PortfolioSettings(
+            max_open_positions=1,
+            max_alt_positions=1,
+            max_gross_exposure_fraction=1.0,
+            max_total_open_risk_fraction=0.01,
+            daily_loss_limit_fraction=None,
+            max_drawdown_fraction=None,
+        ),
+    )
+
+    assert result.trades == 1
+    trade = result.trade_log[0]
+    fee_rate = backtest_settings.fee_bps / 10_000.0
+    slippage_rate = backtest_settings.slippage_bps / 10_000.0
+    stop_fill = trade["initial_stop"] * (1.0 - slippage_rate)
+    estimated_stop_loss = (
+        trade["quantity"] * (trade["entry_price"] - stop_fill)
+        + trade["entry_fee"]
+        + trade["quantity"] * stop_fill * fee_rate
+    )
+    assert estimated_stop_loss <= initial_cash * backtest_settings.risk_fraction + 1e-8
+
+    assert result.final_equity == pytest.approx(
+        initial_cash + sum(item["net_pnl"] for item in result.trade_log)
+    )
+    assert result.fees_paid == pytest.approx(
+        sum(item["entry_fee"] + item["exit_fee"] for item in result.trade_log)
+    )
+    assert result.slippage_paid == pytest.approx(
+        sum(item["slippage_paid"] for item in result.trade_log)
+    )
+    for item in result.trade_log:
+        assert item["net_pnl"] == pytest.approx(
+            item["gross_pnl"]
+            - item["slippage_paid"]
+            - item["entry_fee"]
+            - item["exit_fee"]
+        )
+
+
+def test_portfolio_gap_through_trailing_stop_fills_at_worse_open():
+    frame = _rising_frame()
+    settings = BacktestSettings(warmup_bars=220, max_hold_bars=100)
+    baseline = run_portfolio_backtest(
+        {"BTC/USDT": frame},
+        settings=settings,
+        portfolio_settings=PortfolioSettings(
+            daily_loss_limit_fraction=None,
+            max_drawdown_fraction=None,
+        ),
+    )
+    assert baseline.trades == 1
+    stop = baseline.trade_log[0]["final_stop"]
+    gap_open = stop * 0.95
+    gap_bar = pd.DataFrame(
+        [{
+            "open": gap_open,
+            "high": gap_open + 0.5,
+            "low": gap_open - 0.2,
+            "close": gap_open + 0.1,
+            "volume": 1000.0,
+        }],
+        index=[frame.index[-1] + pd.Timedelta(hours=1)],
+    )
+    result = run_portfolio_backtest(
+        {"BTC/USDT": pd.concat([frame, gap_bar])},
+        settings=settings,
+        portfolio_settings=PortfolioSettings(
+            daily_loss_limit_fraction=None,
+            max_drawdown_fraction=None,
+        ),
+    )
+    assert result.trades == 1
+    assert result.trade_log[0]["reason"] == "atr_stop"
+    assert result.trade_log[0]["raw_exit_price"] == pytest.approx(gap_open)
