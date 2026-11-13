@@ -174,6 +174,7 @@ def run_walk_forward(
     walk_forward_settings: WalkForwardSettings | None = None,
     backtest_settings: BacktestSettings | None = None,
     portfolio_settings: PortfolioSettings | None = None,
+    mode: str = "ensemble",
 ) -> dict:
     """Evaluate fixed RAE settings on disjoint chronological OOS windows."""
     wf = walk_forward_settings or WalkForwardSettings()
@@ -186,6 +187,7 @@ def run_walk_forward(
     all_returns: list[float] = []
     all_trades: list[dict] = []
     compounded_equity = bt.initial_cash
+    benchmark_equity = bt.initial_cash
     fold_number = 0
     fold_start = 0
     while True:
@@ -205,6 +207,7 @@ def run_walk_forward(
             settings=bt,
             portfolio_settings=ps,
             trading_start_ts=start_time,
+            mode=mode,
         )
         oos_curve = [
             point for point in result.equity_curve
@@ -220,6 +223,17 @@ def run_walk_forward(
         all_trades.extend(result.trade_log)
         fold_return = result.final_equity / bt.initial_cash - 1.0
         compounded_equity *= 1.0 + fold_return
+        fee_rate = bt.fee_bps / 10_000.0
+        slip_rate = bt.slippage_bps / 10_000.0
+        benchmark_returns = []
+        for symbol, frame in frames.items():
+            entry_fill = float(frame.open.iloc[test_start]) * (1.0 + slip_rate)
+            exit_fill = float(frame.close.iloc[test_end - 1]) * (1.0 - slip_rate)
+            benchmark_returns.append(
+                exit_fill * (1.0 - fee_rate) / (entry_fill * (1.0 + fee_rate)) - 1.0
+            )
+        benchmark_return = float(np.mean(benchmark_returns))
+        benchmark_equity *= 1.0 + benchmark_return
         folds.append({
             "fold": fold_number,
             "train_context_start": index[fold_start].isoformat(),
@@ -233,6 +247,7 @@ def run_walk_forward(
             "net_return_pct": result.net_return_pct,
             "max_drawdown_pct": result.max_drawdown_pct,
             "profit_factor": result.profit_factor,
+            "equal_weight_buy_hold_net_return_pct": benchmark_return * 100.0,
             "blocked_entries": result.blocked_entries,
         })
         fold_start += step
@@ -250,7 +265,7 @@ def run_walk_forward(
     return {
         "schema_version": 1,
         "kind": "rae_chronological_walk_forward",
-        "strategy": "frozen RAE settings; no parameter fitting or retuning",
+        "strategy": f"frozen RAE settings; mode={mode}; no parameter fitting or retuning",
         "execution": "completed hourly close signals; next hourly open fills; gap-aware stops",
         "assumptions": [
             "Purge and embargo bars are not eligible for entries.",
@@ -272,6 +287,7 @@ def run_walk_forward(
             "oos_end": folds[-1]["oos_end"],
             "oos_bars": sum(fold["oos_bars"] for fold in folds),
             "compounded_net_return_pct": (compounded_equity / bt.initial_cash - 1.0) * 100.0,
+            "equal_weight_buy_hold_compounded_net_return_pct": (benchmark_equity / bt.initial_cash - 1.0) * 100.0,
             "worst_fold_max_drawdown_pct": worst_fold_drawdown,
             **metrics,
         },
