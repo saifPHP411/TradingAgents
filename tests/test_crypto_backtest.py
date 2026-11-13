@@ -32,6 +32,8 @@ from tradingagents.crypto.backtest.study import (
     metrics_for,
     per_symbol_metrics,
     run_cost_scenarios,
+    run_period_cost_scenarios,
+    run_walk_forward_cost_scenarios,
     run_periods,
     run_regimes,
     run_sensitivity,
@@ -286,6 +288,31 @@ class TestCosts:
         assert realistic["num_trades"] >= 1
         assert realistic["fees"] > 0.0
         assert realistic["slippage_cost"] >= 0.0
+
+    def test_every_requested_period_is_recomputed_under_each_cost_scenario(self):
+        series = _multi_day_series(days=3)
+        results = run_period_cost_scenarios(series, _config(periods=(1, 2)))
+        assert set(results) == {"frictionless", "realistic", "conservative"}
+        for scenario_rows in results.values():
+            assert [row.label for row in scenario_rows] == ["1d", "2d", "max"]
+        realistic = {row.label: row.metrics for row in results["realistic"]}
+        frictionless = {row.label: row.metrics for row in results["frictionless"]}
+        assert realistic["max"]["fees"] > 0.0
+        assert realistic["max"]["final_equity"] < frictionless["max"]["final_equity"]
+
+    def test_every_walk_forward_fold_is_recomputed_under_each_cost_scenario(self):
+        series = _multi_day_series(days=4)
+        results = run_walk_forward_cost_scenarios(
+            series, _config(walk_forward_folds=2)
+        )
+        assert set(results) == {"frictionless", "realistic", "conservative"}
+        assert all(len(rows) == 2 for rows in results.values())
+        realistic = results["realistic"]
+        frictionless = results["frictionless"]
+        assert sum(row.metrics["fees"] for row in realistic) > 0.0
+        assert sum(row.metrics["final_equity"] for row in realistic) < sum(
+            row.metrics["final_equity"] for row in frictionless
+        )
 
 
 @pytest.mark.unit
