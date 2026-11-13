@@ -191,7 +191,7 @@ def engine_view(status: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "banner": status.get("banner"),
-        "mode": status.get("mode", "ALPACA_PAPER"),
+        "mode": status.get("mode") or "UNKNOWN",
         "live": False,
         "worker": {
             "status": worker_status,
