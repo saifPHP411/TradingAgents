@@ -630,6 +630,39 @@ class TestInstruments:
         assert btc_info.tick_size == 0.1
         assert btc_info.tradable is True
 
+    def test_spot_instrument_uses_base_precision_as_quantity_step(self):
+        # Bybit Spot documents basePrecision, not qtyStep, in lotSizeFilter.
+        response = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "category": "spot",
+                "list": [
+                    {
+                        "symbol": "BNBUSDT",
+                        "status": "Trading",
+                        "baseCoin": "BNB",
+                        "quoteCoin": "USDT",
+                        "lotSizeFilter": {
+                            "basePrecision": "0.0001",
+                            "minOrderAmt": "5",
+                        },
+                        "priceFilter": {"tickSize": "0.01"},
+                    }
+                ],
+            },
+        }
+        transport = MockTransport()
+        transport.add_response("GET", "/v5/market/instruments-info", response)
+        client = _make_client(transport)
+
+        info = client.get_instrument("BNB/USDT")
+
+        assert info is not None
+        assert info.qty_step == 0.0001
+        assert info.min_order_amt == 5.0
+        assert info.tradable is True
+
     def test_instrument_not_found_returns_none(self):
         transport = MockTransport()
         transport.add_response("GET", "/v5/market/instruments-info", MOCK_INSTRUMENTS_RESPONSE)
