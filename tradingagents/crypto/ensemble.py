@@ -3,7 +3,7 @@
 Research-only: this module emits candidate long/flat signals from completed OHLCV
 bars. It is deliberately not wired to the paper worker or broker.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 from dataclasses import dataclass
 from typing import Literal
