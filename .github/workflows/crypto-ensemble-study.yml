@@ -48,10 +48,31 @@ jobs:
             --symbols "${SYMBOLS[@]}" \
             --cache .research-cache \
             --out artifacts/rae_study.json
-      - name: Upload study report
+      - name: Fetch 30 days of 1m bars for unchanged TJR baseline
+        env:
+          STUDY_SYMBOLS: ${{ inputs.symbols }}
+        run: |
+          read -r -a SYMBOLS <<< "$STUDY_SYMBOLS"
+          python -m tradingagents.crypto.backtest.fetch \
+            --limit 43200 \
+            --symbols "${SYMBOLS[@]}" \
+            --cache .research-cache
+      - name: Run unchanged TJR 30-day baseline
+        env:
+          STUDY_SYMBOLS: ${{ inputs.symbols }}
+        run: |
+          read -r -a SYMBOLS <<< "$STUDY_SYMBOLS"
+          python -m tradingagents.crypto.backtest.run \
+            --symbols "${SYMBOLS[@]}" \
+            --periods 30 \
+            --cache .research-cache \
+            --no-sensitivity \
+            --out artifacts/tjr_30d_study.json \
+            --markdown artifacts/tjr_30d_study.md
+      - name: Upload RAE and TJR study reports
         uses: actions/upload-artifact@v4
         with:
-          name: crypto-rae-study
-          path: artifacts/rae_study.json
+          name: crypto-rae-and-tjr-study
+          path: artifacts/
           if-no-files-found: error
           retention-days: 30
