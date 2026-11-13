@@ -184,6 +184,14 @@ def test_range_only_mode_does_not_trade_an_uncertain_regime():
     assert result.should_exit is True
 
 
+def test_rejects_non_finite_indicator_thresholds():
+    frame = _frame(np.linspace(100, 110, 240))
+    with pytest.raises(ValueError, match="finite"):
+        evaluate_ensemble(frame, EnsembleSettings(volume_multiple=float("nan")))
+    with pytest.raises(ValueError, match="finite"):
+        evaluate_ensemble(frame, EnsembleSettings(atr_stop_multiple=float("inf")))
+
+
 def test_rejects_invalid_indicator_settings():
     frame = _frame(np.linspace(100, 110, 240))
     with pytest.raises(ValueError, match="fast_ema"):
