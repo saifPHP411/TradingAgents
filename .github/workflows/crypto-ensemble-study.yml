@@ -19,6 +19,11 @@ on:
         description: "Space-separated Binance Spot symbols"
         required: true
         default: "BTC/USDT ETH/USDT BNB/USDT"
+      include_tjr_baseline:
+        description: "Also rerun the unchanged, slower TJR reference study"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: crypto-rae-study-${{ github.ref }}
@@ -61,6 +66,7 @@ jobs:
             --cache .research-cache \
             --out artifacts/rae_study.json
       - name: Fetch 30 days of 1m bars for unchanged TJR baseline
+        if: ${{ inputs.include_tjr_baseline == true }}
         env:
           STUDY_SYMBOLS: ${{ inputs.symbols || 'BTC/USDT ETH/USDT BNB/USDT' }}
         run: |
@@ -70,6 +76,7 @@ jobs:
             --symbols "${SYMBOLS[@]}" \
             --cache .research-cache
       - name: Run unchanged TJR 30-day baseline
+        if: ${{ inputs.include_tjr_baseline == true }}
         env:
           STUDY_SYMBOLS: ${{ inputs.symbols || 'BTC/USDT ETH/USDT BNB/USDT' }}
         run: |
@@ -81,7 +88,7 @@ jobs:
             --no-sensitivity \
             --out artifacts/tjr_30d_study.json \
             --markdown artifacts/tjr_30d_study.md
-      - name: Upload RAE and TJR study reports
+      - name: Upload RAE report and optional TJR reference
         uses: actions/upload-artifact@v4
         with:
           name: crypto-rae-and-tjr-study
