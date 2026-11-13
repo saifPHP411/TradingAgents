@@ -273,7 +273,7 @@ def run_portfolio_backtest(
             entry = entry_raw * (1.0 + slip)
             stop = float(action["stop"])
             risk_per_unit = entry - stop
-            if risk_per_unit <= 0:
+            if stop <= 0 or risk_per_unit <= 0:
                 blocked["insufficient_cash_or_risk"] += 1
                 continue
 
