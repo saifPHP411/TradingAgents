@@ -150,7 +150,8 @@ def run_portfolio_backtest(
     if not frames or btc_symbol not in frames:
         raise ValueError(f"frames must include the BTC risk-filter symbol {btc_symbol}")
 
-    symbols = sorted(frames)
+    # Give the BTC risk-filter asset first claim on a simultaneous entry slot.
+    symbols = [btc_symbol, *sorted(symbol for symbol in frames if symbol != btc_symbol)]
     data = {symbol: _validate(frames[symbol], settings) for symbol in symbols}
     index = data[btc_symbol].index
     for symbol in symbols:
@@ -367,7 +368,8 @@ def run_portfolio_backtest(
         # Time, trend and cross-asset exits are decisions at this completed
         # close; they are submitted for the next bar's open.
         for symbol, position in positions.items():
-            if j - position["entry_bar"] >= settings.max_hold_bars:
+            # The entry candle counts as holding bar one.
+            if j - position["entry_bar"] + 1 >= settings.max_hold_bars:
                 pending[symbol] = {"action": "exit", "reason": "max_hold_bars"}
                 continue
             if symbol != btc_symbol and btc_risk_off:
