@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .backtest.history import HistoryCache
 from .ensemble_backtest import BacktestSettings, compare_modes
+from .ensemble_portfolio import PortfolioSettings, run_portfolio_backtest
 from .symbols import parse_pair
 
 
@@ -38,7 +39,8 @@ def run_ensemble_study(
         "important": [
             "Completed 1h candles only.",
             "Signals are generated at bar close and executed at next bar open.",
-            "Each symbol and partition is a separate single-symbol account; results are not added together.",
+            "Per-symbol comparisons are separate diagnostic accounts; a separate portfolio result uses one shared cash account.",
+            "The shared portfolio is long-only, max 2 open positions, max 1 altcoin, 25% gross exposure, 2% daily loss gate, and 10% peak drawdown gate.",
             "Each partition has an indicator warm-up period that is excluded from trading.",
             "No parameter optimization or holdout retuning is performed.",
         ],
@@ -48,12 +50,14 @@ def run_ensemble_study(
         raise RuntimeError("BTC 1h history is required for the fail-closed altcoin risk overlay")
     for partition, (left, right) in partitions.items():
         report["partitions"][partition] = {}
+        partition_frames = {}
         for raw in symbols:
             symbol = parse_pair(raw).canonical
             frame = cache.load(symbol, "1h")
             if frame is None or frame.empty:
                 raise RuntimeError(f"missing cached 1h history for {symbol}")
             section = _partition(frame, left, right)
+            partition_frames[symbol] = section
             if len(section) < 402:
                 raise RuntimeError(
                     f"{symbol} {partition} has only {len(section)} bars; at least 402 required"
