@@ -17,6 +17,8 @@ import argparse
 import json
 from pathlib import Path
 
+from tradingagents.risk.paper_parity import paper_parity_limits
+
 from ..binance import BinancePublicClient
 from ..symbols import parse_pair
 from ..types import CANDLE_INTERVALS
