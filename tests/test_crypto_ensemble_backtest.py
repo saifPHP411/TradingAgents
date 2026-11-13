@@ -81,7 +81,7 @@ def test_backtest_rejects_bad_bar_order_and_negative_fees():
 
 
 
-def test_max_hold_bars_exits_at_the_next_bar_open():
+def test_max_hold_bars_exits_after_exactly_n_completed_bars():
     frame = _rising_breakout_frame()
     for _ in range(4):
         previous = frame.iloc[-1]
@@ -105,7 +105,7 @@ def test_max_hold_bars_exits_at_the_next_bar_open():
     assert result.trade_log[0]["raw_entry_price"] == pytest.approx(
         _rising_breakout_frame().iloc[260].open
     )
-    assert result.trade_log[0]["exit_time"] == frame.index[263].isoformat()
+    assert result.trade_log[0]["exit_time"] == frame.index[262].isoformat()
 
 
 def test_backtest_rejects_non_finite_or_non_integer_risk_settings():
