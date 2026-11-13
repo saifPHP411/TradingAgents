@@ -233,6 +233,8 @@ def run_portfolio_backtest(
             "exit_price": fill,
             "raw_exit_price": raw_price,
             "quantity": position["qty"],
+            "entry_equity": position["entry_equity"],
+            "estimated_stop_risk": position["estimated_stop_risk"],
             "initial_stop": position["initial_stop"],
             "final_stop": position["stop"],
             "gross_pnl": position["qty"] * (raw_price - position["raw_entry"]),
@@ -357,6 +359,8 @@ def run_portfolio_backtest(
                 "highest_high": max(entry, float(data[symbol].high.iloc[j])),
                 "entry_fee": entry_fee,
                 "entry_slippage": entry_slippage,
+                "entry_equity": equity_at_open,
+                "estimated_stop_risk": qty * risk_per_unit,
             }
 
         # Intrabar protective stops, including positions opened at this bar's
