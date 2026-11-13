@@ -155,7 +155,7 @@ def _evaluate_indicator_row(
 ) -> EnsembleSignal:
     """Evaluate one precomputed causal indicator row without recalculating history."""
     if mode not in {"ensemble", "trend", "range", "breakout", "trend_pullback"}:
-        raise ValueError("mode must be ensemble, trend, range, or breakout")
+        raise ValueError("mode must be ensemble, trend, trend_pullback, range, or breakout")
     if position <= 0 or position >= len(indicators):
         raise ValueError("indicator position must have a previous completed bar")
     row = indicators.iloc[position]
@@ -240,9 +240,19 @@ def _evaluate_indicator_row(
             or row.fast_ema < row.slow_ema
             or row.plus_di < row.minus_di
         )
+        module = (
+            "trend_pullback_momentum"
+            if mode == "trend_pullback"
+            else "trend_donchian_momentum"
+        )
+        idle_reason = (
+            "no pullback reclaim; keep existing position"
+            if mode == "trend_pullback"
+            else "no fresh breakout; keep existing position"
+        )
         return EnsembleSignal(
-            "flat", regime, "trend_donchian_momentum", 0.0, close, None,
-            "trend exit condition" if trend_exit else "no fresh breakout; keep existing position",
+            "flat", regime, module, 0.0, close, None,
+            "trend exit condition" if trend_exit else idle_reason,
             bool(trend_exit),
         )
 
