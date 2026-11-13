@@ -29,6 +29,7 @@ class PortfolioSettings:
     max_drawdown_fraction: float | None = 0.10
     max_alt_correlation: float = 0.85
     correlation_lookback: int = 168
+    max_total_open_risk_fraction: float = 0.01
 
 
 @dataclass
@@ -67,6 +68,11 @@ def _validate_portfolio_settings(settings: PortfolioSettings) -> None:
         raise ValueError("max gross exposure fraction must be in (0, 1]")
     if not isfinite(settings.max_alt_correlation) or not 0 < settings.max_alt_correlation <= 1:
         raise ValueError("maximum altcoin correlation must be in (0, 1]")
+    if (
+        not isfinite(settings.max_total_open_risk_fraction)
+        or not 0 < settings.max_total_open_risk_fraction <= 0.05
+    ):
+        raise ValueError("maximum total open risk fraction must be in (0, 0.05]")
     if type(settings.correlation_lookback) is not int or settings.correlation_lookback < 20:
         raise ValueError("correlation lookback must be an integer of at least 20")
     for name, value in (
@@ -171,6 +177,7 @@ def run_portfolio_backtest(
         "max_drawdown": 0,
         "btc_risk_filter": 0,
         "alt_correlation": 0,
+        "portfolio_risk": 0,
         "insufficient_cash_or_risk": 0,
     }
     total_fees = 0.0
@@ -286,7 +293,21 @@ def run_portfolio_backtest(
                 blocked["gross_exposure"] += 1
                 continue
 
-            risk_budget = equity_at_open * settings.risk_fraction
+            current_open_risk = sum(
+                position["qty"] * max(position["entry"] - position["stop"], 0.0)
+                for position in positions.values()
+            )
+            remaining_portfolio_risk = (
+                equity_at_open * portfolio_settings.max_total_open_risk_fraction
+                - current_open_risk
+            )
+            if remaining_portfolio_risk <= 0:
+                blocked["portfolio_risk"] += 1
+                continue
+            risk_budget = min(
+                equity_at_open * settings.risk_fraction,
+                remaining_portfolio_risk,
+            )
             notional_cap = equity_at_open * settings.max_notional_fraction
             cash_cap_qty = cash / (entry * (1.0 + fee_rate))
             qty = min(
