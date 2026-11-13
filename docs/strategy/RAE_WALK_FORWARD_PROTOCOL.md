@@ -49,6 +49,7 @@ Each fold reports its exact train-context and OOS date ranges, bar count, trades
 - Trade count, win rate, net expectancy in USDT and R multiples, and profit factor.
 - Hourly Sharpe and Sortino, annualized with 24 × 365 periods.
 - Worst fold drawdown.
+- Gross-winning-PnL concentration by symbol, fold, and individual trade; the report flags whether one symbol or fold contributes more than 50% of gross winning PnL, and marks concentration unassessable when there are no gross winners.
 - Circular moving-block bootstrap distribution of terminal equity and maximum drawdown, including probability of loss and 5th/50th/95th percentiles.
 
 Bootstrap paths preserve short contiguous clusters of hourly returns. They still assume that the observed return blocks are representative; they do not capture new regimes, exchange failure, market impact, or parameter uncertainty. A small trade count remains a small trade count regardless of the number of bootstrap simulations.
