@@ -229,7 +229,7 @@ def run_backtest(
             levels = entry_levels(row, strategy)
             if levels is None:
                 continue
-            reference, signal_stop, _ = levels
+            _, signal_stop, _ = levels
             next_open = float(data.iloc[i + 1]["open"])
             fill = next_open * (1.0 + impact)
             risk_per_unit = fill - signal_stop
@@ -241,7 +241,9 @@ def run_backtest(
             quantity = min(quantity_by_risk, quantity_by_notional)
             if quantity <= 0:
                 continue
-            stop = fill - (reference - signal_stop)
+            # Keep the signal-bar invalidation price fixed across an overnight/bar gap.
+            # Sizing above uses this exact distance, so the risk budget remains honest.
+            stop = signal_stop
             target = fill + strategy.reward_risk * (fill - stop)
             entry_notional = quantity * fill
             entry_fee = entry_notional * execution.commission_bps / 10_000.0
