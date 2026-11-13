@@ -121,3 +121,28 @@ def test_walkforward_requires_enough_data_for_a_complete_fold():
             ),
             backtest_settings=BacktestSettings(warmup_bars=220),
         )
+
+def test_buy_hold_benchmark_uses_same_next_bar_oos_entry_timing():
+    frame = _flat_frame()
+    frame.loc[frame.index[228]:, ["open", "high", "low", "close"]] = 110.0
+    fee_rate = 10.0 / 10_000.0
+    expected = (110.0 * (1.0 - fee_rate) / (110.0 * (1.0 + fee_rate)) - 1.0) * 100.0
+    report = run_walk_forward(
+        {"BTC/USDT": frame},
+        walk_forward_settings=WalkForwardSettings(
+            train_bars=220,
+            test_bars=20,
+            purge_bars=3,
+            embargo_bars=4,
+            monte_carlo_simulations=100,
+            monte_carlo_block_bars=4,
+        ),
+        backtest_settings=BacktestSettings(warmup_bars=220),
+        portfolio_settings=PortfolioSettings(
+            daily_loss_limit_fraction=None,
+            max_drawdown_fraction=None,
+        ),
+        mode="range",
+    )
+    assert report["folds"][0]["equal_weight_buy_hold_net_return_pct"] == pytest.approx(expected)
+
