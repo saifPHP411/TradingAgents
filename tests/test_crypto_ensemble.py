@@ -48,6 +48,23 @@ def test_signal_is_based_on_last_bar_and_returns_a_defined_stop():
         assert result.module == "trend_donchian_momentum"
 
 
+def test_rejects_infinite_and_negative_volume():
+    frame = _frame(np.linspace(100, 110, 240))
+    frame.loc[239, "close"] = np.inf
+    with pytest.raises(ValueError, match="finite"):
+        evaluate_ensemble(frame)
+    frame = _frame(np.linspace(100, 110, 240))
+    frame.loc[239, "volume"] = -1
+    with pytest.raises(ValueError, match="volume"):
+        evaluate_ensemble(frame)
+
+
+def test_rejects_invalid_indicator_settings():
+    frame = _frame(np.linspace(100, 110, 240))
+    with pytest.raises(ValueError, match="fast_ema"):
+        evaluate_ensemble(frame, EnsembleSettings(fast_ema=200, slow_ema=50))
+
+
 def test_no_lookahead_in_donchian_reference():
     close = np.linspace(100, 130, 260)
     frame = _frame(close)
