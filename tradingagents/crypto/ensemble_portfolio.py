@@ -158,6 +158,8 @@ def run_portfolio_backtest(
         raise ValueError("max notional fraction must be in (0, 1]")
     if settings.fee_bps < 0 or settings.slippage_bps < 0:
         raise ValueError("fees and slippage cannot be negative")
+    if settings.slippage_bps >= 10_000:
+        raise ValueError("slippage must be below 10000 bps")
     if settings.trailing_stop_atr_multiple <= 0:
         raise ValueError("trailing stop ATR multiple must be positive")
 
