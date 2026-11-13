@@ -169,6 +169,12 @@ def _evaluate_indicator_row(
     else:
         regime = "uncertain"
 
+    if mode == "range" and regime != "range":
+        return EnsembleSignal(
+            "flat", regime, "range_mean_reversion", 0.0, close, None,
+            "range-only mode requires a confirmed range regime", True,
+        )
+
     if mode == "breakout" and regime != "trend":
         return EnsembleSignal(
             "flat", regime, "volatility_breakout", 0.0, close, None,
