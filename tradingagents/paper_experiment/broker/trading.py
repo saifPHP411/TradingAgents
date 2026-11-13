@@ -5110,7 +5110,14 @@ class PaperTradingWorker:
                     refresh=True,
                     crypto=self.config.crypto,
                 )
-            except (PaperRiskRejected, BrokerRejectedError, BrokerError) as exc:
+            except (
+                PaperRiskRejected,
+                BybitPaperRiskRejected,
+                BrokerRejectedError,
+                BybitBrokerRejectedError,
+                BrokerError,
+                BybitBrokerError,
+            ) as exc:
                 self.state.last_error = f"{type(exc).__name__}: {exc}"
                 self.state.last_no_decision_reason = str(exc)
                 self.state.last_no_trade_code = NO_TRADE_EXIT_REFUSED
