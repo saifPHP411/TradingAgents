@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, 'v[0-9]+.[0-9]+.[0-9]+', 'bybit-demo-integration', 'demo-ready-dashboard-2026']
+    branches: [main, 'v[0-9]+.[0-9]+.[0-9]+', 'bybit-demo-integration', 'demo-ready-dashboard-2026', 'strategy-research-cost-aware', 'strategy-research-bybit-parity']
   pull_request:
 
 concurrency:
