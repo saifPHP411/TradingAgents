@@ -119,6 +119,7 @@ def run_portfolio_backtest(
         settings.max_notional_fraction,
         settings.fee_bps,
         settings.slippage_bps,
+        settings.trailing_stop_atr_multiple,
     )
     if (
         type(settings.max_hold_bars) is not int
@@ -135,6 +136,8 @@ def run_portfolio_backtest(
         raise ValueError("max notional fraction must be in (0, 1]")
     if settings.fee_bps < 0 or settings.slippage_bps < 0:
         raise ValueError("fees and slippage cannot be negative")
+    if settings.trailing_stop_atr_multiple <= 0:
+        raise ValueError("trailing stop ATR multiple must be positive")
 
     signal_settings = signal_settings or EnsembleSettings()
     _validate_settings(signal_settings)
