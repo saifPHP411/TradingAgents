@@ -76,7 +76,7 @@ def run_backtest(
     frame: pd.DataFrame,
     *,
     mode: str = "ensemble",
-    signal_settings: EnsembleSettings = EnsembleSettings(),
+    signal_settings: EnsembleSettings | None = None,
     settings: BacktestSettings = BacktestSettings(),
 ) -> BacktestResult:
     """Run one symbol; each signal is acted on at the following bar's open."""
@@ -89,6 +89,7 @@ def run_backtest(
     if settings.fee_bps < 0 or settings.slippage_bps < 0:
         raise ValueError("fees and slippage cannot be negative")
 
+    signal_settings = signal_settings or EnsembleSettings()
     data = _validate(frame, settings)
     cash = float(settings.initial_cash)
     position = None
@@ -233,10 +234,11 @@ def run_backtest(
 def compare_modes(
     frame: pd.DataFrame,
     *,
-    signal_settings: EnsembleSettings = EnsembleSettings(),
+    signal_settings: EnsembleSettings | None = None,
     settings: BacktestSettings = BacktestSettings(),
 ) -> dict:
     """Run four comparable variants on identical bars and execution assumptions."""
+    signal_settings = signal_settings or EnsembleSettings()
     modes = ("trend", "range", "breakout", "ensemble")
     return {
         "schema_version": 1,
