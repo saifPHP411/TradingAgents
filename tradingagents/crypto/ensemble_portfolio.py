@@ -97,6 +97,21 @@ def _btc_risk_off(indicators: pd.DataFrame, position: int, adx_min: float) -> bo
     )
 
 
+def _stop_risk_per_unit(
+    entry: float,
+    stop: float,
+    fee_rate: float,
+    slippage_rate: float,
+) -> float:
+    """Estimate loss to a stop after entry/exit fees and exit slippage.
+
+    Entry is already the slipped fill. The stop exit is conservatively filled
+    after adverse exit slippage, then charged its taker fee.
+    """
+    stop_fill = stop * (1.0 - slippage_rate)
+    return max(entry * (1.0 + fee_rate) - stop_fill * (1.0 - fee_rate), 0.0)
+
+
 def run_portfolio_backtest(
     frames: dict[str, pd.DataFrame],
     *,
@@ -275,7 +290,9 @@ def run_portfolio_backtest(
             entry_raw = float(data[symbol].open.iloc[j])
             entry = entry_raw * (1.0 + slip)
             stop = float(action["stop"])
-            risk_per_unit = entry - stop
+            risk_per_unit = _stop_risk_per_unit(
+                entry, stop, fee_rate, slip
+            )
             if stop <= 0 or risk_per_unit <= 0:
                 blocked["insufficient_cash_or_risk"] += 1
                 continue
@@ -297,7 +314,9 @@ def run_portfolio_backtest(
                 continue
 
             current_open_risk = sum(
-                position["qty"] * max(position["entry"] - position["stop"], 0.0)
+                position["qty"] * _stop_risk_per_unit(
+                    position["entry"], position["stop"], fee_rate, slip
+                )
                 for position in positions.values()
             )
             remaining_portfolio_risk = (
