@@ -178,3 +178,21 @@ def test_profit_concentration_is_not_assessable_without_winning_trades():
     assert result["largest_fold_share_pct"] is None
     assert result["single_symbol_or_fold_dominates"] is None
     assert result["interpretation"] == "not_assessable_no_gross_winning_pnl"
+
+
+
+def test_block_bootstrap_rejects_segments_that_do_not_partition_returns():
+    with pytest.raises(ValueError, match="partition hourly_returns"):
+        block_bootstrap_equity(
+            [0.01, -0.01],
+            initial_equity=10_000,
+            simulations=100,
+            segments=[],
+        )
+    with pytest.raises(ValueError, match="partition hourly_returns"):
+        block_bootstrap_equity(
+            [0.01, -0.01],
+            initial_equity=10_000,
+            simulations=100,
+            segments=[[0.01]],
+        )
