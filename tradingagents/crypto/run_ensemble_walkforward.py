@@ -39,12 +39,40 @@ def run_cached_walkforward(
         embargo_bars=embargo_bars,
         monte_carlo_simulations=simulations,
     )
-    report = run_walk_forward(
-        frames,
-        walk_forward_settings=walk_forward,
-        backtest_settings=backtest,
-        portfolio_settings=PortfolioSettings(),
-    )
+    modes = ("trend", "trend_pullback", "range", "breakout", "ensemble")
+    reports = {}
+    for mode in modes:
+        base_report = run_walk_forward(
+            frames,
+            walk_forward_settings=walk_forward,
+            backtest_settings=backtest,
+            portfolio_settings=PortfolioSettings(),
+            mode=mode,
+        )
+        stress_backtest = BacktestSettings(
+            initial_cash=backtest.initial_cash,
+            risk_fraction=backtest.risk_fraction,
+            max_notional_fraction=backtest.max_notional_fraction,
+            fee_bps=backtest.fee_bps * 1.5,
+            slippage_bps=backtest.slippage_bps * 1.5,
+            warmup_bars=backtest.warmup_bars,
+            max_hold_bars=backtest.max_hold_bars,
+            trailing_stop_atr_multiple=backtest.trailing_stop_atr_multiple,
+        )
+        stress_report = run_walk_forward(
+            frames,
+            walk_forward_settings=walk_forward,
+            backtest_settings=stress_backtest,
+            portfolio_settings=PortfolioSettings(),
+            mode=mode,
+        )
+        reports[mode] = {"base_costs": base_report, "stress_costs_1_5x": stress_report}
+    report = {
+        "schema_version": 1,
+        "kind": "rae_walkforward_mode_and_cost_comparison",
+        "modes": reports,
+        "cost_stress_multiplier": 1.5,
+    }
     report["data"] = {
         symbol: {
             "bars": len(frame),
@@ -80,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n")
-    print(json.dumps(report["summary"], indent=2, sort_keys=True))
+    print(json.dumps({mode: value["base_costs"]["summary"] for mode, value in report["modes"].items()}, indent=2, sort_keys=True))
     print(f"wrote {args.out}")
     return 0
 
