@@ -90,7 +90,7 @@ def test_last_target_closes_the_entire_remaining_position():
 @pytest.mark.unit
 def test_a_slice_smaller_than_one_quantity_step_never_rounds_up():
     worker = _worker(step=0.0001)
-    quantity = _exit(worker, held=0.0002, ladder=[1.0, 2.0, 3.0], price=1000.0)
+    quantity = _exit(worker, held=0.0002, ladder=[1.0, 2.0, 3.0], price=100000.0)
 
     # The requested rung is below one step, so it safely becomes a full close.
     assert quantity == pytest.approx(0.0002)
