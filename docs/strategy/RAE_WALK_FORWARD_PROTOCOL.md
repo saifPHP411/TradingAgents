@@ -43,7 +43,7 @@ The modeled stop loss cannot guarantee a maximum realized loss: gaps, liquidity,
 
 ## Reported metrics
 
-Each fold reports its exact train-context and OOS date ranges, bar count, trades, net return, max drawdown, profit factor, and blocked-entry reasons. The combined report includes:
+Each fold reports its exact train-context and OOS date ranges, bar count, trades, net return, max drawdown, profit factor, and blocked-entry reasons. The runner evaluates all five RAE modes (trend, trend-pullback, range, breakout, and ensemble) under both base costs and a 1.5x fee/slippage stress. Each mode uses the same symbols, folds, portfolio limits, and starting capital. The combined report includes:
 
 - Chronologically compounded OOS return (not a sum of fold percentages).
 - Trade count, win rate, net expectancy in USDT and R multiples, and profit factor.
@@ -57,7 +57,7 @@ Bootstrap paths preserve short contiguous clusters of hourly returns. They still
 
 The existing crypto TJR study uses a shared-book intraday engine with 1-minute entry triggers and 5-minute/hourly/four-hour context. RAE currently uses completed 1-hour bars and next-hour-open fills. Running those two existing engines on their native timeframes is not an apples-to-apples comparison, even if the calendar dates overlap.
 
-Do not label the existing TJR 1-minute 30-day study as a matched benchmark for RAE. A fair comparison requires either:
+Do not label the existing TJR 1-minute 30-day study as a matched benchmark for RAE. The runner also reports an equal-weight buy-and-hold benchmark on the same hourly bars, with the same modeled entry/exit fees and slippage. This is a useful market baseline, not a TJR comparison. A fair TJR comparison requires either:
 1. a separately reviewed hourly TJR implementation with identical hourly signals/fill timing and the same portfolio, fees, slippage, and universe; or
 2. an RAE execution adapter using the same 1-minute data, fill engine, and cost model as TJR.
 
