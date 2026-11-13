@@ -97,9 +97,9 @@ from .alpaca_paper import (
 from .bybit_demo import (
     BrokerError as BybitBrokerError,
     BrokerRejectedError as BybitBrokerRejectedError,
+    BybitDemoBroker,
     InsufficientFundsError as BybitInsufficientFundsError,
     PaperRiskRejected as BybitPaperRiskRejected,
-    BybitDemoBroker,
 )
 
 WORKER_STATE_SCHEMA_VERSION = 1
