@@ -21,7 +21,7 @@ The server uses only the standard library, so it adds no dependency to a project
 whose runtime is deliberately small.
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import argparse
 import contextlib
@@ -45,7 +45,6 @@ from ..broker import (
     DEFAULT_MAX_PRICE_DEVIATION,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     EXECUTION_PROVIDER_ALPACA_PAPER,
-    EXECUTION_PROVIDER_BYBIT_DEMO,
     EXECUTION_PROVIDER_BYBIT_DEMO,
     EXECUTION_PROVIDER_CHOICES,
     MARKET_DATA_CHOICES,
