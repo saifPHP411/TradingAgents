@@ -14,7 +14,6 @@ reader can tell what was actually run.
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import json
 from pathlib import Path
 
