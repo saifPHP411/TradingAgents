@@ -66,6 +66,8 @@ def _validate_settings(settings: WalkForwardSettings, backtest: BacktestSettings
         raise ValueError("test_bars must be >= 2 and purge/embargo cannot be negative")
     if step < settings.test_bars:
         raise ValueError("step_bars must be >= test_bars to prevent overlapping OOS windows")
+    if settings.random_seed < 0:
+        raise ValueError("random_seed cannot be negative")
     if settings.monte_carlo_simulations < 100 or settings.monte_carlo_block_bars < 1:
         raise ValueError("Monte Carlo requires >= 100 simulations and a positive block length")
 
@@ -146,6 +148,11 @@ def _risk_metrics(hourly_returns: list[float], trades: list[dict]) -> dict:
         else None
     )
     pnls = [float(trade["net_pnl"]) for trade in trades]
+    r_multiples = [
+        float(trade["net_pnl"]) / float(trade["estimated_stop_risk"])
+        for trade in trades
+        if float(trade.get("estimated_stop_risk", 0.0)) > 0
+    ]
     gains = sum(value for value in pnls if value > 0)
     losses = abs(sum(value for value in pnls if value < 0))
     return {
@@ -154,6 +161,7 @@ def _risk_metrics(hourly_returns: list[float], trades: list[dict]) -> dict:
         "losses": sum(value < 0 for value in pnls),
         "win_rate_pct": (sum(value > 0 for value in pnls) / len(pnls) * 100.0) if pnls else 0.0,
         "expectancy_usdt": float(np.mean(pnls)) if pnls else 0.0,
+        "expectancy_r": float(np.mean(r_multiples)) if r_multiples else None,
         "profit_factor": gains / losses if losses > 0 else None,
         "sharpe_hourly_annualized": sharpe,
         "sortino_hourly_annualized": sortino,
