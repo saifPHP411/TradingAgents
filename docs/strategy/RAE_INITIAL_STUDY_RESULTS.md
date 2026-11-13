@@ -38,8 +38,8 @@ The holdout BTC profit factor is mathematically high but comes from only two tra
 The TJR rule chain was run separately on 30 days of 1-minute market data. It is not an apples-to-apples comparison with the RAE 1-hour study; it is retained only as a same-project reference.
 
 - Frictionless: 93 trades, PF 1.22, net +70.42 USDT on 100,000 USDT.
-- Realistic costs: 93 trades, PF 0.061, net -207.49 USDT; fees 924.83 USDT and slippage 277.45 USDT.
-- Conservative costs: 93 trades, PF 0.024, net -575.07 USDT; fees 1,381.54 USDT and slippage 644.72 USDT.
+- Realistic costs: 93 trades, PF 0.061, final equity 98,867.68 USDT, net equity change -1,132.32 USDT; fees 924.83 USDT and slippage 277.45 USDT.
+- Conservative costs: 93 trades, PF 0.024, final equity 98,043.39 USDT, net equity change -1,956.61 USDT; fees 1,381.54 USDT and slippage 644.72 USDT.
 
 The frictionless result is not actionable. Under the modeled realistic and conservative costs, this TJR reference loses money.
 
