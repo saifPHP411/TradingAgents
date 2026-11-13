@@ -7,7 +7,7 @@ market, without touching the network (the suite's autouse guard refuses it):
 1. the strategy is the **unchanged** TJR rule chain — the crypto path builds the
    same :class:`TjrDecisionSource` and the same :class:`TjrStrategy`, so there is
    exactly one strategy in the project;
-2. the decision data is **real Binance public market data** (no key), sliced to
+2. the decision data is **real Bybit Spot public market data** (no key), sliced to
    bars that had *closed* at the decision instant, freshness-checked and
    future-checked;
 3. the session clock is 24/7: the gate reads *open* from a readable clock and
@@ -232,6 +232,12 @@ class TestCryptoDecisionData:
         described = seam.describe()
         assert described["crypto_data_requires_key"] is False
         assert described["tjr_data_session_policy"] == utc_day_session().label
+
+    def test_default_live_crypto_decision_data_is_bybit_spot(self):
+        described = CryptoIntradayBars().describe()
+        assert described["crypto_data_provider"] == "bybit_public"
+        assert described["tjr_data_provider"] == "bybit_intraday_bars"
+        assert described["crypto_data_requires_key"] is False
 
     def test_a_stale_feed_is_refused(self):
         # The decision instant is hours after the newest bar closed.
