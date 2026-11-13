@@ -29,6 +29,7 @@ class BacktestSettings:
     slippage_bps: float = 5.0
     warmup_bars: int = 400
     max_hold_bars: int = 168
+    trailing_stop_atr_multiple: float = 3.0
 
 
 @dataclass
@@ -102,6 +103,7 @@ def run_backtest(
     numeric_settings = (
         settings.initial_cash, settings.risk_fraction, settings.max_notional_fraction,
         settings.fee_bps, settings.slippage_bps,
+        settings.trailing_stop_atr_multiple,
     )
     if not all(isfinite(float(value)) for value in numeric_settings):
         raise ValueError("backtest settings must be finite numbers")
@@ -111,6 +113,8 @@ def run_backtest(
         raise ValueError("max notional fraction must be in (0, 1]")
     if settings.fee_bps < 0 or settings.slippage_bps < 0:
         raise ValueError("fees and slippage cannot be negative")
+    if settings.trailing_stop_atr_multiple <= 0:
+        raise ValueError("trailing stop ATR multiple must be positive")
 
     signal_settings = signal_settings or EnsembleSettings()
     _validate_settings(signal_settings)
@@ -194,6 +198,7 @@ def run_backtest(
                             "entry_bar": j,
                             "qty": qty,
                             "stop": stop,
+                            "highest_high": max(entry, float(row.high)),
                             "entry_fee": entry_fee,
                             "entry_slippage": entry_slippage,
                         }
@@ -223,6 +228,15 @@ def run_backtest(
             stop_fill = min(float(row.open), position["stop"])
             close_position(timestamp, stop_fill, "atr_stop")
             cooldown_until = j + 1
+
+        # Tighten the Chandelier-style stop after this bar's stop check.
+        # The updated level is active only from the next candle onward.
+        if position is not None:
+            position["highest_high"] = max(position["highest_high"], float(row.high))
+            current_atr = float(signal_indicators.atr.iloc[j])
+            if isfinite(current_atr) and current_atr > 0:
+                trail = position["highest_high"] - settings.trailing_stop_atr_multiple * current_atr
+                position["stop"] = max(position["stop"], trail)
 
         time_stop_due = position is not None and j - position["entry_bar"] >= settings.max_hold_bars
 
