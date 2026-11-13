@@ -67,6 +67,7 @@ def build_study(
     periods: tuple[int, ...] = STANDARD_PERIODS,
     allow_substitution: bool = True,
     include_sensitivity: bool = True,
+    include_diagnostics: bool = True,
     paper_parity_sizing: bool = False,
     client: BinancePublicClient | None = None,
 ):
@@ -113,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--cache", default=None)
     parser.add_argument("--no-sensitivity", action="store_true")
+    parser.add_argument("--skip-diagnostics", action="store_true")
     parser.add_argument("--out", type=Path, default=None, help="write the JSON study here")
     parser.add_argument("--markdown", type=Path, default=None, help="write a Markdown summary here")
     args = parser.parse_args(argv)
@@ -123,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         initial_cash=args.initial_cash,
         periods=tuple(args.periods),
         include_sensitivity=not args.no_sensitivity,
+        include_diagnostics=not args.skip_diagnostics,
         paper_parity_sizing=args.paper_parity_sizing,
     )
     payload = study.to_dict()
