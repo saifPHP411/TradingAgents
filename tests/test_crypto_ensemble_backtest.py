@@ -58,7 +58,7 @@ def test_flat_market_stays_out_and_preserves_capital():
 
 def test_comparison_runs_all_four_variants_on_same_bars():
     report = compare_modes(_flat_frame(), settings=BacktestSettings(warmup_bars=220))
-    assert set(report["results"]) == {"trend", "range", "breakout", "ensemble"}
+    assert set(report["results"]) == {"trend", "trend_pullback", "range", "breakout", "ensemble"}
     assert report["bar_count"] == 260
     assert report["execution"] == "signal_on_close_next_bar_open_stop_gap_aware"
     for result in report["results"].values():
