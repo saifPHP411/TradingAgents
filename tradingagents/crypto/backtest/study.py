@@ -1115,12 +1115,19 @@ def run_study(
     notes = [
         "The strategy is the unchanged TJR rule chain; only the session policy and "
         "the entry-window cut are adapted for a 24/7 market, and both are reported.",
-        "Historical research bars are Binance public Spot data; Bybit Demo Spot is "
-        "the intended execution venue. This reporting-only study is a cross-venue "
-        "proxy and does not change the live decision-data source.",
+        "Historical research bars are Binance public Spot data; live demo decisions "
+        "are intended to use Bybit Spot candles and orders execute on Bybit Demo Spot. "
+        "Treat this backtest as a cross-venue proxy, not a Bybit historical replay.",
         "Every figure comes from real bars the venue served; a period the data does "
         "not cover is reported short, never padded.",
     ]
+    risk_limits = config.risk_limits
+    if risk_limits is not None and risk_limits.max_order_value == 25:
+        notes.append(
+            f"Deployment sizing: {config.initial_cash:.2f} USDT starting cash (illustrative), "
+            "25 USDT target/max order, at most 5 open positions and 10 orders per day; "
+            "long-only. The starting balance should be changed to match the Demo account."
+        )
     result = CryptoStudyResult(
         config=config,
         generated_at=datetime.now(UTC).isoformat(),

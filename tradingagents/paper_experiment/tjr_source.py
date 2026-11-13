@@ -310,14 +310,14 @@ class TjrDecisionSource:
     own currency.
 
     The crypto path analyses one market and trades another: the TJR chain reads
-    Binance's ``BTC/USDT`` and the order is placed on Alpaca's ``BTC/USD``. The
+    Bybit Spot's ``BTC/USDT`` and the order is placed on Bybit Demo Spot's same pair. The
     account is funded in USD and every cap the risk engine enforces — the $25
     order notional, the exposure fraction of equity — is denominated in the
     account's currency. Sizing a USD order from a USDT price therefore sized it in
     the wrong currency, and the cash value of the order was never the value the
     risk engine approved.
 
-    This seam supplies the USD price for the execution symbol, so the risk engine
+    This seam supplies the execution symbol's quote-currency price, so the risk engine
     sizes the entry in the currency the order will actually cost. It is separate
     from :attr:`price_provider` (the market-data venue's price) because the two
     are different instruments on different venues.
