@@ -1,5 +1,7 @@
 """Regression coverage for the live broker execution dashboard view."""
 
+import pytest
+
 from tradingagents.paper_experiment.dashboard.engine_view import trades_view
 
 
