@@ -62,3 +62,10 @@ In development the shared portfolio recorded 27 altcoin entry blocks from the BT
 5. Before any future activation discussion, add and validate 4h trend context, trailing/Chandelier exits, a correlation cap, spread/depth/liquidity and expected-move cost filters, Bybit instrument min-quantity/step/notional rules, and measured account-tier fees/slippage. Then run a shadow-only integration and demo validation only after independent offline gates pass.
 
 The previous TJR 30-day reference is documented separately in `RAE_INITIAL_STUDY_RESULTS.md`. It used 1-minute data and is not an apples-to-apples comparison with this 1-hour RAE study; its realistic-cost report showed a negative net equity change. The RAE v1.1 study artifact is attached to GitHub Actions run 43395328090.
+
+
+## Subsequent engineering iteration (RAE v1.2)
+
+After rejecting v1.1, a separate risk-control iteration added a 3.0 ATR Chandelier-style trailing stop and a fail-closed altcoin correlation cap (0.85 over 168 completed hourly returns). The trailing level is calculated after each candle's intrabar stop check and is active only on the next candle. Correlation is evaluated at the next-bar entry open using returns through the preceding completed bar; missing/undefined history blocks the entry. These controls were added without retuning the entry thresholds.
+
+The v1.1 results above do not measure the performance of these v1.2 controls. Because the historical validation and holdout periods have already been inspected, rerunning them is exploratory and cannot restore holdout independence. A new future holdout is required after the v1.2 code is frozen. The strategy remains rejected for activation and research-only.
