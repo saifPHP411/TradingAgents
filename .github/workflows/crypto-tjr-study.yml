@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: crypto-tjr-study
+  group: crypto-tjr-study-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
