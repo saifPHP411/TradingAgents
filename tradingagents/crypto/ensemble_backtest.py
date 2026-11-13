@@ -24,6 +24,7 @@ class BacktestSettings:
     slippage_bps: float = 5.0
     warmup_bars: int = 220
     max_signal_lookback: int = 300
+    max_hold_bars: int = 168
 
 
 @dataclass
@@ -85,6 +86,8 @@ def run_backtest(
     """Run one symbol; each signal is acted on at the following bar's open."""
     if mode not in {"ensemble", "trend", "range", "breakout"}:
         raise ValueError("unsupported strategy mode")
+    if settings.max_hold_bars < 1:
+        raise ValueError("max hold bars must be positive")
     if settings.warmup_bars < 220 or settings.max_signal_lookback < 220:
         raise ValueError("warm-up and signal lookback must be at least 220 bars")
     if settings.initial_cash <= 0 or not 0 < settings.risk_fraction <= 0.05:
@@ -107,6 +110,7 @@ def run_backtest(
     curve: list[dict] = []
     total_fees = 0.0
     total_slippage = 0.0
+    cooldown_until = -1
     slip = settings.slippage_bps / 10_000.0
     fee_rate = settings.fee_bps / 10_000.0
 
@@ -169,6 +173,7 @@ def run_backtest(
                             "entry": entry,
                             "raw_entry": float(row.open),
                             "entry_time": timestamp.isoformat(),
+                            "entry_bar": j,
                             "qty": qty,
                             "stop": stop,
                             "entry_fee": entry_fee,
@@ -199,6 +204,9 @@ def run_backtest(
         if position is not None and float(row.low) <= position["stop"]:
             stop_fill = min(float(row.open), position["stop"])
             close_position(timestamp, stop_fill, "atr_stop")
+            cooldown_until = j + 1
+
+        time_stop_due = position is not None and j - position["entry_bar"] >= settings.max_hold_bars
 
         # Mark-to-market equity at this bar's close.
         equity = cash + (position["qty"] * float(row.close) if position else 0.0)
@@ -215,11 +223,13 @@ def run_backtest(
         signal = evaluate_ensemble(
             data.iloc[start : j + 1], signal_settings, mode=mode
         )
-        if btc_risk_off and position is not None:
+        if time_stop_due and position is not None:
+            pending = {"action": "exit", "reason": "max_hold_bars"}
+        elif btc_risk_off and position is not None:
             pending = {"action": "exit", "reason": "btc_risk_filter"}
         elif position is not None and signal.should_exit:
             pending = {"action": "exit", "reason": "signal_flat"}
-        elif position is None and not btc_risk_off and signal.action == "long" and signal.stop is not None:
+        elif position is None and j > cooldown_until and not btc_risk_off and signal.action == "long" and signal.stop is not None:
             pending = {"action": "entry", "stop": signal.stop}
 
     # If a position remains after the loop, close it at the last available close.
