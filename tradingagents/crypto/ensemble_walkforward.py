@@ -259,7 +259,7 @@ def run_walk_forward(
         fee_rate = bt.fee_bps / 10_000.0
         slip_rate = bt.slippage_bps / 10_000.0
         benchmark_returns = []
-        for symbol, frame in frames.items():
+        for _symbol, frame in frames.items():
             entry_fill = float(frame.open.iloc[test_start]) * (1.0 + slip_rate)
             exit_fill = float(frame.close.iloc[test_end - 1]) * (1.0 - slip_rate)
             benchmark_returns.append(
