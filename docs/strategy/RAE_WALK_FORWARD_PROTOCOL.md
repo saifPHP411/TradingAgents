@@ -6,7 +6,7 @@
 
 The published RAE v1.2 study is not sufficient for activation: development and the previously inspected holdout were negative, validation contained only nine trades, the prior holdout contains only six trades, and the recent 30-day window had no trades. Those validation/holdout dates have already been inspected and must not be reused as independent evidence.
 
-This protocol freezes the current RAE rules and evaluates them on new, chronological, disjoint out-of-sample windows. It does not tune parameters, select the best fold, or claim that bootstrap simulations predict future returns.
+This protocol freezes the current RAE rules and evaluates them on chronological, disjoint out-of-sample windows over refreshed market data. However, the default two-year history overlaps the dates already inspected in the RAE v1.1/v1.2 studies. These results are therefore exploratory diagnostics, **not an independent future holdout**. A genuinely untouched holdout can only be collected after the code and settings are frozen and new future candles arrive. This runner does not tune parameters, select the best fold, or claim that bootstrap simulations predict future returns.
 
 ## Frozen evaluation defaults
 
@@ -80,6 +80,6 @@ Passing unit tests or CI does not satisfy these performance gates. A favorable b
 
 ## Reproduction
 
-Run the GitHub Actions workflow **Crypto RAE walk-forward validation** manually. It fetches fresh public Binance Spot data, writes `artifacts/rae_walkforward.json`, and uploads the report as an artifact. It does not use credentials or any trading endpoint.
+Run the GitHub Actions workflow **Crypto RAE walk-forward validation** manually. It fetches current public Binance Spot data, writes `artifacts/rae_walkforward.json`, and uploads the report as an artifact. It does not use credentials or any trading endpoint.
 
-The workflow is manual by design. It does not change the active TJR strategy, the Bybit Demo branch, Railway, broker settings, or API credentials.
+The workflow is manual by design. Its historical walk-forward output is exploratory because it overlaps previously inspected dates; it does not satisfy the future-holdout acceptance gate. It does not change the active TJR strategy, the Bybit Demo branch, Railway, broker settings, or API credentials.
