@@ -120,6 +120,7 @@ def run_portfolio_backtest(
     signal_settings: EnsembleSettings | None = None,
     settings: BacktestSettings | None = None,
     portfolio_settings: PortfolioSettings | None = None,
+    trading_start_ts: pd.Timestamp | str | None = None,
 ) -> PortfolioBacktestResult:
     """Backtest a shared-cash spot portfolio using only completed 1h bars.
 
@@ -169,6 +170,11 @@ def run_portfolio_backtest(
     symbols = [btc_symbol, *sorted(symbol for symbol in frames if symbol != btc_symbol)]
     data = {symbol: _validate(frames[symbol], settings) for symbol in symbols}
     index = data[btc_symbol].index
+    trading_start = pd.Timestamp(trading_start_ts) if trading_start_ts is not None else None
+    if trading_start is not None:
+        if trading_start.tzinfo is None:
+            raise ValueError("trading_start_ts must be timezone-aware")
+        trading_start = trading_start.tz_convert(index.tz)
     for symbol in symbols:
         if not data[symbol].index.equals(index):
             raise ValueError("all portfolio symbols must have identical hourly timestamps")
@@ -440,6 +446,8 @@ def run_portfolio_backtest(
         # completed bar. Pending entries are always filled on the next bar.
         for symbol in symbols:
             if symbol in positions or symbol in pending or j <= cooldown_until[symbol]:
+                continue
+            if trading_start is not None and timestamp < trading_start:
                 continue
             signal = _evaluate_indicator_row(indicators[symbol], j, signal_settings, mode)
             if signal.action != "long" or signal.stop is None:
