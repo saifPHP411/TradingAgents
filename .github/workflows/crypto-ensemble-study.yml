@@ -39,8 +39,8 @@ jobs:
           python -m pip install -e ".[dev]"
       - name: Fetch completed public Binance 1h candles
         env:
-          STUDY_BARS: ${{ inputs.bars }}
-          STUDY_SYMBOLS: ${{ inputs.symbols }}
+          STUDY_BARS: ${{ inputs.bars || '17520' }}
+          STUDY_SYMBOLS: ${{ inputs.symbols || 'BTC/USDT ETH/USDT BNB/USDT' }}
         run: |
           read -r -a SYMBOLS <<< "$STUDY_SYMBOLS"
           python -m tradingagents.crypto.fetch_ensemble_history \
