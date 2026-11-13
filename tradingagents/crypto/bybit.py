@@ -262,7 +262,7 @@ class BybitPublicClient:
             if not isinstance(payload, dict):
                 raise CryptoDataError("Bybit kline response was not a JSON object")
             ret_code = payload.get("retCode", 0)
-            if ret_code not in (0, "0", None):
+            if ret_code not in (0, "0"):
                 ret_message = str(payload.get("retMsg") or "unknown venue error")
                 raise CryptoDataError(
                     f"Bybit rejected the kline request ({ret_code}): {ret_message}"
