@@ -1,0 +1,247 @@
+"""Conservative, next-bar-open backtest for the research ensemble.
+
+This is a single-symbol research harness, not a portfolio simulator and not wired
+to any broker. Signals use completed bars only; entries/exits execute at the next
+bar open, stops are checked intrabar with gap-aware fills, and both sides pay fees
+and slippage. Results must not be treated as live performance.
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from math import isfinite
+
+import pandas as pd
+
+from .ensemble import EnsembleSettings, evaluate_ensemble
+
+
+@dataclass(frozen=True)
+class BacktestSettings:
+    initial_cash: float = 10_000.0
+    risk_fraction: float = 0.005
+    max_notional_fraction: float = 0.10
+    fee_bps: float = 10.0
+    slippage_bps: float = 5.0
+    warmup_bars: int = 220
+    max_signal_lookback: int = 300
+
+
+@dataclass
+class BacktestResult:
+    mode: str
+    settings: dict
+    final_equity: float
+    net_return_pct: float
+    max_drawdown_pct: float
+    trades: int
+    wins: int
+    losses: int
+    win_rate_pct: float
+    profit_factor: float | None
+    gross_profit: float
+    gross_loss: float
+    fees_paid: float
+    slippage_bps: float
+    equity_curve: list[dict]
+    trade_log: list[dict]
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _validate(frame: pd.DataFrame, settings: BacktestSettings) -> pd.DataFrame:
+    required = {"open", "high", "low", "close", "volume"}
+    if required.difference(frame.columns):
+        raise ValueError(f"missing OHLCV columns: {sorted(required.difference(frame.columns))}")
+    if len(frame) < settings.warmup_bars + 2:
+        raise ValueError("not enough bars for warm-up and next-bar execution")
+    data = frame.loc[:, ["open", "high", "low", "close", "volume"]].astype(float).copy()
+    if not data.index.is_monotonic_increasing or data.index.has_duplicates:
+        raise ValueError("bar index must be strictly increasing and unique")
+    if not all(isfinite(float(v)) for v in data.to_numpy().ravel()):
+        raise ValueError("OHLCV values must be finite")
+    if (data[["open", "high", "low", "close"]] <= 0).any().any():
+        raise ValueError("prices must be positive")
+    if (data["volume"] < 0).any():
+        raise ValueError("volume must be non-negative")
+    if (data["high"] < data[["open", "close", "low"]].max(axis=1)).any():
+        raise ValueError("invalid high in OHLC data")
+    if (data["low"] > data[["open", "close", "high"]].min(axis=1)).any():
+        raise ValueError("invalid low in OHLC data")
+    return data
+
+
+def run_backtest(
+    frame: pd.DataFrame,
+    *,
+    mode: str = "ensemble",
+    signal_settings: EnsembleSettings = EnsembleSettings(),
+    settings: BacktestSettings = BacktestSettings(),
+) -> BacktestResult:
+    """Run one symbol; each signal is acted on at the following bar's open."""
+    if mode not in {"ensemble", "trend", "range", "breakout"}:
+        raise ValueError("unsupported strategy mode")
+    if settings.initial_cash <= 0 or not 0 < settings.risk_fraction <= 0.05:
+        raise ValueError("initial cash and risk fraction are outside safe bounds")
+    if not 0 < settings.max_notional_fraction <= 1:
+        raise ValueError("max notional fraction must be in (0, 1]")
+    if settings.fee_bps < 0 or settings.slippage_bps < 0:
+        raise ValueError("fees and slippage cannot be negative")
+
+    data = _validate(frame, settings)
+    cash = float(settings.initial_cash)
+    position = None
+    pending = None
+    trades: list[dict] = []
+    curve: list[dict] = []
+    total_fees = 0.0
+    slip = settings.slippage_bps / 10_000.0
+    fee_rate = settings.fee_bps / 10_000.0
+
+    def close_position(timestamp, raw_price: float, reason: str) -> None:
+        nonlocal cash, position, total_fees
+        if position is None:
+            return
+        fill = raw_price * (1.0 - slip)
+        fee = position["qty"] * fill * fee_rate
+        cash += position["qty"] * fill - fee
+        total_fees += fee
+        pnl = (
+            position["qty"] * (fill - position["entry"])
+            - position["entry_fee"]
+            - fee
+        )
+        trades.append({
+            "entry_time": position["entry_time"],
+            "exit_time": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
+            "entry_price": position["entry"],
+            "exit_price": fill,
+            "quantity": position["qty"],
+            "gross_pnl": position["qty"] * (fill - position["entry"]),
+            "net_pnl": pnl,
+            "entry_fee": position["entry_fee"],
+            "exit_fee": fee,
+            "reason": reason,
+        })
+        position = None
+
+    for j in range(settings.warmup_bars, len(data)):
+        row = data.iloc[j]
+        timestamp = data.index[j]
+
+        # Pending actions come from the previous completed bar.
+        if pending is not None:
+            if pending["action"] == "exit" and position is not None:
+                close_position(timestamp, float(row.open), pending["reason"])
+            elif pending["action"] == "entry" and position is None:
+                entry = float(row.open) * (1.0 + slip)
+                stop = float(pending["stop"])
+                equity_at_open = cash
+                risk_per_unit = entry - stop
+                if risk_per_unit > 0 and equity_at_open > 0:
+                    risk_budget = equity_at_open * settings.risk_fraction
+                    notional_cap = equity_at_open * settings.max_notional_fraction
+                    qty = min(risk_budget / risk_per_unit, notional_cap / entry)
+                    if qty > 0 and isfinite(qty):
+                        entry_fee = qty * entry * fee_rate
+                        cash -= qty * entry + entry_fee
+                        total_fees += entry_fee
+                        position = {
+                            "entry": entry,
+                            "entry_time": timestamp.isoformat(),
+                            "qty": qty,
+                            "stop": stop,
+                            "entry_fee": entry_fee,
+                        }
+            pending = None
+
+        # Intrabar stop: if the bar gaps through the stop, use its open.
+        if position is not None and float(row.low) <= position["stop"]:
+            stop_fill = min(float(row.open), position["stop"])
+            close_position(timestamp, stop_fill, "atr_stop")
+
+        # Mark-to-market equity at this bar's close.
+        equity = cash + (position["qty"] * float(row.close) if position else 0.0)
+        curve.append({"time": timestamp.isoformat(), "equity": equity})
+
+        if j == len(data) - 1:
+            if position is not None:
+                close_position(timestamp, float(row.close), "end_of_data")
+                curve[-1]["equity"] = cash
+            break
+
+        # Only completed bars through j are visible to the signal function.
+        start = max(0, j - settings.max_signal_lookback + 1)
+        signal = evaluate_ensemble(
+            data.iloc[start : j + 1], signal_settings, mode=mode
+        )
+        if position is not None and signal.action == "flat":
+            pending = {"action": "exit", "reason": "signal_flat"}
+        elif position is None and signal.action == "long" and signal.stop is not None:
+            pending = {"action": "entry", "stop": signal.stop}
+
+    # If a position remains after the loop, close it at the last available close.
+    if position is not None:
+        close_position(data.index[-1], float(data.close.iloc[-1]), "end_of_data")
+        if curve:
+            curve[-1]["equity"] = cash
+
+    equity_values = [point["equity"] for point in curve]
+    peak = settings.initial_cash
+    max_dd = 0.0
+    for value in equity_values:
+        peak = max(peak, value)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - value) / peak)
+
+    pnls = [trade["net_pnl"] for trade in trades]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else (
+        None if not wins else float("inf")
+    )
+    final_equity = cash
+    return BacktestResult(
+        mode=mode,
+        settings={**asdict(settings), "signal_settings": asdict(signal_settings)},
+        final_equity=final_equity,
+        net_return_pct=(final_equity / settings.initial_cash - 1.0) * 100.0,
+        max_drawdown_pct=max_dd * 100.0,
+        trades=len(trades),
+        wins=len(wins),
+        losses=len(losses),
+        win_rate_pct=(len(wins) / len(trades) * 100.0) if trades else 0.0,
+        profit_factor=profit_factor,
+        gross_profit=gross_profit,
+        gross_loss=gross_loss,
+        fees_paid=total_fees,
+        slippage_bps=settings.slippage_bps,
+        equity_curve=curve,
+        trade_log=trades,
+    )
+
+
+def compare_modes(
+    frame: pd.DataFrame,
+    *,
+    signal_settings: EnsembleSettings = EnsembleSettings(),
+    settings: BacktestSettings = BacktestSettings(),
+) -> dict:
+    """Run four comparable variants on identical bars and execution assumptions."""
+    modes = ("trend", "range", "breakout", "ensemble")
+    return {
+        "schema_version": 1,
+        "kind": "crypto_regime_ensemble_comparison",
+        "bar_count": len(frame),
+        "first_bar": frame.index[0].isoformat(),
+        "last_bar": frame.index[-1].isoformat(),
+        "execution": "signal_on_close_next_bar_open_stop_gap_aware",
+        "results": {
+            mode: run_backtest(
+                frame, mode=mode, signal_settings=signal_settings, settings=settings
+            ).to_dict()
+            for mode in modes
+        },
+    }
