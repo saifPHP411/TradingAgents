@@ -1061,6 +1061,7 @@ def run_study(
     coverage: Mapping[str, dict] | None = None,
     universe: Mapping | None = None,
     include_sensitivity: bool = True,
+    include_diagnostics: bool = True,
 ) -> CryptoStudyResult:
     """Run every part of the study over ``series`` and return the result.
 
@@ -1115,21 +1116,41 @@ def run_study(
     notes = [
         "The strategy is the unchanged TJR rule chain; only the session policy and "
         "the entry-window cut are adapted for a 24/7 market, and both are reported.",
-        "Historical research bars are Binance public Spot data; Bybit Demo Spot is "
-        "the intended execution venue. This reporting-only study is a cross-venue "
-        "proxy and does not change the live decision-data source.",
+        "Historical research bars are Binance public Spot data; live demo decisions "
+        "are intended to use Bybit Spot candles and orders execute on Bybit Demo Spot. "
+        "Treat this backtest as a cross-venue proxy, not a Bybit historical replay.",
         "Every figure comes from real bars the venue served; a period the data does "
         "not cover is reported short, never padded.",
     ]
+    if not include_diagnostics:
+        notes.append(
+            "Per-symbol, regime and duplicate-run diagnostics were skipped in this "
+            "pass to prioritize after-cost period and walk-forward results."
+        )
+    risk_limits = config.risk_limits
+    if risk_limits is not None and risk_limits.max_order_value == 25:
+        notes.append(
+            f"Deployment sizing: {config.initial_cash:.2f} USDT starting cash (illustrative), "
+            "25 USDT target/max order, at most 5 open positions and 10 orders per day; "
+            "long-only. The starting balance should be changed to match the Demo account."
+        )
     result = CryptoStudyResult(
         config=config,
         generated_at=datetime.now(UTC).isoformat(),
         coverage=dict(coverage or {}),
         universe=dict(universe or {}),
         periods=periods,
-        per_symbol=per_symbol_metrics(series, frictionless_config, evaluation_cache=cache),
+        per_symbol=(
+            per_symbol_metrics(series, frictionless_config, evaluation_cache=cache)
+            if include_diagnostics
+            else {}
+        ),
         walk_forward=walk_forward,
-        regimes=run_regimes(series, frictionless_config, evaluation_cache=cache),
+        regimes=(
+            run_regimes(series, frictionless_config, evaluation_cache=cache)
+            if include_diagnostics
+            else []
+        ),
         cost_scenarios=full_cost_results,
         period_cost_scenarios=period_cost_results,
         walk_forward_cost_scenarios=walk_forward_cost_results,
@@ -1138,7 +1159,15 @@ def run_study(
             if include_sensitivity
             else []
         ),
-        determinism=determinism_check(series, frictionless_config),
+        determinism=(
+            determinism_check(series, frictionless_config)
+            if include_diagnostics
+            else {
+                "identical": "skipped",
+                "final_equity": "n/a",
+                "num_trades": "n/a",
+            }
+        ),
         trades=[
             {
                 "symbol": t.symbol,

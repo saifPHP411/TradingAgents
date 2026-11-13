@@ -17,6 +17,8 @@ import argparse
 import json
 from pathlib import Path
 
+from tradingagents.risk.paper_parity import paper_parity_limits
+
 from ..binance import BinancePublicClient
 from ..symbols import parse_pair
 from ..types import CANDLE_INTERVALS
@@ -65,6 +67,8 @@ def build_study(
     periods: tuple[int, ...] = STANDARD_PERIODS,
     allow_substitution: bool = True,
     include_sensitivity: bool = True,
+    include_diagnostics: bool = True,
+    paper_parity_sizing: bool = False,
     client: BinancePublicClient | None = None,
 ):
     """Resolve the universe, load the cache, and run the study."""
@@ -76,14 +80,18 @@ def build_study(
         tuple(parse_pair(s).canonical for s in requested),
         allow_substitution=allow_substitution,
     )
-    cache = HistoryCache(cache_dir) if cache_dir else HistoryCache()
+    cache = HistoryCache(Path(cache_dir) / "binance") if cache_dir else HistoryCache()
     series, coverage = load_cached_series(cache, resolution.symbols)
     if not series:
         raise SystemExit(
             "no cached 1m bars found; run `python -m tradingagents.crypto.backtest.fetch` first"
         )
     config = CryptoBacktestConfig(
-        symbols=tuple(sorted(series)), initial_cash=initial_cash, periods=periods
+        symbols=tuple(sorted(series)),
+        initial_cash=initial_cash,
+        currency="USDT" if paper_parity_sizing else "USD",
+        periods=periods,
+        risk_limits=paper_parity_limits() if paper_parity_sizing else None,
     )
     return run_study(
         series,
@@ -99,8 +107,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--symbols", nargs="+", default=None)
     parser.add_argument("--periods", nargs="+", type=int, default=list(STANDARD_PERIODS))
     parser.add_argument("--initial-cash", type=float, default=100_000.0)
+    parser.add_argument(
+        "--paper-parity-sizing",
+        action="store_true",
+        help="use the live paper limits: 25 USDT/order, 5 positions, 10 orders/day",
+    )
     parser.add_argument("--cache", default=None)
     parser.add_argument("--no-sensitivity", action="store_true")
+    parser.add_argument("--skip-diagnostics", action="store_true")
     parser.add_argument("--out", type=Path, default=None, help="write the JSON study here")
     parser.add_argument("--markdown", type=Path, default=None, help="write a Markdown summary here")
     args = parser.parse_args(argv)
@@ -111,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
         initial_cash=args.initial_cash,
         periods=tuple(args.periods),
         include_sensitivity=not args.no_sensitivity,
+        include_diagnostics=not args.skip_diagnostics,
+        paper_parity_sizing=args.paper_parity_sizing,
     )
     payload = study.to_dict()
     text = json.dumps(payload, indent=2, sort_keys=True, default=str)
