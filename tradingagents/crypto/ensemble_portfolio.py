@@ -97,6 +97,21 @@ def _btc_risk_off(indicators: pd.DataFrame, position: int, adx_min: float) -> bo
     )
 
 
+def _stop_risk_per_unit(
+    entry: float,
+    stop: float,
+    fee_rate: float,
+    slippage_rate: float,
+) -> float:
+    """Estimate loss to a stop after entry/exit fees and exit slippage.
+
+    Entry is already the slipped fill. The stop exit is conservatively filled
+    after adverse exit slippage, then charged its taker fee.
+    """
+    stop_fill = stop * (1.0 - slippage_rate)
+    return max(entry * (1.0 + fee_rate) - stop_fill * (1.0 - fee_rate), 0.0)
+
+
 def run_portfolio_backtest(
     frames: dict[str, pd.DataFrame],
     *,
@@ -105,6 +120,7 @@ def run_portfolio_backtest(
     signal_settings: EnsembleSettings | None = None,
     settings: BacktestSettings | None = None,
     portfolio_settings: PortfolioSettings | None = None,
+    trading_start_ts: pd.Timestamp | str | None = None,
 ) -> PortfolioBacktestResult:
     """Backtest a shared-cash spot portfolio using only completed 1h bars.
 
@@ -142,6 +158,8 @@ def run_portfolio_backtest(
         raise ValueError("max notional fraction must be in (0, 1]")
     if settings.fee_bps < 0 or settings.slippage_bps < 0:
         raise ValueError("fees and slippage cannot be negative")
+    if settings.slippage_bps >= 10_000:
+        raise ValueError("slippage must be below 10000 bps")
     if settings.trailing_stop_atr_multiple <= 0:
         raise ValueError("trailing stop ATR multiple must be positive")
 
@@ -154,6 +172,11 @@ def run_portfolio_backtest(
     symbols = [btc_symbol, *sorted(symbol for symbol in frames if symbol != btc_symbol)]
     data = {symbol: _validate(frames[symbol], settings) for symbol in symbols}
     index = data[btc_symbol].index
+    trading_start = pd.Timestamp(trading_start_ts) if trading_start_ts is not None else None
+    if trading_start is not None:
+        if trading_start.tzinfo is None:
+            raise ValueError("trading_start_ts must be timezone-aware")
+        trading_start = trading_start.tz_convert(index.tz)
     for symbol in symbols:
         if not data[symbol].index.equals(index):
             raise ValueError("all portfolio symbols must have identical hourly timestamps")
@@ -218,6 +241,8 @@ def run_portfolio_backtest(
             "exit_price": fill,
             "raw_exit_price": raw_price,
             "quantity": position["qty"],
+            "entry_equity": position["entry_equity"],
+            "estimated_stop_risk": position["estimated_stop_risk"],
             "initial_stop": position["initial_stop"],
             "final_stop": position["stop"],
             "gross_pnl": position["qty"] * (raw_price - position["raw_entry"]),
@@ -275,7 +300,9 @@ def run_portfolio_backtest(
             entry_raw = float(data[symbol].open.iloc[j])
             entry = entry_raw * (1.0 + slip)
             stop = float(action["stop"])
-            risk_per_unit = entry - stop
+            risk_per_unit = _stop_risk_per_unit(
+                entry, stop, fee_rate, slip
+            )
             if stop <= 0 or risk_per_unit <= 0:
                 blocked["insufficient_cash_or_risk"] += 1
                 continue
@@ -297,7 +324,9 @@ def run_portfolio_backtest(
                 continue
 
             current_open_risk = sum(
-                position["qty"] * max(position["entry"] - position["stop"], 0.0)
+                position["qty"] * _stop_risk_per_unit(
+                    position["entry"], position["stop"], fee_rate, slip
+                )
                 for position in positions.values()
             )
             remaining_portfolio_risk = (
@@ -338,6 +367,8 @@ def run_portfolio_backtest(
                 "highest_high": max(entry, float(data[symbol].high.iloc[j])),
                 "entry_fee": entry_fee,
                 "entry_slippage": entry_slippage,
+                "entry_equity": equity_at_open,
+                "estimated_stop_risk": qty * risk_per_unit,
             }
 
         # Intrabar protective stops, including positions opened at this bar's
@@ -417,6 +448,8 @@ def run_portfolio_backtest(
         # completed bar. Pending entries are always filled on the next bar.
         for symbol in symbols:
             if symbol in positions or symbol in pending or j <= cooldown_until[symbol]:
+                continue
+            if trading_start is not None and timestamp < trading_start:
                 continue
             signal = _evaluate_indicator_row(indicators[symbol], j, signal_settings, mode)
             if signal.action != "long" or signal.stop is None:

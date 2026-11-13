@@ -85,6 +85,12 @@ def _validate(frame: pd.DataFrame, settings: BacktestSettings) -> pd.DataFrame:
     return data
 
 
+def _stop_risk_per_unit(entry: float, stop: float, fee_rate: float, slippage_rate: float) -> float:
+    """Estimate stop loss per unit after both fees and adverse exit slippage."""
+    stop_fill = stop * (1.0 - slippage_rate)
+    return max(entry * (1.0 + fee_rate) - stop_fill * (1.0 - fee_rate), 0.0)
+
+
 def run_backtest(
     frame: pd.DataFrame,
     *,
@@ -92,6 +98,7 @@ def run_backtest(
     signal_settings: EnsembleSettings | None = None,
     settings: BacktestSettings = BacktestSettings(),
     btc_frame: pd.DataFrame | None = None,
+    trading_start_ts: pd.Timestamp | str | None = None,
 ) -> BacktestResult:
     """Run one symbol; each signal is acted on at the following bar's open."""
     if mode not in {"ensemble", "trend", "range", "breakout", "trend_pullback"}:
@@ -113,12 +120,19 @@ def run_backtest(
         raise ValueError("max notional fraction must be in (0, 1]")
     if settings.fee_bps < 0 or settings.slippage_bps < 0:
         raise ValueError("fees and slippage cannot be negative")
+    if settings.slippage_bps >= 10_000:
+        raise ValueError("slippage must be below 10000 bps")
     if settings.trailing_stop_atr_multiple <= 0:
         raise ValueError("trailing stop ATR multiple must be positive")
 
     signal_settings = signal_settings or EnsembleSettings()
     _validate_settings(signal_settings)
     data = _validate(frame, settings)
+    trading_start = pd.Timestamp(trading_start_ts) if trading_start_ts is not None else None
+    if trading_start is not None:
+        if trading_start.tzinfo is None:
+            raise ValueError("trading_start_ts must be timezone-aware")
+        trading_start = trading_start.tz_convert(data.index.tz)
     signal_indicators = _indicators(data, signal_settings)
     btc_indicators = None
     if btc_frame is not None:
@@ -158,6 +172,8 @@ def run_backtest(
             "exit_price": fill,
             "raw_exit_price": raw_price,
             "quantity": position["qty"],
+            "entry_equity": position["entry_equity"],
+            "estimated_stop_risk": position["estimated_stop_risk"],
             "initial_stop": position["initial_stop"],
             "final_stop": position["stop"],
             "gross_pnl": position["qty"] * (raw_price - position["raw_entry"]),
@@ -182,11 +198,16 @@ def run_backtest(
                 entry = float(row.open) * (1.0 + slip)
                 stop = float(pending["stop"])
                 equity_at_open = cash
-                risk_per_unit = entry - stop
+                risk_per_unit = _stop_risk_per_unit(entry, stop, fee_rate, slip)
                 if stop > 0 and risk_per_unit > 0 and equity_at_open > 0:
                     risk_budget = equity_at_open * settings.risk_fraction
                     notional_cap = equity_at_open * settings.max_notional_fraction
-                    qty = min(risk_budget / risk_per_unit, notional_cap / entry)
+                    cash_cap_qty = cash / (entry * (1.0 + fee_rate))
+                    qty = min(
+                        risk_budget / risk_per_unit,
+                        notional_cap / entry,
+                        cash_cap_qty,
+                    )
                     if qty > 0 and isfinite(qty):
                         entry_fee = qty * entry * fee_rate
                         entry_slippage = qty * (entry - float(row.open))
@@ -204,6 +225,8 @@ def run_backtest(
                             "highest_high": max(entry, float(row.high)),
                             "entry_fee": entry_fee,
                             "entry_slippage": entry_slippage,
+                            "entry_equity": equity_at_open,
+                            "estimated_stop_risk": qty * risk_per_unit,
                         }
             pending = None
 
@@ -262,7 +285,11 @@ def run_backtest(
             pending = {"action": "exit", "reason": "btc_risk_filter"}
         elif position is not None and signal.should_exit:
             pending = {"action": "exit", "reason": "signal_flat"}
-        elif position is None and j > cooldown_until and not btc_risk_off and signal.action == "long" and signal.stop is not None:
+        elif (
+            position is None and j > cooldown_until and not btc_risk_off
+            and (trading_start is None or timestamp >= trading_start)
+            and signal.action == "long" and signal.stop is not None
+        ):
             pending = {"action": "entry", "stop": signal.stop}
 
     # If a position remains after the loop, close it at the last available close.
