@@ -1070,16 +1070,54 @@ def run_study(
     cache: dict = {}
     sessions = sessions_for(series, config.session_policy)
     full_intervals = intervals_for_window(series, sessions)
+    scenarios = cost_scenarios(config)
+    frictionless_config = _config_with_costs(config, scenarios["frictionless"])
     full = run_window(
         series,
-        config,
+        frictionless_config,
         intervals=full_intervals,
         evaluation_cache=cache,
         run_id="crypto-tjr-full",
     )
+    # The base period and fold runs are already the frictionless scenario. Reuse
+    # them rather than simulating the same bars a second time.
+    periods = run_periods(series, frictionless_config, evaluation_cache=cache)
+    walk_forward = run_walk_forward(series, frictionless_config, evaluation_cache=cache)
+    period_cost_results: dict[str, list[PeriodResult]] = {"frictionless": periods}
+    walk_forward_cost_results: dict[str, list[PeriodResult]] = {
+        "frictionless": walk_forward
+    }
+    for label in ("realistic", "conservative"):
+        scenario_config = _config_with_costs(config, scenarios[label])
+        period_cost_results[label] = run_periods(
+            series, scenario_config, evaluation_cache=cache
+        )
+        walk_forward_cost_results[label] = run_walk_forward(
+            series, scenario_config, evaluation_cache=cache
+        )
+    full_cost_results = []
+    for label in ("frictionless", "realistic", "conservative"):
+        max_period = next(
+            (row for row in period_cost_results[label] if row.label == "max"),
+            None,
+        )
+        if max_period is not None:
+            full_cost_results.append(
+                PeriodResult(
+                    label=label,
+                    days=None,
+                    start=max_period.start,
+                    end=max_period.end,
+                    sessions=max_period.sessions,
+                    metrics=max_period.metrics,
+                )
+            )
     notes = [
         "The strategy is the unchanged TJR rule chain; only the session policy and "
         "the entry-window cut are adapted for a 24/7 market, and both are reported.",
+        "Historical research bars are Binance public Spot data; Bybit Demo Spot is "
+        "the intended execution venue. This reporting-only study is a cross-venue "
+        "proxy and does not change the live decision-data source.",
         "Every figure comes from real bars the venue served; a period the data does "
         "not cover is reported short, never padded.",
     ]
@@ -1088,19 +1126,19 @@ def run_study(
         generated_at=datetime.now(UTC).isoformat(),
         coverage=dict(coverage or {}),
         universe=dict(universe or {}),
-        periods=run_periods(series, config, evaluation_cache=cache),
-        per_symbol=per_symbol_metrics(series, config, evaluation_cache=cache),
-        walk_forward=run_walk_forward(series, config, evaluation_cache=cache),
-        regimes=run_regimes(series, config, evaluation_cache=cache),
-        cost_scenarios=run_cost_scenarios(series, config, evaluation_cache=cache),
-        period_cost_scenarios=run_period_cost_scenarios(series, config, evaluation_cache=cache),
-        walk_forward_cost_scenarios=run_walk_forward_cost_scenarios(
-            series, config, evaluation_cache=cache
-        ),
+        periods=periods,
+        per_symbol=per_symbol_metrics(series, frictionless_config, evaluation_cache=cache),
+        walk_forward=walk_forward,
+        regimes=run_regimes(series, frictionless_config, evaluation_cache=cache),
+        cost_scenarios=full_cost_results,
+        period_cost_scenarios=period_cost_results,
+        walk_forward_cost_scenarios=walk_forward_cost_results,
         sensitivity=(
-            run_sensitivity(series, config, evaluation_cache=cache) if include_sensitivity else []
+            run_sensitivity(series, frictionless_config, evaluation_cache=cache)
+            if include_sensitivity
+            else []
         ),
-        determinism=determinism_check(series, config),
+        determinism=determinism_check(series, frictionless_config),
         trades=[
             {
                 "symbol": t.symbol,
