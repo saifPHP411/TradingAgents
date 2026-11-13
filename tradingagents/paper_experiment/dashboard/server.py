@@ -46,6 +46,7 @@ from ..broker import (
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     EXECUTION_PROVIDER_ALPACA_PAPER,
     EXECUTION_PROVIDER_BYBIT_DEMO,
+    EXECUTION_PROVIDER_BYBIT_DEMO,
     EXECUTION_PROVIDER_CHOICES,
     MARKET_DATA_CHOICES,
     MAX_PRICE_DEVIATION_ENV,
@@ -54,7 +55,6 @@ from ..broker import (
     BrokerNotConfiguredError,
     BybitBrokerNotConfiguredError,
     BybitDemoBroker,
-    banner_for_provider,
 )
 from ..crypto_symbol_config import (
     DEFAULT_MARKET_DATA_SYMBOLS,
