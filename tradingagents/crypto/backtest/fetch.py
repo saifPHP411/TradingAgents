@@ -20,7 +20,7 @@ import argparse
 import json
 from pathlib import Path
 
-from ..bybit import BybitPublicClient
+from ..binance import BinancePublicClient
 from ..symbols import parse_pair
 from ..universe import DEFAULT_SYMBOLS, resolve_universe
 from .history import HistoryCache, fetch_history
@@ -40,8 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    client = BybitPublicClient()
-    registry = client.instruments_info(category="spot")
+    client = BinancePublicClient()
+    registry = client.exchange_info()
     resolution = resolve_universe(
         registry,
         tuple(parse_pair(s).canonical for s in args.symbols),
@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         print("no tradable symbols; nothing fetched", flush=True)
         return 1
 
-    cache = HistoryCache(Path(args.cache) / "bybit") if args.cache else HistoryCache()
+    cache = HistoryCache(Path(args.cache) / "binance") if args.cache else HistoryCache()
     frames = fetch_history(
         resolution.symbols, intervals=("1m",), limit=args.limit, client=client, cache=cache
     )
