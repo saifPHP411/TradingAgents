@@ -81,6 +81,34 @@ def run_ensemble_study(
                 "base_costs": compare_modes(section, settings=base, btc_frame=btc_section),
                 "stress_costs": compare_modes(section, settings=stressed, btc_frame=btc_section),
             }
+    report["partitions"]["recent_30d"] = {}
+    for raw in symbols:
+        symbol = parse_pair(raw).canonical
+        frame = cache.load(symbol, "1h")
+        section = frame.tail(720)
+        btc_section = None
+        if symbol != "BTC/USDT" and btc_full is not None:
+            btc_section = btc_full.loc[section.index[0] : section.index[-1]]
+        if len(section) < 222 or (btc_section is not None and len(btc_section) < 222):
+            raise RuntimeError(f"insufficient recent 30d 1h history for {symbol}")
+        base = BacktestSettings(initial_cash=initial_cash)
+        stressed = BacktestSettings(
+            initial_cash=initial_cash,
+            risk_fraction=base.risk_fraction,
+            max_notional_fraction=base.max_notional_fraction,
+            fee_bps=base.fee_bps * 1.5,
+            slippage_bps=base.slippage_bps * 1.5,
+        )
+        report["partitions"]["recent_30d"][symbol] = {
+            "coverage": {
+                "bars": len(section),
+                "first": section.index[0].isoformat(),
+                "last": section.index[-1].isoformat(),
+            },
+            "btc_filter": btc_section is not None,
+            "base_costs": compare_modes(section, settings=base, btc_frame=btc_section),
+            "stress_costs": compare_modes(section, settings=stressed, btc_frame=btc_section),
+        }
     return report
 
 
