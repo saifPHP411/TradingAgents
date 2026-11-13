@@ -518,7 +518,11 @@ def make_handler(dashboard: Dashboard):
                 self._send_json(200, {"status": "ok"})
                 return
             if path == "/":
-                self._send_html(200, INDEX_HTML)
+                html = INDEX_HTML.replace(
+                    "PAPER TRADING — NOT LIVE",
+                    banner_for_provider(dashboard.paper.execution_provider),
+                )
+                self._send_html(200, html)
                 return
             if not self._authed():
                 return
