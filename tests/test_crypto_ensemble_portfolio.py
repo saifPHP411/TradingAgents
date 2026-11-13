@@ -124,6 +124,52 @@ def test_shared_portfolio_enforces_altcoin_concentration_and_gross_exposure():
         assert trade["entry_price"] * trade["quantity"] <= 500.01
 
 
+ 
+def test_btc_has_first_claim_on_simultaneous_entry_capacity():
+    rising = _rising_frame()
+    result = run_portfolio_backtest(
+        {"BNB/USDT": rising.copy(), "BTC/USDT": rising.copy()},
+        settings=BacktestSettings(warmup_bars=220),
+        portfolio_settings=PortfolioSettings(
+            max_open_positions=1,
+            max_alt_positions=1,
+            max_gross_exposure_fraction=0.5,
+            daily_loss_limit_fraction=None,
+            max_drawdown_fraction=None,
+        ),
+    )
+    assert result.trades == 1
+    assert result.trade_log[0]["symbol"] == "BTC/USDT"
+    assert result.blocked_entries["max_open_positions"] > 0
+
+
+def test_portfolio_max_hold_counts_entry_candle_and_exits_next_open():
+    frame = _rising_frame()
+    previous = frame.iloc[-1]
+    next_open = float(previous.close) + 0.1
+    next_bar = pd.DataFrame(
+        [{
+            "open": next_open,
+            "high": next_open + 0.5,
+            "low": next_open - 0.2,
+            "close": next_open + 0.1,
+            "volume": 1000.0,
+        }],
+        index=[frame.index[-1] + pd.Timedelta(hours=1)],
+    )
+    frame = pd.concat([frame, next_bar])
+    result = run_portfolio_backtest(
+        {"BTC/USDT": frame},
+        settings=BacktestSettings(warmup_bars=220, max_hold_bars=1),
+        portfolio_settings=PortfolioSettings(
+            daily_loss_limit_fraction=None,
+            max_drawdown_fraction=None,
+        ),
+    )
+    assert result.trades == 1
+    assert result.trade_log[0]["reason"] == "max_hold_bars"
+    assert result.trade_log[0]["exit_time"] == frame.index[-1].isoformat()
+
 def test_portfolio_requires_aligned_hourly_history_and_btc():
     frame = _flat_frame()
     with pytest.raises(ValueError, match="include the BTC"):
