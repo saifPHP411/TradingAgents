@@ -83,4 +83,7 @@ def test_btc_filter_blocks_altcoin_entries_when_btc_trend_is_not_bullish():
     unfiltered = run_backtest(alt)
     filtered = run_backtest(alt, btc_frame=btc)
     assert unfiltered.trades == 1
+    assert unfiltered.fees_paid > 0
+    assert unfiltered.slippage_paid > 0
+    assert unfiltered.trade_log[0]["net_pnl"] < unfiltered.trade_log[0]["gross_pnl"]
     assert filtered.trades == 0
