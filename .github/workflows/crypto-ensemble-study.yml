@@ -1,6 +1,14 @@
 name: Crypto RAE historical study
 
 on:
+  push:
+    branches: [research/regime-adaptive-ensemble]
+    paths:
+      - ".github/workflows/crypto-ensemble-study.yml"
+      - "tradingagents/crypto/ensemble.py"
+      - "tradingagents/crypto/ensemble_backtest.py"
+      - "tradingagents/crypto/fetch_ensemble_history.py"
+      - "tradingagents/crypto/run_ensemble_study.py"
   workflow_dispatch:
     inputs:
       bars:
