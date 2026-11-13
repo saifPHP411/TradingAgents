@@ -2,7 +2,7 @@ name: Regime-adaptive ensemble unit tests
 
 on:
   push:
-    branches: [research/regime-adaptive-ensemble]
+    branches: [research/regime-adaptive-ensemble, rae-portfolio-accounting-audit]
     paths:
       - "tradingagents/crypto/ensemble.py"
       - "tradingagents/crypto/ensemble_backtest.py"
@@ -14,7 +14,7 @@ on:
       - "tests/test_crypto_ensemble_walkforward.py"
       - ".github/workflows/crypto-ensemble-tests.yml"
   pull_request:
-    branches: [bybit-demo-integration]
+    branches: [bybit-demo-integration, research/regime-adaptive-ensemble]
     paths:
       - "tradingagents/crypto/ensemble.py"
       - "tradingagents/crypto/ensemble_backtest.py"
@@ -22,6 +22,7 @@ on:
       - "tests/test_crypto_ensemble.py"
       - "tests/test_crypto_ensemble_backtest.py"
       - "tests/test_crypto_ensemble_portfolio.py"
+      - "tests/test_crypto_ensemble_walkforward.py"
       - ".github/workflows/crypto-ensemble-tests.yml"
   workflow_dispatch:
 
