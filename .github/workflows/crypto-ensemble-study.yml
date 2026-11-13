@@ -49,7 +49,7 @@ jobs:
             --cache .research-cache
       - name: Run chronological comparison and 1.5x cost stress
         env:
-          STUDY_SYMBOLS: ${{ inputs.symbols }}
+          STUDY_SYMBOLS: ${{ inputs.symbols || 'BTC/USDT ETH/USDT BNB/USDT' }}
         run: |
           read -r -a SYMBOLS <<< "$STUDY_SYMBOLS"
           python -m tradingagents.crypto.run_ensemble_study \
@@ -58,7 +58,7 @@ jobs:
             --out artifacts/rae_study.json
       - name: Fetch 30 days of 1m bars for unchanged TJR baseline
         env:
-          STUDY_SYMBOLS: ${{ inputs.symbols }}
+          STUDY_SYMBOLS: ${{ inputs.symbols || 'BTC/USDT ETH/USDT BNB/USDT' }}
         run: |
           read -r -a SYMBOLS <<< "$STUDY_SYMBOLS"
           python -m tradingagents.crypto.backtest.fetch \
@@ -67,7 +67,7 @@ jobs:
             --cache .research-cache
       - name: Run unchanged TJR 30-day baseline
         env:
-          STUDY_SYMBOLS: ${{ inputs.symbols }}
+          STUDY_SYMBOLS: ${{ inputs.symbols || 'BTC/USDT ETH/USDT BNB/USDT' }}
         run: |
           read -r -a SYMBOLS <<< "$STUDY_SYMBOLS"
           python -m tradingagents.crypto.backtest.run \
