@@ -44,6 +44,8 @@ class EnsembleSettings:
     atr_period: int = 14
     rsi_period: int = 14
     volume_period: int = 20
+    atr_expansion_period: int = 20
+    atr_expansion_multiple: float = 1.05
     trend_rsi_min: float = 55.0
     range_rsi_max: float = 35.0
     volume_multiple: float = 1.1
@@ -105,6 +107,8 @@ def _indicators(data: pd.DataFrame, s: EnsembleSettings) -> pd.DataFrame:
     x.loc[(loss == 0) & (gain > 0), "rsi"] = 100.0
     x.loc[(loss == 0) & (gain == 0), "rsi"] = 50.0
     x["volume_mean"] = x.volume.rolling(s.volume_period).mean()
+    x["atr_mean"] = x.atr.rolling(s.atr_expansion_period).mean()
+    x["atr_expansion"] = x.atr / x.atr_mean.replace(0, float("nan"))
     return x
 
 
@@ -113,7 +117,7 @@ def _validate_settings(settings: EnsembleSettings) -> None:
         settings.fast_ema, settings.slow_ema, settings.adx_period,
         settings.donchian_entry, settings.donchian_exit,
         settings.momentum_bars, settings.range_period, settings.atr_period,
-        settings.rsi_period, settings.volume_period,
+        settings.rsi_period, settings.volume_period, settings.atr_expansion_period,
     )
     if any(not isinstance(period, int) or period <= 0 for period in positive_periods):
         raise ValueError("indicator periods must be positive integers")
@@ -124,6 +128,7 @@ def _validate_settings(settings: EnsembleSettings) -> None:
         or settings.max_extension_atr <= 0
         or settings.volume_multiple <= 0
         or settings.range_zscore <= 0
+        or settings.atr_expansion_multiple <= 0
     ):
         raise ValueError("ATR, volume and range thresholds must be positive")
     if not 0 <= settings.range_rsi_max <= 100 or not 0 <= settings.trend_rsi_min <= 100:
@@ -147,7 +152,7 @@ def _evaluate_indicator_row(
     needed = [
         "atr", "adx", "fast_ema", "slow_ema", "prior_high", "prior_low_exit",
         "momentum", "range_mean", "range_std", "zscore", "plus_di", "minus_di",
-        "rsi", "volume_mean",
+        "rsi", "volume_mean", "atr_expansion",
     ]
     if any(pd.isna(row[key]) for key in needed) or row.atr <= 0:
         return EnsembleSignal(
@@ -182,12 +187,15 @@ def _evaluate_indicator_row(
             aligned = close > row.slow_ema
         volume_ok = row.volume >= row.volume_mean * settings.volume_multiple
         rsi_ok = row.rsi >= settings.trend_rsi_min
-        if aligned and momentum_ok and breakout and extension_ok and volume_ok and rsi_ok:
+        volatility_expansion_ok = (
+            mode != "breakout" or row.atr_expansion >= settings.atr_expansion_multiple
+        )
+        if aligned and momentum_ok and breakout and extension_ok and volume_ok and rsi_ok and volatility_expansion_ok:
             stop = close - settings.atr_stop_multiple * atr
             module = "volatility_breakout" if mode == "breakout" else "trend_donchian_momentum"
             return EnsembleSignal(
                 "long", regime, module, 1.0, close, stop,
-                "Donchian breakout with trend, momentum, RSI and volume confirmation",
+                "Donchian breakout with trend, momentum, RSI, volume and ATR expansion confirmation",
             )
         trend_exit = (
             close < row.prior_low_exit
