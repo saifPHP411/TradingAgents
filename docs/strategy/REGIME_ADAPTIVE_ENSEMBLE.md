@@ -80,7 +80,7 @@ Published backtests are hypotheses, not a menu of guaranteed-profitable strategi
 
 The current branch contains a deliberately isolated prototype:
 
-- `tradingagents/crypto/ensemble.py`: completed-bar regime classification, EMA/DI/ADX trend filter, Donchian breakout, momentum/RSI/volume confirmation, range z-score + RSI reversal, ATR initial stop, fail-closed BTC trend overlay for altcoins, and distinct `should_exit` semantics so "no fresh entry" does not force an open trend trade to close.
+- `tradingagents/crypto/ensemble.py`: completed-bar regime classification, EMA/DI/ADX trend filter, Donchian breakout, momentum/RSI/volume confirmation, range z-score + RSI reversal, ATR initial stop, explicit Donchian/mean exits, max-hold/time stop and post-stop cooldown, fail-closed BTC trend overlay for altcoins, and distinct `should_exit` semantics so "no fresh entry" does not force an open trend trade to close.
 - `tradingagents/crypto/ensemble_backtest.py`: one-symbol long-only simulation, signal at completed-bar close, next-bar-open execution, gap-aware intrabar ATR stop, stop-distance sizing, notional cap, per-side fee and slippage accounting, and trade/equity logs.
 - `tradingagents/crypto/fetch_ensemble_history.py`: explicit fetch of completed Binance Spot 1h candles into the offline research cache.
 - `tradingagents/crypto/run_ensemble_study.py`: chronological 60/20/20 development/validation/holdout comparison for trend-only, range-only, breakout-only, and ensemble variants, with a 1.5x fee/slippage stress. Each symbol and partition is an independent account; its returns must not be summed as if they were one portfolio.
