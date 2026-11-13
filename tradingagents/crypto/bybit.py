@@ -27,6 +27,7 @@ from typing import Any
 from .instruments import STATUS_UNKNOWN, InstrumentRegistry
 from .symbols import SymbolError, parse_pair
 from .transport import CryptoDataError, CryptoRateLimitedError, fetch_json
+from .types import CANDLE_INTERVALS, Candle, candle_from_bybit_kline
 
 DEMO_REST_HOST = "https://api-demo.bybit.com"
 """Bybit's **demo** REST host: no key needed for public market data."""
@@ -35,6 +36,15 @@ LIVE_REST_HOST = "https://api.bybit.com"
 """Bybit's **live** REST host: no key needed for public market data."""
 
 REQUEST_TIMEOUT = 15.0
+
+_BYBIT_KLINE_INTERVALS = {
+    "1m": "1",
+    "5m": "5",
+    "15m": "15",
+    "1h": "60",
+    "4h": "240",
+}
+
 
 
 def _classify_status(status: int, body: str) -> None:
@@ -204,6 +214,91 @@ class BybitPublicClient:
                 fractionable=_fractionable_from_step(step_text),
             )
         return rules
+
+    # -- historical candles -----------------------------------------------
+
+    def klines(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        limit: int = 1000,
+        start: int | None = None,
+        end: int | None = None,
+    ) -> list[Candle]:
+        """Fetch Spot candles, paging backwards at Bybit's 1000-row cap.
+
+        Bybit returns each page newest-first. Pages are walked backwards with an
+        exclusive end timestamp, de-duplicated by open time, then returned oldest
+        first so every downstream frame has one deterministic order.
+        """
+        if interval not in CANDLE_INTERVALS or interval not in _BYBIT_KLINE_INTERVALS:
+            raise CryptoDataError(f"unsupported Bybit kline interval {interval!r}")
+        try:
+            wanted = int(limit)
+        except (TypeError, ValueError):
+            raise CryptoDataError(f"invalid Bybit kline limit {limit!r}") from None
+        if wanted < 1:
+            raise CryptoDataError("Bybit kline limit must be positive")
+        lower = int(start) if start is not None else None
+        upper = int(end) if end is not None else None
+        cursor_end = upper
+        market = bybit_symbol(symbol)
+        collected: dict[datetime, Candle] = {}
+
+        while len(collected) < wanted:
+            page_limit = min(1000, wanted - len(collected))
+            params: dict[str, Any] = {
+                "category": "spot",
+                "symbol": market,
+                "interval": _BYBIT_KLINE_INTERVALS[interval],
+                "limit": page_limit,
+            }
+            if lower is not None:
+                params["start"] = lower
+            if cursor_end is not None:
+                params["end"] = cursor_end
+            payload = self._get("/v5/market/kline", params)
+            if not isinstance(payload, dict):
+                raise CryptoDataError("Bybit kline response was not a JSON object")
+            ret_code = payload.get("retCode", 0)
+            if ret_code not in (0, "0", None):
+                ret_message = str(payload.get("retMsg") or "unknown venue error")
+                raise CryptoDataError(
+                    f"Bybit rejected the kline request ({ret_code}): {ret_message}"
+                )
+            result = payload.get("result", {})
+            rows = result.get("list", []) if isinstance(result, dict) else None
+            if not isinstance(rows, list):
+                raise CryptoDataError("Bybit kline response is missing result.list")
+            if not rows:
+                break
+
+            parsed = [
+                candle
+                for row in rows
+                if (candle := candle_from_bybit_kline(symbol, interval, row)) is not None
+            ]
+            for candle in parsed:
+                open_ms = int(candle.open_time.timestamp() * 1000)
+                if lower is not None and open_ms < lower:
+                    continue
+                if upper is not None and open_ms > upper:
+                    continue
+                collected[candle.open_time] = candle
+
+            if len(rows) < page_limit or not parsed:
+                break
+            oldest_ms = min(int(c.open_time.timestamp() * 1000) for c in parsed)
+            next_end = oldest_ms - 1
+            if lower is not None and next_end < lower:
+                break
+            if cursor_end is not None and next_end >= cursor_end:
+                break
+            cursor_end = next_end
+
+        ordered = [collected[key] for key in sorted(collected)]
+        return ordered[-wanted:]
 
     # -- live views -------------------------------------------------------
 
