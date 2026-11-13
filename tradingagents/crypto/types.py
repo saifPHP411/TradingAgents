@@ -390,6 +390,38 @@ def candle_from_binance_kline(symbol: str, interval: str, row: list) -> Candle |
         volume=volume,
     )
 
+def candle_from_bybit_kline(symbol: str, interval: str, row: list) -> Candle | None:
+    """Parse one Bybit V5 kline row into a Candle, or None.
+
+    Bybit returns [startTime, open, high, low, close, volume, turnover] in reverse
+    chronological order. Its REST response does not include a close time, so derive
+    the bar's final millisecond from the requested interval.
+    """
+    if not isinstance(row, (list, tuple)) or len(row) < 6:
+        return None
+    open_time = _stamp(row[0])
+    open_, high, low, close, volume = (_finite(row[i]) for i in (1, 2, 3, 4, 5))
+    if None in (open_time, open_, high, low, close, volume):
+        return None
+    try:
+        close_time = datetime.fromtimestamp(
+            open_time.timestamp() + interval_millis(interval) / 1000.0 - 0.001,
+            tz=UTC,
+        )
+    except (ValueError, OverflowError):
+        return None
+    return Candle(
+        symbol=symbol.upper(),
+        interval=interval,
+        open_time=open_time,
+        close_time=close_time,
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        volume=volume,
+    )
+
 
 __all__ = [
     "BINANCE_INTERVALS",
@@ -400,6 +432,7 @@ __all__ = [
     "PublicTrade",
     "Ticker",
     "candle_from_binance_kline",
+    "candle_from_bybit_kline",
     "candles_to_frame",
     "interval_millis",
 ]
