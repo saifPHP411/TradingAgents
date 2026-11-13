@@ -14,10 +14,11 @@ reader can tell what was actually run.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import json
 from pathlib import Path
 
-from ..binance import BinancePublicClient
+from ..bybit import BybitPublicClient
 from ..symbols import parse_pair
 from ..types import CANDLE_INTERVALS
 from ..universe import DEFAULT_SYMBOLS, resolve_universe
@@ -65,18 +66,18 @@ def build_study(
     periods: tuple[int, ...] = STANDARD_PERIODS,
     allow_substitution: bool = True,
     include_sensitivity: bool = True,
-    client: BinancePublicClient | None = None,
+    client: BybitPublicClient | None = None,
 ):
     """Resolve the universe, load the cache, and run the study."""
-    client = client or BinancePublicClient()
-    registry = client.exchange_info()
+    client = client or BybitPublicClient()
+    registry = client.instruments_info(category="spot")
     requested = symbols or DEFAULT_SYMBOLS
     resolution = resolve_universe(
         registry,
         tuple(parse_pair(s).canonical for s in requested),
         allow_substitution=allow_substitution,
     )
-    cache = HistoryCache(cache_dir) if cache_dir else HistoryCache()
+    cache = HistoryCache(Path(cache_dir) / "bybit") if cache_dir else HistoryCache()
     series, coverage = load_cached_series(cache, resolution.symbols)
     if not series:
         raise SystemExit(
