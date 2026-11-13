@@ -195,7 +195,7 @@ def test_chandelier_trailing_stop_tightens_only_for_following_bar():
 def test_single_symbol_stop_risk_budget_includes_fees_and_adverse_slippage():
     settings = BacktestSettings(
         warmup_bars=220,
-        risk_fraction=0.005,
+        risk_fraction=0.05,
         max_notional_fraction=1.0,
         fee_bps=10.0,
         slippage_bps=5.0,
