@@ -60,6 +60,8 @@ def _validate(frame: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"OHLCV frame missing columns: {sorted(missing)}")
     if len(frame) < 220:
         raise ValueError("at least 220 completed bars are required")
+    if not frame.index.is_monotonic_increasing or frame.index.has_duplicates:
+        raise ValueError("completed bars must be strictly increasing and unique")
     data = frame.loc[:, ["open", "high", "low", "close", "volume"]].astype(float).copy()
     if not np.isfinite(data.to_numpy()).all():
         raise ValueError("OHLCV data must be finite and non-null")
