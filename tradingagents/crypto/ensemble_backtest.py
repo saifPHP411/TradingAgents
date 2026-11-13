@@ -98,6 +98,7 @@ def run_backtest(
     signal_settings: EnsembleSettings | None = None,
     settings: BacktestSettings = BacktestSettings(),
     btc_frame: pd.DataFrame | None = None,
+    trading_start_ts: pd.Timestamp | str | None = None,
 ) -> BacktestResult:
     """Run one symbol; each signal is acted on at the following bar's open."""
     if mode not in {"ensemble", "trend", "range", "breakout", "trend_pullback"}:
@@ -125,6 +126,11 @@ def run_backtest(
     signal_settings = signal_settings or EnsembleSettings()
     _validate_settings(signal_settings)
     data = _validate(frame, settings)
+    trading_start = pd.Timestamp(trading_start_ts) if trading_start_ts is not None else None
+    if trading_start is not None:
+        if trading_start.tzinfo is None:
+            raise ValueError("trading_start_ts must be timezone-aware")
+        trading_start = trading_start.tz_convert(data.index.tz)
     signal_indicators = _indicators(data, signal_settings)
     btc_indicators = None
     if btc_frame is not None:
@@ -272,7 +278,11 @@ def run_backtest(
             pending = {"action": "exit", "reason": "btc_risk_filter"}
         elif position is not None and signal.should_exit:
             pending = {"action": "exit", "reason": "signal_flat"}
-        elif position is None and j > cooldown_until and not btc_risk_off and signal.action == "long" and signal.stop is not None:
+        elif (
+            position is None and j > cooldown_until and not btc_risk_off
+            and (trading_start is None or timestamp >= trading_start)
+            and signal.action == "long" and signal.stop is not None
+        ):
             pending = {"action": "entry", "stop": signal.stop}
 
     # If a position remains after the loop, close it at the last available close.
