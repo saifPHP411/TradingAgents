@@ -54,14 +54,14 @@ def run_ensemble_study(
             if frame is None or frame.empty:
                 raise RuntimeError(f"missing cached 1h history for {symbol}")
             section = _partition(frame, left, right)
-            if len(section) < 222:
+            if len(section) < 402:
                 raise RuntimeError(
-                    f"{symbol} {partition} has only {len(section)} bars; at least 222 required"
+                    f"{symbol} {partition} has only {len(section)} bars; at least 402 required"
                 )
             btc_section = None
             if symbol != "BTC/USDT" and btc_full is not None:
                 btc_section = btc_full.loc[section.index[0] : section.index[-1]]
-                if len(btc_section) < 222:
+                if len(btc_section) < 402:
                     raise RuntimeError(f"insufficient aligned BTC filter history for {symbol}")
             base = BacktestSettings(initial_cash=initial_cash)
             stressed = BacktestSettings(
@@ -89,7 +89,7 @@ def run_ensemble_study(
         btc_section = None
         if symbol != "BTC/USDT" and btc_full is not None:
             btc_section = btc_full.loc[section.index[0] : section.index[-1]]
-        if len(section) < 222 or (btc_section is not None and len(btc_section) < 222):
+        if len(section) < 402 or (btc_section is not None and len(btc_section) < 402):
             raise RuntimeError(f"insufficient recent 30d 1h history for {symbol}")
         base = BacktestSettings(initial_cash=initial_cash)
         stressed = BacktestSettings(
