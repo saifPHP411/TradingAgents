@@ -6,8 +6,10 @@ on:
     paths:
       - "tradingagents/crypto/ensemble.py"
       - "tradingagents/crypto/ensemble_backtest.py"
+      - "tradingagents/crypto/ensemble_portfolio.py"
       - "tests/test_crypto_ensemble.py"
       - "tests/test_crypto_ensemble_backtest.py"
+      - "tests/test_crypto_ensemble_portfolio.py"
       - ".github/workflows/crypto-ensemble-tests.yml"
   pull_request:
     branches: [bybit-demo-integration]
@@ -34,4 +36,4 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
       - name: Run ensemble unit tests
-        run: python -m pytest -q tests/test_crypto_ensemble.py tests/test_crypto_ensemble_backtest.py
+        run: python -m pytest -q tests/test_crypto_ensemble.py tests/test_crypto_ensemble_backtest.py tests/test_crypto_ensemble_portfolio.py
