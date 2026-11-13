@@ -2,7 +2,7 @@
 
 Both seams are driven offline. The market clock is exercised with an injected
 clock (open, naive, and a raising clock that must read *unknown*, never *open*);
-the intraday seam is exercised with a fake Binance client so the closed-bar,
+the intraday seam is exercised with a fake Bybit client so the closed-bar,
 freshness, future-dated, malformed and transport branches all run for real.
 """
 

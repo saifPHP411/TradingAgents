@@ -5,7 +5,6 @@ on:
     branches:
       - bybit-demo-integration
       - demo-ready-dashboard-2026
-      - strategy-research-cost-aware
     paths:
       - ".github/workflows/crypto-tjr-study.yml"
       - "tradingagents/crypto/**"
@@ -38,14 +37,14 @@ jobs:
       - name: Install backtest dependencies
         run: python -m pip install --upgrade pip pandas numpy requests python-dotenv pydantic
 
-      - name: Fetch 30 days of public Binance candles
+      - name: Fetch 30 days of Bybit Spot candles
         run: |
           python -m tradingagents.crypto.backtest.fetch \
             --symbols BTC/USDT ETH/USDT BNB/USDT \
             --limit 43200 \
             --cache ./crypto-cache
 
-      - name: Run TJR study with explicit frictionless, realistic and conservative cost scenarios
+      - name: Run unchanged TJR study with realistic costs
         run: |
           mkdir -p artifacts
           python -m tradingagents.crypto.backtest.run \
