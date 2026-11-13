@@ -17,6 +17,8 @@ on:
     branches: [bybit-demo-integration, research/regime-adaptive-ensemble]
     paths:
       - "tradingagents/crypto/ensemble.py"
+      - "tradingagents/crypto/ensemble_walkforward.py"
+      - "tradingagents/crypto/run_ensemble_walkforward.py"
       - "tradingagents/crypto/ensemble_backtest.py"
       - "tradingagents/crypto/ensemble_portfolio.py"
       - "tests/test_crypto_ensemble.py"
