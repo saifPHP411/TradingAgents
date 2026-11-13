@@ -199,6 +199,70 @@ def _risk_metrics(hourly_returns: list[float], trades: list[dict]) -> dict:
     }
 
 
+def _profit_concentration(trades: list[dict], fold_trade_logs: list[list[dict]]) -> dict:
+    """Measure whether gross winning PnL is dominated by one symbol, fold, or trade."""
+    symbol_net: dict[str, float] = {}
+    symbol_wins: dict[str, float] = {}
+    for trade in trades:
+        symbol = str(trade["symbol"])
+        pnl = float(trade["net_pnl"])
+        symbol_net[symbol] = symbol_net.get(symbol, 0.0) + pnl
+        symbol_wins[symbol] = symbol_wins.get(symbol, 0.0) + max(pnl, 0.0)
+
+    fold_wins = [
+        sum(max(float(trade["net_pnl"]), 0.0) for trade in fold_trades)
+        for fold_trades in fold_trade_logs
+    ]
+    trade_wins = [max(float(trade["net_pnl"]), 0.0) for trade in trades]
+    total_wins = sum(trade_wins)
+
+    def share(value: float) -> float | None:
+        return value / total_wins * 100.0 if total_wins > 0 else None
+
+    by_symbol = {
+        symbol: {
+            "net_pnl_usdt": round(symbol_net[symbol], 8),
+            "gross_winning_pnl_usdt": round(symbol_wins[symbol], 8),
+            "gross_winning_pnl_share_pct": share(symbol_wins[symbol]),
+        }
+        for symbol in sorted(symbol_net)
+    }
+    by_fold = [
+        {
+            "fold": number,
+            "gross_winning_pnl_usdt": round(winning_pnl, 8),
+            "gross_winning_pnl_share_pct": share(winning_pnl),
+        }
+        for number, winning_pnl in enumerate(fold_wins, start=1)
+    ]
+    symbol_shares = [item["gross_winning_pnl_share_pct"] for item in by_symbol.values()]
+    fold_shares = [item["gross_winning_pnl_share_pct"] for item in by_fold]
+    largest_trade_share = share(max(trade_wins, default=0.0))
+    largest_symbol_share = max((value for value in symbol_shares if value is not None), default=None)
+    largest_fold_share = max((value for value in fold_shares if value is not None), default=None)
+    return {
+        "gross_winning_pnl_usdt": round(total_wins, 8),
+        "by_symbol": by_symbol,
+        "by_fold": by_fold,
+        "largest_symbol_share_pct": largest_symbol_share,
+        "largest_fold_share_pct": largest_fold_share,
+        "largest_trade_share_pct": largest_trade_share,
+        "single_symbol_or_fold_dominates": (
+            largest_symbol_share > 50.0 or largest_fold_share > 50.0
+            if largest_symbol_share is not None and largest_fold_share is not None
+            else None
+        ),
+        "interpretation": (
+            "not_assessable_no_gross_winning_pnl"
+            if total_wins <= 0
+            else "concentrated" if (
+                (largest_symbol_share is not None and largest_symbol_share > 50.0)
+                or (largest_fold_share is not None and largest_fold_share > 50.0)
+            ) else "no_single_symbol_or_fold_over_50pct"
+        ),
+    }
+
+
 def run_walk_forward(
     frames: dict[str, pd.DataFrame],
     *,
@@ -218,6 +282,7 @@ def run_walk_forward(
     all_returns: list[float] = []
     return_segments: list[list[float]] = []
     all_trades: list[dict] = []
+    fold_trade_logs: list[list[dict]] = []
     compounded_equity = bt.initial_cash
     benchmark_equity = bt.initial_cash
     fold_number = 0
@@ -254,6 +319,7 @@ def run_walk_forward(
         all_returns.extend(fold_returns)
         return_segments.append(fold_returns)
         all_trades.extend(result.trade_log)
+        fold_trade_logs.append(result.trade_log)
         fold_return = result.final_equity / bt.initial_cash - 1.0
         compounded_equity *= 1.0 + fold_return
         fee_rate = bt.fee_bps / 10_000.0
@@ -325,6 +391,7 @@ def run_walk_forward(
             "compounded_net_return_pct": (compounded_equity / bt.initial_cash - 1.0) * 100.0,
             "equal_weight_buy_hold_compounded_net_return_pct": (benchmark_equity / bt.initial_cash - 1.0) * 100.0,
             "worst_fold_max_drawdown_pct": worst_fold_drawdown,
+            "profit_concentration": _profit_concentration(all_trades, fold_trade_logs),
             **metrics,
         },
         "monte_carlo": monte_carlo,
