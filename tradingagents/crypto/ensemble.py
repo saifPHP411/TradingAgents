@@ -108,16 +108,7 @@ def _indicators(data: pd.DataFrame, s: EnsembleSettings) -> pd.DataFrame:
     return x
 
 
-def evaluate_ensemble(
-    frame: pd.DataFrame,
-    settings: EnsembleSettings = EnsembleSettings(),
-    *,
-    mode: StrategyMode = "ensemble",
-) -> EnsembleSignal:
-    """Evaluate the latest completed bar; callers must exclude any still-open candle."""
-    if mode not in {"ensemble", "trend", "range", "breakout"}:
-        raise ValueError("mode must be ensemble, trend, range, or breakout")
-    data = _validate(frame)
+def _validate_settings(settings: EnsembleSettings) -> None:
     positive_periods = (
         settings.fast_ema, settings.slow_ema, settings.adx_period,
         settings.donchian_entry, settings.donchian_exit,
@@ -128,15 +119,41 @@ def evaluate_ensemble(
         raise ValueError("indicator periods must be positive integers")
     if settings.fast_ema >= settings.slow_ema:
         raise ValueError("fast_ema must be smaller than slow_ema")
-    if settings.atr_stop_multiple <= 0 or settings.max_extension_atr <= 0 or settings.volume_multiple <= 0:
-        raise ValueError("ATR multiples must be positive")
-    x = _indicators(data, settings)
-    row = x.iloc[-1]
-    needed = ["atr", "adx", "fast_ema", "slow_ema", "prior_high", "momentum",
-              "range_mean", "range_std", "zscore", "plus_di", "minus_di", "rsi", "volume_mean"]
-    if any(pd.isna(row[k]) for k in needed) or row.atr <= 0:
-        return EnsembleSignal("flat", "uncertain", "none", 0.0, float(row.close), None,
-                              "indicator warm-up or invalid volatility", True)
+    if (
+        settings.atr_stop_multiple <= 0
+        or settings.max_extension_atr <= 0
+        or settings.volume_multiple <= 0
+        or settings.range_zscore <= 0
+    ):
+        raise ValueError("ATR, volume and range thresholds must be positive")
+    if not 0 <= settings.range_rsi_max <= 100 or not 0 <= settings.trend_rsi_min <= 100:
+        raise ValueError("RSI thresholds must be between 0 and 100")
+    if not 0 <= settings.adx_range_max < settings.adx_trend_min <= 100:
+        raise ValueError("ADX regime thresholds must satisfy 0 <= range < trend <= 100")
+
+
+def _evaluate_indicator_row(
+    indicators: pd.DataFrame,
+    position: int,
+    settings: EnsembleSettings,
+    mode: StrategyMode = "ensemble",
+) -> EnsembleSignal:
+    """Evaluate one precomputed causal indicator row without recalculating history."""
+    if mode not in {"ensemble", "trend", "range", "breakout"}:
+        raise ValueError("mode must be ensemble, trend, range, or breakout")
+    if position <= 0 or position >= len(indicators):
+        raise ValueError("indicator position must have a previous completed bar")
+    row = indicators.iloc[position]
+    needed = [
+        "atr", "adx", "fast_ema", "slow_ema", "prior_high", "prior_low_exit",
+        "momentum", "range_mean", "range_std", "zscore", "plus_di", "minus_di",
+        "rsi", "volume_mean",
+    ]
+    if any(pd.isna(row[key]) for key in needed) or row.atr <= 0:
+        return EnsembleSignal(
+            "flat", "uncertain", "none", 0.0, float(row.close), None,
+            "indicator warm-up or invalid volatility", True,
+        )
     close, atr = float(row.close), float(row.atr)
     if row.adx >= settings.adx_trend_min:
         regime: Regime = "trend"
@@ -145,22 +162,33 @@ def evaluate_ensemble(
     else:
         regime = "uncertain"
 
+    if mode == "breakout" and regime != "trend":
+        return EnsembleSignal(
+            "flat", regime, "volatility_breakout", 0.0, close, None,
+            "breakout module requires a confirmed trend regime", True,
+        )
+
     if regime == "trend" or mode == "breakout":
         aligned = row.fast_ema > row.slow_ema and row.plus_di > row.minus_di
         momentum_ok = row.momentum > 0
         breakout = close > row.prior_high
         extension_ok = (close - row.fast_ema) / atr <= settings.max_extension_atr
         if mode == "range":
-            return EnsembleSignal("flat", regime, "range_mean_reversion", 0.0, close, None,
-                                  "range-only mode: trend regime is disabled", True)
+            return EnsembleSignal(
+                "flat", regime, "range_mean_reversion", 0.0, close, None,
+                "range-only mode: trend regime is disabled", True,
+            )
         if mode == "breakout":
-            aligned = True
+            aligned = close > row.slow_ema
         volume_ok = row.volume >= row.volume_mean * settings.volume_multiple
         rsi_ok = row.rsi >= settings.trend_rsi_min
         if aligned and momentum_ok and breakout and extension_ok and volume_ok and rsi_ok:
             stop = close - settings.atr_stop_multiple * atr
-            return EnsembleSignal("long", regime, "trend_donchian_momentum", 1.0,
-                                  close, stop, "EMA/DI alignment, positive momentum and prior-channel breakout")
+            module = "volatility_breakout" if mode == "breakout" else "trend_donchian_momentum"
+            return EnsembleSignal(
+                "long", regime, module, 1.0, close, stop,
+                "Donchian breakout with trend, momentum, RSI and volume confirmation",
+            )
         trend_exit = (
             close < row.prior_low_exit
             or row.fast_ema < row.slow_ema
@@ -174,22 +202,41 @@ def evaluate_ensemble(
 
     if regime == "range" or mode == "range":
         if mode in {"trend", "breakout"}:
-            return EnsembleSignal("flat", regime, "trend_donchian_momentum", 0.0, close, None,
-                                  "trend-only mode: range regime is disabled", True)
-        # Mean reversion is only allowed in a low-ADX regime. Never average down:
-        # require a bullish close relative to the prior bar after a lower-band stretch.
+            return EnsembleSignal(
+                "flat", regime, "trend_donchian_momentum", 0.0, close, None,
+                "trend-only mode: range regime is disabled", True,
+            )
         stretched = row.zscore <= -settings.range_zscore
-        reversal = close > float(x.close.iloc[-2])
+        reversal = close > float(indicators.close.iloc[position - 1])
         oversold = row.rsi <= settings.range_rsi_max
         if stretched and reversal and oversold:
             stop = close - settings.atr_stop_multiple * atr
-            return EnsembleSignal("long", regime, "range_mean_reversion", 0.7,
-                                  close, stop, "lower-band stretch followed by a bullish close")
+            return EnsembleSignal(
+                "long", regime, "range_mean_reversion", 0.7, close, stop,
+                "lower-band stretch with oversold RSI and bullish reversal",
+            )
         range_exit = close >= float(row.range_mean)
         return EnsembleSignal(
             "flat", regime, "range_mean_reversion", 0.0, close, None,
             "mean-reversion target reached" if range_exit else "no fresh oversold reversal; keep existing position",
             bool(range_exit),
         )
-    return EnsembleSignal("flat", regime, "none", 0.0, close, None,
-                          "ambiguous regime: stand aside")
+    return EnsembleSignal(
+        "flat", regime, "none", 0.0, close, None,
+        "ambiguous regime: stand aside", True,
+    )
+
+
+def evaluate_ensemble(
+    frame: pd.DataFrame,
+    settings: EnsembleSettings = EnsembleSettings(),
+    *,
+    mode: StrategyMode = "ensemble",
+) -> EnsembleSignal:
+    """Evaluate the latest completed bar; callers must exclude any still-open candle."""
+    if mode not in {"ensemble", "trend", "range", "breakout"}:
+        raise ValueError("mode must be ensemble, trend, range, or breakout")
+    _validate_settings(settings)
+    data = _validate(frame)
+    indicators = _indicators(data, settings)
+    return _evaluate_indicator_row(indicators, len(indicators) - 1, settings, mode)
