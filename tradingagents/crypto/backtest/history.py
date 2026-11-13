@@ -41,9 +41,10 @@ from ..transport import CryptoDataError
 from ..types import CANDLE_INTERVALS, Candle, candles_to_frame
 
 CACHE_SCHEMA_VERSION = 1
-DEFAULT_CACHE_DIR = Path(
-    os.environ.get("TRADINGAGENTS_CRYPTO_CACHE_DIR") or "~/.tradingagents/crypto/bybit"
+_DEFAULT_CACHE_ROOT = Path(
+    os.environ.get("TRADINGAGENTS_CRYPTO_CACHE_DIR") or "~/.tradingagents/crypto"
 ).expanduser()
+DEFAULT_CACHE_DIR = _DEFAULT_CACHE_ROOT / "bybit"
 
 
 def _bar_key(symbol: str, interval: str) -> str:
