@@ -1,5 +1,7 @@
 """Regression coverage for the live broker execution dashboard view."""
 
+import pytest
+
 from tradingagents.paper_experiment.dashboard.engine_view import trades_view
 
 
@@ -125,8 +127,8 @@ def test_bybit_spot_position_uses_mark_price_and_worker_fill_cost_basis():
 
     assert row["entry_price"] == 652.57
     assert row["current_price"] == 660.0
-    assert row["market_value"] == 0.0153 * 660.0
-    assert row["unrealized_pnl"] == (0.0153 * 660.0) - (0.0153 * 652.57)
+    assert row["market_value"] == pytest.approx(0.0153 * 660.0, abs=1e-12)
+    assert row["unrealized_pnl"] == pytest.approx((660.0 - 652.57) * 0.0153, abs=1e-12)
 
 
 def test_bybit_spot_position_does_not_guess_cost_basis_from_partial_order_history():
@@ -155,7 +157,7 @@ def test_bybit_spot_position_does_not_guess_cost_basis_from_partial_order_histor
 
     assert row["entry_price"] is None
     assert row["current_price"] == 660.0
-    assert row["market_value"] == 13.2
+    assert row["market_value"] == pytest.approx(13.2, abs=1e-12)
     assert row["unrealized_pnl"] is None
 
 
@@ -173,5 +175,5 @@ def test_position_view_uses_recorded_stop_entry_price_when_broker_cost_basis_mis
 
     assert row["entry_price"] == 652.57
     assert row["current_price"] == 660.0
-    assert row["market_value"] == 0.0153 * 660.0
-    assert row["unrealized_pnl"] == (660.0 - 652.57) * 0.0153
+    assert row["market_value"] == pytest.approx(0.0153 * 660.0, abs=1e-12)
+    assert row["unrealized_pnl"] == pytest.approx((660.0 - 652.57) * 0.0153, abs=1e-12)
