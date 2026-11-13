@@ -88,7 +88,7 @@ def run_backtest(
     btc_frame: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """Run one symbol; each signal is acted on at the following bar's open."""
-    if mode not in {"ensemble", "trend", "range", "breakout"}:
+    if mode not in {"ensemble", "trend", "range", "breakout", "trend_pullback"}:
         raise ValueError("unsupported strategy mode")
     if type(settings.max_hold_bars) is not int or settings.max_hold_bars < 1:
         raise ValueError("max hold bars must be a positive integer")
@@ -297,7 +297,7 @@ def compare_modes(
 ) -> dict:
     """Run four comparable variants on identical bars and execution assumptions."""
     signal_settings = signal_settings or EnsembleSettings()
-    modes = ("trend", "range", "breakout", "ensemble")
+    modes = ("trend", "trend_pullback", "range", "breakout", "ensemble")
     return {
         "schema_version": 1,
         "kind": "crypto_regime_ensemble_comparison",
