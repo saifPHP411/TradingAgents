@@ -14,7 +14,7 @@ import pandas as pd
 
 Regime = Literal["trend", "range", "uncertain"]
 Action = Literal["long", "flat"]
-StrategyMode = Literal["ensemble", "trend", "range", "breakout"]
+StrategyMode = Literal["ensemble", "trend", "range", "breakout", "trend_pullback"]
 
 
 @dataclass(frozen=True)
@@ -146,7 +146,7 @@ def _evaluate_indicator_row(
     mode: StrategyMode = "ensemble",
 ) -> EnsembleSignal:
     """Evaluate one precomputed causal indicator row without recalculating history."""
-    if mode not in {"ensemble", "trend", "range", "breakout"}:
+    if mode not in {"ensemble", "trend", "range", "breakout", "trend_pullback"}:
         raise ValueError("mode must be ensemble, trend, range, or breakout")
     if position <= 0 or position >= len(indicators):
         raise ValueError("indicator position must have a previous completed bar")
@@ -175,13 +175,14 @@ def _evaluate_indicator_row(
             "range-only mode requires a confirmed range regime", True,
         )
 
-    if mode == "breakout" and regime != "trend":
+    if mode in {"breakout", "trend_pullback"} and regime != "trend":
+        module = "volatility_breakout" if mode == "breakout" else "trend_pullback_momentum"
         return EnsembleSignal(
-            "flat", regime, "volatility_breakout", 0.0, close, None,
-            "breakout module requires a confirmed trend regime", True,
+            "flat", regime, module, 0.0, close, None,
+            "trend module requires a confirmed trend regime", True,
         )
 
-    if regime == "trend" or mode == "breakout":
+    if regime == "trend" or mode in {"breakout", "trend_pullback"}:
         aligned = row.fast_ema > row.slow_ema and row.plus_di > row.minus_di
         momentum_ok = row.momentum > 0
         breakout = close > row.prior_high
@@ -193,18 +194,39 @@ def _evaluate_indicator_row(
             )
         if mode == "breakout":
             aligned = close > row.slow_ema
+        if mode == "trend_pullback":
+            aligned = row.fast_ema > row.slow_ema and row.plus_di > row.minus_di
         volume_ok = row.volume >= row.volume_mean * settings.volume_multiple
         rsi_ok = row.rsi >= settings.trend_rsi_min
         volatility_expansion_ok = (
             mode != "breakout" or row.atr_expansion >= settings.atr_expansion_multiple
         )
-        if aligned and momentum_ok and breakout and extension_ok and volume_ok and rsi_ok and volatility_expansion_ok:
+        if mode != "trend_pullback" and aligned and momentum_ok and breakout and extension_ok and volume_ok and rsi_ok and volatility_expansion_ok:
             stop = close - settings.atr_stop_multiple * atr
             module = "volatility_breakout" if mode == "breakout" else "trend_donchian_momentum"
             return EnsembleSignal(
                 "long", regime, module, 1.0, close, stop,
                 "Donchian breakout with trend, momentum, RSI, volume and ATR expansion confirmation",
             )
+
+        if mode in {"ensemble", "trend_pullback"}:
+            previous = indicators.iloc[position - 1]
+            pullback_reclaim = (
+                previous.close <= previous.fast_ema
+                and close > row.fast_ema
+                and close > previous.close
+            )
+            pullback_volume_ok = row.volume >= row.volume_mean * 0.8
+            pullback_rsi_ok = row.rsi >= 50.0
+            if (
+                aligned and momentum_ok and pullback_reclaim and extension_ok
+                and pullback_volume_ok and pullback_rsi_ok
+            ):
+                stop = close - settings.atr_stop_multiple * atr
+                return EnsembleSignal(
+                    "long", regime, "trend_pullback_momentum", 0.85, close, stop,
+                    "EMA pullback reclaim with positive trend momentum and volume confirmation",
+                )
         trend_exit = (
             close < row.prior_low_exit
             or row.fast_ema < row.slow_ema
@@ -217,7 +239,7 @@ def _evaluate_indicator_row(
         )
 
     if regime == "range" or mode == "range":
-        if mode in {"trend", "breakout"}:
+        if mode in {"trend", "breakout", "trend_pullback"}:
             return EnsembleSignal(
                 "flat", regime, "trend_donchian_momentum", 0.0, close, None,
                 "trend-only mode: range regime is disabled", True,
@@ -250,7 +272,7 @@ def evaluate_ensemble(
     mode: StrategyMode = "ensemble",
 ) -> EnsembleSignal:
     """Evaluate the latest completed bar; callers must exclude any still-open candle."""
-    if mode not in {"ensemble", "trend", "range", "breakout"}:
+    if mode not in {"ensemble", "trend", "range", "breakout", "trend_pullback"}:
         raise ValueError("mode must be ensemble, trend, range, or breakout")
     _validate_settings(settings)
     data = _validate(frame)
