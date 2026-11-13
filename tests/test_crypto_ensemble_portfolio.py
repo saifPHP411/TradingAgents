@@ -370,5 +370,6 @@ def test_portfolio_backtest_requires_timezone_aware_oos_start():
     with pytest.raises(ValueError, match="timezone-aware"):
         run_portfolio_backtest(
             {"BTC/USDT": _rising_frame()},
+            settings=BacktestSettings(warmup_bars=220),
             trading_start_ts="2025-01-12 00:00:00",
         )
