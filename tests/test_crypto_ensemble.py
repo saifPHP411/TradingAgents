@@ -72,6 +72,25 @@ def test_trend_no_entry_is_not_mistaken_for_an_exit():
     assert result.should_exit is False
 
 
+def test_trend_pullback_module_can_emit_a_reclaim_entry():
+    close = np.linspace(100, 109, 300)
+    close[-3] = close[-4] - 1.2
+    close[-2] = close[-3] - 0.2
+    close[-1] = close[-2] + 1.8
+    frame = pd.DataFrame({
+        "open": close - 0.1,
+        "high": close + 0.3,
+        "low": close - 0.3,
+        "close": close,
+        "volume": np.full(len(close), 1000.0),
+    })
+    result = evaluate_ensemble(frame, mode="trend_pullback")
+    assert result.regime == "trend"
+    assert result.action == "long"
+    assert result.module == "trend_pullback_momentum"
+    assert result.stop is not None and result.stop < result.close
+
+
 def test_breakout_module_requires_atr_expansion():
     close = np.linspace(100, 130, 260)
     close[-1] = close[-2] + 1.1
