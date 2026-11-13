@@ -150,6 +150,17 @@ def test_rejects_infinite_and_negative_volume():
         evaluate_ensemble(frame)
 
 
+def test_rejects_unsorted_and_duplicate_bar_indexes():
+    frame = _frame(np.linspace(100, 110, 240))
+    frame.index = frame.index[::-1]
+    with pytest.raises(ValueError, match="strictly increasing"):
+        evaluate_ensemble(frame)
+    frame = _frame(np.linspace(100, 110, 240))
+    frame.index = list(range(239)) + [238]
+    with pytest.raises(ValueError, match="strictly increasing"):
+        evaluate_ensemble(frame)
+
+
 def test_rejects_invalid_indicator_settings():
     frame = _frame(np.linspace(100, 110, 240))
     with pytest.raises(ValueError, match="fast_ema"):
