@@ -1,16 +1,14 @@
 """Research-only regime-aware spot breakout strategy.
 
-This module is deliberately isolated from the paper worker. It produces a
-long-only signal from completed OHLCV bars and does not place orders, size a
-portfolio, or modify the deployed TJR strategy.
+This module is isolated from the paper worker. It provides a causal long-only
+signal and a single-symbol OHLCV backtest with next-bar-open entries, conservative
+intrabar stop handling, explicit execution costs and risk-based sizing.
 
-The entry is a trend-filtered Donchian breakout with a relative-volume filter.
-All rolling breakout/volume references are shifted by one bar to avoid using
-the signal bar in its own threshold.
+It is a research candidate, not a claim of profitability and not wired to trading.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -38,6 +36,79 @@ class RegimeBreakoutSettings:
             raise ValueError("volume_multiple, stop_atr_multiple and reward_risk must be positive")
 
 
+@dataclass(frozen=True)
+class ExecutionCosts:
+    """Per-fill assumptions; these are scenarios, not verified account fees."""
+    commission_bps: float = 10.0
+    half_spread_bps: float = 1.0
+    slippage_bps: float = 2.0
+
+    def __post_init__(self) -> None:
+        if min(self.commission_bps, self.half_spread_bps, self.slippage_bps) < 0:
+            raise ValueError("execution costs cannot be negative")
+
+
+@dataclass(frozen=True)
+class BacktestSettings:
+    initial_cash: float = 10_000.0
+    risk_fraction: float = 0.005
+    max_notional_fraction: float = 0.10
+
+    def __post_init__(self) -> None:
+        if self.initial_cash <= 0:
+            raise ValueError("initial_cash must be positive")
+        if not 0 < self.risk_fraction <= 0.02:
+            raise ValueError("risk_fraction must be in (0, 0.02]")
+        if not 0 < self.max_notional_fraction <= 1:
+            raise ValueError("max_notional_fraction must be in (0, 1]")
+
+
+@dataclass
+class BreakoutTrade:
+    entry_time: str
+    exit_time: str
+    quantity: float
+    entry_price: float
+    exit_price: float
+    stop: float
+    target: float
+    exit_reason: str
+    fees: float
+    gross_pnl: float
+    net_pnl: float
+
+
+@dataclass
+class BreakoutBacktestResult:
+    initial_cash: float
+    final_equity: float
+    trades: list[BreakoutTrade] = field(default_factory=list)
+    total_fees: float = 0.0
+    total_slippage_spread: float = 0.0
+
+    def metrics(self) -> dict:
+        wins = [t.net_pnl for t in self.trades if t.net_pnl > 0]
+        losses = [t.net_pnl for t in self.trades if t.net_pnl < 0]
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
+        return {
+            "initial_equity": self.initial_cash,
+            "final_equity": self.final_equity,
+            "net_pnl": self.final_equity - self.initial_cash,
+            "net_return_pct": (self.final_equity / self.initial_cash - 1.0) * 100.0,
+            "trades": len(self.trades),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate_pct": (len(wins) / len(self.trades) * 100.0) if self.trades else 0.0,
+            "profit_factor": (gross_profit / gross_loss) if gross_loss else (float("inf") if gross_profit else 0.0),
+            "expectancy_per_trade": (
+                sum(t.net_pnl for t in self.trades) / len(self.trades) if self.trades else 0.0
+            ),
+            "fees": self.total_fees,
+            "spread_and_slippage": self.total_slippage_spread,
+        }
+
+
 def indicators(frame: pd.DataFrame, settings: RegimeBreakoutSettings = RegimeBreakoutSettings()) -> pd.DataFrame:
     """Return causal indicators for a chronological OHLCV frame."""
     required = {"open", "high", "low", "close", "volume"}
@@ -51,6 +122,10 @@ def indicators(frame: pd.DataFrame, settings: RegimeBreakoutSettings = RegimeBre
     out = frame.loc[:, ["open", "high", "low", "close", "volume"]].astype(float).copy()
     if (out[["open", "high", "low", "close"]] <= 0).any().any() or (out["volume"] < 0).any():
         raise ValueError("prices must be positive and volume cannot be negative")
+    if (out["high"] < out[["open", "close", "low"]].max(axis=1)).any():
+        raise ValueError("high must be the greatest OHLC price")
+    if (out["low"] > out[["open", "close", "high"]].min(axis=1)).any():
+        raise ValueError("low must be the smallest OHLC price")
     previous_close = out["close"].shift(1)
     true_range = pd.concat(
         [out["high"] - out["low"],
@@ -88,8 +163,132 @@ def entry_levels(row: pd.Series, settings: RegimeBreakoutSettings = RegimeBreako
     if not pd.notna(atr) or atr <= 0 or entry <= 0:
         return None
     stop = entry - settings.stop_atr_multiple * atr
-    risk = entry - stop
-    target = entry + settings.reward_risk * risk
+    target = entry + settings.reward_risk * (entry - stop)
     if stop <= 0 or not (stop < entry < target):
         return None
     return entry, stop, target
+
+
+def run_backtest(
+    frame: pd.DataFrame,
+    *,
+    strategy: RegimeBreakoutSettings = RegimeBreakoutSettings(),
+    execution: ExecutionCosts = ExecutionCosts(),
+    portfolio: BacktestSettings = BacktestSettings(),
+) -> BreakoutBacktestResult:
+    """Backtest one spot symbol; signals use closed bars and fill at next open.
+
+    If one bar touches both stop and target, stop wins. A position is closed at
+    the last close if the data ends before its stop/target/time exit.
+    """
+    data = indicators(frame, strategy)
+    cash = float(portfolio.initial_cash)
+    result = BreakoutBacktestResult(initial_cash=cash, final_equity=cash)
+    position: dict | None = None
+    impact = (execution.half_spread_bps + execution.slippage_bps) / 10_000.0
+
+    for i, (stamp, row) in enumerate(data.iterrows()):
+        if position is not None:
+            held = i - position["entry_index"]
+            exit_price = None
+            reason = None
+            if float(row["low"]) <= position["stop"]:
+                exit_price, reason = position["stop"], "stop"
+            elif float(row["high"]) >= position["target"]:
+                exit_price, reason = position["target"], "target"
+            elif held >= strategy.max_holding_bars:
+                exit_price, reason = float(row["close"]), "time"
+            if exit_price is not None:
+                fill = exit_price * (1.0 - impact)
+                notional = position["quantity"] * fill
+                fee = notional * execution.commission_bps / 10_000.0
+                cash += notional - fee
+                gross = (fill - position["entry_price"]) * position["quantity"]
+                net = gross - position["entry_fee"] - fee
+                result.total_fees += fee
+                result.total_slippage_spread += (
+                    abs(exit_price - fill) * position["quantity"]
+                )
+                result.trades.append(BreakoutTrade(
+                    entry_time=position["entry_time"],
+                    exit_time=stamp.isoformat(),
+                    quantity=position["quantity"],
+                    entry_price=position["entry_price"],
+                    exit_price=fill,
+                    stop=position["stop"],
+                    target=position["target"],
+                    exit_reason=reason,
+                    fees=position["entry_fee"] + fee,
+                    gross_pnl=gross,
+                    net_pnl=net,
+                ))
+                position = None
+
+        # Signal at this close; the earliest fill is the next bar's open.
+        if position is None and i + 1 < len(data) and bool(row["long_entry"]):
+            levels = entry_levels(row, strategy)
+            if levels is None:
+                continue
+            reference, signal_stop, _ = levels
+            next_open = float(data.iloc[i + 1]["open"])
+            fill = next_open * (1.0 + impact)
+            risk_per_unit = fill - signal_stop
+            if risk_per_unit <= 0:
+                continue
+            risk_budget = cash * portfolio.risk_fraction
+            quantity_by_risk = risk_budget / risk_per_unit
+            quantity_by_notional = cash * portfolio.max_notional_fraction / fill
+            quantity = min(quantity_by_risk, quantity_by_notional)
+            if quantity <= 0:
+                continue
+            stop = fill - (reference - signal_stop)
+            target = fill + strategy.reward_risk * (fill - stop)
+            entry_notional = quantity * fill
+            entry_fee = entry_notional * execution.commission_bps / 10_000.0
+            total_debit = entry_notional + entry_fee
+            if total_debit > cash:
+                quantity = cash / (fill * (1.0 + execution.commission_bps / 10_000.0))
+                entry_notional = quantity * fill
+                entry_fee = entry_notional * execution.commission_bps / 10_000.0
+                total_debit = entry_notional + entry_fee
+            cash -= total_debit
+            result.total_fees += entry_fee
+            result.total_slippage_spread += abs(fill - next_open) * quantity
+            position = {
+                "entry_index": i + 1,
+                "entry_time": data.index[i + 1].isoformat(),
+                "entry_price": fill,
+                "quantity": quantity,
+                "stop": stop,
+                "target": target,
+                "entry_fee": entry_fee,
+            }
+
+    if position is not None and len(data):
+        stamp = data.index[-1]
+        raw_exit = float(data.iloc[-1]["close"])
+        fill = raw_exit * (1.0 - impact)
+        notional = position["quantity"] * fill
+        fee = notional * execution.commission_bps / 10_000.0
+        cash += notional - fee
+        gross = (fill - position["entry_price"]) * position["quantity"]
+        net = gross - position["entry_fee"] - fee
+        result.total_fees += fee
+        result.total_slippage_spread += abs(raw_exit - fill) * position["quantity"]
+        result.trades.append(BreakoutTrade(
+            entry_time=position["entry_time"], exit_time=stamp.isoformat(),
+            quantity=position["quantity"], entry_price=position["entry_price"],
+            exit_price=fill, stop=position["stop"], target=position["target"],
+            exit_reason="data_end", fees=position["entry_fee"] + fee,
+            gross_pnl=gross, net_pnl=net,
+        ))
+
+    result.final_equity = cash
+    return result
+
+
+__all__ = [
+    "BacktestSettings", "BreakoutBacktestResult", "BreakoutTrade",
+    "ExecutionCosts", "RegimeBreakoutSettings", "entry_levels",
+    "indicators", "run_backtest",
+]
