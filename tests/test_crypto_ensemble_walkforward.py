@@ -10,6 +10,7 @@ from tradingagents.crypto.ensemble_walkforward import (
     WalkForwardSettings,
     block_bootstrap_equity,
     run_walk_forward,
+    _profit_concentration,
 )
 
 
@@ -146,3 +147,34 @@ def test_buy_hold_benchmark_uses_same_next_bar_oos_entry_timing():
     )
     assert report["folds"][0]["equal_weight_buy_hold_net_return_pct"] == pytest.approx(expected)
 
+
+
+
+def test_profit_concentration_flags_single_symbol_and_fold_dominance():
+    btc_win = {"symbol": "BTC/USDT", "net_pnl": 60.0}
+    btc_loss = {"symbol": "BTC/USDT", "net_pnl": -10.0}
+    eth_win = {"symbol": "ETH/USDT", "net_pnl": 30.0}
+    bnb_win = {"symbol": "BNB/USDT", "net_pnl": 10.0}
+    result = _profit_concentration(
+        [btc_win, btc_loss, eth_win, bnb_win],
+        [[btc_win, btc_loss], [eth_win], [bnb_win]],
+    )
+    assert result["gross_winning_pnl_usdt"] == pytest.approx(100.0)
+    assert result["by_symbol"]["BTC/USDT"]["net_pnl_usdt"] == pytest.approx(50.0)
+    assert result["largest_symbol_share_pct"] == pytest.approx(60.0)
+    assert result["largest_fold_share_pct"] == pytest.approx(60.0)
+    assert result["largest_trade_share_pct"] == pytest.approx(60.0)
+    assert result["single_symbol_or_fold_dominates"] is True
+    assert result["interpretation"] == "concentrated"
+
+
+def test_profit_concentration_is_not_assessable_without_winning_trades():
+    result = _profit_concentration(
+        [{"symbol": "BTC/USDT", "net_pnl": -5.0}],
+        [[{"symbol": "BTC/USDT", "net_pnl": -5.0}]],
+    )
+    assert result["gross_winning_pnl_usdt"] == 0.0
+    assert result["largest_symbol_share_pct"] is None
+    assert result["largest_fold_share_pct"] is None
+    assert result["single_symbol_or_fold_dominates"] is None
+    assert result["interpretation"] == "not_assessable_no_gross_winning_pnl"
