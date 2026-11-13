@@ -349,6 +349,9 @@ def run_portfolio_backtest(
         for symbol in symbols:
             if symbol in positions or symbol in pending or j <= cooldown_until[symbol]:
                 continue
+            signal = _evaluate_indicator_row(indicators[symbol], j, signal_settings, mode)
+            if signal.action != "long" or signal.stop is None:
+                continue
             if daily_blocked:
                 blocked["daily_loss_limit"] += 1
                 continue
@@ -358,9 +361,7 @@ def run_portfolio_backtest(
             if symbol != btc_symbol and btc_risk_off:
                 blocked["btc_risk_filter"] += 1
                 continue
-            signal = _evaluate_indicator_row(indicators[symbol], j, signal_settings, mode)
-            if signal.action == "long" and signal.stop is not None:
-                pending[symbol] = {"action": "entry", "stop": signal.stop}
+            pending[symbol] = {"action": "entry", "stop": signal.stop}
 
     peak = settings.initial_cash
     max_drawdown = 0.0
