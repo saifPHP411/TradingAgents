@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 from ..bybit import BybitPublicClient
 from ..symbols import parse_pair
@@ -51,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         print("no tradable symbols; nothing fetched", flush=True)
         return 1
 
-    cache = HistoryCache(args.cache) if args.cache else HistoryCache()
+    cache = HistoryCache(Path(args.cache) / "bybit") if args.cache else HistoryCache()
     frames = fetch_history(
         resolution.symbols, intervals=("1m",), limit=args.limit, client=client, cache=cache
     )
