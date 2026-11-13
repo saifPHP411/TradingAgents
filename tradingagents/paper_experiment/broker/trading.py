@@ -4806,43 +4806,51 @@ class PaperTradingWorker:
         if len(remaining) <= 1:
             # The last target, or a single target: close what is left.
             return float(held)
-        base = entry_quantity if entry_quantity is not None else float(held)
-        if not math.isfinite(base) or base <= 0:
-            base = float(held)
-        # The share is of the original position, but it can never exceed what
-        # is actually held: the broker is the authority for what is held, and
-        # an order for more than the position would be refused as a short.
-        share = base / len(remaining)
-        if float(held) < base:
-            # The position is smaller than the entry recorded (it was reduced
-            # outside the worker), so the shares are of what is left.
-            share = float(held) / len(remaining)
-        slice_size = share
-        if not math.isfinite(slice_size) or slice_size <= 0:
+        held_decimal = Decimal(str(held))
+        base_value = entry_quantity if entry_quantity is not None else held
+        try:
+            base_decimal = Decimal(str(base_value))
+        except (TypeError, ValueError, ArithmeticError):
+            base_decimal = held_decimal
+        if not base_decimal.is_finite() or base_decimal <= 0:
+            base_decimal = held_decimal
+        # Each remaining rung keeps its share of the original entry quantity.
+        # If the broker now holds less than that share, the clamp below closes
+        # no more than the actual holding; it must not silently rebase every
+        # remaining target and leave an untradeable tail.
+        share = base_decimal / Decimal(len(remaining))
+        if not share.is_finite() or share <= 0:
             return float(held)
+
         if self.config.whole_shares:
-            slice_size = float(math.floor(slice_size))
+            slice_decimal = share.to_integral_value(rounding=ROUND_DOWN)
+        elif step > 0:
+            units = (share / step).to_integral_value(rounding=ROUND_DOWN)
+            slice_decimal = units * step
         else:
-            slice_size = floor_to_step(slice_size)
-        if slice_size <= 0:
+            micros = (share * Decimal("1000000")).to_integral_value(rounding=ROUND_DOWN)
+            slice_decimal = micros / Decimal("1000000")
+        if slice_decimal <= 0:
             # A fractional slice smaller than one venue step is not a valid order.
             # Close the whole position now instead of creating an untradeable tail.
             return float(held)
 
-        slice_size = min(float(held), slice_size)
+        slice_decimal = min(held_decimal, slice_decimal)
         if reference_price is not None and math.isfinite(reference_price) and reference_price > 0:
-            remaining_quantity = max(0.0, float(held) - slice_size)
+            price_decimal = Decimal(str(reference_price))
+            remaining_decimal = max(Decimal("0"), held_decimal - slice_decimal)
             # The exchange minimum applies to every order, not just the original
             # entry. Avoid a partial close if either side of the split would fall
             # below that minimum; the full holding is still the executable choice.
             if min_notional > 0:
-                slice_notional = slice_size * reference_price
-                remainder_notional = remaining_quantity * reference_price
-                if slice_notional + 1e-12 < min_notional:
+                minimum_decimal = Decimal(str(min_notional))
+                slice_notional = slice_decimal * price_decimal
+                remainder_notional = remaining_decimal * price_decimal
+                if slice_notional < minimum_decimal:
                     return float(held)
-                if remaining_quantity > 1e-12 and remainder_notional + 1e-12 < min_notional:
+                if remaining_decimal > 0 and remainder_notional < minimum_decimal:
                     return float(held)
-        return slice_size
+        return float(slice_decimal)
 
     def _check_exits(self) -> CycleResult | None:
         """Close a worker-held long whose recorded stop or target has triggered.
