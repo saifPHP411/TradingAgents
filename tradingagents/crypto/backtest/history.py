@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..bybit import BybitPublicClient
+from ..binance import BinancePublicClient
 from ..symbols import parse_pair
 from ..transport import CryptoDataError
 from ..types import CANDLE_INTERVALS, Candle, candles_to_frame
@@ -44,7 +44,7 @@ CACHE_SCHEMA_VERSION = 1
 _DEFAULT_CACHE_ROOT = Path(
     os.environ.get("TRADINGAGENTS_CRYPTO_CACHE_DIR") or "~/.tradingagents/crypto"
 ).expanduser()
-DEFAULT_CACHE_DIR = _DEFAULT_CACHE_ROOT / "bybit"
+DEFAULT_CACHE_DIR = _DEFAULT_CACHE_ROOT / "binance"
 
 
 def _bar_key(symbol: str, interval: str) -> str:
@@ -206,7 +206,7 @@ def fetch_history(
     intervals: Iterable[str] = ("1m", "5m"),
     limits: Mapping[str, int] | None = None,
     limit: int = 1500,
-    client: BybitPublicClient | None = None,
+    client: BinancePublicClient | None = None,
     cache: HistoryCache | None = None,
     refresh: bool = False,
 ) -> dict[str, dict[str, pd.DataFrame]]:
@@ -219,7 +219,7 @@ def fetch_history(
     is a disk read. A fetch failure for one symbol/interval is raised rather than
     hidden, so a study never silently runs on a partial universe.
     """
-    client = client or BybitPublicClient()
+    client = client or BinancePublicClient()
     cache = cache or HistoryCache()
     per_interval = dict(limits or {})
     out: dict[str, dict[str, pd.DataFrame]] = {}
