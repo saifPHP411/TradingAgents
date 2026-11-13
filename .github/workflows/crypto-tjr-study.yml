@@ -52,6 +52,8 @@ jobs:
           python -m tradingagents.crypto.backtest.run \
             --symbols BTC/USDT ETH/USDT BNB/USDT \
             --periods 7 \
+            --initial-cash 1000 \
+            --paper-parity-sizing \
             --cache ./crypto-cache \
             --no-sensitivity \
             --out artifacts/crypto_tjr_study.json \
