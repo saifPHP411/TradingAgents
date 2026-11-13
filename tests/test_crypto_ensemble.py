@@ -40,12 +40,14 @@ def test_ambiguous_regime_fails_flat():
 def test_trend_module_can_emit_a_long_signal():
     close = np.linspace(100, 130, 260)
     close[-1] = close[-2] + 1.1
+    volume = np.full(len(close), 1000.0)
+    volume[-1] = 1500.0
     frame = pd.DataFrame({
         "open": close - 0.5,
         "high": close + 1.0,
         "low": close - 1.0,
         "close": close,
-        "volume": np.full(len(close), 1000.0),
+        "volume": volume,
     })
     result = evaluate_ensemble(frame)
     assert result.regime == "trend"
