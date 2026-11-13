@@ -241,7 +241,8 @@ def run_backtest(
                 trail = position["highest_high"] - settings.trailing_stop_atr_multiple * current_atr
                 position["stop"] = max(position["stop"], trail)
 
-        time_stop_due = position is not None and j - position["entry_bar"] >= settings.max_hold_bars
+        # Count the entry candle as the first completed holding bar.
+        time_stop_due = position is not None and j - position["entry_bar"] + 1 >= settings.max_hold_bars
 
         # Mark-to-market equity at this bar's close.
         equity = cash + (position["qty"] * float(row.close) if position else 0.0)
