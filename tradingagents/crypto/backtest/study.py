@@ -1080,8 +1080,9 @@ def run_study(
     notes = [
         "The strategy is the unchanged TJR rule chain; only the session policy and "
         "the entry-window cut are adapted for a 24/7 market, and both are reported.",
-        "Every figure comes from real Bybit Spot bars; the intended execution venue is "
-        "Bybit Demo Spot, and no Binance candle data is mixed into this study.",
+        "Historical research bars are Binance public Spot data; live demo decisions "
+        "are intended to use Bybit Spot candles and orders execute on Bybit Demo Spot. "
+        "Treat this backtest as a cross-venue proxy, not a Bybit historical replay.",
         "Every figure comes from real bars the venue served; a period the data does "
         "not cover is reported short, never padded.",
     ]
