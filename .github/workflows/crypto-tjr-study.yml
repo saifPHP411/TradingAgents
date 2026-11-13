@@ -5,6 +5,7 @@ on:
     branches:
       - bybit-demo-integration
       - demo-ready-dashboard-2026
+      - strategy-research-cost-aware
     paths:
       - ".github/workflows/crypto-tjr-study.yml"
       - "tradingagents/crypto/**"
@@ -44,7 +45,7 @@ jobs:
             --limit 43200 \
             --cache ./crypto-cache
 
-      - name: Run unchanged TJR study with realistic costs
+      - name: Run TJR study with explicit frictionless, realistic and conservative cost scenarios
         run: |
           mkdir -p artifacts
           python -m tradingagents.crypto.backtest.run \
