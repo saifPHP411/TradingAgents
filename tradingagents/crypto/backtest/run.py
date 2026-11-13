@@ -17,7 +17,7 @@ import argparse
 import json
 from pathlib import Path
 
-from ..bybit import BybitPublicClient
+from ..binance import BinancePublicClient
 from ..symbols import parse_pair
 from ..types import CANDLE_INTERVALS
 from ..universe import DEFAULT_SYMBOLS, resolve_universe
@@ -65,18 +65,18 @@ def build_study(
     periods: tuple[int, ...] = STANDARD_PERIODS,
     allow_substitution: bool = True,
     include_sensitivity: bool = True,
-    client: BybitPublicClient | None = None,
+    client: BinancePublicClient | None = None,
 ):
     """Resolve the universe, load the cache, and run the study."""
-    client = client or BybitPublicClient()
-    registry = client.instruments_info(category="spot")
+    client = client or BinancePublicClient()
+    registry = client.exchange_info()
     requested = symbols or DEFAULT_SYMBOLS
     resolution = resolve_universe(
         registry,
         tuple(parse_pair(s).canonical for s in requested),
         allow_substitution=allow_substitution,
     )
-    cache = HistoryCache(Path(cache_dir) / "bybit") if cache_dir else HistoryCache()
+    cache = HistoryCache(Path(cache_dir) / "binance") if cache_dir else HistoryCache()
     series, coverage = load_cached_series(cache, resolution.symbols)
     if not series:
         raise SystemExit(
