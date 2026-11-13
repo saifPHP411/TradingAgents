@@ -232,3 +232,11 @@ def test_single_symbol_backtest_requires_timezone_aware_oos_start():
             settings=BacktestSettings(warmup_bars=220),
             trading_start_ts="2025-01-12 00:00:00",
         )
+
+
+def test_backtest_rejects_slippage_that_would_make_exit_fill_negative():
+    with pytest.raises(ValueError, match="below 10000 bps"):
+        run_backtest(
+            _flat_frame(),
+            settings=BacktestSettings(slippage_bps=10_000, warmup_bars=220),
+        )
