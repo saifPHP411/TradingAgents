@@ -127,7 +127,12 @@ def test_buy_hold_benchmark_uses_same_next_bar_oos_entry_timing():
     frame = _flat_frame()
     frame.loc[frame.index[228]:, ["open", "high", "low", "close"]] = 110.0
     fee_rate = 10.0 / 10_000.0
-    expected = (110.0 * (1.0 - fee_rate) / (110.0 * (1.0 + fee_rate)) - 1.0) * 100.0
+    slippage_rate = 5.0 / 10_000.0
+    entry_fill = 110.0 * (1.0 + slippage_rate)
+    exit_fill = 110.0 * (1.0 - slippage_rate)
+    expected = (
+        exit_fill * (1.0 - fee_rate) / (entry_fill * (1.0 + fee_rate)) - 1.0
+    ) * 100.0
     report = run_walk_forward(
         {"BTC/USDT": frame},
         walk_forward_settings=WalkForwardSettings(
