@@ -78,6 +78,13 @@ def run_cached_walkforward(
             "reason": "TJR uses 1m/5m intraday triggers while this RAE runner uses 1h signals and next-hour-open fills; do not compare these as equivalent.",
         },
     }
+    report["summary"] = {
+        mode: {
+            "base_costs": value["base_costs"]["summary"],
+            "stress_costs_1_5x": value["stress_costs_1_5x"]["summary"],
+        }
+        for mode, value in reports.items()
+    }
     report["data"] = {
         symbol: {
             "bars": len(frame),
@@ -113,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n")
-    print(json.dumps({mode: value["base_costs"]["summary"] for mode, value in report["modes"].items()}, indent=2, sort_keys=True))
+    print(json.dumps(report["summary"], indent=2, sort_keys=True))
     print(f"wrote {args.out}")
     return 0
 
