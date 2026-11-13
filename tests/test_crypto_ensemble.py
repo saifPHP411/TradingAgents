@@ -72,6 +72,27 @@ def test_trend_no_entry_is_not_mistaken_for_an_exit():
     assert result.should_exit is False
 
 
+def test_breakout_module_requires_atr_expansion():
+    close = np.linspace(100, 130, 260)
+    close[-1] = close[-2] + 1.1
+    volume = np.full(len(close), 1000.0)
+    volume[-1] = 1500.0
+    frame = pd.DataFrame({
+        "open": close - 0.5,
+        "high": close + 1.0,
+        "low": close - 1.0,
+        "close": close,
+        "volume": volume,
+    })
+    no_expansion = evaluate_ensemble(frame, mode="breakout")
+    assert no_expansion.action == "flat"
+    frame.loc[259, "high"] = close[-1] + 4.0
+    frame.loc[259, "low"] = close[-1] - 4.0
+    expanded = evaluate_ensemble(frame, mode="breakout")
+    assert expanded.action == "long"
+    assert expanded.module == "volatility_breakout"
+
+
 def test_range_module_can_emit_a_long_reversal():
     close = 100 + np.sin(np.arange(260) * 0.7) * 0.1
     close[-2] = 97.8
