@@ -121,8 +121,16 @@ def _validate_settings(settings: EnsembleSettings) -> None:
         settings.momentum_bars, settings.range_period, settings.atr_period,
         settings.rsi_period, settings.volume_period, settings.atr_expansion_period,
     )
-    if any(not isinstance(period, int) or period <= 0 for period in positive_periods):
+    if any(type(period) is not int or period <= 0 for period in positive_periods):
         raise ValueError("indicator periods must be positive integers")
+    numeric_thresholds = (
+        settings.adx_trend_min, settings.adx_range_max, settings.range_zscore,
+        settings.atr_expansion_multiple, settings.trend_rsi_min,
+        settings.range_rsi_max, settings.volume_multiple,
+        settings.atr_stop_multiple, settings.max_extension_atr,
+    )
+    if not np.isfinite(np.asarray(numeric_thresholds, dtype=float)).all():
+        raise ValueError("indicator thresholds must be finite numbers")
     if settings.fast_ema >= settings.slow_ema:
         raise ValueError("fast_ema must be smaller than slow_ema")
     if (
