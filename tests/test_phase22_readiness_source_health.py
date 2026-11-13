@@ -144,7 +144,7 @@ class TestCurrentSourceIsReady:
         )
         assert experiment.source.is_current_market is True
         assert build_report(experiment).to_dict()["readiness"]["status"] == (
-            "OFFLINE PAPER (reproducible, not live)"
+            "READY FOR LIVE PAPER"
         )
 
     def test_a_weekend_gap_is_still_current(self, tmp_path):
@@ -297,7 +297,7 @@ class TestNoNewSessionsIsNotAFailure:
 
 @pytest.mark.unit
 class TestRefreshAppendsAndStaysCurrent:
-    def test_appending_a_new_session_keeps_offline_readiness_state(self, tmp_path):
+    def test_appending_a_new_session_keeps_readiness_ready(self, tmp_path):
         today = date(2026, 11, 2)
         start = today - timedelta(days=4)  # an older newest bar at start
         experiment = _with_genuine_inference(
