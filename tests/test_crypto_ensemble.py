@@ -37,6 +37,40 @@ def test_ambiguous_regime_fails_flat():
     assert result.stop is None
 
 
+def test_trend_module_can_emit_a_long_signal():
+    close = np.linspace(100, 130, 260)
+    close[-1] = close[-2] + 1.1
+    frame = pd.DataFrame({
+        "open": close - 0.5,
+        "high": close + 1.0,
+        "low": close - 1.0,
+        "close": close,
+        "volume": np.full(len(close), 1000.0),
+    })
+    result = evaluate_ensemble(frame)
+    assert result.regime == "trend"
+    assert result.action == "long"
+    assert result.module == "trend_donchian_momentum"
+    assert result.stop is not None and result.stop < result.close
+
+
+def test_range_module_can_emit_a_long_reversal():
+    close = 100 + np.sin(np.arange(260) * 0.7) * 0.1
+    close[-2] = 97.8
+    close[-1] = 98.6
+    frame = pd.DataFrame({
+        "open": close - 0.05,
+        "high": close + 2.0,
+        "low": close - 2.0,
+        "close": close,
+        "volume": np.full(len(close), 1000.0),
+    })
+    result = evaluate_ensemble(frame)
+    assert result.regime == "range"
+    assert result.action == "long"
+    assert result.module == "range_mean_reversion"
+
+
 def test_signal_is_based_on_last_bar_and_returns_a_defined_stop():
     # Strong rising series. The final close clears the previous 20-bar high.
     close = np.linspace(100, 150, 260)
