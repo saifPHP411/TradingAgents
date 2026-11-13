@@ -40,21 +40,21 @@ from tradingagents.risk.paper_parity import WHOLE_SHARES
 
 from ...crypto.symbols import parse_pair
 from ..broker import (
-    banner_for_provider,
     DECISION_SOURCE_CHOICES,
     DECISION_SOURCE_HISTORY,
     DEFAULT_MAX_PRICE_DEVIATION,
     DEFAULT_MAX_SNAPSHOT_AGE_SECONDS,
     EXECUTION_PROVIDER_ALPACA_PAPER,
+    EXECUTION_PROVIDER_BYBIT_DEMO,
     EXECUTION_PROVIDER_CHOICES,
     MARKET_DATA_CHOICES,
     MAX_PRICE_DEVIATION_ENV,
     PROVIDER_BAR_OPEN,
     BrokerError,
     BrokerNotConfiguredError,
-    BybitDemoBroker,
     BybitBrokerNotConfiguredError,
-    EXECUTION_PROVIDER_BYBIT_DEMO,
+    BybitDemoBroker,
+    banner_for_provider,
 )
 from ..crypto_symbol_config import (
     DEFAULT_MARKET_DATA_SYMBOLS,
