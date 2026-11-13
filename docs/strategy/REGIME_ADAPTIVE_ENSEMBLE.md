@@ -10,9 +10,10 @@ The initial candidate is a **Regime-Adaptive Ensemble (RAE)** for liquid Binance
 
 1. **Trend following / time-series momentum (primary):** multi-horizon return and moving-average trend alignment, with Donchian breakout confirmation. This is the default module in persistent directional markets.
 2. **Range mean reversion (conditional):** deviation from a rolling mean / volatility band with RSI confirmation, enabled only when trend strength is low and the market is demonstrably range-bound. It is disabled during strong trends to avoid repeatedly buying falling markets or shorting rising ones.
-3. **Volatility breakout (secondary confirmation):** ATR-normalized range expansion and volume confirmation. It confirms a new move; it is not a standalone reason to chase an already extended candle.
-4. **Cross-asset risk filter:** BTC trend/volatility state can reduce or block altcoin exposure when broad market conditions are hostile. This is a risk overlay, not a predictive guarantee.
-5. **Execution and cost filter:** reject stale prices, excessive spread, insufficient liquidity, and signals whose conservative expected move does not clear estimated round-trip fees plus slippage.
+3. **Trend pullback continuation (additional candidate):** EMA pullback reclaim while the higher-level trend, directional movement and time-series momentum remain aligned. It is evaluated separately from Donchian breakouts to avoid hiding which entry family is responsible for results.
+4. **Volatility breakout (secondary confirmation):** ATR-normalized range expansion and volume confirmation. It confirms a new move; it is not a standalone reason to chase an already extended candle.
+5. **Cross-asset risk filter:** BTC trend/volatility state can reduce or block altcoin exposure when broad market conditions are hostile. This is a risk overlay, not a predictive guarantee.
+6. **Execution and cost filter:** reject stale prices, excessive spread, insufficient liquidity, and signals whose conservative expected move does not clear estimated round-trip fees plus slippage.
 
 The modules are combined by **regime gating and calibrated scores**, not by unconditional indicator stacking. In a trend regime, trend and breakout modules may contribute; in a range regime, mean reversion may contribute; in an ambiguous/high-volatility regime, the system stays flat.
 
@@ -41,7 +42,7 @@ The modules are combined by **regime gating and calibrated scores**, not by unco
 
 1. Preserve the TJR implementation as a reproducible baseline. Do not delete it or silently change the deployed source.
 2. Implement each candidate module independently and unit-test it on synthetic OHLCV fixtures, including look-ahead and candle-completion boundaries.
-3. Compare baseline TJR, trend-only, range-only, breakout-only, and the regime-adaptive ensemble on identical symbols, bars, sizing, and costs.
+3. Compare baseline TJR, trend-only, trend-pullback-only, range-only, breakout-only, and the regime-adaptive ensemble on identical symbols, bars, sizing, and costs.
 4. Use at least 2 years of hourly history where available, plus a separate higher-frequency execution-cost sample. The current 30-day 1-minute study is not sufficient to establish robustness.
 5. Use chronological development / validation / untouched holdout splits and rolling walk-forward folds. Freeze parameters before the final holdout.
 6. Include exchange maker/taker fees appropriate to the actual account tier, spread, conservative slippage, rejected/partial fills, and turnover. Report gross and net results separately.
@@ -83,10 +84,10 @@ The current branch contains a deliberately isolated prototype:
 - `tradingagents/crypto/ensemble.py`: completed-bar regime classification, EMA/DI/ADX trend filter, Donchian breakout, momentum/RSI/volume confirmation, range z-score + RSI reversal, ATR initial stop, explicit Donchian/mean exits, max-hold/time stop and post-stop cooldown, fail-closed BTC trend overlay for altcoins, and distinct `should_exit` semantics so "no fresh entry" does not force an open trend trade to close.
 - `tradingagents/crypto/ensemble_backtest.py`: one-symbol long-only simulation, signal at completed-bar close, next-bar-open execution, gap-aware intrabar ATR stop, stop-distance sizing, notional cap, per-side fee and slippage accounting, and trade/equity logs.
 - `tradingagents/crypto/fetch_ensemble_history.py`: explicit fetch of completed Binance Spot 1h candles into the offline research cache.
-- `tradingagents/crypto/run_ensemble_study.py`: chronological 60/20/20 development/validation/holdout comparison for trend-only, range-only, breakout-only, and ensemble variants, with a 1.5x fee/slippage stress. Each symbol and partition is an independent account; its returns must not be summed as if they were one portfolio.
+- `tradingagents/crypto/run_ensemble_study.py`: chronological 60/20/20 development/validation/holdout comparison for trend-only, trend-pullback-only, range-only, breakout-only, and ensemble variants, with a 1.5x fee/slippage stress. Each symbol and partition is an independent account; its returns must not be summed as if they were one portfolio.
 - `.github/workflows/crypto-ensemble-study.yml`: manually dispatched two-year (17,520 hourly bars) public-data study; the JSON report is uploaded as an artifact.
 
-This is **not yet the complete proposed system**. The following remain before any strategy selection: 4h trend context; spread/depth/liquidity and expected-move cost filter; trailing/Chandelier stop; multi-symbol shared-equity portfolio with correlation/exposure/daily-loss caps; comparison against the unchanged TJR baseline on exactly matched data and costs; and a higher-frequency execution-cost sample. The current single-symbol backtest is a controlled prototype, not a production portfolio engine.
+This is **not yet the complete proposed system**. The following remain before any strategy selection: 4h trend context; spread/depth/liquidity and expected-move cost filter; trailing/Chandelier stop; multi-symbol shared-equity portfolio with correlation/exposure/daily-loss caps; comparison against the unchanged TJR baseline on exactly matched data and costs; and a higher-frequency execution-cost sample. The first RAE v1 historical report is in `docs/strategy/RAE_INITIAL_STUDY_RESULTS.md`; it failed the acceptance gate because trade counts were extremely low and development results were weak/negative on BTC and BNB. A separate EMA pullback-reclaim module has since been added as an exploratory v2 candidate. The v1 report does not include that new module, and the previously inspected validation/holdout dates are no longer untouched for any further tuning. The current single-symbol backtest is a controlled prototype, not a production portfolio engine.
 
 The Binance fetch workflow uses public market data and has no API credentials. The 10 bps per-side fee and 5 bps per-side slippage defaults are research assumptions, **not a claim about the user's Bybit fee tier or actual fills**. The 1.5x run stress-tests those assumptions. Replace them with verified account-tier fees and measured execution costs before interpreting results.
 
