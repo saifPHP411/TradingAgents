@@ -80,6 +80,46 @@ def test_backtest_rejects_bad_bar_order_and_negative_fees():
 
 
 
+def test_max_hold_bars_exits_at_the_next_bar_open():
+    frame = _rising_breakout_frame()
+    for _ in range(4):
+        previous = frame.iloc[-1]
+        open_price = float(previous.close) + 0.1
+        close_price = open_price + 0.1
+        next_index = frame.index[-1] + pd.Timedelta(hours=1)
+        extra = pd.DataFrame([{
+            "open": open_price,
+            "high": close_price + 0.5,
+            "low": open_price - 0.2,
+            "close": close_price,
+            "volume": 1000.0,
+        }], index=[next_index])
+        frame = pd.concat([frame, extra])
+    result = run_backtest(
+        frame,
+        settings=BacktestSettings(warmup_bars=220, max_hold_bars=2),
+    )
+    assert result.trades == 1
+    assert result.trade_log[0]["reason"] == "max_hold_bars"
+    assert result.trade_log[0]["raw_entry_price"] == pytest.approx(
+        _rising_breakout_frame().iloc[260].open
+    )
+    assert result.trade_log[0]["exit_time"] == frame.index[263].isoformat()
+
+
+def test_backtest_rejects_non_finite_or_non_integer_risk_settings():
+    with pytest.raises(ValueError, match="finite"):
+        run_backtest(
+            _flat_frame(),
+            settings=BacktestSettings(fee_bps=float("nan"), warmup_bars=220),
+        )
+    with pytest.raises(ValueError, match="positive integer"):
+        run_backtest(
+            _flat_frame(),
+            settings=BacktestSettings(max_hold_bars=1.5, warmup_bars=220),
+        )
+
+
 def test_btc_filter_blocks_altcoin_entries_when_btc_trend_is_not_bullish():
     alt = _rising_breakout_frame()
     btc = _flat_frame(size=len(alt))
