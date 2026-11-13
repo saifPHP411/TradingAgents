@@ -12,7 +12,12 @@ from math import isfinite
 
 import pandas as pd
 
-from .ensemble import EnsembleSettings, _evaluate_indicator_row, _indicators
+from .ensemble import (
+    EnsembleSettings,
+    _evaluate_indicator_row,
+    _indicators,
+    _validate_settings,
+)
 
 
 @dataclass(frozen=True)
@@ -108,6 +113,7 @@ def run_backtest(
         raise ValueError("fees and slippage cannot be negative")
 
     signal_settings = signal_settings or EnsembleSettings()
+    _validate_settings(signal_settings)
     data = _validate(frame, settings)
     signal_indicators = _indicators(data, signal_settings)
     btc_indicators = None
