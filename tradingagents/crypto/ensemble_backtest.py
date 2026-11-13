@@ -12,7 +12,7 @@ from math import isfinite
 
 import pandas as pd
 
-from .ensemble import EnsembleSettings, _indicators, evaluate_ensemble
+from .ensemble import EnsembleSettings, _evaluate_indicator_row, _indicators
 
 
 @dataclass(frozen=True)
@@ -22,8 +22,7 @@ class BacktestSettings:
     max_notional_fraction: float = 0.10
     fee_bps: float = 10.0
     slippage_bps: float = 5.0
-    warmup_bars: int = 220
-    max_signal_lookback: int = 300
+    warmup_bars: int = 400
     max_hold_bars: int = 168
 
 
@@ -88,8 +87,8 @@ def run_backtest(
         raise ValueError("unsupported strategy mode")
     if settings.max_hold_bars < 1:
         raise ValueError("max hold bars must be positive")
-    if settings.warmup_bars < 220 or settings.max_signal_lookback < 220:
-        raise ValueError("warm-up and signal lookback must be at least 220 bars")
+    if settings.warmup_bars < 220:
+        raise ValueError("warm-up must be at least 220 bars")
     if settings.initial_cash <= 0 or not 0 < settings.risk_fraction <= 0.05:
         raise ValueError("initial cash and risk fraction are outside safe bounds")
     if not 0 < settings.max_notional_fraction <= 1:
@@ -99,6 +98,7 @@ def run_backtest(
 
     signal_settings = signal_settings or EnsembleSettings()
     data = _validate(frame, settings)
+    signal_indicators = _indicators(data, signal_settings)
     btc_indicators = None
     if btc_frame is not None:
         btc_data = _validate(btc_frame, settings)
@@ -220,10 +220,7 @@ def run_backtest(
             break
 
         # Only completed bars through j are visible to the signal function.
-        start = max(0, j - settings.max_signal_lookback + 1)
-        signal = evaluate_ensemble(
-            data.iloc[start : j + 1], signal_settings, mode=mode
-        )
+        signal = _evaluate_indicator_row(signal_indicators, j, signal_settings, mode)
         if time_stop_due and position is not None:
             pending = {"action": "exit", "reason": "max_hold_bars"}
         elif btc_risk_off and position is not None:
