@@ -23,7 +23,7 @@ def _worker(*, step=0.0001, min_order_amt=5.0):
     return worker
 
 
-def _exit(worker, *, held, ladder, taken=(), target=1.0, price=1000.0, entry=None):
+def _exit(worker, *, held, ladder, taken=(), target=1.0, price=1000.0):
     return worker._exit_quantity(
         symbol="BNB/USDT",
         held=held,
@@ -31,7 +31,6 @@ def _exit(worker, *, held, ladder, taken=(), target=1.0, price=1000.0, entry=Non
         ladder=ladder,
         taken=list(taken),
         target=target,
-        entry_quantity=entry if entry is not None else held,
         reference_price=price,
     )
 
@@ -46,10 +45,10 @@ def test_partial_target_is_floored_to_the_actual_bybit_quantity_step():
 
 
 @pytest.mark.unit
-def test_partial_exit_does_not_leave_a_remainder_below_minimum_notional():
+def test_partial_exit_keeps_both_remaining_slices_above_minimum_notional():
     worker = _worker(step=0.0001, min_order_amt=5.0)
-    # First rung is a valid $5.10 slice. At the second rung, a $2.60
-    # remainder would be untradeable, so close the still-executable holding.
+    # Split the currently held quantity evenly across the two remaining rungs.
+    # Flooring the slice leaves a remainder at least as large as the slice.
     quantity = _exit(
         worker,
         held=0.0102,
@@ -57,10 +56,9 @@ def test_partial_exit_does_not_leave_a_remainder_below_minimum_notional():
         taken=[1.0],
         target=2.0,
         price=1000.0,
-        entry=0.0153,
     )
 
-    assert quantity == pytest.approx(0.0102)
+    assert quantity == pytest.approx(0.0051)
 
 
 @pytest.mark.unit
@@ -81,7 +79,6 @@ def test_last_target_closes_the_entire_remaining_position():
         taken=[1.0, 2.0],
         target=3.0,
         price=1000.0,
-        entry=0.0153,
     )
 
     assert quantity == pytest.approx(0.0102)
