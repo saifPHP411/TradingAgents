@@ -33,6 +33,7 @@ from tradingagents.paper_experiment.broker import (
     is_paper_endpoint,
     mode_for_provider,
 )
+from tradingagents.paper_experiment.broker.trading import BANNER, WorkerState, WorkerStateStore
 from tradingagents.paper_experiment.broker.bybit_demo import (
     API_KEY_ENV,
     API_SECRET_ENV,
@@ -40,14 +41,12 @@ from tradingagents.paper_experiment.broker.bybit_demo import (
     BrokerNotConfiguredError,
     LiveEndpointRefusedError,
 )
-from tradingagents.paper_experiment.broker.trading import BANNER
 from tradingagents.paper_experiment.dashboard.paper_control import (
     PaperTradingController,
     _endpoint_for_provider,
 )
 from tradingagents.paper_experiment.inference import StubInference
 from tradingagents.paper_experiment.sources import StaticPriceSource
-from tradingagents.paper_experiment.broker.trading import WorkerState, WorkerStateStore
 
 SYMBOL = "SPY"
 NOW = pd.Timestamp("2024-01-01", tz="UTC")
