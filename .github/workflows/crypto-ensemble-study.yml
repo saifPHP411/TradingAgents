@@ -1,0 +1,50 @@
+name: Crypto RAE historical study
+
+on:
+  workflow_dispatch:
+    inputs:
+      bars:
+        description: "Completed 1h bars per symbol (17520 is about two years)"
+        required: true
+        default: "17520"
+      symbols:
+        description: "Space-separated Binance Spot symbols"
+        required: true
+        default: "BTC/USDT ETH/USDT BNB/USDT"
+
+permissions:
+  contents: read
+
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install research dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Fetch completed public Binance 1h candles
+        run: |
+          python -m tradingagents.crypto.fetch_ensemble_history \
+            --bars "${{ inputs.bars }}" \
+            --symbols ${{ inputs.symbols }} \
+            --cache .research-cache
+      - name: Run chronological comparison and 1.5x cost stress
+        run: |
+          python -m tradingagents.crypto.run_ensemble_study \
+            --symbols ${{ inputs.symbols }} \
+            --cache .research-cache \
+            --out artifacts/rae_study.json
+      - name: Upload study report
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-rae-study
+          path: artifacts/rae_study.json
+          if-no-files-found: error
+          retention-days: 30
