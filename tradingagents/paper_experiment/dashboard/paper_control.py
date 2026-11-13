@@ -686,8 +686,9 @@ class PaperTradingController:
         the crypto seams: Bybit Spot public 1m/5m bars (no key) for the decision window
         and a 24/7 crypto clock for the session. The RiskEngine gate and the book it
         sizes against are the same read-only mirror of the worker's broker
-        account/positions, and the price it sizes at is the worker's own execution
-        seam (``--paper-market-data binance_snapshot``). Its per-session memory lives
+        account/positions, and the order is sized at Bybit Demo's own execution-price
+        seam. The worker's Binance snapshot remains a separate cross-venue reference
+        for the price-deviation guard. Its per-session memory lives
         in ``crypto_source_state.json`` — never the experiment's state and never the
         equity TJR source's — so it is not a second writer to the experiment
         directory. A test may inject the seams, so the path is exercisable offline.
@@ -715,11 +716,10 @@ class PaperTradingController:
         def _execution_price(symbol: str) -> float:
             """The execution venue's price for the pair the order will trade.
 
-            The crypto path analyses Binance's ``XRP/USDT`` and trades Alpaca's
-            ``XRP/USD``. The account is funded in USD and every risk cap is
-            denominated in that currency, so the risk engine must size the entry
-            at the **execution** venue's price. Sizing it at the market-data
-            venue's price sized a USD order in USDT terms.
+            The crypto path analyses Bybit Spot's ``XRP/USDT`` and trades the
+            same pair on Bybit Demo Spot. The risk engine sizes the entry at the
+            **execution** venue's price, not the independent Binance reference
+            snapshot used by the worker's price-deviation guard.
 
             The canonical symbol is translated to its execution pair through the
             worker's own validated symbol map — the same map the worker uses to
