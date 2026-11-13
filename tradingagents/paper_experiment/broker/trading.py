@@ -4758,28 +4758,39 @@ class PaperTradingWorker:
         taken: list[Any],
         target: float | None,
         entry_quantity: float | None = None,
+        reference_price: float | None = None,
     ) -> float:
-        """How much of the position this exit closes.
+        """Size an exit on the venue's quantity grid without creating sellable dust.
 
-        A **stop** closes the whole position: a stop is the end of the trade, not
-        a stage of it. A **target** closes the slice that target represents.
-
-        The slice is an equal share of the **original** position, one share per
-        remaining target, so a three-target ladder closes a third at the first
-        target, another third at the second, and the rest at the last. The
-        original size is the yardstick, not what happens to be held now: the
-        rungs have to add up to the position the entry opened, so a share is
-        never computed against a shrinking base.
-
-        That split is the simplest one that needs no extra level from the
-        strategy — the ladder says *where* to take profit, not *how much* at
-        each one.
-
-        The last target closes the remainder, and a single-target exit closes
-        everything. The result is never more than what is held and never
-        negative, and it is never zero: a zero-quantity order would be rejected
-        by the venue, so the whole remaining position is closed instead.
+        Partial targets are floored to the instrument's actual quantity step.
+        Before taking a partial exit, also check that both the submitted slice
+        and the remaining position satisfy Bybit's minimum order notional. If
+        either would be untradeable, collapse this rung into a full close while
+        the whole holding is still large enough to sell.
         """
+        broker = self._broker
+        instrument = None
+        get_instrument = getattr(broker, "get_instrument", None)
+        if callable(get_instrument):
+            instrument = get_instrument(symbol)
+        raw_step = getattr(instrument, "qty_step", None)
+        try:
+            step = Decimal(str(raw_step)) if raw_step is not None else Decimal("0")
+        except Exception:
+            step = Decimal("0")
+        if not step.is_finite() or step <= 0:
+            step = Decimal("0")
+        try:
+            min_notional = float(getattr(instrument, "min_order_amt", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            min_notional = 0.0
+
+        def floor_to_step(value: float) -> float:
+            if step <= 0:
+                return math.floor(value * 1_000_000) / 1_000_000
+            units = (Decimal(str(value)) / step).to_integral_value(rounding=ROUND_DOWN)
+            return float(units * step)
+
         if reason != "take_profit" or not ladder or target is None:
             return float(held)
         remaining = [
@@ -4809,14 +4820,28 @@ class PaperTradingWorker:
         if not math.isfinite(slice_size) or slice_size <= 0:
             return float(held)
         if self.config.whole_shares:
-            slice_size = math.floor(slice_size)
+            slice_size = float(math.floor(slice_size))
         else:
-            slice_size = math.floor(slice_size * 1_000_000) / 1_000_000
+            slice_size = floor_to_step(slice_size)
         if slice_size <= 0:
-            # A fractional slice too small to express: close the whole position
-            # rather than send an order the venue would reject.
+            # A fractional slice smaller than one venue step is not a valid order.
+            # Close the whole position now instead of creating an untradeable tail.
             return float(held)
-        return min(float(held), slice_size)
+
+        slice_size = min(float(held), slice_size)
+        if reference_price is not None and math.isfinite(reference_price) and reference_price > 0:
+            remaining_quantity = max(0.0, float(held) - slice_size)
+            # The exchange minimum applies to every order, not just the original
+            # entry. Avoid a partial close if either side of the split would fall
+            # below that minimum; the full holding is still the executable choice.
+            if min_notional > 0:
+                slice_notional = slice_size * reference_price
+                remainder_notional = remaining_quantity * reference_price
+                if slice_notional + 1e-12 < min_notional:
+                    return float(held)
+                if remaining_quantity > 1e-12 and remainder_notional + 1e-12 < min_notional:
+                    return float(held)
+        return slice_size
 
     def _check_exits(self) -> CycleResult | None:
         """Close a worker-held long whose recorded stop or target has triggered.
@@ -5097,6 +5122,7 @@ class PaperTradingWorker:
                 entry_quantity=_as_float(
                     (self.state.protections.get(symbol) or {}).get("quantity")
                 ),
+                reference_price=exit_price,
             )
             try:
                 order = broker.submit_order(
