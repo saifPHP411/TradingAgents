@@ -50,7 +50,7 @@ jobs:
       - name: Fetch fresh completed Binance Spot hourly candles
         run: |
           python -m tradingagents.crypto.fetch_ensemble_history \
-            --bars "${{ inputs.bars }}" \
+            --bars "${{ inputs.bars || '17520' }}" \
             --symbols BTC/USDT ETH/USDT BNB/USDT \
             --cache .research-cache
       - name: Run frozen chronological OOS validation and Monte Carlo
@@ -58,11 +58,11 @@ jobs:
           python -m tradingagents.crypto.run_ensemble_walkforward \
             --symbols BTC/USDT ETH/USDT BNB/USDT \
             --cache .research-cache \
-            --train-bars "${{ inputs.train_bars }}" \
-            --test-bars "${{ inputs.test_bars }}" \
-            --purge-bars "${{ inputs.purge_bars }}" \
-            --embargo-bars "${{ inputs.embargo_bars }}" \
-            --simulations "${{ inputs.simulations }}" \
+            --train-bars "${{ inputs.train_bars || '4000' }}" \
+            --test-bars "${{ inputs.test_bars || '720' }}" \
+            --purge-bars "${{ inputs.purge_bars || '24' }}" \
+            --embargo-bars "${{ inputs.embargo_bars || '24' }}" \
+            --simulations "${{ inputs.simulations || '2000' }}" \
             --out artifacts/rae_walkforward.json
       - name: Upload OOS report
         uses: actions/upload-artifact@v4
