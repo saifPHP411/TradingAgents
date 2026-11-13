@@ -8,9 +8,9 @@ from tradingagents.crypto.ensemble_backtest import BacktestSettings
 from tradingagents.crypto.ensemble_portfolio import PortfolioSettings
 from tradingagents.crypto.ensemble_walkforward import (
     WalkForwardSettings,
+    _profit_concentration,
     block_bootstrap_equity,
     run_walk_forward,
-    _profit_concentration,
 )
 
 
