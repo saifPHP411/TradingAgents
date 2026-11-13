@@ -161,6 +161,29 @@ def test_rejects_unsorted_and_duplicate_bar_indexes():
         evaluate_ensemble(frame)
 
 
+def test_range_only_mode_does_not_trade_an_uncertain_regime():
+    close = 100 + np.sin(np.arange(260) * 0.7) * 0.1
+    close[-2] = 98.0
+    close[-1] = 98.5
+    frame = pd.DataFrame({
+        "open": close - 0.05,
+        "high": close + 2.0,
+        "low": close - 2.0,
+        "close": close,
+        "volume": np.full(len(close), 1000.0),
+    })
+    settings = EnsembleSettings(
+        adx_range_max=0.0,
+        adx_trend_min=100.0,
+        range_zscore=0.1,
+        range_rsi_max=100.0,
+    )
+    result = evaluate_ensemble(frame, settings, mode="range")
+    assert result.regime == "uncertain"
+    assert result.action == "flat"
+    assert result.should_exit is True
+
+
 def test_rejects_invalid_indicator_settings():
     frame = _frame(np.linspace(100, 110, 240))
     with pytest.raises(ValueError, match="fast_ema"):
