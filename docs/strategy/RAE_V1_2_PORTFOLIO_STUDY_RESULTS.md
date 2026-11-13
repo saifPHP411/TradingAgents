@@ -4,16 +4,16 @@
 
 ## Run and data provenance
 
-- GitHub Actions run: [43397216756](https://github.com/saifPHP411/TradingAgents/actions/runs/43397216756)
-- Code revision studied: `536794e68593b399e99c4987cb41c584f6acf511`. The final later commit only strengthens the trailing-stop test; strategy and portfolio implementation are unchanged.
+- Corrected GitHub Actions run: [43399778930](https://github.com/saifPHP411/TradingAgents/actions/runs/43399778930) (completed successfully).
+- Code revision studied: `714eef2f0c0c67c7897209002b114f71e07e0f96`. This revision includes the corrected inclusive `max_hold_bars` semantics and deterministic BTC-first simultaneous-entry priority. Later commits only update tests and documentation.
 - Binance Spot completed 1-hour OHLCV; 17,519 bars per symbol.
 - Symbols: BTC/USDT, ETH/USDT, BNB/USDT.
-- Coverage: 2024-11-13 09:00 UTC through 2026-11-13 07:00 UTC.
+- Coverage: 2024-11-13 10:00 UTC through 2026-11-13 08:00 UTC.
 - Chronological partitions, each with fresh 10,000 USDT capital:
-  - Development: 10,511 bars, 2024-11-13 09:00 to 2026-01-25 07:00 UTC.
-  - Validation: 3,504 bars, 2026-01-25 08:00 to 2026-06-20 07:00 UTC.
-  - Previously inspected holdout: 3,504 bars, 2026-06-20 08:00 to 2026-11-13 07:00 UTC.
-  - Recent activity check: 720 bars (30 days).
+  - Development: 10,511 bars, 2024-11-13 10:00 to 2026-01-25 08:00 UTC.
+  - Validation: 3,504 bars, 2026-01-25 09:00 to 2026-06-20 08:00 UTC.
+  - Previously inspected holdout: 3,504 bars, 2026-06-20 09:00 to 2026-11-13 08:00 UTC.
+  - Recent activity check: 720 bars, 2026-10-14 09:00 to 2026-11-13 08:00 UTC.
 - Signals use completed candles and execute at the next bar open. Stops use gap-aware fills.
 - Base costs: 10 bps fee and 5 bps slippage per side. Stress: 1.5x both. These are research assumptions, not verified Bybit account-tier fees or measured execution costs.
 
@@ -26,6 +26,15 @@
 - Maximum gross exposure: 25%; per-trade risk budget: 0.5%; per-position notional cap: 10%.
 - BTC trend risk filter; daily-loss entry gate 2%; peak-drawdown entry gate 10%.
 - Altcoin correlation cap: 0.85 over 168 completed hourly returns. Missing or undefined correlation fails closed.
+
+## Correctness audit after v1.2
+
+A post-study code audit found and fixed two backtest-engine issues before this corrected rerun:
+
+- **Maximum holding period was one completed candle too long.** Both the single-symbol and shared-portfolio simulators now count the entry candle as holding bar one and schedule the exit at the next bar open once exactly `max_hold_bars` completed candles have elapsed.
+- **Simultaneous entries did not actually prioritize BTC.** Portfolio processing now gives the configured BTC risk-filter symbol the first deterministic entry slot, then processes remaining symbols alphabetically.
+
+Regression tests cover exact max-hold timing in both simulators and BTC-first entry priority. The corrected study's trade logs contain no `max_hold_bars` exits in these partitions, so the holding-period correction did not change the primary portfolio outcome figures below. The BTC-first ordering is now explicit and reproducible; it is not a performance optimization.
 
 ## Primary shared-portfolio results
 
@@ -65,4 +74,4 @@ This is not evidence of a durable edge. The sample is tiny (only 6 holdout trade
 4. Do not retune thresholds against these dates. Any next candidate must be developed using development data only, frozen, and evaluated on a newly collected future holdout with a materially larger trade sample.
 5. Before activation is reconsidered, collect measured spread/depth and account-tier fees, validate exchange quantity/minimum-notional rules, and test shadow-only broker integration after independent offline acceptance.
 
-The artifact for this run is the `crypto-rae-and-tjr-study` artifact on GitHub Actions run 43397216756. This report summarizes its RAE JSON output.
+The artifact for the corrected rerun is the `crypto-rae-and-tjr-study` artifact on GitHub Actions run 43399778930. The optional TJR rerun was not enabled, so this artifact is an RAE study, not a matched TJR-vs-RAE comparison. It supersedes the earlier v1.2 report run (43397216756).
