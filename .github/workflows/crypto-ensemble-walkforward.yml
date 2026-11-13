@@ -30,6 +30,10 @@ on:
         required: true
         default: "2000"
 
+concurrency:
+  group: rae-walkforward-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
