@@ -5,6 +5,8 @@ on:
     branches:
       - bybit-demo-integration
       - demo-ready-dashboard-2026
+      - strategy-research-cost-aware
+      - strategy-research-bybit-parity
     paths:
       - ".github/workflows/crypto-tjr-study.yml"
       - "tradingagents/crypto/**"
