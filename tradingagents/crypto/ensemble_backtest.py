@@ -82,6 +82,8 @@ def run_backtest(
     """Run one symbol; each signal is acted on at the following bar's open."""
     if mode not in {"ensemble", "trend", "range", "breakout"}:
         raise ValueError("unsupported strategy mode")
+    if settings.warmup_bars < 220 or settings.max_signal_lookback < 220:
+        raise ValueError("warm-up and signal lookback must be at least 220 bars")
     if settings.initial_cash <= 0 or not 0 < settings.risk_fraction <= 0.05:
         raise ValueError("initial cash and risk fraction are outside safe bounds")
     if not 0 < settings.max_notional_fraction <= 1:
