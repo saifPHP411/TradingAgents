@@ -362,7 +362,7 @@ def positions_view(
         )
         market_value = _opt_float(position.get("market_value"))
         if market_value is None and current_price is not None:
-            market_value = abs(quantity) * current_price
+            market_value = round(abs(quantity) * current_price, 12)
 
         # Bybit Spot currently has no wallet-level average cost field. A
         # defensible entry estimate is possible only when this worker's recorded
@@ -405,7 +405,7 @@ def positions_view(
             position.get("unrealized_pnl", position.get("unrealised_pnl"))
         )
         if unrealized is None and market_value is not None and entry is not None and quantity:
-            unrealized = market_value - entry * abs(quantity)
+            unrealized = round((current_price - entry) * abs(quantity), 12) if current_price is not None else round(market_value - entry * abs(quantity), 12)
         level = stops.get(symbol) if isinstance(stops.get(symbol), dict) else {}
         internal_row = internal.get(symbol) if isinstance(internal.get(symbol), dict) else {}
         internal_qty = _opt_float(internal_row.get("quantity")) if internal_row else None
