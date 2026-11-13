@@ -102,3 +102,15 @@ python -m tradingagents.crypto.run_ensemble_study --symbols BTC/USDT ETH/USDT BN
 ```
 
 The workflow can also be started from GitHub Actions → **Crypto RAE historical study** → Run workflow. It is manual by design; no recurring job, paper worker, Railway deployment, or broker order is started by it.
+
+
+## RAE v1.2 engineering changes (research-only)
+
+The v1.1 shared-portfolio result is rejected and must not be tuned against its already inspected validation or holdout windows. A new research iteration adds two risk controls without changing the entry thresholds:
+
+- **Chandelier-style ATR trailing stop:** the stop can only tighten using the completed bar's high and ATR after that bar's intrabar stop check. The updated stop becomes active on the following bar. This avoids same-bar look-ahead. The initial ATR stop remains in force until the trailing level is higher.
+- **Altcoin correlation cap:** before a new altcoin order is filled at a bar open, its rolling return correlation with existing altcoin positions is measured using completed returns only through the prior bar. Correlation at or above the configured cap blocks the entry. Insufficient history or undefined correlation fails closed. BTC is excluded from this pairwise altcoin cap because the separate BTC regime overlay already governs broad-market risk.
+
+Defaults are a 3.0 ATR trailing distance, 0.85 maximum altcoin correlation, and 168 completed hourly returns. These are initial risk-control hypotheses, not optimized parameters. Unit tests cover next-bar trailing-stop activation, correlation blocking, and invalid settings.
+
+The old v1.1 validation/holdout have already been inspected and are no longer untouched data. Any performance report produced after these changes is exploratory only; do not use it as a fresh out-of-sample claim. Freeze the v1.2 implementation and collect a new future holdout before evaluating activation. Do not connect it to Bybit Demo or Live.
