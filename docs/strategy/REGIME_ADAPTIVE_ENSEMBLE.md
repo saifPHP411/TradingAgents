@@ -74,3 +74,27 @@ If the gates fail, do not deploy the ensemble. Preserve the negative result and 
 ## Important limitations
 
 Published backtests are hypotheses, not a menu of guaranteed-profitable strategies. Results depend on sample, horizon, universe, fees, spread, execution, and market regime. The implementation must be tested against the project's own Bybit Demo execution path before it can replace TJR.
+
+
+## Implementation status (research branch)
+
+The current branch contains a deliberately isolated prototype:
+
+- `tradingagents/crypto/ensemble.py`: completed-bar regime classification, EMA/DI/ADX trend filter, Donchian breakout, momentum confirmation, range z-score reversal, ATR initial stop, and distinct `should_exit` semantics so "no fresh entry" does not force an open trend trade to close.
+- `tradingagents/crypto/ensemble_backtest.py`: one-symbol long-only simulation, signal at completed-bar close, next-bar-open execution, gap-aware intrabar ATR stop, stop-distance sizing, notional cap, per-side fee and slippage accounting, and trade/equity logs.
+- `tradingagents/crypto/fetch_ensemble_history.py`: explicit fetch of completed Binance Spot 1h candles into the offline research cache.
+- `tradingagents/crypto/run_ensemble_study.py`: chronological 60/20/20 development/validation/holdout comparison for trend-only, range-only, breakout-only, and ensemble variants, with a 1.5x fee/slippage stress. Each symbol and partition is an independent account; its returns must not be summed as if they were one portfolio.
+- `.github/workflows/crypto-ensemble-study.yml`: manually dispatched two-year (17,520 hourly bars) public-data study; the JSON report is uploaded as an artifact.
+
+This is **not yet the complete proposed system**. The following remain before any strategy selection: RSI and volume confirmation; 4h trend context; BTC cross-asset risk overlay; spread/depth/liquidity and expected-move cost filter; trailing/Chandelier stop; multi-symbol shared-equity portfolio with correlation/exposure/daily-loss caps; comparison against the unchanged TJR baseline on exactly matched data and costs; and a higher-frequency execution-cost sample. The current single-symbol backtest is a controlled prototype, not a production portfolio engine.
+
+The Binance fetch workflow uses public market data and has no API credentials. The 10 bps per-side fee and 5 bps per-side slippage defaults are research assumptions, **not a claim about the user's Bybit fee tier or actual fills**. The 1.5x run stress-tests those assumptions. Replace them with verified account-tier fees and measured execution costs before interpreting results.
+
+Commands for a local research environment:
+
+```bash
+python -m tradingagents.crypto.fetch_ensemble_history --bars 17520 --symbols BTC/USDT ETH/USDT BNB/USDT --cache .research-cache
+python -m tradingagents.crypto.run_ensemble_study --symbols BTC/USDT ETH/USDT BNB/USDT --cache .research-cache --out rae_study.json
+```
+
+The workflow can also be started from GitHub Actions → **Crypto RAE historical study** → Run workflow. It is manual by design; no recurring job, paper worker, Railway deployment, or broker order is started by it.
