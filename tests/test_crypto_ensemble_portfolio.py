@@ -140,3 +140,41 @@ def test_portfolio_requires_aligned_hourly_history_and_btc():
             {"BTC/USDT": frame},
             portfolio_settings=PortfolioSettings(max_open_positions=1.5),
         )
+
+
+
+def test_portfolio_blocks_highly_correlated_altcoin_entries():
+    rising = _rising_frame()
+    result = run_portfolio_backtest(
+        {
+            "BTC/USDT": rising,
+            "BNB/USDT": rising.copy(),
+            "ETH/USDT": rising.copy(),
+        },
+        settings=BacktestSettings(warmup_bars=220),
+        portfolio_settings=PortfolioSettings(
+            max_open_positions=3,
+            max_alt_positions=2,
+            max_gross_exposure_fraction=0.5,
+            max_alt_correlation=0.85,
+            correlation_lookback=20,
+            daily_loss_limit_fraction=None,
+            max_drawdown_fraction=None,
+        ),
+    )
+    assert result.blocked_entries["alt_correlation"] > 0
+    alt_trades = [trade for trade in result.trade_log if trade["symbol"] != "BTC/USDT"]
+    assert len(alt_trades) <= 1
+
+
+def test_portfolio_rejects_invalid_correlation_limits_and_trailing_stop():
+    with pytest.raises(ValueError, match="correlation"):
+        run_portfolio_backtest(
+            {"BTC/USDT": _flat_frame()},
+            portfolio_settings=PortfolioSettings(max_alt_correlation=1.1),
+        )
+    with pytest.raises(ValueError, match="trailing stop"):
+        run_portfolio_backtest(
+            {"BTC/USDT": _flat_frame()},
+            settings=BacktestSettings(trailing_stop_atr_multiple=0),
+        )
