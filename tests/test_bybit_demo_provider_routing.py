@@ -22,6 +22,7 @@ import pandas as pd
 import pytest
 
 from tradingagents.paper_experiment import ExperimentConfig, PaperExperiment
+from tradingagents.paper_experiment.broker.trading import BANNER, WorkerState, WorkerStateStore
 from tradingagents.paper_experiment.broker import (
     EXECUTION_PROVIDER_ALPACA_PAPER,
     EXECUTION_PROVIDER_BYBIT_DEMO,
@@ -40,15 +41,12 @@ from tradingagents.paper_experiment.broker.bybit_demo import (
     BrokerNotConfiguredError,
     LiveEndpointRefusedError,
 )
-from tradingagents.paper_experiment.broker.trading import BANNER
 from tradingagents.paper_experiment.dashboard.paper_control import (
     PaperTradingController,
     _endpoint_for_provider,
 )
 from tradingagents.paper_experiment.inference import StubInference
 from tradingagents.paper_experiment.sources import StaticPriceSource
-from tradingagents.paper_experiment.broker.trading import WorkerState, WorkerStateStore
-
 SYMBOL = "SPY"
 NOW = pd.Timestamp("2024-01-01", tz="UTC")
 
