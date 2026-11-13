@@ -178,3 +178,39 @@ def test_portfolio_rejects_invalid_correlation_limits_and_trailing_stop():
             {"BTC/USDT": _flat_frame()},
             settings=BacktestSettings(trailing_stop_atr_multiple=0),
         )
+
+
+def test_portfolio_caps_aggregate_open_stop_risk():
+    rising = _rising_frame()
+    result = run_portfolio_backtest(
+        {
+            "BTC/USDT": rising,
+            "BNB/USDT": rising.copy(),
+            "ETH/USDT": rising.copy(),
+        },
+        settings=BacktestSettings(
+            warmup_bars=220,
+            risk_fraction=0.005,
+            max_notional_fraction=1.0,
+        ),
+        portfolio_settings=PortfolioSettings(
+            max_open_positions=3,
+            max_alt_positions=2,
+            max_gross_exposure_fraction=1.0,
+            max_alt_correlation=0.85,
+            correlation_lookback=20,
+            max_total_open_risk_fraction=0.003,
+            daily_loss_limit_fraction=None,
+            max_drawdown_fraction=None,
+        ),
+    )
+    assert result.trades == 1
+    assert result.blocked_entries["portfolio_risk"] > 0
+
+
+def test_portfolio_rejects_invalid_total_open_risk_limit():
+    with pytest.raises(ValueError, match="total open risk"):
+        run_portfolio_backtest(
+            {"BTC/USDT": _flat_frame()},
+            portfolio_settings=PortfolioSettings(max_total_open_risk_fraction=0),
+        )
