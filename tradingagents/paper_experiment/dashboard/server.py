@@ -2309,7 +2309,7 @@ async function refresh(){
     $("auth").classList.add("hide");
     $("main").classList.remove("hide");
     $("nav").classList.remove("hide");
-    renderOverview(s);
+    $("livewarn").textContent = s.banner || "PAPER TRADING — NOT LIVE";\n    renderOverview(s);
     await refreshEngine();
     await refreshOverviewAccount();
   }catch(e){
