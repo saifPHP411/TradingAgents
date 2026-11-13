@@ -3,7 +3,7 @@
 Public Binance market data only; no API key and no trading endpoint. The cache
 contains completed candles only. Defaults target roughly two years per symbol.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import argparse
 import json
