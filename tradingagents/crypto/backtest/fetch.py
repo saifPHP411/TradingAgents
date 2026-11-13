@@ -1,7 +1,7 @@
-"""Fetch the real historical bars a crypto study reads. The one network entry point.
+"""Fetch the real Bybit Spot historical bars a crypto study reads. The one network entry point.
 
 Run once by a human, like the equity TJR's ``fetch_data``. It resolves the
-requested universe against the venue, fetches 1-minute bars for each symbol (the
+requested universe against Bybit Spot, fetches 1-minute bars for each symbol (the
 base interval every coarser one is resampled from), caches them, and prints the
 coverage the venue actually served — so a short window is visible rather than
 assumed.
@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from ..binance import BinancePublicClient
+from ..bybit import BybitPublicClient
 from ..symbols import parse_pair
 from ..universe import DEFAULT_SYMBOLS, resolve_universe
 from .history import HistoryCache, fetch_history
@@ -39,8 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    client = BinancePublicClient()
-    registry = client.exchange_info()
+    client = BybitPublicClient()
+    registry = client.instruments_info(category="spot")
     resolution = resolve_universe(
         registry,
         tuple(parse_pair(s).canonical for s in args.symbols),
