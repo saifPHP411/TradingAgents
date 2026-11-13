@@ -362,7 +362,13 @@ def run_portfolio_backtest(
             if signal.action == "long" and signal.stop is not None:
                 pending[symbol] = {"action": "entry", "stop": signal.stop}
 
-    equity_values = [float(point["equity"]) for point in curve]
+    peak = settings.initial_cash
+    max_drawdown = 0.0
+    for point in curve:
+        value = float(point["equity"])
+        peak = max(peak, value)
+        if peak > 0:
+            max_drawdown = max(max_drawdown, (peak - value) / peak)
     wins = [trade["net_pnl"] for trade in trades if trade["net_pnl"] > 0]
     losses = [trade["net_pnl"] for trade in trades if trade["net_pnl"] < 0]
     net_loss = abs(sum(losses))
