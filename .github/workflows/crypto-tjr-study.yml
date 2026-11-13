@@ -39,7 +39,7 @@ jobs:
       - name: Install backtest dependencies
         run: python -m pip install --upgrade pip pandas numpy requests python-dotenv pydantic
 
-      - name: Fetch 60 days of Bybit Spot candles
+      - name: Fetch 60 days of Binance public Spot candles
         run: |
           python -m tradingagents.crypto.backtest.fetch \
             --symbols BTC/USDT ETH/USDT BNB/USDT \
