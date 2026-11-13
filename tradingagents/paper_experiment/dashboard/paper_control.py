@@ -683,7 +683,7 @@ class PaperTradingController:
 
         This is the *same* ``TjrDecisionSource`` class the ``tjr`` path builds — the
         rule chain is identical, so there is exactly one strategy — but wired with
-        the crypto seams: Binance public 1m/5m bars (no key) for the decision window
+        the crypto seams: Bybit Spot public 1m/5m bars (no key) for the decision window
         and a 24/7 crypto clock for the session. The RiskEngine gate and the book it
         sizes against are the same read-only mirror of the worker's broker
         account/positions, and the price it sizes at is the worker's own execution
@@ -771,7 +771,7 @@ class PaperTradingController:
         return TjrDecisionSource(**kwargs)
 
     def _build_crypto_data(self):
-        """The crypto decision-data seam: an injected one, else Binance 1m/5m bars."""
+        """The crypto decision-data seam: an injected one, else Bybit Spot 1m/5m bars."""
         if self._crypto_data_factory is not None:
             return self._crypto_data_factory()
         from ..crypto_intraday_data import CryptoIntradayBars
