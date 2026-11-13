@@ -84,6 +84,9 @@ def test_trend_pullback_module_can_emit_a_reclaim_entry():
         "close": close,
         "volume": np.full(len(close), 1000.0),
     })
+    frame.loc[frame.index[-10], "high"] = close[-1] + 0.5
+    frame.loc[frame.index[-1], "volume"] = 1500.0
+    assert evaluate_ensemble(frame, mode="trend").action == "flat"
     result = evaluate_ensemble(frame, mode="trend_pullback")
     assert result.regime == "trend"
     assert result.action == "long"
