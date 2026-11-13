@@ -72,6 +72,7 @@ def run_cached_walkforward(
         "kind": "rae_walkforward_mode_and_cost_comparison",
         "modes": reports,
         "cost_stress_multiplier": 1.5,
+        "holdout_status": "exploratory_only; the fetched two-year history overlaps previously inspected RAE v1.1/v1.2 dates and is not an independent future holdout",
         "tjr_comparison": {
             "status": "not_matched",
             "reason": "TJR uses 1m/5m intraday triggers while this RAE runner uses 1h signals and next-hour-open fills; do not compare these as equivalent.",
