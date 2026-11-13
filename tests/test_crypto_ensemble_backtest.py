@@ -212,6 +212,7 @@ def test_single_symbol_stop_risk_budget_includes_fees_and_adverse_slippage():
     )
     assert estimated_loss == pytest.approx(trade["estimated_stop_risk"])
     assert estimated_loss <= trade["entry_equity"] * settings.risk_fraction + 1e-8
+    assert trade["entry_price"] * trade["quantity"] + trade["entry_fee"] <= trade["entry_equity"] + 1e-8
 
 
 def test_single_symbol_backtest_does_not_trade_before_oos_start():
