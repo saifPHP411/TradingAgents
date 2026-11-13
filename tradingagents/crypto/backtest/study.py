@@ -745,8 +745,9 @@ def cost_scenarios(config: CryptoBacktestConfig) -> dict[str, CostModel]:
     """The cost schedules a study reports, from frictionless to realistic.
 
     A frictionless run is included *and labelled*, so a reader can see how much of
-    a result is friction. The realistic scenario is a 10 bps taker fee (Binance's
-    spot taker rate), a 1 bp half-spread and 2 bps slippage — stated, not implied.
+    a result is friction. The realistic scenario uses a 10 bps per-fill commission
+    (matching Bybit's published VIP 0 spot rate as a reference), a 1 bp half-spread
+    and 2 bps slippage. Account- and region-specific fees must still be verified.
     """
     return {
         "frictionless": CostModel(),
