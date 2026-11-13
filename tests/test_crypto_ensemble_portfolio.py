@@ -124,7 +124,7 @@ def test_shared_portfolio_enforces_altcoin_concentration_and_gross_exposure():
         assert trade["entry_price"] * trade["quantity"] <= 500.01
 
 
- 
+
 def test_btc_has_first_claim_on_simultaneous_entry_capacity():
     rising = _rising_frame()
     result = run_portfolio_backtest(
