@@ -91,8 +91,8 @@ def run_portfolio_backtest(
     btc_symbol: str = "BTC/USDT",
     mode: str = "ensemble",
     signal_settings: EnsembleSettings | None = None,
-    settings: BacktestSettings = BacktestSettings(),
-    portfolio_settings: PortfolioSettings = PortfolioSettings(),
+    settings: BacktestSettings | None = None,
+    portfolio_settings: PortfolioSettings | None = None,
 ) -> PortfolioBacktestResult:
     """Backtest a shared-cash spot portfolio using only completed 1h bars.
 
@@ -103,6 +103,8 @@ def run_portfolio_backtest(
     allowed_modes = {"ensemble", "trend", "trend_pullback", "range", "breakout"}
     if mode not in allowed_modes:
         raise ValueError("unsupported strategy mode")
+    settings = settings or BacktestSettings()
+    portfolio_settings = portfolio_settings or PortfolioSettings()
     _validate_portfolio_settings(portfolio_settings)
 
     numeric_settings = (
@@ -148,7 +150,7 @@ def run_portfolio_backtest(
     cash = float(settings.initial_cash)
     positions: dict[str, dict] = {}
     pending: dict[str, dict] = {}
-    cooldown_until = {symbol: -1 for symbol in symbols}
+    cooldown_until = dict.fromkeys(symbols, -1)
     trades: list[dict] = []
     curve: list[dict] = []
     blocked = {
