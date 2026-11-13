@@ -181,7 +181,7 @@ def run_backtest(
                 stop = float(pending["stop"])
                 equity_at_open = cash
                 risk_per_unit = entry - stop
-                if risk_per_unit > 0 and equity_at_open > 0:
+                if stop > 0 and risk_per_unit > 0 and equity_at_open > 0:
                     risk_budget = equity_at_open * settings.risk_fraction
                     notional_cap = equity_at_open * settings.max_notional_fraction
                     qty = min(risk_budget / risk_per_unit, notional_cap / entry)
