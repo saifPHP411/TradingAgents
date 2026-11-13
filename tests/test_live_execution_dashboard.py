@@ -127,7 +127,7 @@ def test_bybit_spot_position_uses_mark_price_and_worker_fill_cost_basis():
 
     assert row["entry_price"] == 652.57
     assert row["current_price"] == 660.0
-    assert row["market_value"] == 0.0153 * 660.0
+    assert row["market_value"] == pytest.approx(0.0153 * 660.0, abs=1e-12)
     assert row["unrealized_pnl"] == (0.0153 * 660.0) - (0.0153 * 652.57)
 
 
