@@ -54,6 +54,7 @@ jobs:
             --periods 7 \
             --initial-cash 1000 \
             --paper-parity-sizing \
+            --skip-diagnostics \
             --cache ./crypto-cache \
             --no-sensitivity \
             --out artifacts/crypto_tjr_study.json \
