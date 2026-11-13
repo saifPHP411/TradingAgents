@@ -1,6 +1,8 @@
 name: Crypto RAE walk-forward validation
 
 on:
+  push:
+    branches: [rae-portfolio-accounting-audit]
   workflow_dispatch:
     inputs:
       bars:
