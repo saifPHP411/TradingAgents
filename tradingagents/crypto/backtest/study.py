@@ -755,6 +755,25 @@ def cost_scenarios(config: CryptoBacktestConfig) -> dict[str, CostModel]:
     }
 
 
+def _config_with_costs(config: CryptoBacktestConfig, costs: CostModel) -> CryptoBacktestConfig:
+    """Copy every study setting while replacing only the execution-cost schedule."""
+    return CryptoBacktestConfig(
+        symbols=config.symbols,
+        initial_cash=config.initial_cash,
+        currency=config.currency,
+        session_policy=config.session_policy,
+        risk_limits=config.risk_limits,
+        costs=costs,
+        settings=config.settings,
+        allow_short=config.allow_short,
+        flat_by_session_close=config.flat_by_session_close,
+        periods=config.periods,
+        walk_forward_folds=config.walk_forward_folds,
+        regime_trend_sessions=config.regime_trend_sessions,
+        regime_threshold=config.regime_threshold,
+    )
+
+
 def run_cost_scenarios(
     series: Mapping[str, Mapping[str, IntradaySeries]],
     config: CryptoBacktestConfig,
@@ -764,21 +783,7 @@ def run_cost_scenarios(
     """Run the full window under each cost scenario."""
     out: list[PeriodResult] = []
     for label, costs in cost_scenarios(config).items():
-        scenario_config = CryptoBacktestConfig(
-            symbols=config.symbols,
-            initial_cash=config.initial_cash,
-            currency=config.currency,
-            session_policy=config.session_policy,
-            risk_limits=config.risk_limits,
-            costs=costs,
-            settings=config.settings,
-            allow_short=config.allow_short,
-            flat_by_session_close=config.flat_by_session_close,
-            periods=config.periods,
-            walk_forward_folds=config.walk_forward_folds,
-            regime_trend_sessions=config.regime_trend_sessions,
-            regime_threshold=config.regime_threshold,
-        )
+        scenario_config = _config_with_costs(config, costs)
         result = run_window(
             series,
             scenario_config,
@@ -800,6 +805,40 @@ def run_cost_scenarios(
             )
         )
     return out
+
+
+def run_period_cost_scenarios(
+    series: Mapping[str, Mapping[str, IntradaySeries]],
+    config: CryptoBacktestConfig,
+    *,
+    evaluation_cache: dict | None = None,
+) -> dict[str, list[PeriodResult]]:
+    """Run every requested period and the max window under every cost schedule."""
+    return {
+        label: run_periods(
+            series,
+            _config_with_costs(config, costs),
+            evaluation_cache=evaluation_cache,
+        )
+        for label, costs in cost_scenarios(config).items()
+    }
+
+
+def run_walk_forward_cost_scenarios(
+    series: Mapping[str, Mapping[str, IntradaySeries]],
+    config: CryptoBacktestConfig,
+    *,
+    evaluation_cache: dict | None = None,
+) -> dict[str, list[PeriodResult]]:
+    """Run every disjoint OOS fold under every cost schedule."""
+    return {
+        label: run_walk_forward(
+            series,
+            _config_with_costs(config, costs),
+            evaluation_cache=evaluation_cache,
+        )
+        for label, costs in cost_scenarios(config).items()
+    }
 
 
 def sensitivity_variants(config: CryptoBacktestConfig) -> dict[str, dict]:
@@ -963,6 +1002,8 @@ class CryptoStudyResult:
     walk_forward: list[PeriodResult] = field(default_factory=list)
     regimes: list[PeriodResult] = field(default_factory=list)
     cost_scenarios: list[PeriodResult] = field(default_factory=list)
+    period_cost_scenarios: dict[str, list[PeriodResult]] = field(default_factory=dict)
+    walk_forward_cost_scenarios: dict[str, list[PeriodResult]] = field(default_factory=dict)
     sensitivity: list[PeriodResult] = field(default_factory=list)
     determinism: dict = field(default_factory=dict)
     universe: dict = field(default_factory=dict)
@@ -987,6 +1028,24 @@ class CryptoStudyResult:
             "walk_forward": [p.to_dict() for p in self.walk_forward],
             "regimes": [p.to_dict() for p in self.regimes],
             "cost_scenarios": [p.to_dict() for p in self.cost_scenarios],
+            "period_cost_scenarios": {
+                label: [p.to_dict() for p in rows]
+                for label, rows in self.period_cost_scenarios.items()
+            },
+            "walk_forward_cost_scenarios": {
+                label: [p.to_dict() for p in rows]
+                for label, rows in self.walk_forward_cost_scenarios.items()
+            },
+            "cost_assumptions": {
+                label: {
+                    "commission_rate": model.commission_rate,
+                    "half_spread_bps": model.half_spread_bps,
+                    "slippage_bps": model.slippage_bps,
+                    "maker_fee_bps": model.maker_fee_bps,
+                    "taker_fee_bps": model.taker_fee_bps,
+                }
+                for label, model in cost_scenarios(self.config).items()
+            },
             "sensitivity": [p.to_dict() for p in self.sensitivity],
             "determinism": self.determinism,
             "trades": self.trades,
@@ -1033,6 +1092,10 @@ def run_study(
         walk_forward=run_walk_forward(series, config, evaluation_cache=cache),
         regimes=run_regimes(series, config, evaluation_cache=cache),
         cost_scenarios=run_cost_scenarios(series, config, evaluation_cache=cache),
+        period_cost_scenarios=run_period_cost_scenarios(series, config, evaluation_cache=cache),
+        walk_forward_cost_scenarios=run_walk_forward_cost_scenarios(
+            series, config, evaluation_cache=cache
+        ),
         sensitivity=(
             run_sensitivity(series, config, evaluation_cache=cache) if include_sensitivity else []
         ),
@@ -1079,6 +1142,8 @@ __all__ = [
     "metrics_for",
     "per_symbol_metrics",
     "run_cost_scenarios",
+    "run_period_cost_scenarios",
+    "run_walk_forward_cost_scenarios",
     "run_periods",
     "run_regimes",
     "run_sensitivity",
