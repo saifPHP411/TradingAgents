@@ -5,7 +5,7 @@ feed and labels the session with the US/Eastern regular-session clock. Crypto is
 different market with a different source and a different session clock, so this is
 its own seam with the same *safety* shape:
 
-- the source is Binance's **public** market data (no key, no registration), on the
+- the source is Bybit's **public Spot** market data (no key, no registration), on the
   data-only host — it can never be pointed at an order endpoint;
 - only bars that had **closed** at the decision instant are returned; an
   in-progress bar is dropped, so a half-formed bar never enters a decision;
@@ -18,7 +18,7 @@ its own seam with the same *safety* shape:
   on — carried by the series' own :class:`~tradingagents.tjr.sessions.SessionPolicy`,
   so the unchanged rule chain reads a crypto session without a second clock.
 
-The Binance client is injectable, so every branch is exercised offline with a
+The Bybit client is injectable, so every branch is exercised offline with a
 mocked client and no socket. The decision data is *separate* from the worker's
 execution price: this seam never prices an order, and the worker's own market-data
 seam never reads these bars.
@@ -33,7 +33,7 @@ from typing import Any
 
 import pandas as pd
 
-from tradingagents.crypto.binance import BinancePublicClient
+from tradingagents.crypto.bybit import BybitPublicClient
 from tradingagents.crypto.symbols import parse_pair
 from tradingagents.crypto.transport import CryptoDataError
 from tradingagents.crypto.types import Candle, candles_to_frame
@@ -104,17 +104,17 @@ def _build_series(
 
 @dataclass
 class CryptoIntradayBars:
-    """Current 1m/5m Binance bars, validated, closed-bar and freshness checked."""
+    """Current 1m/5m Bybit Spot bars, validated, closed-bar and freshness checked."""
 
-    provider_name: str = "binance_intraday_bars"
+    provider_name: str = "bybit_intraday_bars"
     kind: str = "vendor_intraday"
-    client: BinancePublicClient | None = None
+    client: BybitPublicClient | None = None
     policy: SessionPolicy | None = None
     max_stale_minutes: float | None = DEFAULT_MAX_STALE_MINUTES
     clock: Callable[[], datetime] | None = None
 
     def __post_init__(self) -> None:
-        self._client = self.client or BinancePublicClient()
+        self._client = self.client or BybitPublicClient()
         self._policy = self.policy or utc_day_session()
         self._clock = self.clock or (lambda: datetime.now(UTC))
         self.last_series: tuple[str, str] | None = None
