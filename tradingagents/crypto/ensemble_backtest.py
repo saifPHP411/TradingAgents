@@ -154,6 +154,7 @@ def run_backtest(
         if pending is not None:
             if pending["action"] == "exit" and position is not None:
                 close_position(timestamp, float(row.open), pending["reason"])
+                cooldown_until = j + 1
             elif pending["action"] == "entry" and position is None:
                 entry = float(row.open) * (1.0 + slip)
                 stop = float(pending["stop"])
