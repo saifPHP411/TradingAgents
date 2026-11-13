@@ -59,8 +59,13 @@ def _validate(frame: pd.DataFrame, settings: BacktestSettings) -> pd.DataFrame:
     if len(frame) < settings.warmup_bars + 2:
         raise ValueError("not enough bars for warm-up and next-bar execution")
     data = frame.loc[:, ["open", "high", "low", "close", "volume"]].astype(float).copy()
+    if not isinstance(data.index, pd.DatetimeIndex) or data.index.tz is None:
+        raise ValueError("backtest bars require a timezone-aware DatetimeIndex")
     if not data.index.is_monotonic_increasing or data.index.has_duplicates:
         raise ValueError("bar index must be strictly increasing and unique")
+    intervals = data.index.to_series().diff().dropna()
+    if not (intervals == pd.Timedelta(hours=1)).all():
+        raise ValueError("backtest requires contiguous 1h bars without gaps")
     if not all(isfinite(float(v)) for v in data.to_numpy().ravel()):
         raise ValueError("OHLCV values must be finite")
     if (data[["open", "high", "low", "close"]] <= 0).any().any():
