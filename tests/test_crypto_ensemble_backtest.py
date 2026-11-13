@@ -147,6 +147,10 @@ def test_btc_filter_blocks_altcoin_entries_when_btc_trend_is_not_bullish():
 
 def test_chandelier_trailing_stop_tightens_only_for_following_bar():
     frame = _rising_breakout_frame()
+    # This entry candle dips below the trailing level computed from its own
+    # high, but remains above the original stop: it must not stop itself out.
+    frame.loc[frame.index[-1], "low"] = 129.5
+    entry_bar_time = frame.index[-1]
     next_index = frame.index[-1] + pd.Timedelta(hours=1)
     extra = pd.DataFrame(
         [{
@@ -178,6 +182,8 @@ def test_chandelier_trailing_stop_tightens_only_for_following_bar():
     assert tight.trades == 1
     assert tight.trade_log[0]["reason"] == "atr_stop"
     assert tight.trade_log[0]["final_stop"] > tight.trade_log[0]["initial_stop"]
+    assert tight.trade_log[0]["exit_time"] == next_index.isoformat()
+    assert tight.trade_log[0]["exit_time"] != entry_bar_time.isoformat()
     assert tight.trade_log[0]["raw_exit_price"] > tight.trade_log[0]["raw_entry_price"] * 0.97
     assert loose.trades == 1
     assert loose.trade_log[0]["reason"] == "end_of_data"
