@@ -43,6 +43,7 @@ def run_ensemble_study(
             "No parameter optimization or holdout retuning is performed.",
         ],
     }
+    btc_full = cache.load("BTC/USDT", "1h")
     for partition, (left, right) in partitions.items():
         report["partitions"][partition] = {}
         for raw in symbols:
@@ -55,6 +56,11 @@ def run_ensemble_study(
                 raise RuntimeError(
                     f"{symbol} {partition} has only {len(section)} bars; at least 222 required"
                 )
+            btc_section = None
+            if symbol != "BTC/USDT" and btc_full is not None:
+                btc_section = btc_full.loc[section.index[0] : section.index[-1]]
+                if len(btc_section) < 222:
+                    raise RuntimeError(f"insufficient aligned BTC filter history for {symbol}")
             base = BacktestSettings(initial_cash=initial_cash)
             stressed = BacktestSettings(
                 initial_cash=initial_cash,
@@ -69,8 +75,9 @@ def run_ensemble_study(
                     "first": section.index[0].isoformat(),
                     "last": section.index[-1].isoformat(),
                 },
-                "base_costs": compare_modes(section, settings=base),
-                "stress_costs": compare_modes(section, settings=stressed),
+                "btc_filter": btc_section is not None,
+                "base_costs": compare_modes(section, settings=base, btc_frame=btc_section),
+                "stress_costs": compare_modes(section, settings=stressed, btc_frame=btc_section),
             }
     return report
 
