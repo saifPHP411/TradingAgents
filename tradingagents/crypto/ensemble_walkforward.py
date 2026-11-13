@@ -79,8 +79,9 @@ def block_bootstrap_equity(
     simulations: int = 2_000,
     block_bars: int = 24,
     seed: int = 42,
+    segments: list[list[float]] | None = None,
 ) -> dict:
-    """Circular moving-block bootstrap of hourly returns, preserving short clusters."""
+    """Circular moving-block bootstrap without joining separate OOS folds."""
     returns = np.asarray(hourly_returns, dtype=float)
     if not isfinite(initial_equity) or initial_equity <= 0:
         raise ValueError("initial_equity must be finite and positive")
@@ -103,8 +104,33 @@ def block_bootstrap_equity(
         }
     if (returns <= -1.0).any():
         raise ValueError("hourly returns must be greater than -100%")
+    return_segments = (
+        [np.asarray(segment, dtype=float) for segment in segments if len(segment)]
+        if segments is not None
+        else [returns]
+    )
+    if any(segment.ndim != 1 or not np.isfinite(segment).all() for segment in return_segments):
+        raise ValueError("bootstrap segments must contain finite one-dimensional returns")
+    if any((segment <= -1.0).any() for segment in return_segments):
+        raise ValueError("bootstrap segment returns must be greater than -100%")
+    if not return_segments:
+        return_segments = [np.asarray([], dtype=float)]
+    lengths = np.asarray([len(segment) for segment in return_segments], dtype=int)
+    total = int(lengths.sum())
+    if total == 0:
+        return {
+            "simulations": simulations,
+            "block_bars": block_bars,
+            "probability_of_loss_pct": 0.0,
+            "terminal_equity_p05": initial_equity,
+            "terminal_equity_p50": initial_equity,
+            "terminal_equity_p95": initial_equity,
+            "max_drawdown_p50_pct": 0.0,
+            "max_drawdown_p95_pct": 0.0,
+        }
+    cumulative_lengths = np.cumsum(lengths)
     rng = np.random.default_rng(seed)
-    n = len(returns)
+    n = total
     terminal = np.empty(simulations, dtype=float)
     drawdowns = np.empty(simulations, dtype=float)
     offsets = np.arange(block_bars)
@@ -112,9 +138,14 @@ def block_bootstrap_equity(
         sampled = np.empty(n, dtype=float)
         cursor = 0
         while cursor < n:
-            start = int(rng.integers(0, n))
-            count = min(block_bars, n - cursor)
-            sampled[cursor : cursor + count] = returns[(start + offsets[:count]) % n]
+            flat_start = int(rng.integers(0, n))
+            segment_index = int(np.searchsorted(cumulative_lengths, flat_start, side="right"))
+            segment_start = flat_start - (int(cumulative_lengths[segment_index - 1]) if segment_index else 0)
+            segment = return_segments[segment_index]
+            count = min(block_bars, n - cursor, len(segment))
+            sampled[cursor : cursor + count] = segment[
+                (segment_start + offsets[:count]) % len(segment)
+            ]
             cursor += count
         path = initial_equity * np.cumprod(1.0 + sampled)
         running_peak = np.maximum.accumulate(np.concatenate(([initial_equity], path)))
@@ -185,6 +216,7 @@ def run_walk_forward(
     step = wf.test_bars if wf.step_bars is None else wf.step_bars
     folds = []
     all_returns: list[float] = []
+    return_segments: list[list[float]] = []
     all_trades: list[dict] = []
     compounded_equity = bt.initial_cash
     benchmark_equity = bt.initial_cash
@@ -220,6 +252,7 @@ def run_walk_forward(
             if values[i - 1] > 0
         ]
         all_returns.extend(fold_returns)
+        return_segments.append(fold_returns)
         all_trades.extend(result.trade_log)
         fold_return = result.final_equity / bt.initial_cash - 1.0
         compounded_equity *= 1.0 + fold_return
@@ -261,6 +294,7 @@ def run_walk_forward(
         simulations=wf.monte_carlo_simulations,
         block_bars=wf.monte_carlo_block_bars,
         seed=wf.random_seed,
+        segments=return_segments,
     )
     return {
         "schema_version": 1,
