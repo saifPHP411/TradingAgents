@@ -63,6 +63,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Any, Protocol
 
