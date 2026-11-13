@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+import numpy as np
 import pandas as pd
 
 
@@ -51,8 +52,12 @@ def _validate(frame: pd.DataFrame) -> pd.DataFrame:
     if len(frame) < 220:
         raise ValueError("at least 220 completed bars are required")
     data = frame.loc[:, ["open", "high", "low", "close", "volume"]].astype(float).copy()
-    if data.isna().any().any() or (data[["open", "high", "low", "close"]] <= 0).any().any():
-        raise ValueError("OHLCV data must be finite, non-null, and prices positive")
+    if not np.isfinite(data.to_numpy()).all():
+        raise ValueError("OHLCV data must be finite and non-null")
+    if (data[["open", "high", "low", "close"]] <= 0).any().any():
+        raise ValueError("OHLC prices must be positive")
+    if (data["volume"] < 0).any():
+        raise ValueError("volume must be non-negative")
     if (data["high"] < data[["open", "close", "low"]].max(axis=1)).any():
         raise ValueError("high is inconsistent with OHLC")
     if (data["low"] > data[["open", "close", "high"]].min(axis=1)).any():
@@ -93,6 +98,17 @@ def evaluate_ensemble(
 ) -> EnsembleSignal:
     """Evaluate the latest completed bar; callers must exclude any still-open candle."""
     data = _validate(frame)
+    positive_periods = (
+        settings.fast_ema, settings.slow_ema, settings.adx_period,
+        settings.donchian_entry, settings.donchian_exit,
+        settings.momentum_bars, settings.range_period, settings.atr_period,
+    )
+    if any(not isinstance(period, int) or period <= 0 for period in positive_periods):
+        raise ValueError("indicator periods must be positive integers")
+    if settings.fast_ema >= settings.slow_ema:
+        raise ValueError("fast_ema must be smaller than slow_ema")
+    if settings.atr_stop_multiple <= 0 or settings.max_extension_atr <= 0:
+        raise ValueError("ATR multiples must be positive")
     x = _indicators(data, settings)
     row = x.iloc[-1]
     needed = ["atr", "adx", "fast_ema", "slow_ema", "prior_high", "momentum",
