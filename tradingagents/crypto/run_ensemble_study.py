@@ -85,6 +85,33 @@ def run_ensemble_study(
                 "base_costs": compare_modes(section, settings=base, btc_frame=btc_section),
                 "stress_costs": compare_modes(section, settings=stressed, btc_frame=btc_section),
             }
+        if "BTC/USDT" in partition_frames:
+            portfolio_base = BacktestSettings(initial_cash=initial_cash)
+            portfolio_stress = BacktestSettings(
+                initial_cash=initial_cash,
+                risk_fraction=portfolio_base.risk_fraction,
+                max_notional_fraction=portfolio_base.max_notional_fraction,
+                fee_bps=portfolio_base.fee_bps * 1.5,
+                slippage_bps=portfolio_base.slippage_bps * 1.5,
+            )
+            btc_index = partition_frames["BTC/USDT"].index
+            report["partitions"][partition]["portfolio"] = {
+                "coverage": {
+                    "bars": len(btc_index),
+                    "first": btc_index[0].isoformat(),
+                    "last": btc_index[-1].isoformat(),
+                },
+                "base_costs": run_portfolio_backtest(
+                    partition_frames,
+                    settings=portfolio_base,
+                    portfolio_settings=PortfolioSettings(),
+                ).to_dict(),
+                "stress_costs": run_portfolio_backtest(
+                    partition_frames,
+                    settings=portfolio_stress,
+                    portfolio_settings=PortfolioSettings(),
+                ).to_dict(),
+            }
     report["partitions"]["recent_30d"] = {}
     for raw in symbols:
         symbol = parse_pair(raw).canonical
