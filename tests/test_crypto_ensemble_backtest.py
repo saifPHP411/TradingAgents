@@ -142,3 +142,41 @@ def test_btc_filter_blocks_altcoin_entries_when_btc_trend_is_not_bullish():
     assert unfiltered.slippage_paid > 0
     assert unfiltered.trade_log[0]["net_pnl"] < unfiltered.trade_log[0]["gross_pnl"]
     assert filtered.trades == 0
+
+
+
+def test_chandelier_trailing_stop_tightens_only_for_following_bar():
+    frame = _rising_breakout_frame()
+    next_index = frame.index[-1] + pd.Timedelta(hours=1)
+    extra = pd.DataFrame(
+        [{
+            "open": 130.8,
+            "high": 131.0,
+            "low": 129.0,
+            "close": 130.8,
+            "volume": 1000.0,
+        }],
+        index=[next_index],
+    )
+    frame = pd.concat([frame, extra])
+    tight = run_backtest(
+        frame,
+        settings=BacktestSettings(
+            warmup_bars=220,
+            max_hold_bars=100,
+            trailing_stop_atr_multiple=1.0,
+        ),
+    )
+    loose = run_backtest(
+        frame,
+        settings=BacktestSettings(
+            warmup_bars=220,
+            max_hold_bars=100,
+            trailing_stop_atr_multiple=10.0,
+        ),
+    )
+    assert tight.trades == 1
+    assert tight.trade_log[0]["reason"] == "atr_stop"
+    assert tight.trade_log[0]["raw_exit_price"] > tight.trade_log[0]["raw_entry_price"] * 0.97
+    assert loose.trades == 1
+    assert loose.trade_log[0]["reason"] == "end_of_data"
