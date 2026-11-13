@@ -40,6 +40,8 @@ class BacktestResult:
     profit_factor: float | None
     gross_profit: float
     gross_loss: float
+    net_profit: float
+    net_loss: float
     fees_paid: float
     slippage_paid: float
     slippage_bps: float
@@ -127,9 +129,11 @@ def run_backtest(
             "entry_time": position["entry_time"],
             "exit_time": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
             "entry_price": position["entry"],
+            "raw_entry_price": position["raw_entry"],
             "exit_price": fill,
+            "raw_exit_price": raw_price,
             "quantity": position["qty"],
-            "gross_pnl": position["qty"] * (fill - position["entry"]),
+            "gross_pnl": position["qty"] * (raw_price - position["raw_entry"]),
             "net_pnl": pnl,
             "entry_fee": position["entry_fee"],
             "exit_fee": fee,
@@ -163,6 +167,7 @@ def run_backtest(
                         total_fees += entry_fee
                         position = {
                             "entry": entry,
+                            "raw_entry": float(row.open),
                             "entry_time": timestamp.isoformat(),
                             "qty": qty,
                             "stop": stop,
@@ -234,9 +239,12 @@ def run_backtest(
     pnls = [trade["net_pnl"] for trade in trades]
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p < 0]
-    gross_profit = sum(wins)
-    gross_loss = abs(sum(losses))
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
+    gross_pnls = [trade["gross_pnl"] for trade in trades]
+    gross_profit = sum(value for value in gross_pnls if value > 0)
+    gross_loss = abs(sum(value for value in gross_pnls if value < 0))
+    net_profit = sum(wins)
+    net_loss = abs(sum(losses))
+    profit_factor = net_profit / net_loss if net_loss > 0 else None
     final_equity = cash
     return BacktestResult(
         mode=mode,
@@ -251,6 +259,8 @@ def run_backtest(
         profit_factor=profit_factor,
         gross_profit=gross_profit,
         gross_loss=gross_loss,
+        net_profit=net_profit,
+        net_loss=net_loss,
         fees_paid=total_fees,
         slippage_paid=total_slippage,
         slippage_bps=settings.slippage_bps,
