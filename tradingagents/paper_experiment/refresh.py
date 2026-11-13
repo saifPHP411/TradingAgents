@@ -387,13 +387,13 @@ def _merge_frames(
     return merged, tuple(new_labels), None
 
 
-def _rebuild_source(experiment, symbol: str, merged: pd.DataFrame) -> PriceSource:
+def _rebuild_source(
+    experiment, symbol: str, merged: pd.DataFrame, *, now: datetime
+) -> PriceSource:
     """A source of the same kind/name as the experiment's, over the merged bars."""
     old_source = experiment.source
     old_provenance = getattr(old_source, "provenance", None)
     last_bar = str(merged.index[-1])[:10]
-    now = datetime.now(UTC)
-
     provenance = old_provenance
     if old_provenance is not None:
         provenance = replace(
@@ -609,7 +609,7 @@ def refresh_source(
             failure_kind=FAILURE_KIND_MALFORMED,
         )
 
-    experiment.source = _rebuild_source(experiment, symbol, validated)
+    experiment.source = _rebuild_source(experiment, symbol, validated, now=now)
     experiment.save_state()
 
     state.last_bar_date = new_labels[-1]

@@ -788,7 +788,7 @@ class TestOrders:
         with pytest.raises(PaperRiskRejected, match="crypto spot orders only"):
             client.submit_order(
                 symbol="BTC/USDT",
-                quantity=0.001,
+                quantity=0.01,
                 side="buy",
                 reference_price=50000,
                 client_order_id="pt-test-client-id",
@@ -994,7 +994,7 @@ class TestRiskLimits:
         with pytest.raises(PaperRiskRejected, match="exceed the open-position limit"):
             client.submit_order(
                 symbol="AVAX/USDT",
-                quantity=0.001,
+                quantity=0.01,
                 side="buy",
                 reference_price=100,
                 client_order_id="pt-test-client-id",

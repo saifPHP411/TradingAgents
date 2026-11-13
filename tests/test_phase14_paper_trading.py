@@ -39,6 +39,7 @@ import pytest
 
 from tradingagents.paper_experiment.broker import (
     BANNER,
+    EXECUTION_PROVIDER_BYBIT_DEMO,
     STATUS_ERROR,
     STATUS_RUNNING,
     STATUS_STOPPED,
@@ -881,12 +882,17 @@ class TestDashboardPaperSurface:
 
 class TestBanner:
     def test_the_index_page_shows_the_not_live_banner(self, tmp_path, allow_loopback):
-        dashboard = Dashboard(tmp_path, token=TOKEN, allow_paper_trading=True)
+        dashboard = Dashboard(
+            tmp_path,
+            token=TOKEN,
+            allow_paper_trading=True,
+            paper_execution_provider=EXECUTION_PROVIDER_BYBIT_DEMO,
+        )
         httpd, base = _serve_in_thread(dashboard)
         try:
             with urllib.request.urlopen(f"{base}/", timeout=10) as response:
                 html = response.read().decode()
-            assert "ALPACA PAPER — NOT LIVE" in html
+            assert "BYBIT DEMO — NOT LIVE" in html
             assert "START PAPER TRADING" in html
             assert "STOP PAPER TRADING" in html
         finally:
