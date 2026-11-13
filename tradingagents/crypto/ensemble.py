@@ -42,6 +42,11 @@ class EnsembleSettings:
     range_period: int = 20
     range_zscore: float = 2.0
     atr_period: int = 14
+    rsi_period: int = 14
+    volume_period: int = 20
+    trend_rsi_min: float = 55.0
+    range_rsi_max: float = 35.0
+    volume_multiple: float = 1.1
     atr_stop_multiple: float = 2.5
     max_extension_atr: float = 2.0
 
@@ -92,6 +97,14 @@ def _indicators(data: pd.DataFrame, s: EnsembleSettings) -> pd.DataFrame:
     x["range_mean"] = close.rolling(s.range_period).mean()
     x["range_std"] = close.rolling(s.range_period).std(ddof=0)
     x["zscore"] = (close - x.range_mean) / x.range_std.replace(0, float("nan"))
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / s.rsi_period, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / s.rsi_period, adjust=False).mean()
+    rs = gain / loss.replace(0, float("nan"))
+    x["rsi"] = 100 - 100 / (1 + rs)
+    x.loc[(loss == 0) & (gain > 0), "rsi"] = 100.0
+    x.loc[(loss == 0) & (gain == 0), "rsi"] = 50.0
+    x["volume_mean"] = x.volume.rolling(s.volume_period).mean()
     return x
 
 
@@ -109,17 +122,18 @@ def evaluate_ensemble(
         settings.fast_ema, settings.slow_ema, settings.adx_period,
         settings.donchian_entry, settings.donchian_exit,
         settings.momentum_bars, settings.range_period, settings.atr_period,
+        settings.rsi_period, settings.volume_period,
     )
     if any(not isinstance(period, int) or period <= 0 for period in positive_periods):
         raise ValueError("indicator periods must be positive integers")
     if settings.fast_ema >= settings.slow_ema:
         raise ValueError("fast_ema must be smaller than slow_ema")
-    if settings.atr_stop_multiple <= 0 or settings.max_extension_atr <= 0:
+    if settings.atr_stop_multiple <= 0 or settings.max_extension_atr <= 0 or settings.volume_multiple <= 0:
         raise ValueError("ATR multiples must be positive")
     x = _indicators(data, settings)
     row = x.iloc[-1]
     needed = ["atr", "adx", "fast_ema", "slow_ema", "prior_high", "momentum",
-              "range_mean", "range_std", "zscore", "plus_di", "minus_di"]
+              "range_mean", "range_std", "zscore", "plus_di", "minus_di", "rsi", "volume_mean"]
     if any(pd.isna(row[k]) for k in needed) or row.atr <= 0:
         return EnsembleSignal("flat", "uncertain", "none", 0.0, float(row.close), None,
                               "indicator warm-up or invalid volatility", True)
@@ -141,7 +155,9 @@ def evaluate_ensemble(
                                   "range-only mode: trend regime is disabled", True)
         if mode == "breakout":
             aligned = True
-        if aligned and momentum_ok and breakout and extension_ok:
+        volume_ok = row.volume >= row.volume_mean * settings.volume_multiple
+        rsi_ok = row.rsi >= settings.trend_rsi_min
+        if aligned and momentum_ok and breakout and extension_ok and volume_ok and rsi_ok:
             stop = close - settings.atr_stop_multiple * atr
             return EnsembleSignal("long", regime, "trend_donchian_momentum", 1.0,
                                   close, stop, "EMA/DI alignment, positive momentum and prior-channel breakout")
@@ -164,14 +180,15 @@ def evaluate_ensemble(
         # require a bullish close relative to the prior bar after a lower-band stretch.
         stretched = row.zscore <= -settings.range_zscore
         reversal = close > float(x.close.iloc[-2])
-        if stretched and reversal:
+        oversold = row.rsi <= settings.range_rsi_max
+        if stretched and reversal and oversold:
             stop = close - settings.atr_stop_multiple * atr
             return EnsembleSignal("long", regime, "range_mean_reversion", 0.7,
                                   close, stop, "lower-band stretch followed by a bullish close")
         range_exit = close >= float(row.range_mean)
         return EnsembleSignal(
             "flat", regime, "range_mean_reversion", 0.0, close, None,
-            "mean-reversion target reached" if range_exit else "no fresh reversal; keep existing position",
+            "mean-reversion target reached" if range_exit else "no fresh oversold reversal; keep existing position",
             bool(range_exit),
         )
     return EnsembleSignal("flat", regime, "none", 0.0, close, None,
