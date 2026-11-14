@@ -75,3 +75,40 @@ Causal/no-lookahead and stale-data tests; multi-symbol chronological walk-forwar
 across multiple market cycles; measured Bybit fees/spread/slippage; untouched final holdout;
 selection-bias analysis; buy-and-hold and cash baselines; per-symbol and per-regime
 expectancy, profit factor, compounded return, drawdown, turnover and uncertainty.
+
+
+## Bybit public-data execution replay (separate research branch)
+
+The `execution_replay` module records public Spot or Linear `orderbook.{depth}.{symbol}`
+and `publicTrade.{symbol}` WebSocket messages to JSONL. Install the optional
+collector dependency with `pip install ".[market-data]"`. Collection is read-only
+and does not use API credentials. Preserve raw receive timestamps alongside Bybit
+exchange timestamps; discard intervals with disconnects, stale books, or sequence
+gaps rather than interpolating missing market state.
+
+The offline replay:
+- Applies L2 snapshots/deltas and uses Bybit public trade taker side to identify
+  eligible passive fills. Queue ahead is initialized from displayed size times a
+  configurable queue factor (default 1.5).
+- Credits fills only after eligible trade volume consumes modeled queue ahead.
+  Book-size decreases are not treated as fills because public L2 cannot identify
+  whether size disappeared due to cancellation or execution.
+- Models submission latency, PostOnly crossing rejection at activation, TTL expiry,
+  and partial fills. Queue cancellation credit is zero by default.
+- Reports any-fill/full-fill rates, partial/unfilled/rejected orders, time-to-first-fill,
+  and signed 1s/5s/30s mid-price markouts net of the supplied maker-fee assumption.
+
+Important limitations:
+- Public L2 does not reveal individual order identities or exact FIFO queue priority;
+  queue factor is a conservative sensitivity assumption, not observed position.
+- The markout is a post-fill mid-price diagnostic, not realized round-trip PnL.
+  A complete strategy evaluation must model exit orders, exit taker/maker fees,
+  inventory exposure, and realized cash/equity paths.
+- The collector currently records a bounded session to JSONL; operators must
+  monitor reconnects and data continuity. Do not use incomplete sessions for
+  conclusions. No order placement, cancel endpoint, authentication, or private
+  account access exists in this module.
+- Instrument validation is a pure function over V5 instrument metadata. Spot uses
+  `minOrderAmt`; linear/inverse use `minNotionalValue`, alongside tickSize,
+  qtyStep, minOrderQty, and maxOrderQty where supplied. Fetch fresh metadata and
+  book state before any future order adapter; this branch does not send orders.
