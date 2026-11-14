@@ -51,7 +51,11 @@ class InstrumentRules:
             symbol=str(item["symbol"]),
             tick_size=_d(price.get("tickSize"), "tickSize"),
             qty_step=_d(lot.get("qtyStep"), "qtyStep"),
-            min_order_qty=(\n                Decimal(str(lot["minOrderQty"]))\n                if category != "spot" and lot.get("minOrderQty")\n                else Decimal("0")\n            ),
+            min_order_qty=(
+                Decimal(str(lot["minOrderQty"]))
+                if category != "spot" and lot.get("minOrderQty")
+                else Decimal("0")
+            ),
             min_notional=Decimal(str(minimum_notional)),
             max_order_qty=(
                 Decimal(str(lot["maxOrderQty"])) if lot.get("maxOrderQty") else None
@@ -354,7 +358,10 @@ class BybitExecutionReplay:
         total = len(self.orders)
         filled_orders = sum(o.filled_qty > 0 for o in self.orders.values())
         complete = sum(o.status == "filled" for o in self.orders.values())
-        markout_values = [\n            f.net_markout_30s / f.price * 10_000\n            for f in self.fills if f.net_markout_30s is not None and f.price > 0\n        ]
+        markout_values = [
+            f.net_markout_30s / f.price * 10_000
+            for f in self.fills if f.net_markout_30s is not None and f.price > 0
+        ]
         markouts = [f.net_markout_30s * f.quantity for f in self.fills if f.net_markout_30s is not None]
         mean_markout = _mean(markout_values)
         variance = (
