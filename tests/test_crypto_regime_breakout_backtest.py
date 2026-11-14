@@ -95,3 +95,55 @@ def test_flat_market_does_not_create_breakout_entries():
     result = run_backtest(frame)
     assert result.trades == []
     assert result.final_equity == pytest.approx(10_000.0)
+
+
+
+def test_oos_window_excludes_warmup_trades_and_closes_at_window_end():
+    frame = _trend_with_breakouts()
+    result = run_backtest(
+        frame,
+        strategy=RegimeBreakoutSettings(max_holding_bars=12),
+        execution=ExecutionCosts(commission_bps=0, half_spread_bps=0, slippage_bps=0),
+        portfolio=BacktestSettings(initial_cash=10_000),
+        start_index=100,
+        end_index=180,
+    )
+    assert result.trades
+    assert all(pd.Timestamp(t.entry_time) >= frame.index[100] for t in result.trades)
+    assert all(pd.Timestamp(t.exit_time) <= frame.index[180] for t in result.trades)
+
+
+def test_stop_market_fill_is_worse_when_the_market_gaps_below_stop():
+    frame = _trend_with_breakouts()
+    signal_rows = indicators(frame)
+    signal_indices = [i for i, value in enumerate(signal_rows["long_entry"]) if value]
+    assert signal_indices
+    signal_index = signal_indices[0]
+    levels = entry_levels(signal_rows.iloc[signal_index], RegimeBreakoutSettings())
+    assert levels is not None
+    signal_stop = levels[1]
+    next_index = signal_index + 1
+    gap_open = signal_stop * 0.95
+    frame.iloc[next_index, frame.columns.get_loc("open")] = gap_open
+    frame.iloc[next_index, frame.columns.get_loc("low")] = gap_open * 0.99
+    frame.iloc[next_index, frame.columns.get_loc("high")] = max(
+        float(frame.iloc[next_index]["high"]), gap_open * 1.01
+    )
+    frame.iloc[next_index, frame.columns.get_loc("close")] = gap_open * 1.005
+    result = run_backtest(
+        frame,
+        execution=ExecutionCosts(commission_bps=0, half_spread_bps=0, slippage_bps=0),
+        start_index=signal_index,
+        end_index=next_index,
+    )
+    assert result.trades
+    assert result.trades[0].exit_reason == "stop"
+    assert result.trades[0].exit_price == pytest.approx(gap_open)
+    assert result.trades[0].exit_price < result.trades[0].stop
+
+
+def test_equity_metrics_include_drawdown():
+    frame = _trend_with_breakouts()
+    result = run_backtest(frame, strategy=RegimeBreakoutSettings(max_holding_bars=12))
+    assert result.equity_curve
+    assert result.metrics()["max_drawdown_pct"] >= 0
