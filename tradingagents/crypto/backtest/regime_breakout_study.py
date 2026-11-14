@@ -6,10 +6,10 @@ reported separately by symbol and execution-cost scenario.
 """
 from __future__ import annotations
 
+import collections.abc
+import dataclasses
 import json
-from collections.abc import Mapping
-from dataclasses import asdict
-from pathlib import Path
+import pathlib
 
 import pandas as pd
 
@@ -42,14 +42,14 @@ def _buy_and_hold_return(
 
 
 def run_walk_forward_study(
-    frames: Mapping[str, pd.DataFrame],
+    frames: collections.abc.Mapping[str, pd.DataFrame],
     *,
     warmup_bars: int = 250,
     test_bars: int = 120,
     initial_cash: float = 10_000,
     strategy: RegimeBreakoutSettings | None = None,
     portfolio: BacktestSettings | None = None,
-    scenarios: Mapping[str, ExecutionCosts] = COST_SCENARIOS,
+    scenarios: collections.abc.Mapping[str, ExecutionCosts] = COST_SCENARIOS,
 ) -> dict:
     """Run fixed-parameter, expanding-context OOS folds for every symbol.
 
@@ -183,7 +183,7 @@ def run_walk_forward_study(
         "bar_count_per_symbol": bar_count,
         "first_bar": next(iter(ordered.values())).index[0].isoformat(),
         "last_bar": next(iter(ordered.values())).index[-1].isoformat(),
-        "strategy": asdict(strategy),
+        "strategy": dataclasses.asdict(strategy),
         "cost_scenarios_per_fill_bps": {
             name: {
                 "commission": costs.commission_bps,
@@ -231,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cache", default="./crypto-cache")
     parser.add_argument("--warmup-bars", type=int, default=250)
     parser.add_argument("--test-bars", type=int, default=120)
-    parser.add_argument("--out", type=Path, default=Path("artifacts/regime_breakout_oos.json"))
+    parser.add_argument("--out", type=pathlib.Path, default=pathlib.Path("artifacts/regime_breakout_oos.json"))
     args = parser.parse_args(argv)
     frames = load_hourly_frames(args.cache, tuple(args.symbols))
     report = run_walk_forward_study(
