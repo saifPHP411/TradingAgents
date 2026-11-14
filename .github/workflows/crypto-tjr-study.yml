@@ -58,11 +58,11 @@ jobs:
 
       - name: Run regime-breakout multi-symbol chronological OOS study
         run: |
-          python -m tradingagents.crypto.backtest.regime_breakout_study \\
-            --symbols BTC/USDT ETH/USDT BNB/USDT \\
-            --cache ./crypto-cache \\
-            --warmup-bars 250 \\
-            --test-bars 100 \\
+          python -m tradingagents.crypto.backtest.regime_breakout_study \
+            --symbols BTC/USDT ETH/USDT BNB/USDT \
+            --cache ./crypto-cache \
+            --warmup-bars 250 \
+            --test-bars 100 \
             --out artifacts/regime_breakout_oos.json
 
       - name: Upload study report
