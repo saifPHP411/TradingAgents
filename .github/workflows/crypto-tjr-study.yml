@@ -56,6 +56,15 @@ jobs:
             --out artifacts/crypto_tjr_study.json \
             --markdown artifacts/crypto_tjr_study.md
 
+      - name: Run regime-breakout multi-symbol chronological OOS study
+        run: |
+          python -m tradingagents.crypto.backtest.regime_breakout_study \\
+            --symbols BTC/USDT ETH/USDT BNB/USDT \\
+            --cache ./crypto-cache \\
+            --warmup-bars 250 \\
+            --test-bars 100 \\
+            --out artifacts/regime_breakout_oos.json
+
       - name: Upload study report
         if: always()
         uses: actions/upload-artifact@v4
