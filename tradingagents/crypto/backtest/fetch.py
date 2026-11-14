@@ -29,7 +29,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Fetch real crypto bars into the study cache.")
     parser.add_argument("--symbols", nargs="+", default=list(DEFAULT_SYMBOLS))
     parser.add_argument(
-        "--limit", type=int, default=2500, help="1m bars per symbol (venue cap 1000/page)"
+        "--interval",
+        choices=("1m", "5m", "15m", "1h", "4h"),
+        default="1m",
+        help="candle interval to fetch",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=2500, help="bars per symbol (venue cap 1000/page)"
     )
     parser.add_argument(
         "--cache", default=None, help="cache directory (default: env or ~/.tradingagents/crypto)"
@@ -53,11 +59,11 @@ def main(argv: list[str] | None = None) -> int:
 
     cache = HistoryCache(args.cache) if args.cache else HistoryCache()
     frames = fetch_history(
-        resolution.symbols, intervals=("1m",), limit=args.limit, client=client, cache=cache
+        resolution.symbols, intervals=(args.interval,), limit=args.limit, client=client, cache=cache
     )
     coverage = {}
     for symbol, bundle in frames.items():
-        frame = bundle.get("1m")
+        frame = bundle.get(args.interval)
         if frame is None or frame.empty:
             continue
         coverage[symbol] = {

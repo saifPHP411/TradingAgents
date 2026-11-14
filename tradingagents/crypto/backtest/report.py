@@ -8,7 +8,7 @@ single number.
 
 from __future__ import annotations
 
-from .study import CryptoStudyResult, PeriodResult
+from .study import CryptoStudyResult, PeriodResult, cost_scenarios
 
 _METRIC_ROWS: tuple[tuple[str, str], ...] = (
     ("Initial Capital", "initial_capital"),
@@ -96,6 +96,21 @@ def render_markdown(study: CryptoStudyResult) -> str:
         f"(local)",
         "",
     ]
+    lines.append("## Cost assumptions (per fill; estimates, not verified Bybit account fees)")
+    lines.append("")
+    lines.append("| Scenario | Commission | Half-spread | Slippage |")
+    lines.append("|---|---:|---:|---:|")
+    for label, model in cost_scenarios(config).items():
+        lines.append(
+            f"| {label} | {model.commission_rate * 10_000:.1f} bps | "
+            f"{model.half_spread_bps:.1f} bps | {model.slippage_bps:.1f} bps |"
+        )
+    lines.append("")
+    lines.append(
+        "These are explicit research assumptions applied on each fill; actual Bybit "
+        "fees and realized spread/slippage depend on the account tier, order type and market."
+    )
+    lines.append("")
     if study.coverage:
         lines.append("## Data coverage (what the venue actually served)")
         lines.append("")
@@ -117,10 +132,16 @@ def render_markdown(study: CryptoStudyResult) -> str:
             lines.append(f"- {requested}: not tradable ({reason})")
         lines.append("")
 
-    lines.append(_table(study.periods, "Periods"))
+    lines.append(_table(study.periods, "Periods (configured base cost schedule)"))
     lines.append("")
-    lines.append(_table(study.walk_forward, "Walk-forward (out-of-sample folds)"))
+    for scenario, rows in study.period_cost_scenarios.items():
+        lines.append(_table(rows, f"Periods after {scenario} costs"))
+        lines.append("")
+    lines.append(_table(study.walk_forward, "Walk-forward (configured base cost schedule)"))
     lines.append("")
+    for scenario, rows in study.walk_forward_cost_scenarios.items():
+        lines.append(_table(rows, f"Walk-forward folds after {scenario} costs"))
+        lines.append("")
     lines.append(_table(study.regimes, "Market regimes"))
     lines.append("")
     lines.append(_table(study.cost_scenarios, "Cost scenarios"))

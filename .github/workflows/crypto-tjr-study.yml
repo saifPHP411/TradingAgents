@@ -11,19 +11,69 @@ on:
       - "tradingagents/tjr/**"
       - "tradingagents/paper_experiment/dashboard/**"
       - "tests/**"
+  pull_request:
+    branches:
+      - demo-ready-dashboard-2026
+    paths:
+      - ".github/workflows/crypto-tjr-study.yml"
+      - "tradingagents/crypto/**"
+      - "tradingagents/tjr/**"
+      - "tradingagents/paper_experiment/dashboard/**"
+      - "tests/**"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: crypto-tjr-study
-  cancel-in-progress: false
+  group: crypto-tjr-study-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  study:
+  fetch-history:
+    name: Fetch and preserve 120-day market history
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 35
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install data-fetch dependencies
+        run: python -m pip install --upgrade pip pandas numpy requests python-dotenv pydantic
+
+      - name: Fetch 120 days of public Binance candles
+        run: |
+          python -m tradingagents.crypto.backtest.fetch \
+            --symbols BTC/USDT ETH/USDT BNB/USDT \
+            --interval 1m \
+            --limit 172800 \
+            --cache ./crypto-cache
+          python -m tradingagents.crypto.backtest.fetch \
+            --symbols BTC/USDT ETH/USDT BNB/USDT SOL/USDT XRP/USDT DOGE/USDT AVAX/USDT LINK/USDT LTC/USDT BCH/USDT \
+            --interval 1h \
+            --limit 17520 \
+            --cache ./crypto-cache
+
+      - name: Upload immutable market-history cache
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-history-cache
+          path: crypto-cache/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 1
+
+  tjr-study:
+    name: TJR cost-scenario study
+    needs: fetch-history
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -37,14 +87,13 @@ jobs:
       - name: Install backtest dependencies
         run: python -m pip install --upgrade pip pandas numpy requests python-dotenv pydantic
 
-      - name: Fetch 30 days of public Binance candles
-        run: |
-          python -m tradingagents.crypto.backtest.fetch \
-            --symbols BTC/USDT ETH/USDT BNB/USDT \
-            --limit 43200 \
-            --cache ./crypto-cache
+      - name: Download the exact fetched market-history cache
+        uses: actions/download-artifact@v4
+        with:
+          name: crypto-history-cache
+          path: crypto-cache/
 
-      - name: Run unchanged TJR study with realistic costs
+      - name: Run TJR study with explicit frictionless, realistic and conservative costs
         run: |
           mkdir -p artifacts
           python -m tradingagents.crypto.backtest.run \
@@ -55,11 +104,98 @@ jobs:
             --out artifacts/crypto_tjr_study.json \
             --markdown artifacts/crypto_tjr_study.md
 
-      - name: Upload study report
+      - name: Upload TJR report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: crypto-tjr-study
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+
+  regime-breakout-study:
+    name: Regime-breakout chronological OOS study
+    needs: fetch-history
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install backtest dependencies
+        run: python -m pip install --upgrade pip pandas numpy requests python-dotenv pydantic
+
+      - name: Download the exact fetched market-history cache
+        uses: actions/download-artifact@v4
+        with:
+          name: crypto-history-cache
+          path: crypto-cache/
+
+      - name: Run regime-breakout multi-symbol chronological OOS study
+        run: |
+          mkdir -p artifacts
+          python -m tradingagents.crypto.backtest.regime_breakout_study \
+            --symbols BTC/USDT ETH/USDT BNB/USDT \
+            --cache ./crypto-cache \
+            --warmup-bars 250 \
+            --test-bars 100 \
+            --out artifacts/regime_breakout_oos.json
+
+      - name: Upload regime-breakout report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regime-breakout-oos-study
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+
+  adaptive-multi-regime-study:
+    name: Adaptive multi-regime chronological OOS study
+    needs: fetch-history
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install backtest dependencies
+        run: python -m pip install --upgrade pip pandas numpy requests python-dotenv pydantic
+
+      - name: Download the exact fetched market-history cache
+        uses: actions/download-artifact@v4
+        with:
+          name: crypto-history-cache
+          path: crypto-cache/
+
+      - name: Run adaptive multi-symbol chronological OOS study
+        run: |
+          mkdir -p artifacts
+          python -m tradingagents.crypto.backtest.adaptive_study \
+            --symbols BTC/USDT ETH/USDT BNB/USDT SOL/USDT XRP/USDT DOGE/USDT AVAX/USDT LINK/USDT LTC/USDT BCH/USDT \
+            --cache ./crypto-cache \
+            --warmup-bars 1000 \
+            --test-bars 200 \
+            --spread-bps 2 \
+            --out artifacts/adaptive_crypto_oos.json
+
+      - name: Upload adaptive strategy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adaptive-crypto-oos-study
           path: artifacts/
           if-no-files-found: warn
           retention-days: 30
