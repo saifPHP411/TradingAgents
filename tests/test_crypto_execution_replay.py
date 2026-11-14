@@ -282,3 +282,34 @@ def test_jsonl_writer_emits_one_parseable_record_per_line():
     lines = output.getvalue().splitlines()
     assert len(lines) == 2
     assert [json.loads(line)["event"] for line in lines] == ["first", "second"]
+
+
+def test_trade_volume_is_not_reused_across_multiple_orders_at_same_price():
+    replay = BybitExecutionReplay(maker_fee_bps=1, queue_factor=1)
+    replay.process(book(1, bid_qty="2"))
+    replay.submit_order(
+        order_id="first", timestamp_ms=2, side="Buy", price="100",
+        quantity="2", latency_ms=0,
+    )
+    replay.submit_order(
+        order_id="second", timestamp_ms=2, side="Buy", price="100",
+        quantity="2", latency_ms=0,
+    )
+
+    replay.process(trade(3, "Sell", price="100", qty="4"))
+
+    total_filled = sum(order.filled_qty for order in replay.orders.values())
+    assert total_filled == Decimal("2")
+    assert replay.orders["first"].filled_qty == Decimal("2")
+    assert replay.orders["second"].filled_qty == Decimal("0")
+
+
+def test_pending_order_expires_before_delayed_activation():
+    replay = BybitExecutionReplay(maker_fee_bps=1, queue_factor=1)
+    replay.submit_order(
+        order_id="slow", timestamp_ms=2, side="Buy", price="100",
+        quantity="1", latency_ms=100, ttl_ms=10,
+    )
+    replay.process(book(120))
+
+    assert replay.orders["slow"].status == "expired"
