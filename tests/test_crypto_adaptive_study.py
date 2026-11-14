@@ -157,3 +157,36 @@ def test_next_open_gap_that_erases_net_reward_risk_is_rejected(monkeypatch):
 
     assert result.trades == []
     assert result.rejections["next-open gap/cost invalidated net reward-risk"] == 1
+
+
+def test_risk_sizing_includes_estimated_round_trip_execution_costs(monkeypatch):
+    import tradingagents.crypto.backtest.adaptive_study as module
+
+    frame = _flat_frame(90)
+
+    def fake_analyze(data, features, index, **kwargs):
+        if index == 55:
+            return AdaptiveDecision(
+                "buy_candidate", "bull_trend", "trend_pullback", .8,
+                100.0, 99.0, 103.0, ("test setup",), (), {},
+            )
+        return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None)
+
+    monkeypatch.setattr(module, "_analyze_market_at", fake_analyze)
+    result = run_adaptive_backtest(
+        frame,
+        execution=AdaptiveExecutionCosts(10, 1, 2),
+        portfolio=AdaptivePortfolio(
+            initial_cash=1000, risk_fraction=.01, max_notional_fraction=1.0
+        ),
+        start_index=55,
+        end_index=60,
+    )
+
+    assert result.trades
+    trade = result.trades[0]
+    round_trip_cost_per_unit = trade.entry_price * 26 / 10_000
+    modeled_risk = trade.quantity * (
+        trade.entry_price - trade.stop_price + round_trip_cost_per_unit
+    )
+    assert modeled_risk <= 10.0
