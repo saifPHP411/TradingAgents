@@ -6,9 +6,9 @@ reported separately by symbol and execution-cost scenario.
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import asdict
-import json
 from pathlib import Path
 
 import pandas as pd
