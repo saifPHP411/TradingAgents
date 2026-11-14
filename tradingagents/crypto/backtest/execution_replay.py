@@ -182,6 +182,9 @@ class BybitExecutionReplay:
         self.rejects: dict[str, int] = defaultdict(int)
         self.events_seen = 0
         self.cancellations = 0
+        self.sequence_gaps = 0
+        self._last_book_update_id: dict[str, int] = {}
+        self._book_valid = False
 
     def submit_order(
         self, *, order_id: str, timestamp_ms: int, side: str,
@@ -240,23 +243,41 @@ class BybitExecutionReplay:
         """Consume normalized or raw Bybit WebSocket event JSON."""
         self.events_seen += 1
         received = int(event.get("received_ts_ms", event.get("ts", 0)))
-        self._expire_due(received)
         topic = str(event.get("topic", ""))
         data = event.get("data") or {}
         event_type = event.get("type")
         if topic.startswith("orderbook.") and event_type in ("snapshot", "delta"):
+            self._expire_due(received)
             self._activate_due(received)
-            self.book.update(data, snapshot=(event_type == "snapshot"))
-            mid = self.book.mid()
-            if mid is not None:
-                self.mid_history.append((received, mid))
+            update_id = data.get("u")
+            if event_type == "snapshot":
+                self._book_valid = True
+                if update_id is not None:
+                    self._last_book_update_id[topic] = int(update_id)
+            elif update_id is not None:
+                previous = self._last_book_update_id.get(topic)
+                current = int(update_id)
+                if current == 1 or (previous is not None and current != previous + 1):
+                    self.sequence_gaps += 1
+                    self._book_valid = False
+                    self.book.update({}, snapshot=True)
+                elif previous is not None:
+                    self._last_book_update_id[topic] = current
+                else:
+                    self._book_valid = False
+            if self._book_valid:
+                self.book.update(data, snapshot=(event_type == "snapshot"))
+                mid = self.book.mid()
+                if mid is not None:
+                    self.mid_history.append((received, mid))
             self._activate_due(received)
         elif topic.startswith("publicTrade."):
             trades = data if isinstance(data, list) else [data]
             for trade in trades:
-                ts = int(trade.get("T", received))
-                self._activate_due(ts)
-                self._process_trade(trade, ts)
+                self._expire_due(received)
+                self._activate_due(received)
+                # Compare local receive timestamps consistently with simulated latency.
+                self._process_trade(trade, received)
         else:
             return
 
@@ -362,7 +383,7 @@ class BybitExecutionReplay:
             "maker_fee_bps": self.maker_fee_bps,
             "queue_factor": float(self.queue_factor),
             "queue_cancellation_credit": 0.0,
-            "events_seen": self.events_seen,
+            "events_seen": self.events_seen, "orderbook_sequence_gaps": self.sequence_gaps,
             "warning": "Markout is a post-fill mid-price proxy, not realized round-trip PnL; queue priority is estimated.",
         }
 
