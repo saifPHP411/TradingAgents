@@ -34,10 +34,24 @@ class AdaptiveConfig:
                 raise ValueError(f"{name} must be >= 2")
         if self.fast_ema >= self.slow_ema:
             raise ValueError("fast_ema must be smaller than slow_ema")
+        numeric_limits = (
+            self.adx_trend_min, self.adx_range_max, self.efficiency_trend_min,
+            self.efficiency_range_max, self.relative_volume_min, self.max_atr_pct,
+            self.max_spread_bps, self.estimated_round_trip_cost_bps,
+            self.min_net_reward_risk, self.risk_fraction, self.max_notional_fraction,
+        )
+        if any(not pd.notna(value) or abs(value) == float("inf") for value in numeric_limits):
+            raise ValueError("configuration values must be finite")
         if not 0 < self.risk_fraction <= 0.02 or not 0 < self.max_notional_fraction <= 1:
             raise ValueError("risk and notional fractions exceed research safety bounds")
         if min(self.max_spread_bps, self.estimated_round_trip_cost_bps) < 0:
             raise ValueError("cost limits cannot be negative")
+        if self.max_atr_pct <= 0 or self.relative_volume_min <= 0 or self.min_net_reward_risk <= 0:
+            raise ValueError("volatility, volume, and reward/risk thresholds must be positive")
+        if not 0 <= self.efficiency_range_max < self.efficiency_trend_min <= 1:
+            raise ValueError("efficiency thresholds must satisfy 0 <= range < trend <= 1")
+        if not 0 <= self.adx_range_max < self.adx_trend_min:
+            raise ValueError("ADX thresholds must satisfy 0 <= range < trend")
 
 @dataclass(frozen=True)
 class AdaptiveDecision:
@@ -97,7 +111,12 @@ def _features(data: pd.DataFrame, cfg: AdaptiveConfig) -> pd.DataFrame:
     delta = x.close.diff()
     gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    x["rsi"] = 100-100/(1+gain/loss.replace(0, pd.NA))
+    relative_strength = gain.div(loss.where(loss > 0))
+    rsi = 100 - 100 / (1 + relative_strength)
+    rsi = rsi.mask((loss == 0) & (gain > 0), 100.0)
+    rsi = rsi.mask((gain == 0) & (loss > 0), 0.0)
+    rsi = rsi.mask((gain == 0) & (loss == 0), 50.0)
+    x["rsi"] = rsi
     x["prior_high"] = x.high.rolling(cfg.breakout_lookback, min_periods=cfg.breakout_lookback).max().shift(1)
     x["prior_low"] = x.low.rolling(cfg.breakout_lookback, min_periods=cfg.breakout_lookback).min().shift(1)
     x["volume_base"] = x.volume.rolling(cfg.breakout_lookback, min_periods=cfg.breakout_lookback).mean().shift(1)
@@ -167,10 +186,17 @@ def analyze_market(frame: pd.DataFrame, *, config: AdaptiveConfig = AdaptiveConf
         reasons.append("mixed market structure; no expert has a clear setup")
     stop = target = None
     if strategy != "none":
-        stop = price-2*atr
-        target = price+4*atr
-        cost_r = (config.estimated_round_trip_cost_bps/10000)*price/(2*atr)
-        if stop <= 0 or 2-cost_r < config.min_net_reward_risk:
+        if strategy == "range_reversion":
+            stop = price - 1.5 * atr
+            target = (price + float(r.prior_high)) / 2
+        else:
+            stop = price - 2 * atr
+            target = price + 4 * atr
+        risk_distance = price - stop
+        reward_distance = target - price
+        cost_distance = (config.estimated_round_trip_cost_bps / 10_000) * price
+        net_reward_risk = (reward_distance - cost_distance) / (risk_distance + cost_distance)
+        if stop <= 0 or reward_distance <= 0 or net_reward_risk < config.min_net_reward_risk:
             blockers.append("estimated round-trip costs erase minimum net reward/risk")
             strategy, confidence, stop, target = "none", 0.0, None, None
         else:
@@ -182,7 +208,12 @@ def analyze_market(frame: pd.DataFrame, *, config: AdaptiveConfig = AdaptiveConf
                    "prior_range_high":float(r.prior_high), "prior_range_low":float(r.prior_low),
                    "relative_volume":float(r.volume/r.volume_base) if r.volume_base > 0 else None,
                    "spread_bps":spread_bps, "estimated_round_trip_cost_bps":config.estimated_round_trip_cost_bps,
-                   "risk_fraction_cap":config.risk_fraction, "max_notional_fraction":config.max_notional_fraction}
+                   "risk_fraction_cap":config.risk_fraction, "max_notional_fraction":config.max_notional_fraction,
+                   "estimated_net_reward_risk": (
+                       (target - price - (config.estimated_round_trip_cost_bps / 10_000) * price)
+                       / (price - stop + (config.estimated_round_trip_cost_bps / 10_000) * price)
+                       if stop is not None and target is not None and stop < price else None
+                   )}
     action = "buy_candidate" if strategy != "none" and not blockers else "no_trade"
     return AdaptiveDecision(action, regime, strategy, confidence,
                             price if action == "buy_candidate" else None,
