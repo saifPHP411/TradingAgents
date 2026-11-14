@@ -62,7 +62,6 @@ def test_walkforward_rejects_insufficient_history():
         )
 
 
-
 def test_walkforward_rejects_misaligned_timestamps_even_when_bar_counts_match():
     first = _flat_frame()
     second = _flat_frame()
