@@ -185,6 +185,7 @@ class BybitExecutionReplay:
         self.sequence_gaps = 0
         self._last_book_update_id: dict[str, int] = {}
         self._book_valid = False
+        self.symbol: str | None = None
 
     def submit_order(
         self, *, order_id: str, timestamp_ms: int, side: str,
@@ -244,6 +245,12 @@ class BybitExecutionReplay:
         self.events_seen += 1
         received = int(event.get("received_ts_ms", event.get("ts", 0)))
         topic = str(event.get("topic", ""))
+        if topic.startswith(("orderbook.", "publicTrade.")):
+            event_symbol = topic.rsplit(".", 1)[-1]
+            if self.symbol is None:
+                self.symbol = event_symbol
+            elif event_symbol != self.symbol:
+                raise ValueError("one replay instance can process only one symbol")
         data = event.get("data") or {}
         event_type = event.get("type")
         if topic.startswith("orderbook.") and event_type in ("snapshot", "delta"):
@@ -340,7 +347,7 @@ class BybitExecutionReplay:
         total = len(self.orders)
         filled_orders = sum(o.filled_qty > 0 for o in self.orders.values())
         complete = sum(o.status == "filled" for o in self.orders.values())
-        markout_values = [f.net_markout_30s for f in self.fills if f.net_markout_30s is not None]
+        markout_values = [\n            f.net_markout_30s / f.price * 10_000\n            for f in self.fills if f.net_markout_30s is not None and f.price > 0\n        ]
         markouts = [f.net_markout_30s * f.quantity for f in self.fills if f.net_markout_30s is not None]
         mean_markout = _mean(markout_values)
         variance = (
@@ -373,7 +380,7 @@ class BybitExecutionReplay:
             "mean_markout_1s": _mean([f.markout_1s for f in self.fills]),
             "mean_markout_5s": _mean([f.markout_5s for f in self.fills]),
             "mean_markout_30s": _mean([f.markout_30s for f in self.fills]),
-            "mean_net_markout_30s": mean_markout,
+            "mean_net_markout_30s_bps": mean_markout,
             "per_fill_markout_sharpe_unannualized": (
                 mean_markout / variance ** 0.5 if variance and variance > 0 else None
             ),
@@ -385,6 +392,8 @@ class BybitExecutionReplay:
             "queue_factor": float(self.queue_factor),
             "queue_cancellation_credit": 0.0,
             "events_seen": self.events_seen, "orderbook_sequence_gaps": self.sequence_gaps,
+            "symbol": self.symbol,
+            "funding_model": "not modeled; do not interpret linear/perpetual results as net returns",
             "warning": "Markout is a post-fill mid-price proxy, not realized round-trip PnL; queue priority is estimated.",
         }
 
@@ -457,7 +466,7 @@ def record_public_market_data(
 
 def replay_jsonl(
     path: str, *, maker_fee_bps: float, queue_factor: float = 1.5,
-    orders: list[dict[str, Any]] | None = None,
+    orders: list[dict[str, Any]] | None = None, symbol: str | None = None,
 ) -> BybitExecutionReplay:
     """Replay captured market data with simulated submissions interleaved by time.
 
@@ -467,6 +476,20 @@ def replay_jsonl(
     replay = BybitExecutionReplay(maker_fee_bps=maker_fee_bps, queue_factor=queue_factor)
     with Path(path).open(encoding="utf-8") as source:
         events = [json.loads(line) for line in source if line.strip()]
+    symbols = {
+        str(event.get("topic", "")).rsplit(".", 1)[-1]
+        for event in events
+        if str(event.get("topic", "")).startswith(("orderbook.", "publicTrade."))
+    }
+    if symbol is None:
+        if len(symbols) > 1:
+            raise ValueError("multi-symbol capture requires an explicit symbol filter")
+        symbol = next(iter(symbols), None)
+    if symbol is not None:
+        events = [
+            event for event in events
+            if str(event.get("topic", "")).endswith(f".{symbol}")
+        ]
     timeline = [
         (int(event.get("received_ts_ms", event.get("ts", 0))), 0, event)
         for event in events
