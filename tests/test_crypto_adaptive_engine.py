@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from tradingagents.crypto.adaptive import AdaptiveConfig, analyze_market
+
 pytestmark = pytest.mark.unit
 
 def frame(n=180):
