@@ -257,3 +257,50 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
     return data
 
 
+def load_ohlcv_range(
+    symbol: str,
+    start: str,
+    end: str,
+    *,
+    auto_adjust: bool = True,
+) -> pd.DataFrame:
+    """A bounded OHLCV range for ``symbol``, for a one-time freeze.
+
+    Unlike :func:`load_ohlcv` this does not cache, does not fill gaps and does not
+    clamp to ``as_of_date``: it returns exactly the rows the vendor reported
+    between ``start`` and ``end`` inclusive, with a lower-cased ``date`` column and
+    a date index, ready to be written to a file and committed. It exists so that
+    code outside the data layer can freeze a dataset without importing a vendor
+    library itself (see ``tests/test_layering.py``).
+
+    yfinance's ``end`` is exclusive, so one day is added to make ``end``
+    inclusive. A rate limit or an outage is raised as
+    ``VendorUnavailableError``; an empty answer is raised as
+    ``NoMarketDataError``.
+    """
+    canonical = normalize_symbol(symbol)
+    start_str = pd.to_datetime(start).strftime("%Y-%m-%d")
+    end_str = (pd.to_datetime(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    downloaded = yf_retry(lambda: yf.Ticker(canonical).history(
+        start=start_str,
+        end=end_str,
+        auto_adjust=auto_adjust,
+        actions=False,
+    ))
+    if downloaded is None or downloaded.empty:
+        raise_for_empty(symbol, canonical, "price rows")
+    frame = _ensure_date_column(downloaded.reset_index())
+    if frame.empty or "Close" not in frame.columns:
+        raise_for_empty(symbol, canonical, "price rows")
+    frame = frame.rename(columns=str.lower)
+    frame = frame.set_index("date")
+    index = pd.to_datetime(frame.index)
+    # Drop the exchange timezone, keeping the local wall-clock date, so the
+    # frozen file is tz-naive like every other feed the backtester reads.
+    if getattr(index, "tz", None) is not None:
+        index = index.tz_localize(None)
+    frame.index = index.normalize()
+    frame.index.name = "date"
+    return frame[["open", "high", "low", "close", "volume"]]
+
+

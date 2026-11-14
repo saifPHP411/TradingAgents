@@ -1,0 +1,32 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile"
+  },
+  "deploy": {
+    "startCommand": "/bin/sh -c \"exec python -m tradingagents.paper_experiment.dashboard.server --root /home/appuser/app/data --host 0.0.0.0 --port $PORT --allow-paper-trading --paper-market-data binance_snapshot --paper-decision-source crypto --crypto-live\"",
+    "healthcheckPath": "/healthz",
+    "healthcheckTimeout": 30,
+    "requiredMountPath": "/home/appuser/app/data",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 3
+  },
+  "environments": {
+    "production": {
+      "variables": {
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "RAILWAY_RUN_UID": "0",
+        "TRADINGAGENTS_DASHBOARD_TOKEN": "{{DASHBOARD_TOKEN}}",
+        "TRADINGAGENTS_CRYPTO_SYMBOLS": "BTC/USDT ETH/USDT SOL/USDT XRP/USDT BNB/USDT DOGE/USDT AVAX/USDT LINK/USDT LTC/USDT BCH/USDT",
+        "TRADINGAGENTS_EXPERIMENT_SYMBOLS": "BTC/USDT ETH/USDT SOL/USDT XRP/USDT BNB/USDT DOGE/USDT AVAX/USDT LINK/USDT LTC/USDT BCH/USDT",
+        "TRADINGAGENTS_PAPER_MARKET_DATA": "binance_snapshot",
+        "TRADINGAGENTS_PAPER_DECISION_SOURCE": "crypto",
+        "TRADINGAGENTS_PAPER_ORDER_NOTIONAL": "25",
+        "TRADINGAGENTS_PAPER_MAX_PRICE_DEVIATION": "0.05",
+        "TRADINGAGENTS_PAPER_SNAPSHOT_MAX_AGE_SECONDS": "15"
+      }
+    }
+  }
+}

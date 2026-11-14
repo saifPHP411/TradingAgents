@@ -54,6 +54,10 @@ include = ["tradingagents*", "cli*"]
 [tool.setuptools.package-data]
 cli = ["static/*"]
 tradingagents = ["assets/*.svg"]
+# The frozen baseline dataset is committed and is what a fresh install reads to
+# create an experiment. Without it in the wheel, an installed deployment has no
+# data to start from and refuses to start.
+"tradingagents.baseline" = ["data/*.csv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
