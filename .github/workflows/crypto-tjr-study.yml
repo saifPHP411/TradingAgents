@@ -50,7 +50,7 @@ jobs:
           mkdir -p artifacts
           python -m tradingagents.crypto.backtest.run \
             --symbols BTC/USDT ETH/USDT BNB/USDT \
-            --periods 7 \
+            --periods 7 30 \
             --cache ./crypto-cache \
             --no-sensitivity \
             --out artifacts/crypto_tjr_study.json \
