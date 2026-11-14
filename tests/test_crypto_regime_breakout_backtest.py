@@ -97,7 +97,6 @@ def test_flat_market_does_not_create_breakout_entries():
     assert result.final_equity == pytest.approx(10_000.0)
 
 
-
 def test_oos_window_excludes_warmup_trades_and_closes_at_window_end():
     frame = _trend_with_breakouts()
     result = run_backtest(
