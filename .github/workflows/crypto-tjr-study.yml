@@ -38,11 +38,11 @@ jobs:
       - name: Install backtest dependencies
         run: python -m pip install --upgrade pip pandas numpy requests python-dotenv pydantic
 
-      - name: Fetch 60 days of public Binance candles
+      - name: Fetch 120 days of public Binance candles
         run: |
           python -m tradingagents.crypto.backtest.fetch \
             --symbols BTC/USDT ETH/USDT BNB/USDT \
-            --limit 86400 \
+            --limit 172800 \
             --cache ./crypto-cache
 
       - name: Run TJR study with explicit frictionless, realistic and conservative cost scenarios
