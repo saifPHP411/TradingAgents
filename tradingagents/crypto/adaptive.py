@@ -1,5 +1,6 @@
 """Research-only adaptive crypto market analysis; never submits orders."""
 from __future__ import annotations
+
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
