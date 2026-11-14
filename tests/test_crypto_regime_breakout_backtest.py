@@ -8,6 +8,7 @@ from tradingagents.crypto.backtest.regime_breakout import (
     BacktestSettings,
     ExecutionCosts,
     RegimeBreakoutSettings,
+    entry_levels,
     indicators,
     run_backtest,
 )
