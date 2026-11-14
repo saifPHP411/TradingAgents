@@ -85,3 +85,10 @@ def test_same_candidate_is_vetoed_when_costs_are_excessive():
     )
     assert result.action == "no_trade"
     assert "estimated round-trip costs" in result.blockers[0]
+
+
+def test_persistent_uptrend_has_defined_rsi_instead_of_missing_indicator():
+    from tradingagents.crypto.adaptive import _features, _validate
+
+    features = _features(_validate(frame()), AdaptiveConfig())
+    assert features.rsi.iloc[-1] == pytest.approx(100.0)

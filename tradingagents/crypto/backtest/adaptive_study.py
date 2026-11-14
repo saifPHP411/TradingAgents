@@ -6,7 +6,7 @@ This module is research-only and has no exchange/order dependencies.
 from __future__ import annotations
 
 import collections.abc
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 import pandas as pd
 
@@ -73,8 +73,8 @@ class AdaptiveBacktestResult:
     def metrics(self) -> dict:
         winners = [trade.net_pnl for trade in self.trades if trade.net_pnl > 0]
         losers = [trade.net_pnl for trade in self.trades if trade.net_pnl < 0]
-        gross_wins = sum(winners)
-        gross_losses = abs(sum(losers))
+        net_profit_on_winners = sum(winners)
+        net_loss_on_losers = abs(sum(losers))
         peak = self.initial_cash
         max_drawdown = 0.0
         for equity in self.equity_curve:
@@ -90,7 +90,12 @@ class AdaptiveBacktestResult:
             "wins": len(winners),
             "losses": len(losers),
             "win_rate_pct": len(winners) / len(self.trades) * 100 if self.trades else 0.0,
-            "profit_factor": gross_wins / gross_losses if gross_losses else ("infinite" if gross_wins else 0.0),
+            "profit_factor": (
+                net_profit_on_winners / net_loss_on_losers
+                if net_loss_on_losers else ("infinite" if net_profit_on_winners else 0.0)
+            ),
+            "net_profit_on_winners": net_profit_on_winners,
+            "net_loss_on_losers": net_loss_on_losers,
             "expectancy_per_trade": sum(t.net_pnl for t in self.trades) / len(self.trades) if self.trades else 0.0,
             "gross_profit": sum(t.gross_pnl for t in self.trades if t.gross_pnl > 0),
             "gross_loss": abs(sum(t.gross_pnl for t in self.trades if t.gross_pnl < 0)),
@@ -114,8 +119,18 @@ def run_adaptive_backtest(
     data_is_fresh: bool = True,
 ) -> AdaptiveBacktestResult:
     """Backtest one Spot symbol with closed-bar signals and next-open fills."""
-    if not pd.notna(spread_bps) or not 0 <= spread_bps <= config.max_spread_bps:
-        raise ValueError("spread_bps must be finite and within the configured liquidity limit")
+    if not pd.notna(spread_bps) or abs(spread_bps) == float("inf") or spread_bps < 0:
+        raise ValueError("spread_bps must be finite and non-negative")
+    effective_spread_bps = max(spread_bps, execution.half_spread_bps)
+    round_trip_cost_bps = 2 * (
+        execution.commission_bps + execution.half_spread_bps + execution.slippage_bps
+    )
+    effective_config = replace(
+        config,
+        estimated_round_trip_cost_bps=max(config.estimated_round_trip_cost_bps, round_trip_cost_bps),
+    )
+    if effective_spread_bps > effective_config.max_spread_bps:
+        raise ValueError("spread_bps must be within the configured liquidity limit")
     if frame.empty:
         return AdaptiveBacktestResult(portfolio.initial_cash, portfolio.initial_cash)
     if not frame.index.is_monotonic_increasing or frame.index.has_duplicates:
@@ -169,7 +184,7 @@ def run_adaptive_backtest(
         if position is None and i >= warmup and i + 1 <= end_index:
             history = frame.iloc[:i + 1]
             decision = analyze_market(
-                history, config=config, spread_bps=spread_bps,
+                history, config=effective_config, spread_bps=effective_spread_bps,
                 data_is_fresh=data_is_fresh, closed_bars_only=True,
             )
             result.regimes[decision.regime] = result.regimes.get(decision.regime, 0) + 1
@@ -286,8 +301,8 @@ def run_adaptive_walk_forward_study(
             peak = max(peak, equity)
             if peak:
                 max_drawdown = max(max_drawdown, (peak - equity) / peak)
-        winners = sum(row["gross_profit"] for row in all_rows)
-        losers = sum(row["gross_loss"] for row in all_rows)
+        winners = sum(row["net_profit_on_winners"] for row in all_rows)
+        losers = sum(row["net_loss_on_losers"] for row in all_rows)
         trades = sum(row["trades"] for row in all_rows)
         pnl = sum(row["net_pnl"] for row in all_rows)
         per_symbol = {}
@@ -362,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
         spread_bps=args.spread_bps,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+    args.out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report["summary"], indent=2, sort_keys=True))
     print(f"wrote {args.out}")
     return 0

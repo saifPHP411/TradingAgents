@@ -188,7 +188,7 @@ def analyze_market(frame: pd.DataFrame, *, config: AdaptiveConfig = AdaptiveConf
     if strategy != "none":
         if strategy == "range_reversion":
             stop = price - 1.5 * atr
-            target = (price + float(r.prior_high)) / 2
+            target = (float(r.prior_high) + float(r.prior_low)) / 2
         else:
             stop = price - 2 * atr
             target = price + 4 * atr
