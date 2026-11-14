@@ -28,6 +28,7 @@ class AdaptiveConfig:
     max_spread_bps: float = 20.0
     estimated_round_trip_cost_bps: float = 30.0
     min_net_reward_risk: float = 1.25
+    min_edge_cost_multiple: float = 3.0
     risk_fraction: float = 0.005
     max_notional_fraction: float = 0.10
 
@@ -42,7 +43,7 @@ class AdaptiveConfig:
             self.efficiency_range_max, self.relative_volume_min, self.max_atr_pct,
             self.bollinger_std,
             self.max_spread_bps, self.estimated_round_trip_cost_bps,
-            self.min_net_reward_risk, self.risk_fraction, self.max_notional_fraction,
+            self.min_net_reward_risk, self.min_edge_cost_multiple, self.risk_fraction, self.max_notional_fraction,
         )
         if any(not pd.notna(value) or abs(value) == float("inf") for value in numeric_limits):
             raise ValueError("configuration values must be finite")
@@ -50,7 +51,7 @@ class AdaptiveConfig:
             raise ValueError("risk and notional fractions exceed research safety bounds")
         if min(self.max_spread_bps, self.estimated_round_trip_cost_bps) < 0:
             raise ValueError("cost limits cannot be negative")
-        if self.max_atr_pct <= 0 or self.relative_volume_min <= 0 or self.min_net_reward_risk <= 0:
+        if self.max_atr_pct <= 0 or self.relative_volume_min <= 0 or self.min_net_reward_risk <= 0 or self.min_edge_cost_multiple < 1:
             raise ValueError("volatility, volume, and reward/risk thresholds must be positive")
         if not 0 <= self.efficiency_range_max < self.efficiency_trend_min <= 1:
             raise ValueError("efficiency thresholds must satisfy 0 <= range < trend <= 1")
@@ -242,7 +243,12 @@ def _analyze_market_at(
         reward_distance = target - price
         cost_distance = (config.estimated_round_trip_cost_bps / 10_000) * price
         net_reward_risk = (reward_distance - cost_distance) / (risk_distance + cost_distance)
-        if stop <= 0 or reward_distance <= 0 or net_reward_risk < config.min_net_reward_risk:
+        if (
+            stop <= 0
+            or reward_distance <= 0
+            or net_reward_risk < config.min_net_reward_risk
+            or reward_distance < cost_distance * config.min_edge_cost_multiple
+        ):
             blockers.append("estimated round-trip costs erase minimum net reward/risk")
             strategy, confidence, stop, target = "none", 0.0, None, None
         else:
@@ -266,6 +272,7 @@ def _analyze_market_at(
         "relative_volume": float(row.volume / row.volume_base) if row.volume_base > 0 else None,
         "spread_bps": spread_bps,
         "estimated_round_trip_cost_bps": config.estimated_round_trip_cost_bps,
+        "minimum_expected_edge_cost_multiple": config.min_edge_cost_multiple,
         "risk_fraction_cap": config.risk_fraction,
         "max_notional_fraction": config.max_notional_fraction,
         "estimated_net_reward_risk": (
