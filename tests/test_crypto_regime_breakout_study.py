@@ -60,3 +60,16 @@ def test_walkforward_rejects_insufficient_history():
             warmup_bars=250,
             test_bars=60,
         )
+
+
+
+def test_walkforward_rejects_misaligned_timestamps_even_when_bar_counts_match():
+    first = _flat_frame()
+    second = _flat_frame()
+    second.index = second.index + pd.Timedelta(minutes=1)
+    with pytest.raises(ValueError, match="aligned timestamps"):
+        run_walk_forward_study(
+            {"BTC/USDT": first, "ETH/USDT": second},
+            warmup_bars=250,
+            test_bars=60,
+        )
