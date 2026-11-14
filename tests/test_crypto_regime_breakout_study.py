@@ -72,3 +72,22 @@ def test_walkforward_rejects_misaligned_timestamps_even_when_bar_counts_match():
             warmup_bars=250,
             test_bars=60,
         )
+
+
+def test_summary_reports_compounded_returns_for_each_symbol_and_symbol_fold_breadth():
+    frame = _flat_frame()
+    shifted = frame.copy()
+    shifted["close"] = shifted["close"] * 1.001
+    shifted["open"] = shifted["open"] * 1.001
+    shifted["high"] = shifted["high"] * 1.001
+    shifted["low"] = shifted["low"] * 1.001
+    report = run_walk_forward_study(
+        {"BTC/USDT": frame, "ETH/USDT": shifted},
+        warmup_bars=250,
+        test_bars=60,
+    )
+    summary = report["summary"]["realistic_estimate"]
+    assert set(summary["per_symbol_compounded_oos_return_pct"]) == {"BTC/USDT", "ETH/USDT"}
+    assert summary["symbol_fold_count"] == len(report["folds"]) * 2
+    assert 0 <= summary["positive_symbol_folds"] <= summary["symbol_fold_count"]
+    assert isinstance(summary["all_symbol_folds_positive"], bool)
