@@ -183,6 +183,7 @@ class BybitExecutionReplay:
         self.events_seen = 0
         self.cancellations = 0
         self.sequence_gaps = 0
+        self.connection_interruptions = 0
         self._last_book_update_id: dict[str, int] = {}
         self._book_valid = False
         self.symbol: str | None = None
@@ -245,6 +246,12 @@ class BybitExecutionReplay:
         self.events_seen += 1
         received = int(event.get("received_ts_ms", event.get("ts", 0)))
         topic = str(event.get("topic", ""))
+        if event.get("collector_status") in ("disconnected", "error"):
+            self._expire_due(received)
+            self.connection_interruptions += 1
+            self._book_valid = False
+            self.book.update({}, snapshot=True)
+            return
         if topic.startswith(("orderbook.", "publicTrade.")):
             event_symbol = topic.rsplit(".", 1)[-1]
             if self.symbol is None:
@@ -411,6 +418,7 @@ class BybitExecutionReplay:
             "queue_factor": float(self.queue_factor),
             "queue_cancellation_credit": 0.0,
             "events_seen": self.events_seen, "orderbook_sequence_gaps": self.sequence_gaps,
+            "connection_interruptions": self.connection_interruptions,
             "symbol": self.symbol,
             "funding_model": "not modeled; do not interpret linear/perpetual results as net returns",
             "warning": "Markout is a post-fill mid-price proxy, not realized round-trip PnL; queue priority is estimated.",
