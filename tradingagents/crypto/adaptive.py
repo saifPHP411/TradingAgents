@@ -2,6 +2,7 @@
 from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Literal
+
 import pandas as pd
 
 Regime = Literal["bull_trend", "bear_trend", "range", "high_volatility", "uncertain"]
