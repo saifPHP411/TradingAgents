@@ -124,8 +124,7 @@ def test_default_simulated_portfolio_inherits_adaptive_risk_caps(monkeypatch):
         frame,
         config=AdaptiveConfig(risk_fraction=0.01, max_notional_fraction=0.2),
         execution=AdaptiveExecutionCosts(0, 0, 0),
-        portfolio=AdaptivePortfolio(initial_cash=1000, risk_fraction=0.01, max_notional_fraction=0.2),
         start_index=55, end_index=60,
     )
     assert result.trades
-    assert result.trades[0].quantity * result.trades[0].entry_price == pytest.approx(200.0)
+    assert result.trades[0].quantity * result.trades[0].entry_price == pytest.approx(2000.0)
