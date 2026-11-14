@@ -103,11 +103,12 @@ def _features(data: pd.DataFrame, cfg: AdaptiveConfig) -> pd.DataFrame:
     smooth_atr = tr.ewm(alpha=1/cfg.atr_period, adjust=False, min_periods=cfg.atr_period).mean()
     pdi = 100*plus.ewm(alpha=1/cfg.atr_period, adjust=False, min_periods=cfg.atr_period).mean()/smooth_atr
     mdi = 100*minus.ewm(alpha=1/cfg.atr_period, adjust=False, min_periods=cfg.atr_period).mean()/smooth_atr
-    dx = 100*(pdi-mdi).abs()/(pdi+mdi).replace(0, pd.NA)
+    directional_total = pdi + mdi
+    dx = 100 * (pdi - mdi).abs() / directional_total.where(directional_total > 0)
     x["adx"] = dx.ewm(alpha=1/cfg.atr_period, adjust=False, min_periods=cfg.atr_period).mean()
     net = x.close.diff(cfg.lookback).abs()
     path = x.close.diff().abs().rolling(cfg.lookback, min_periods=cfg.lookback).sum()
-    x["efficiency"] = net/path.replace(0, pd.NA)
+    x["efficiency"] = net / path.where(path > 0)
     delta = x.close.diff()
     gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
