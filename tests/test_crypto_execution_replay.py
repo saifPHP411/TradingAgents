@@ -313,3 +313,21 @@ def test_pending_order_expires_before_delayed_activation():
     replay.process(book(120))
 
     assert replay.orders["slow"].status == "expired"
+
+
+def test_better_priced_resting_order_gets_trade_priority_over_older_order():
+    replay = BybitExecutionReplay(maker_fee_bps=1, queue_factor=1)
+    replay.process(book(1, bid_qty="2"))
+    replay.submit_order(
+        order_id="older_lower_bid", timestamp_ms=2, side="Buy", price="100",
+        quantity="1", latency_ms=0,
+    )
+    replay.submit_order(
+        order_id="newer_better_bid", timestamp_ms=3, side="Buy", price="100.5",
+        quantity="1", latency_ms=0,
+    )
+    replay.process(book(4, bid="100", ask="101", kind="delta"))
+    replay.process(trade(5, "Sell", price="100", qty="1"))
+
+    assert replay.orders["newer_better_bid"].filled_qty == Decimal("1")
+    assert replay.orders["older_lower_bid"].filled_qty == Decimal("0")
