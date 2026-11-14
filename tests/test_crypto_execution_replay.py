@@ -153,7 +153,7 @@ def test_adverse_selection_markout_is_signed_against_passive_fill():
     report = replay.report()
     assert report["mean_markout_1s"] < 0
     assert report["mean_markout_30s"] < 0
-    assert report["mean_net_markout_30s"] < report["mean_markout_30s"]
+    assert report["mean_net_markout_30s_bps"] < report["mean_markout_30s"]
 
 
 def test_bybit_instrument_parser_handles_spot_min_order_amount():
@@ -212,3 +212,46 @@ def test_jsonl_replay_interleaves_submissions_and_expires_orders(tmp_path):
     )
     assert replay.orders["late-expire"].filled_qty == Decimal("1")
     assert replay.orders["late-expire"].status == "filled"
+
+
+def test_sequence_gap_invalidates_book_until_fresh_snapshot():
+    replay = BybitExecutionReplay(maker_fee_bps=1)
+    replay.process({
+        **book(1), "data": {"b": [["100", "1"]], "a": [["101", "1"]], "u": 10},
+    })
+    replay.process({
+        "topic": "orderbook.50.BTCUSDT", "type": "delta",
+        "received_ts_ms": 2, "data": {"b": [["100", "2"]], "a": [], "u": 12},
+    })
+    assert replay.sequence_gaps == 1
+    assert replay.book.bid is None
+    replay.process(trade(3, "Sell", price="100", qty="10"))
+    assert replay.book.bid is None
+    replay.process({
+        **book(4), "data": {"b": [["100", "1"]], "a": [["101", "1"]], "u": 1},
+    })
+    assert replay.book.bid == Decimal("100")
+
+
+def test_one_replay_instance_rejects_mixed_symbols():
+    replay = BybitExecutionReplay(maker_fee_bps=1)
+    replay.process(book(1))
+    with pytest.raises(ValueError, match="one symbol"):
+        replay.process({
+            "topic": "orderbook.50.ETHUSDT", "type": "snapshot",
+            "received_ts_ms": 2, "data": {"b": [["10", "1"]], "a": [["11", "1"]]},
+        })
+
+
+def test_report_contains_per_fill_fee_adjusted_markout():
+    replay = BybitExecutionReplay(maker_fee_bps=2, queue_factor=1)
+    replay.process(book(1, bid_qty="0"))
+    replay.submit_order(
+        order_id="audit", timestamp_ms=2, side="Buy", price="100",
+        quantity="1", latency_ms=0,
+    )
+    replay.process(trade(3, "Sell", price="100", qty="1"))
+    replay.process(book(30_100, bid="101", ask="102"))
+    fill = replay.report()["fill_results"][0]
+    assert fill["estimated_maker_fee"] == pytest.approx(0.02)
+    assert fill["net_markout_30s"] is not None
