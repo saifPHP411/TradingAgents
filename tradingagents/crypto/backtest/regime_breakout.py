@@ -113,6 +113,7 @@ class BreakoutBacktestResult:
             ),
             "gross_profit": gross_profit,
             "gross_loss": gross_loss,
+            "max_drawdown_pct": max_drawdown * 100.0,
             "fees": self.total_fees,
             "spread_and_slippage": self.total_slippage_spread,
         }
