@@ -106,7 +106,6 @@ def run_walk_forward_study(
                 symbol_rows[symbol] = metrics
             returns = [row["net_return_pct"] for row in symbol_rows.values()]
             benchmarks = [row["buy_hold_return_pct"] for row in symbol_rows.values()]
-            folds[-0:] if False else None
             fold["scenarios"][scenario_name] = {
                 "equal_weight_net_return_pct": sum(returns) / len(returns),
                 "equal_weight_buy_hold_return_pct": sum(benchmarks) / len(benchmarks),
