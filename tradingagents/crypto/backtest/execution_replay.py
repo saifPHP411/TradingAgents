@@ -6,9 +6,9 @@ from public L2 data; the model therefore exposes conservative queue assumptions.
 from __future__ import annotations
 
 import json
-from bisect import bisect_left
 import threading
 import time
+from bisect import bisect_left
 from collections import defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
