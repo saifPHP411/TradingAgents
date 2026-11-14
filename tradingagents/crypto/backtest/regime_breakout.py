@@ -107,7 +107,7 @@ class BreakoutBacktestResult:
             "wins": len(wins),
             "losses": len(losses),
             "win_rate_pct": (len(wins) / len(self.trades) * 100.0) if self.trades else 0.0,
-            "profit_factor": (gross_profit / gross_loss) if gross_loss else (float("inf") if gross_profit else 0.0),
+            "profit_factor": (gross_profit / gross_loss) if gross_loss else ("infinite" if gross_profit else 0.0),
             "expectancy_per_trade": (
                 sum(t.net_pnl for t in self.trades) / len(self.trades) if self.trades else 0.0
             ),
