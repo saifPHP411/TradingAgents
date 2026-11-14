@@ -16,6 +16,9 @@ class AdaptiveConfig:
     atr_period: int = 14
     lookback: int = 50
     breakout_lookback: int = 20
+    mean_reversion_period: int = 20
+    vwap_period: int = 24
+    bollinger_std: float = 2.0
     adx_trend_min: float = 20.0
     adx_range_max: float = 17.0
     efficiency_trend_min: float = 0.30
@@ -29,7 +32,7 @@ class AdaptiveConfig:
     max_notional_fraction: float = 0.10
 
     def __post_init__(self):
-        for name in ("fast_ema", "slow_ema", "atr_period", "lookback", "breakout_lookback"):
+        for name in ("fast_ema", "slow_ema", "atr_period", "lookback", "breakout_lookback", "mean_reversion_period", "vwap_period"):
             if getattr(self, name) < 2:
                 raise ValueError(f"{name} must be >= 2")
         if self.fast_ema >= self.slow_ema:
@@ -37,6 +40,7 @@ class AdaptiveConfig:
         numeric_limits = (
             self.adx_trend_min, self.adx_range_max, self.efficiency_trend_min,
             self.efficiency_range_max, self.relative_volume_min, self.max_atr_pct,
+            self.bollinger_std,
             self.max_spread_bps, self.estimated_round_trip_cost_bps,
             self.min_net_reward_risk, self.risk_fraction, self.max_notional_fraction,
         )
@@ -121,6 +125,14 @@ def _features(data: pd.DataFrame, cfg: AdaptiveConfig) -> pd.DataFrame:
     x["prior_high"] = x.high.rolling(cfg.breakout_lookback, min_periods=cfg.breakout_lookback).max().shift(1)
     x["prior_low"] = x.low.rolling(cfg.breakout_lookback, min_periods=cfg.breakout_lookback).min().shift(1)
     x["volume_base"] = x.volume.rolling(cfg.breakout_lookback, min_periods=cfg.breakout_lookback).mean().shift(1)
+    band_mid = x.close.rolling(cfg.mean_reversion_period, min_periods=cfg.mean_reversion_period).mean()
+    band_std = x.close.rolling(cfg.mean_reversion_period, min_periods=cfg.mean_reversion_period).std(ddof=0)
+    x["bb_lower"] = band_mid - cfg.bollinger_std * band_std
+    typical_price = (x.high + x.low + x.close) / 3
+    rolling_volume = x.volume.rolling(cfg.vwap_period, min_periods=cfg.vwap_period).sum()
+    x["rolling_vwap"] = (typical_price * x.volume).rolling(
+        cfg.vwap_period, min_periods=cfg.vwap_period
+    ).sum() / rolling_volume.where(rolling_volume > 0)
     x["atr_base"] = x.atr_pct.rolling(cfg.lookback, min_periods=cfg.lookback).median().shift(1)
     return x
 
@@ -157,7 +169,7 @@ def _analyze_market_at(
     row = features.iloc[index]
     required = (
         "atr", "atr_pct", "ema_fast", "ema_slow", "adx", "efficiency", "rsi",
-        "prior_high", "prior_low", "volume_base", "atr_base",
+        "prior_high", "prior_low", "volume_base", "atr_base", "bb_lower", "rolling_vwap",
     )
     if any(pd.isna(row[key]) for key in required):
         return AdaptiveDecision(
@@ -199,9 +211,15 @@ def _analyze_market_at(
             reasons += ["close broke prior-bar range high", "relative volume confirms breakout"]
     elif regime == "range":
         width = float(row.prior_high - row.prior_low)
-        if width > 0 and row.rsi <= 30 and price <= row.prior_low + width * .15:
+        lower_range_touch = width > 0 and price <= row.prior_low + width * .15
+        vwap_band_reversion = price <= row.bb_lower and price < row.rolling_vwap and row.rsi <= 35
+        if width > 0 and row.rsi <= 35 and (lower_range_touch or vwap_band_reversion):
             strategy, confidence = "range_reversion", .62
-            reasons += ["low ADX and path efficiency indicate range", "oversold near lower range boundary"]
+            reasons += ["low ADX and path efficiency indicate range"]
+            if vwap_band_reversion:
+                reasons += ["price below lower Bollinger band", "price below rolling volume-weighted average"]
+            else:
+                reasons += ["oversold near lower range boundary"]
         elif width > 0 and row.rsi >= 70 and price >= row.prior_high - width * .15:
             reasons.append("overbought at upper range boundary; long-only engine abstains")
     elif regime == "bear_trend":
@@ -215,7 +233,8 @@ def _analyze_market_at(
     if strategy != "none":
         if strategy == "range_reversion":
             stop = price - 1.5 * atr
-            target = (float(row.prior_high) + float(row.prior_low)) / 2
+            midpoint = (float(row.prior_high) + float(row.prior_low)) / 2
+            target = min(midpoint, float(row.rolling_vwap))
         else:
             stop = price - 2 * atr
             target = price + 4 * atr
@@ -242,6 +261,8 @@ def _analyze_market_at(
         "ema_slow": float(row.ema_slow),
         "prior_range_high": float(row.prior_high),
         "prior_range_low": float(row.prior_low),
+        "bollinger_lower": float(row.bb_lower),
+        "rolling_vwap": float(row.rolling_vwap),
         "relative_volume": float(row.volume / row.volume_base) if row.volume_base > 0 else None,
         "spread_bps": spread_bps,
         "estimated_round_trip_cost_bps": config.estimated_round_trip_cost_bps,
