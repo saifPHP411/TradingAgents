@@ -90,8 +90,10 @@ class BreakoutBacktestResult:
     def metrics(self) -> dict:
         wins = [t.net_pnl for t in self.trades if t.net_pnl > 0]
         losses = [t.net_pnl for t in self.trades if t.net_pnl < 0]
-        gross_profit = sum(wins)
-        gross_loss = abs(sum(losses))
+        gross_profit = sum(t.gross_pnl for t in self.trades if t.gross_pnl > 0)
+        gross_loss = abs(sum(t.gross_pnl for t in self.trades if t.gross_pnl < 0))
+        net_profit = sum(wins)
+        net_loss = abs(sum(losses))
         peak = self.initial_cash
         max_drawdown = 0.0
         for equity in self.equity_curve:
@@ -107,12 +109,14 @@ class BreakoutBacktestResult:
             "wins": len(wins),
             "losses": len(losses),
             "win_rate_pct": (len(wins) / len(self.trades) * 100.0) if self.trades else 0.0,
-            "profit_factor": (gross_profit / gross_loss) if gross_loss else ("infinite" if gross_profit else 0.0),
+            "profit_factor": (net_profit / net_loss) if net_loss else ("infinite" if net_profit else 0.0),
             "expectancy_per_trade": (
                 sum(t.net_pnl for t in self.trades) / len(self.trades) if self.trades else 0.0
             ),
             "gross_profit": gross_profit,
             "gross_loss": gross_loss,
+            "net_profit_on_winners": net_profit,
+            "net_loss_on_losers": net_loss,
             "max_drawdown_pct": max_drawdown * 100.0,
             "fees": self.total_fees,
             "spread_and_slippage": self.total_slippage_spread,
