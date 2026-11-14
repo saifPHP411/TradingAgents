@@ -168,3 +168,19 @@ def test_bybit_instrument_parser_handles_spot_min_order_amount():
     rules = InstrumentRules.from_bybit_instrument(item, "spot")
     assert rules.min_notional == Decimal("5")
     assert rules.qty_step == Decimal("0.00001")
+
+
+def test_cancel_replace_loses_queue_priority_and_counts_cancellation():
+    replay = BybitExecutionReplay(maker_fee_bps=1, queue_factor=1)
+    replay.process(book(1, bid_qty="2"))
+    replay.submit_order(
+        order_id="old", timestamp_ms=2, side="Buy", price="100",
+        quantity="1", latency_ms=0,
+    )
+    replay.replace_order(
+        "old", new_order_id="new", timestamp_ms=3, side="Buy",
+        price="100", quantity="1", latency_ms=0,
+    )
+    assert replay.orders["old"].status == "cancelled"
+    assert replay.orders["new"].queue_ahead == Decimal("2")
+    assert replay.report()["cancellations"] == 1
