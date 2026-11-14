@@ -168,6 +168,7 @@ def test_bybit_instrument_parser_handles_spot_min_order_amount():
     rules = InstrumentRules.from_bybit_instrument(item, "spot")
     assert rules.min_notional == Decimal("5")
     assert rules.qty_step == Decimal("0.00001")
+    assert rules.min_order_qty == Decimal("0")
 
 
 def test_cancel_replace_loses_queue_priority_and_counts_cancellation():
@@ -184,3 +185,29 @@ def test_cancel_replace_loses_queue_priority_and_counts_cancellation():
     assert replay.orders["old"].status == "cancelled"
     assert replay.orders["new"].queue_ahead == Decimal("2")
     assert replay.report()["cancellations"] == 1
+
+
+def test_jsonl_replay_interleaves_submissions_and_expires_orders(tmp_path):
+    import json
+
+    from tradingagents.crypto.backtest.execution_replay import replay_jsonl
+
+    path = tmp_path / "tape.jsonl"
+    events = [
+        book(1, bid_qty="0"),
+        trade(3, "Sell", price="100", qty="1"),
+        book(20, bid="99", ask="100"),
+    ]
+    path.write_text(
+        "".join(json.dumps(event) + "\\n" for event in events),
+        encoding="utf-8",
+    )
+    replay = replay_jsonl(
+        str(path), maker_fee_bps=1, queue_factor=1,
+        orders=[{
+            "order_id": "late-expire", "timestamp_ms": 2, "side": "Buy",
+            "price": "100", "quantity": "1", "latency_ms": 0, "ttl_ms": 5,
+        }],
+    )
+    assert replay.orders["late-expire"].filled_qty == Decimal("1")
+    assert replay.orders["late-expire"].status == "filled"
