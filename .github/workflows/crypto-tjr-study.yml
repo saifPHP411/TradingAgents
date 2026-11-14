@@ -149,3 +149,47 @@ jobs:
           path: artifacts/
           if-no-files-found: warn
           retention-days: 30
+
+  adaptive-multi-regime-study:
+    name: Adaptive multi-regime chronological OOS study
+    needs: fetch-history
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install backtest dependencies
+        run: python -m pip install --upgrade pip pandas numpy requests python-dotenv pydantic
+
+      - name: Download the exact fetched market-history cache
+        uses: actions/download-artifact@v4
+        with:
+          name: crypto-history-cache
+          path: crypto-cache/
+
+      - name: Run adaptive multi-symbol chronological OOS study
+        run: |
+          mkdir -p artifacts
+          python -m tradingagents.crypto.backtest.adaptive_study \
+            --symbols BTC/USDT ETH/USDT BNB/USDT \
+            --cache ./crypto-cache \
+            --warmup-bars 250 \
+            --test-bars 100 \
+            --spread-bps 2 \
+            --out artifacts/adaptive_crypto_oos.json
+
+      - name: Upload adaptive strategy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adaptive-crypto-oos-study
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30

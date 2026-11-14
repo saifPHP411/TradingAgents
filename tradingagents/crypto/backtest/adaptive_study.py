@@ -33,7 +33,7 @@ class AdaptivePortfolio:
     max_holding_bars: int = 48
 
     def __post_init__(self) -> None:
-        if not pd.notna(self.initial_cash) or self.initial_cash <= 0:
+        if not pd.notna(self.initial_cash) or abs(self.initial_cash) == float("inf") or self.initial_cash <= 0:
             raise ValueError("initial_cash must be positive and finite")
         if not 0 < self.risk_fraction <= 0.02:
             raise ValueError("risk_fraction must be in (0, 0.02]")
@@ -206,7 +206,9 @@ def run_adaptive_backtest(
                         result.rejections["insufficient cash after entry fees"] = (
                             result.rejections.get("insufficient cash after entry fees", 0) + 1
                         )
-        mark = cash + (position["quantity"] * float(row.close) if position is not None else 0.0)
+        mark = cash
+        if position is not None and i >= position["entry_index"]:
+            mark += position["quantity"] * float(row.close)
         result.equity_curve.append(mark)
 
     result.final_equity = cash + (
@@ -318,3 +320,53 @@ def run_adaptive_walk_forward_study(
             "adequate trade count, independent market periods, and measured venue fills."
         ),
     }
+
+
+def load_hourly_frames(cache_dir: str, symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
+    """Load cached 1m candles and aggregate only completed UTC hourly bars."""
+    from .history import HistoryCache
+
+    cache = HistoryCache(cache_dir)
+    now = pd.Timestamp.now(tz="UTC")
+    frames = {}
+    for symbol in symbols:
+        minutes = cache.load(symbol, "1m")
+        if minutes is None or minutes.empty:
+            raise ValueError(f"missing cached 1m history for {symbol}")
+        hourly = minutes.resample("1h", label="left", closed="left").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        ).dropna()
+        hourly = hourly.loc[hourly.index + pd.Timedelta(hours=1) <= now]
+        if hourly.empty:
+            raise ValueError(f"no completed hourly candles for {symbol}")
+        frames[symbol] = hourly
+    return frames
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import json
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(description="Run adaptive multi-regime chronological OOS study.")
+    parser.add_argument("--symbols", nargs="+", default=["BTC/USDT", "ETH/USDT", "BNB/USDT"])
+    parser.add_argument("--cache", default="./crypto-cache")
+    parser.add_argument("--warmup-bars", type=int, default=250)
+    parser.add_argument("--test-bars", type=int, default=100)
+    parser.add_argument("--spread-bps", type=float, default=2.0)
+    parser.add_argument("--out", type=Path, default=Path("artifacts/adaptive_crypto_oos.json"))
+    args = parser.parse_args(argv)
+    frames = load_hourly_frames(args.cache, tuple(args.symbols))
+    report = run_adaptive_walk_forward_study(
+        frames, warmup_bars=args.warmup_bars, test_bars=args.test_bars,
+        spread_bps=args.spread_bps,
+    )
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+    print(json.dumps(report["summary"], indent=2, sort_keys=True))
+    print(f"wrote {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
