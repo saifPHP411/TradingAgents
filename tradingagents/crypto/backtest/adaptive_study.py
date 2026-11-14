@@ -388,12 +388,14 @@ def load_hourly_frames(cache_dir: str, symbols: tuple[str, ...]) -> dict[str, pd
     now = pd.Timestamp.now(tz="UTC")
     frames = {}
     for symbol in symbols:
-        minutes = cache.load(symbol, "1m")
-        if minutes is None or minutes.empty:
-            raise ValueError(f"missing cached 1m history for {symbol}")
-        hourly = minutes.resample("1h", label="left", closed="left").agg(
-            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-        ).dropna()
+        hourly = cache.load(symbol, "1h")
+        if hourly is None or hourly.empty:
+            minutes = cache.load(symbol, "1m")
+            if minutes is None or minutes.empty:
+                raise ValueError(f"missing cached 1h or 1m history for {symbol}")
+            hourly = minutes.resample("1h", label="left", closed="left").agg(
+                {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+            ).dropna()
         hourly = hourly.loc[hourly.index + pd.Timedelta(hours=1) <= now]
         if hourly.empty:
             raise ValueError(f"no completed hourly candles for {symbol}")
@@ -407,10 +409,16 @@ def main(argv: list[str] | None = None) -> int:
     from pathlib import Path
 
     parser = argparse.ArgumentParser(description="Run adaptive multi-regime chronological OOS study.")
-    parser.add_argument("--symbols", nargs="+", default=["BTC/USDT", "ETH/USDT", "BNB/USDT"])
+    parser.add_argument(
+        "--symbols", nargs="+",
+        default=[
+            "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
+            "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "LTC/USDT", "BCH/USDT",
+        ],
+    )
     parser.add_argument("--cache", default="./crypto-cache")
-    parser.add_argument("--warmup-bars", type=int, default=250)
-    parser.add_argument("--test-bars", type=int, default=100)
+    parser.add_argument("--warmup-bars", type=int, default=1000)
+    parser.add_argument("--test-bars", type=int, default=200)
     parser.add_argument("--spread-bps", type=float, default=2.0)
     parser.add_argument("--out", type=Path, default=Path("artifacts/adaptive_crypto_oos.json"))
     args = parser.parse_args(argv)
@@ -422,8 +430,13 @@ def main(argv: list[str] | None = None) -> int:
     from .history import HistoryCache
 
     cache = HistoryCache(args.cache)
-    report["data_source"] = "Binance public Spot 1m candles aggregated to completed UTC 1h bars"
+    report["data_source"] = "Binance public Spot 1h candles; 1m aggregation is a fallback only"
     report["execution_venue"] = "Bybit Demo Spot is a future proxy target; fills here are simulated, not Bybit fills"
+    report["history_coverage_1h"] = {
+        symbol: coverage.to_dict()
+        for symbol in args.symbols
+        if (coverage := cache.coverage(symbol, "1h")) is not None
+    }
     report["history_coverage_1m"] = {
         symbol: coverage.to_dict()
         for symbol in args.symbols

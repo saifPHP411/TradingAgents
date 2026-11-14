@@ -51,7 +51,13 @@ jobs:
         run: |
           python -m tradingagents.crypto.backtest.fetch \
             --symbols BTC/USDT ETH/USDT BNB/USDT \
+            --interval 1m \
             --limit 172800 \
+            --cache ./crypto-cache
+          python -m tradingagents.crypto.backtest.fetch \
+            --symbols BTC/USDT ETH/USDT BNB/USDT SOL/USDT XRP/USDT DOGE/USDT AVAX/USDT LINK/USDT LTC/USDT BCH/USDT \
+            --interval 1h \
+            --limit 17520 \
             --cache ./crypto-cache
 
       - name: Upload immutable market-history cache
@@ -178,10 +184,10 @@ jobs:
         run: |
           mkdir -p artifacts
           python -m tradingagents.crypto.backtest.adaptive_study \
-            --symbols BTC/USDT ETH/USDT BNB/USDT \
+            --symbols BTC/USDT ETH/USDT BNB/USDT SOL/USDT XRP/USDT DOGE/USDT AVAX/USDT LINK/USDT LTC/USDT BCH/USDT \
             --cache ./crypto-cache \
-            --warmup-bars 250 \
-            --test-bars 100 \
+            --warmup-bars 1000 \
+            --test-bars 200 \
             --spread-bps 2 \
             --out artifacts/adaptive_crypto_oos.json
 

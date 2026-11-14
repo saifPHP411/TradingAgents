@@ -21,8 +21,10 @@ intrabar handling, gap-aware stop exits, time exits, and explicit per-fill commi
 half-spread and slippage scenarios. Simulated quantity is bounded by risk-per-trade
 and notional caps. The backtest is single-position per symbol; it is not a shared
 multi-asset execution portfolio and it does not create executable order quantities.
-The CI study currently aggregates Binance public Spot 1m candles into completed
-UTC 1h bars. Binance history is only a cross-venue proxy for Bybit Demo Spot.
+The CI study prefers Binance public Spot 1h candles, with completed 1m aggregation
+as a fallback. The research workflow fetches a 2-year hourly history for ten liquid
+USDT pairs, while the legacy benchmark cache retains its 120-day 1m sample.
+Binance history is only a cross-venue proxy for Bybit Demo Spot.
 
 ## Current limitations
 The engine does not yet consume order-book depth, funding, open interest, liquidation
