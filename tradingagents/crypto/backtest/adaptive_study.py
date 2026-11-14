@@ -230,7 +230,7 @@ def run_adaptive_backtest(
                 else:
                     risk_budget = cash * portfolio.risk_fraction
                     notional_cap = cash * portfolio.max_notional_fraction
-                    quantity = min(risk_budget / risk_per_unit, notional_cap / entry_fill)
+                    quantity = min(risk_budget / (risk_per_unit + cost_distance), notional_cap / entry_fill)
                     entry_notional = quantity * entry_fill
                     entry_fee = entry_notional * fee_rate
                     if quantity > 0 and entry_notional + entry_fee <= cash:
