@@ -145,6 +145,16 @@ def run_walk_forward_study(
         worst_intraperiod_drawdown = max(
             (row["max_drawdown_pct"] for row in all_symbol_rows), default=0.0
         )
+        per_symbol_returns = {}
+        for symbol in ordered:
+            symbol_equity = initial_cash
+            for fold in folds:
+                symbol_return = fold["scenarios"][scenario_name]["symbols"][symbol]["net_return_pct"]
+                symbol_equity *= 1 + symbol_return / 100
+            per_symbol_returns[symbol] = (symbol_equity / initial_cash - 1) * 100
+        symbol_fold_returns = [
+            row["net_return_pct"] for row in all_symbol_rows
+        ]
         summary[scenario_name] = {
             "folds": len(folds),
             "compounded_oos_return_pct": (equity / initial_cash - 1) * 100,
@@ -153,6 +163,10 @@ def run_walk_forward_study(
             "mean_buy_hold_return_pct": sum(benchmarks) / len(benchmarks),
             "positive_folds": sum(value > 0 for value in returns),
             "profitable_after_costs": all(value > 0 for value in returns),
+            "per_symbol_compounded_oos_return_pct": per_symbol_returns,
+            "positive_symbol_folds": sum(value > 0 for value in symbol_fold_returns),
+            "symbol_fold_count": len(symbol_fold_returns),
+            "all_symbol_folds_positive": all(value > 0 for value in symbol_fold_returns),
             "trades": total_trades,
             "expectancy_per_trade": total_net_pnl / total_trades if total_trades else 0.0,
             "aggregate_profit_factor": aggregate_profit_factor,
