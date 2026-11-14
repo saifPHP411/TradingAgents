@@ -248,7 +248,6 @@ class BybitExecutionReplay:
         event_type = event.get("type")
         if topic.startswith("orderbook.") and event_type in ("snapshot", "delta"):
             self._expire_due(received)
-            self._activate_due(received)
             update_id = data.get("u")
             if event_type == "snapshot":
                 self._book_valid = True
@@ -270,14 +269,16 @@ class BybitExecutionReplay:
                 mid = self.book.mid()
                 if mid is not None:
                     self.mid_history.append((received, mid))
-            self._activate_due(received)
+            if self._book_valid:
+                self._activate_due(received)
         elif topic.startswith("publicTrade."):
             trades = data if isinstance(data, list) else [data]
             for trade in trades:
                 self._expire_due(received)
-                self._activate_due(received)
-                # Compare local receive timestamps consistently with simulated latency.
-                self._process_trade(trade, received)
+                if self._book_valid:
+                    self._activate_due(received)
+                    # Compare local receive timestamps consistently with simulated latency.
+                    self._process_trade(trade, received)
         else:
             return
 
