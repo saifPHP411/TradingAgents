@@ -251,45 +251,44 @@ def run_backtest(
         # Signal at this close; the earliest fill is the next bar's open.
         if position is None and i + 1 <= end_index and bool(row["long_entry"]):
             levels = entry_levels(row, strategy)
-            if levels is None:
-                continue
-            _, signal_stop, _ = levels
-            next_open = float(data.iloc[i + 1]["open"])
-            fill = next_open * (1.0 + impact)
-            risk_per_unit = fill - signal_stop
-            if risk_per_unit <= 0:
-                continue
-            risk_budget = cash * portfolio.risk_fraction
-            quantity_by_risk = risk_budget / risk_per_unit
-            quantity_by_notional = cash * portfolio.max_notional_fraction / fill
-            quantity = min(quantity_by_risk, quantity_by_notional)
-            if quantity <= 0:
-                continue
-            # Keep the signal-bar invalidation price fixed across an overnight/bar gap.
-            # Sizing above uses this exact distance, so the risk budget remains honest.
-            stop = signal_stop
-            target = fill + strategy.reward_risk * (fill - stop)
-            entry_notional = quantity * fill
-            entry_fee = entry_notional * execution.commission_bps / 10_000.0
-            total_debit = entry_notional + entry_fee
-            if total_debit > cash:
-                quantity = cash / (fill * (1.0 + execution.commission_bps / 10_000.0))
-                entry_notional = quantity * fill
-                entry_fee = entry_notional * execution.commission_bps / 10_000.0
-                total_debit = entry_notional + entry_fee
-            cash -= total_debit
-            result.total_fees += entry_fee
-            result.total_slippage_spread += abs(fill - next_open) * quantity
-            position = {
-                "entry_index": i + 1,
-                "entry_time": data.index[i + 1].isoformat(),
-                "entry_price": fill,
-                "quantity": quantity,
-                "stop": stop,
-                "target": target,
-                "entry_fee": entry_fee,
-                "entry_debit": total_debit,
-            }
+            if levels is not None:
+                _, signal_stop, _ = levels
+                next_open = float(data.iloc[i + 1]["open"])
+                fill = next_open * (1.0 + impact)
+                risk_per_unit = fill - signal_stop
+                if risk_per_unit > 0:
+                    risk_budget = cash * portfolio.risk_fraction
+                    quantity_by_risk = risk_budget / risk_per_unit
+                    quantity_by_notional = cash * portfolio.max_notional_fraction / fill
+                    quantity = min(quantity_by_risk, quantity_by_notional)
+                    if quantity > 0:
+                        # Keep the signal-bar invalidation price fixed across a gap.
+                        # Sizing uses this exact distance, keeping the risk budget honest.
+                        stop = signal_stop
+                        target = fill + strategy.reward_risk * (fill - stop)
+                        entry_notional = quantity * fill
+                        entry_fee = entry_notional * execution.commission_bps / 10_000.0
+                        total_debit = entry_notional + entry_fee
+                        if total_debit > cash:
+                            quantity = cash / (
+                                fill * (1.0 + execution.commission_bps / 10_000.0)
+                            )
+                            entry_notional = quantity * fill
+                            entry_fee = entry_notional * execution.commission_bps / 10_000.0
+                            total_debit = entry_notional + entry_fee
+                        cash -= total_debit
+                        result.total_fees += entry_fee
+                        result.total_slippage_spread += abs(fill - next_open) * quantity
+                        position = {
+                            "entry_index": i + 1,
+                            "entry_time": data.index[i + 1].isoformat(),
+                            "entry_price": fill,
+                            "quantity": quantity,
+                            "stop": stop,
+                            "target": target,
+                            "entry_fee": entry_fee,
+                            "entry_debit": total_debit,
+                        }
         # The order is filled at the next bar open. Until that bar begins,
         # the position is pending and must not affect this bar's marked equity.
         if position is None:
