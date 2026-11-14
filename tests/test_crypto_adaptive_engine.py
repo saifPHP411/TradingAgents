@@ -120,14 +120,17 @@ def test_breakout_requires_relative_volume_confirmation():
 
 def test_range_reversion_expert_uses_range_midpoint_as_target():
     x = frame()
-    phase = (np.arange(len(x)) - (len(x) - 1)) * (2 * np.pi / 20) - np.pi / 2
+    phase = (np.arange(len(x)) - (len(x) - 1)) * (2 * np.pi / 24) - np.pi / 2
     close = 100 + 2 * np.sin(phase)
     x["close"] = close
     x["open"] = close + 0.01
     x["high"] = close + 0.08
     x["low"] = close - 0.08
     result = analyze_market(
-        x, spread_bps=2, config=AdaptiveConfig(estimated_round_trip_cost_bps=0)
+        x, spread_bps=2,
+        config=AdaptiveConfig(
+            adx_range_max=30, adx_trend_min=31, estimated_round_trip_cost_bps=0
+        ),
     )
     assert result.regime == "range"
     assert result.strategy == "range_reversion"
