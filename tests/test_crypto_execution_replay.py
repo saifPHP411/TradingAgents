@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from io import StringIO
-import json
 
 import pytest
 
 from tradingagents.crypto.backtest.execution_replay import (
     BybitExecutionReplay,
     InstrumentRules,
-    validate_post_only_order,
     _write_jsonl_record,
+    validate_post_only_order,
 )
 
 pytestmark = pytest.mark.unit
