@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tradingagents.crypto.adaptive import AdaptiveDecision
+from tradingagents.crypto.adaptive import AdaptiveConfig, AdaptiveDecision
 from tradingagents.crypto.backtest.adaptive_study import (
     AdaptiveExecutionCosts,
     AdaptivePortfolio,
@@ -113,16 +113,19 @@ def test_default_simulated_portfolio_inherits_adaptive_risk_caps(monkeypatch):
     frame = _flat_frame(70)
     captured = []
 
-    def no_trade(history, **kwargs):
-        captured.append(kwargs["config"])
-        return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None)
+    def candidate(history, **kwargs):
+        return AdaptiveDecision(
+            "buy_candidate", "bull_trend", "trend_pullback", .8,
+            100.0, 99.0, 103.0, ("test setup",), (), {},
+        )
 
-    monkeypatch.setattr(module, "analyze_market", no_trade)
-    run_adaptive_backtest(
+    monkeypatch.setattr(module, "analyze_market", candidate)
+    result = run_adaptive_backtest(
         frame,
-        config=__import__("tradingagents.crypto.adaptive", fromlist=["AdaptiveConfig"]).AdaptiveConfig(
-            risk_fraction=0.01, max_notional_fraction=0.2
-        ),
+        config=AdaptiveConfig(risk_fraction=0.01, max_notional_fraction=0.2),
+        execution=AdaptiveExecutionCosts(0, 0, 0),
+        portfolio=AdaptivePortfolio(initial_cash=1000, risk_fraction=0.01, max_notional_fraction=0.2),
         start_index=55, end_index=60,
     )
-    assert captured
+    assert result.trades
+    assert result.trades[0].quantity * result.trades[0].entry_price == pytest.approx(200.0)
