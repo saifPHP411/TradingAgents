@@ -20,7 +20,6 @@ from .regime_breakout import (
     run_backtest,
 )
 
-
 COST_SCENARIOS = {
     "frictionless": ExecutionCosts(0, 0, 0),
     "realistic_estimate": ExecutionCosts(10, 1, 2),
