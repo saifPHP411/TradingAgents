@@ -153,3 +153,20 @@ def test_equity_metrics_include_drawdown():
     result = run_backtest(frame, strategy=RegimeBreakoutSettings(max_holding_bars=12))
     assert result.equity_curve
     assert result.metrics()["max_drawdown_pct"] >= 0
+
+
+def test_pending_next_bar_entry_does_not_change_signal_bar_equity():
+    frame = _trend_with_breakouts()
+    signal_rows = indicators(frame)
+    signal_indices = [i for i, value in enumerate(signal_rows["long_entry"]) if value]
+    assert signal_indices
+    signal_index = signal_indices[0]
+    result = run_backtest(
+        frame,
+        execution=ExecutionCosts(commission_bps=10, half_spread_bps=1, slippage_bps=2),
+        start_index=signal_index,
+        end_index=signal_index + 1,
+    )
+    # The signal is known only at this bar's close; its next-open order cannot
+    # create a position valuation or artificial drawdown at the signal timestamp.
+    assert result.equity_curve[0] == pytest.approx(result.initial_cash)
