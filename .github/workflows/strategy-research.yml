@@ -1,6 +1,10 @@
 name: Strategy research pipeline
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/strategy-research.yml"
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
