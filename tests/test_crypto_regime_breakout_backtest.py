@@ -128,7 +128,7 @@ def test_stop_market_fill_is_worse_when_the_market_gaps_below_stop():
     entry_open = float(frame.iloc[entry_index]["open"])
     assert entry_open > signal_stop
     frame.iloc[entry_index, frame.columns.get_loc("low")] = max(
-        float(frame.iloc[entry_index]["low"]), signal_stop * 1.01
+        float(frame.iloc[entry_index]["low"]), signal_stop * 1.001
     )
     gap_open = signal_stop * 0.95
     frame.iloc[gap_index, frame.columns.get_loc("open")] = gap_open
