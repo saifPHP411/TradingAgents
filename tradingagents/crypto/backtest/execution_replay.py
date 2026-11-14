@@ -380,6 +380,25 @@ class BybitExecutionReplay:
             "mean_markout_1s": _mean([f.markout_1s for f in self.fills]),
             "mean_markout_5s": _mean([f.markout_5s for f in self.fills]),
             "mean_markout_30s": _mean([f.markout_30s for f in self.fills]),
+            "fill_results": [
+                {
+                    "order_id": fill.order_id, "timestamp_ms": fill.timestamp_ms,
+                    "side": fill.side, "price": fill.price, "quantity": fill.quantity,
+                    "mid_at_fill": fill.mid_at_fill,
+                    "markout_1s": fill.markout_1s, "markout_5s": fill.markout_5s,
+                    "markout_30s": fill.markout_30s,
+                    "estimated_maker_fee": fill.price * fill.quantity * fill.maker_fee_bps / 10_000,
+                    "net_markout_30s": (
+                        fill.net_markout_30s * fill.quantity
+                        if fill.net_markout_30s is not None else None
+                    ),
+                    "net_markout_30s_bps": (
+                        fill.net_markout_30s / fill.price * 10_000
+                        if fill.net_markout_30s is not None and fill.price > 0 else None
+                    ),
+                }
+                for fill in self.fills
+            ],
             "mean_net_markout_30s_bps": mean_markout,
             "per_fill_markout_sharpe_unannualized": (
                 mean_markout / variance ** 0.5 if variance and variance > 0 else None
