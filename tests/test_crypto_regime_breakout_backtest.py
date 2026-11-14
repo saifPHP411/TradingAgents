@@ -122,19 +122,26 @@ def test_stop_market_fill_is_worse_when_the_market_gaps_below_stop():
     levels = entry_levels(signal_rows.iloc[signal_index], RegimeBreakoutSettings())
     assert levels is not None
     signal_stop = levels[1]
-    next_index = signal_index + 1
-    gap_open = signal_stop * 0.95
-    frame.iloc[next_index, frame.columns.get_loc("open")] = gap_open
-    frame.iloc[next_index, frame.columns.get_loc("low")] = gap_open * 0.99
-    frame.iloc[next_index, frame.columns.get_loc("high")] = max(
-        float(frame.iloc[next_index]["high"]), gap_open * 1.01
+    entry_index = signal_index + 1
+    gap_index = signal_index + 2
+    # Enter above the stop, survive the entry candle, then gap below the stop.
+    entry_open = float(frame.iloc[entry_index]["open"])
+    assert entry_open > signal_stop
+    frame.iloc[entry_index, frame.columns.get_loc("low")] = max(
+        float(frame.iloc[entry_index]["low"]), signal_stop * 1.01
     )
-    frame.iloc[next_index, frame.columns.get_loc("close")] = gap_open * 1.005
+    gap_open = signal_stop * 0.95
+    frame.iloc[gap_index, frame.columns.get_loc("open")] = gap_open
+    frame.iloc[gap_index, frame.columns.get_loc("low")] = gap_open * 0.99
+    frame.iloc[gap_index, frame.columns.get_loc("high")] = max(
+        float(frame.iloc[gap_index]["high"]), gap_open * 1.01
+    )
+    frame.iloc[gap_index, frame.columns.get_loc("close")] = gap_open * 1.005
     result = run_backtest(
         frame,
         execution=ExecutionCosts(commission_bps=0, half_spread_bps=0, slippage_bps=0),
         start_index=signal_index,
-        end_index=next_index,
+        end_index=gap_index,
     )
     assert result.trades
     assert result.trades[0].exit_reason == "stop"
