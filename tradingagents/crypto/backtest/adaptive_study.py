@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field, replace
 
 import pandas as pd
 
-from .adaptive import AdaptiveConfig, analyze_market
+from ..adaptive import AdaptiveConfig, analyze_market
 
 
 @dataclass(frozen=True)
