@@ -139,7 +139,7 @@ def run_walk_forward_study(
         total_net_pnl = sum(row["net_pnl"] for row in all_symbol_rows)
         aggregate_profit_factor = (
             total_gross_profit / total_gross_loss if total_gross_loss else
-            (float("inf") if total_gross_profit else 0.0)
+            ("infinite" if total_gross_profit else 0.0)
         )
         worst_intraperiod_drawdown = max(
             (row["max_drawdown_pct"] for row in all_symbol_rows), default=0.0
