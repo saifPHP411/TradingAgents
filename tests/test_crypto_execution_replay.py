@@ -156,7 +156,7 @@ def test_adverse_selection_markout_is_signed_against_passive_fill():
     report = replay.report()
     assert report["mean_markout_1s"] < 0
     assert report["mean_markout_30s"] < 0
-    assert report["mean_net_markout_30s_bps"] < report["mean_markout_30s"]
+    assert report["mean_entry_fee_adjusted_markout_30s_bps"] < report["mean_markout_30s"]
 
 
 def test_bybit_instrument_parser_handles_spot_min_order_amount():
@@ -257,7 +257,7 @@ def test_report_contains_per_fill_fee_adjusted_markout():
     replay.process(book(30_100, bid="101", ask="102"))
     fill = replay.report()["fill_results"][0]
     assert fill["estimated_maker_fee"] == pytest.approx(0.02)
-    assert fill["net_markout_30s"] is not None
+    assert fill["entry_fee_adjusted_markout_30s"] is not None
 
 
 def test_collector_disconnect_invalidates_orderbook_until_reconnect_snapshot():
