@@ -432,6 +432,12 @@ class BybitExecutionReplay:
         }
 
 
+def _write_jsonl_record(output: Any, record: dict[str, Any]) -> None:
+    """Write one valid newline-delimited JSON record and flush it."""
+    output.write(json.dumps(record, separators=(",", ":")) + "\n")
+    output.flush()
+
+
 def _mean(values: list[float | None]) -> float | None:
     present = [value for value in values if value is not None]
     return sum(present) / len(present) if present else None
@@ -470,8 +476,7 @@ def record_public_market_data(
                     "symbols": symbols,
                     **details,
                 }
-                output.write(json.dumps(record, separators=(",", ":")) + "\n")
-                output.flush()
+                _write_jsonl_record(output, record)
 
             def on_open(ws):
                 nonlocal backoff_seconds
@@ -489,8 +494,7 @@ def record_public_market_data(
                 if "topic" not in payload:
                     return
                 payload["received_ts_ms"] = received
-                output.write(json.dumps(payload, separators=(",", ":")) + "\n")
-                output.flush()
+                _write_jsonl_record(output, payload)
                 count += 1
 
             def on_error(_ws, error):
