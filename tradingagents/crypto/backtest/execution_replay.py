@@ -9,8 +9,8 @@ import json
 import threading
 import time
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +39,7 @@ class InstrumentRules:
     max_order_qty: Decimal | None = None
 
     @classmethod
-    def from_bybit_instrument(cls, item: dict[str, Any], category: str) -> "InstrumentRules":
+    def from_bybit_instrument(cls, item: dict[str, Any], category: str) -> InstrumentRules:
         price = item.get("priceFilter") or {}
         lot = item.get("lotSizeFilter") or {}
         # Spot V5 uses minOrderAmt; linear/inverse use minNotionalValue.
@@ -296,7 +296,6 @@ class BybitExecutionReplay:
             order.status = "filled" if order.filled_qty >= order.quantity else "partial"
 
     def finalize_markouts(self) -> None:
-        times = [ts for ts, _ in self.mid_history]
         for fill in self.fills:
             signed = 1.0 if fill.side == BUY else -1.0
             for horizon, attr in ((1_000, "markout_1s"), (5_000, "markout_5s"), (30_000, "markout_30s")):
