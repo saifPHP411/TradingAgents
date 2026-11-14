@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import pytest
-
 from tradingagents.crypto.backtest.bybit_execution import build_post_only_limit_payload
+
+import pytest
 
 
 pytestmark = pytest.mark.unit
