@@ -209,9 +209,23 @@ def run_adaptive_backtest(
                 stop = float(decision.stop_price)
                 target = float(decision.target_price)
                 risk_per_unit = entry_fill - stop
-                if risk_per_unit <= 0 or target <= entry_fill:
-                    result.rejections["next-open gap invalidated setup"] = (
-                        result.rejections.get("next-open gap invalidated setup", 0) + 1
+                cost_distance = (
+                    effective_config.estimated_round_trip_cost_bps / 10_000
+                ) * entry_fill
+                net_reward_risk = (
+                    (target - entry_fill - cost_distance)
+                    / (risk_per_unit + cost_distance)
+                    if risk_per_unit > 0 else float("-inf")
+                )
+                if (
+                    risk_per_unit <= 0
+                    or target <= entry_fill
+                    or net_reward_risk < effective_config.min_net_reward_risk
+                ):
+                    result.rejections["next-open gap/cost invalidated net reward-risk"] = (
+                        result.rejections.get(
+                            "next-open gap/cost invalidated net reward-risk", 0
+                        ) + 1
                     )
                 else:
                     risk_budget = cash * portfolio.risk_fraction
