@@ -31,6 +31,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+market-data = [
+    "websocket-client>=1.8",
+]
 dev = [
     "ruff>=0.16",
     "pytest>=8.0",
