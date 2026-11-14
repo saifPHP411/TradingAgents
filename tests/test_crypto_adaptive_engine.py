@@ -1,0 +1,52 @@
+from __future__ import annotations
+import numpy as np
+import pandas as pd
+import pytest
+from tradingagents.crypto.adaptive import AdaptiveConfig, analyze_market
+pytestmark = pytest.mark.unit
+
+def frame(n=180):
+    c=100+np.arange(n)*.1
+    return pd.DataFrame({"open":c-.02,"high":c+.08,"low":c-.08,"close":c,"volume":np.full(n,1000.)},
+        index=pd.date_range("2025-01-01",periods=n,freq="h",tz="UTC"))
+
+def test_stale_forming_and_unknown_spread_fail_closed():
+    x=frame()
+    assert analyze_market(x,spread_bps=2,data_is_fresh=False).action=="no_trade"
+    assert analyze_market(x,spread_bps=2,closed_bars_only=False).action=="no_trade"
+    assert "spread is unknown" in analyze_market(x).blockers
+
+def test_insufficient_history_fails_closed():
+    assert analyze_market(frame(30),spread_bps=2).action=="no_trade"
+
+def test_decision_is_deterministic():
+    x=frame()
+    assert analyze_market(x,spread_bps=2).to_dict()==analyze_market(x,spread_bps=2).to_dict()
+
+def test_current_bar_cannot_define_its_own_range_or_volume_baseline():
+    from tradingagents.crypto.adaptive import _features, _validate
+    x=frame()
+    a=_features(_validate(x),AdaptiveConfig()).iloc[-1]
+    x.iloc[-1,x.columns.get_loc("high")]=999
+    x.iloc[-1,x.columns.get_loc("volume")]=999999
+    b=_features(_validate(x),AdaptiveConfig()).iloc[-1]
+    assert a.prior_high==pytest.approx(b.prior_high)
+    assert a.volume_base==pytest.approx(b.volume_base)
+
+def test_excessive_spread_blocks_analysis():
+    assert analyze_market(frame(),spread_bps=500).action=="no_trade"
+
+def test_high_cost_assumption_can_veto_candidate():
+    result=analyze_market(frame(),spread_bps=2,config=AdaptiveConfig(estimated_round_trip_cost_bps=1000))
+    assert result.action=="no_trade"
+
+def test_bad_prices_and_nonchronological_data_are_rejected():
+    x=frame()
+    x.iloc[-1,x.columns.get_loc("close")]=0
+    with pytest.raises(ValueError,match="positive"): analyze_market(x,spread_bps=2)
+    with pytest.raises(ValueError,match="chronological"): analyze_market(frame().iloc[::-1],spread_bps=2)
+
+def test_long_only_action_vocabulary():
+    result=analyze_market(frame(),spread_bps=2)
+    assert result.action in {"buy_candidate","no_trade"}
+    assert result.strategy in {"trend_pullback","range_reversion","breakout","none"}
