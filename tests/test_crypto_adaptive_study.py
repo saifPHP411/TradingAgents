@@ -4,13 +4,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tradingagents.crypto.adaptive import AdaptiveDecision
 from tradingagents.crypto.backtest.adaptive_study import (
     AdaptiveExecutionCosts,
     AdaptivePortfolio,
     run_adaptive_backtest,
     run_adaptive_walk_forward_study,
 )
-from tradingagents.crypto.adaptive import AdaptiveDecision
 
 pytestmark = pytest.mark.unit
 

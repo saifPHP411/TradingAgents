@@ -110,15 +110,18 @@ class AdaptiveBacktestResult:
 def run_adaptive_backtest(
     frame: pd.DataFrame,
     *,
-    config: AdaptiveConfig = AdaptiveConfig(),
-    execution: AdaptiveExecutionCosts = AdaptiveExecutionCosts(),
-    portfolio: AdaptivePortfolio = AdaptivePortfolio(),
+    config: AdaptiveConfig | None = None,
+    execution: AdaptiveExecutionCosts | None = None,
+    portfolio: AdaptivePortfolio | None = None,
     spread_bps: float = 2.0,
     start_index: int = 0,
     end_index: int | None = None,
     data_is_fresh: bool = True,
 ) -> AdaptiveBacktestResult:
     """Backtest one Spot symbol with closed-bar signals and next-open fills."""
+    config = config or AdaptiveConfig()
+    execution = execution or AdaptiveExecutionCosts()
+    portfolio = portfolio or AdaptivePortfolio()
     if not pd.notna(spread_bps) or abs(spread_bps) == float("inf") or spread_bps < 0:
         raise ValueError("spread_bps must be finite and non-negative")
     effective_spread_bps = max(spread_bps, execution.half_spread_bps)
@@ -261,7 +264,7 @@ def run_adaptive_walk_forward_study(
     *,
     warmup_bars: int = 250,
     test_bars: int = 120,
-    config: AdaptiveConfig = AdaptiveConfig(),
+    config: AdaptiveConfig | None = None,
     portfolio: AdaptivePortfolio | None = None,
     scenarios: collections.abc.Mapping[str, AdaptiveExecutionCosts] = DEFAULT_COST_SCENARIOS,
     spread_bps: float = 2.0,
@@ -284,6 +287,7 @@ def run_adaptive_walk_forward_study(
     bar_count = next(iter(lengths))
     if bar_count < warmup_bars + test_bars:
         raise ValueError("not enough history for one complete OOS fold")
+    config = config or AdaptiveConfig()
     base_portfolio = portfolio or AdaptivePortfolio()
     folds = []
     for fold_number, start in enumerate(range(warmup_bars, bar_count - test_bars + 1, test_bars), 1):
