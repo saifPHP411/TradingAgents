@@ -51,7 +51,7 @@ class AdaptiveConfig:
             raise ValueError("risk and notional fractions exceed research safety bounds")
         if min(self.max_spread_bps, self.estimated_round_trip_cost_bps) < 0:
             raise ValueError("cost limits cannot be negative")
-        if self.max_atr_pct <= 0 or self.relative_volume_min <= 0 or self.min_net_reward_risk <= 0 or self.min_edge_cost_multiple < 1:
+        if self.max_atr_pct <= 0 or self.relative_volume_min <= 0 or self.bollinger_std <= 0 or self.min_net_reward_risk <= 0 or self.min_edge_cost_multiple < 1:
             raise ValueError("volatility, volume, and reward/risk thresholds must be positive")
         if not 0 <= self.efficiency_range_max < self.efficiency_trend_min <= 1:
             raise ValueError("efficiency thresholds must satisfy 0 <= range < trend <= 1")
