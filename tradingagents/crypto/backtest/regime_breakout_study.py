@@ -67,9 +67,12 @@ def run_walk_forward_study(
     lengths = {len(frame) for frame in ordered.values()}
     if len(lengths) != 1:
         raise ValueError("all symbols must have aligned bar counts")
+    reference_index = next(iter(ordered.values())).index
     for frame in ordered.values():
         if frame.empty or not frame.index.is_monotonic_increasing or frame.index.has_duplicates:
             raise ValueError("all symbol frames must be non-empty and chronological")
+        if not frame.index.equals(reference_index):
+            raise ValueError("all symbols must have aligned timestamps")
     bar_count = next(iter(lengths))
     if bar_count < warmup_bars + test_bars:
         raise ValueError("not enough history for one complete OOS fold")
@@ -80,7 +83,8 @@ def run_walk_forward_study(
         end = start + test_bars - 1
         fold = {
             "fold": fold_number,
-            "context_start": ordered[next(iter(ordered))].index[0].isoformat(),
+            "context_start": reference_index[0].isoformat(),
+            "context_end": reference_index[start - 1].isoformat(),
             "oos_start": ordered[next(iter(ordered))].index[start].isoformat(),
             "oos_end": ordered[next(iter(ordered))].index[end].isoformat(),
             "symbols": {},
