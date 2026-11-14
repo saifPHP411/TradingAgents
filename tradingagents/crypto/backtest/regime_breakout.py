@@ -111,6 +111,8 @@ class BreakoutBacktestResult:
             "expectancy_per_trade": (
                 sum(t.net_pnl for t in self.trades) / len(self.trades) if self.trades else 0.0
             ),
+            "gross_profit": gross_profit,
+            "gross_loss": gross_loss,
             "fees": self.total_fees,
             "spread_and_slippage": self.total_slippage_spread,
         }
