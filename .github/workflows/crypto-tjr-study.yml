@@ -28,7 +28,7 @@ permissions:
 
 concurrency:
   group: crypto-tjr-study
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   study:
