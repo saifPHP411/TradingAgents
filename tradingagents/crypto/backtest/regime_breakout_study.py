@@ -124,6 +124,22 @@ def run_walk_forward_study(
             equity *= 1 + value / 100
             peak = max(peak, equity)
             max_drawdown = max(max_drawdown, (peak - equity) / peak if peak else 0)
+        all_symbol_rows = [
+            row
+            for fold in folds
+            for row in fold["scenarios"][scenario_name]["symbols"].values()
+        ]
+        total_trades = sum(row["trades"] for row in all_symbol_rows)
+        total_gross_profit = sum(row["gross_profit"] for row in all_symbol_rows)
+        total_gross_loss = sum(row["gross_loss"] for row in all_symbol_rows)
+        total_net_pnl = sum(row["net_pnl"] for row in all_symbol_rows)
+        aggregate_profit_factor = (
+            total_gross_profit / total_gross_loss if total_gross_loss else
+            (float("inf") if total_gross_profit else 0.0)
+        )
+        worst_intraperiod_drawdown = max(
+            (row["max_drawdown_pct"] for row in all_symbol_rows), default=0.0
+        )
         summary[scenario_name] = {
             "folds": len(folds),
             "compounded_oos_return_pct": (equity / initial_cash - 1) * 100,
@@ -132,6 +148,10 @@ def run_walk_forward_study(
             "mean_buy_hold_return_pct": sum(benchmarks) / len(benchmarks),
             "positive_folds": sum(value > 0 for value in returns),
             "profitable_after_costs": all(value > 0 for value in returns),
+            "trades": total_trades,
+            "expectancy_per_trade": total_net_pnl / total_trades if total_trades else 0.0,
+            "aggregate_profit_factor": aggregate_profit_factor,
+            "worst_symbol_fold_drawdown_pct": worst_intraperiod_drawdown,
         }
     return {
         "study": "regime_breakout_fixed_parameters_chronological_oos",
