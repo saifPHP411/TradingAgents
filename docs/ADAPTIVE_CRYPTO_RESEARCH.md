@@ -15,12 +15,20 @@ Spot; bearish, high-volatility and uncertain regimes abstain.
 5. Reject candidates when spread/data quality or estimated round-trip cost fails.
    Stops and targets are reference levels, not exchange instructions.
 
+## Backtest and execution assumptions
+The research backtester uses closed hourly bars, next-hour-open entries, stop-first
+intrabar handling, gap-aware stop exits, time exits, and explicit per-fill commission,
+half-spread and slippage scenarios. Simulated quantity is bounded by risk-per-trade
+and notional caps. The backtest is single-position per symbol; it is not a shared
+multi-asset execution portfolio and it does not create executable order quantities.
+The CI study currently aggregates Binance public Spot 1m candles into completed
+UTC 1h bars. Binance history is only a cross-venue proxy for Bybit Demo Spot.
+
 ## Current limitations
-This first implementation does not yet consume order-book depth, funding, open
-interest, liquidation flow, macro/news, or exchange-specific historical fills.
-Spread and cost assumptions must be supplied/measured; defaults are not verified
-Bybit fees. It does not size executable quantities. Do not connect it to orders
-without a separate risk/execution integration and validation.
+The engine does not yet consume order-book depth, funding, open interest, liquidation
+flow, macro/news, or exchange-specific historical fills. Spread and cost assumptions
+are explicit estimates, not verified Bybit fees or realized market impact. Do not
+connect it to orders without separate risk/execution integration and validation.
 
 ## Research foundations (hypotheses, not profit guarantees)
 - Moskowitz, Ooi & Pedersen (2012), Time Series Momentum.
@@ -34,6 +42,6 @@ implementation profitable in crypto or on Bybit.
 
 ## Required gates before paper/demo integration
 Causal/no-lookahead and stale-data tests; multi-symbol chronological walk-forward
-across market cycles; measured Bybit fees/spread/slippage; untouched final holdout;
+across multiple market cycles; measured Bybit fees/spread/slippage; untouched final holdout;
 selection-bias analysis; buy-and-hold and cash baselines; per-symbol and per-regime
 expectancy, profit factor, compounded return, drawdown, turnover and uncertainty.

@@ -82,3 +82,47 @@ def test_execution_costs_and_portfolio_reject_invalid_values():
         AdaptiveExecutionCosts(float("inf"), 0, 0)
     with pytest.raises(ValueError, match="risk_fraction"):
         AdaptivePortfolio(risk_fraction=.5)
+
+
+def test_execution_cost_scenario_sets_matching_signal_cost_gate(monkeypatch):
+    import tradingagents.crypto.backtest.adaptive_study as module
+
+    frame = _flat_frame(70)
+    observed = []
+
+    def no_trade(history, **kwargs):
+        observed.append(kwargs["config"].estimated_round_trip_cost_bps)
+        return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None)
+
+    monkeypatch.setattr(module, "analyze_market", no_trade)
+    run_adaptive_backtest(
+        frame, execution=AdaptiveExecutionCosts(0, 0, 0),
+        start_index=55, end_index=60,
+    )
+    run_adaptive_backtest(
+        frame, execution=AdaptiveExecutionCosts(15, 3, 5),
+        start_index=55, end_index=60,
+    )
+    assert observed[0] == 0
+    assert observed[-1] == 46
+
+
+def test_default_simulated_portfolio_inherits_adaptive_risk_caps(monkeypatch):
+    import tradingagents.crypto.backtest.adaptive_study as module
+
+    frame = _flat_frame(70)
+    captured = []
+
+    def no_trade(history, **kwargs):
+        captured.append(kwargs["config"])
+        return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None)
+
+    monkeypatch.setattr(module, "analyze_market", no_trade)
+    run_adaptive_backtest(
+        frame,
+        config=__import__("tradingagents.crypto.adaptive", fromlist=["AdaptiveConfig"]).AdaptiveConfig(
+            risk_fraction=0.01, max_notional_fraction=0.2
+        ),
+        start_index=55, end_index=60,
+    )
+    assert captured

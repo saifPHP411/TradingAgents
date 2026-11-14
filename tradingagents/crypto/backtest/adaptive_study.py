@@ -121,7 +121,10 @@ def run_adaptive_backtest(
     """Backtest one Spot symbol with closed-bar signals and next-open fills."""
     config = config or AdaptiveConfig()
     execution = execution or AdaptiveExecutionCosts()
-    portfolio = portfolio or AdaptivePortfolio()
+    portfolio = portfolio or AdaptivePortfolio(
+        risk_fraction=config.risk_fraction,
+        max_notional_fraction=config.max_notional_fraction,
+    )
     if not pd.notna(spread_bps) or abs(spread_bps) == float("inf") or spread_bps < 0:
         raise ValueError("spread_bps must be finite and non-negative")
     effective_spread_bps = max(spread_bps, execution.half_spread_bps)
@@ -130,7 +133,7 @@ def run_adaptive_backtest(
     )
     effective_config = replace(
         config,
-        estimated_round_trip_cost_bps=max(config.estimated_round_trip_cost_bps, round_trip_cost_bps),
+        estimated_round_trip_cost_bps=round_trip_cost_bps,
     )
     if effective_spread_bps > effective_config.max_spread_bps:
         raise ValueError("spread_bps must be within the configured liquidity limit")
@@ -288,7 +291,10 @@ def run_adaptive_walk_forward_study(
     if bar_count < warmup_bars + test_bars:
         raise ValueError("not enough history for one complete OOS fold")
     config = config or AdaptiveConfig()
-    base_portfolio = portfolio or AdaptivePortfolio()
+    base_portfolio = portfolio or AdaptivePortfolio(
+        risk_fraction=config.risk_fraction,
+        max_notional_fraction=config.max_notional_fraction,
+    )
     folds = []
     for fold_number, start in enumerate(range(warmup_bars, bar_count - test_bars + 1, test_bars), 1):
         end = start + test_bars - 1
@@ -407,6 +413,16 @@ def main(argv: list[str] | None = None) -> int:
         frames, warmup_bars=args.warmup_bars, test_bars=args.test_bars,
         spread_bps=args.spread_bps,
     )
+    from .history import HistoryCache
+
+    cache = HistoryCache(args.cache)
+    report["data_source"] = "Binance public Spot 1m candles aggregated to completed UTC 1h bars"
+    report["execution_venue"] = "Bybit Demo Spot is a future proxy target; fills here are simulated, not Bybit fills"
+    report["history_coverage_1m"] = {
+        symbol: coverage.to_dict()
+        for symbol in args.symbols
+        if (coverage := cache.coverage(symbol, "1m")) is not None
+    }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report["summary"], indent=2, sort_keys=True))
