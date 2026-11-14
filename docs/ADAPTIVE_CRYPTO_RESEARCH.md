@@ -26,6 +26,34 @@ as a fallback. The research workflow fetches a 2-year hourly history for ten liq
 USDT pairs, while the legacy benchmark cache retains its 120-day 1m sample.
 Binance history is only a cross-venue proxy for Bybit Demo Spot.
 
+## Fee-aware and passive-execution research additions
+
+- The entry gate now requires the modeled gross reward distance to exceed the
+  estimated round-trip cost by a configurable multiple (default 3x), in addition
+  to the minimum net reward/risk ratio. The same gate is rechecked at the next
+  simulated open so a gap cannot silently invalidate the setup.
+- Position sizing includes the estimated round-trip cost in risk per unit.
+- Range mean reversion now has rolling Bollinger lower-band and rolling
+  volume-weighted-average features, while retaining the ADX/path-efficiency
+  range regime filter. The VWAP here is a rolling OHLCV proxy, not exchange
+  session VWAP or order-book microprice.
+- `tradingagents/crypto/backtest/bybit_execution.py` builds a Bybit V5
+  `Limit`/`PostOnly` payload and rounds quotes to tick size. It is a pure
+  helper: it does not authenticate, submit, amend, cancel, or poll orders.
+  Buy quotes rest at/below best bid; sell quotes rest at/above best ask.
+- A PostOnly instruction prevents taking liquidity at submission, but it does
+  not guarantee a fill, a maker fee tier, or a profitable exit. OHLCV alone
+  cannot model queue position, partial fills, cancellations, adverse selection,
+  or maker-to-taker conversion at exit. Do not count a hypothetical passive
+  quote as filled without order-book/trade replay and conservative queue rules.
+- Commission inputs remain explicit scenario assumptions. They must be replaced
+  with the account's actual Bybit fee schedule and instrument category before
+  any venue-specific conclusion; VIP tier rates are not hardcoded.
+- Funding-rate cash-and-carry is deferred. It requires synchronized Spot and
+  Perpetual order books, historical funding timestamps/rates, basis, borrow or
+  inventory costs, two-leg partial-fill handling, and liquidation/margin modeling.
+  A positive funding rate alone is not a risk-free arbitrage signal.
+
 ## Current limitations
 The engine does not yet consume order-book depth, funding, open interest, liquidation
 flow, macro/news, or exchange-specific historical fills. Spread and cost assumptions
