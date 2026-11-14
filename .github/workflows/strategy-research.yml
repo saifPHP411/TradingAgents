@@ -1,0 +1,110 @@
+name: Strategy research pipeline
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: strategy-research-pipeline
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate research branch (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out research candidate
+        uses: actions/checkout@v4
+        with:
+          ref: strategy-research-cost-aware
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Run complete test suite
+        run: pytest -q
+
+  lint:
+    name: Ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out research candidate
+        uses: actions/checkout@v4
+        with:
+          ref: strategy-research-cost-aware
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ruff
+        run: pip install "ruff>=0.16"
+      - name: Lint complete repository
+        run: ruff check .
+
+  historical-study:
+    name: 120-day cost-aware OOS research
+    needs: [validate, lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out research candidate
+        uses: actions/checkout@v4
+        with:
+          ref: strategy-research-cost-aware
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install isolated research dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests python-dotenv pydantic
+          pip install -e . --no-deps
+      - name: Fetch up to 120 days of public Binance Spot history
+        run: |
+          python -m tradingagents.crypto.backtest.fetch \
+            --symbols BTC/USDT ETH/USDT BNB/USDT \
+            --limit 172800 \
+            --cache ./crypto-cache
+      - name: Run TJR baseline with explicit execution costs
+        run: |
+          mkdir -p artifacts
+          python -m tradingagents.crypto.backtest.run \
+            --symbols BTC/USDT ETH/USDT BNB/USDT \
+            --periods 7 30 \
+            --cache ./crypto-cache \
+            --no-sensitivity \
+            --out artifacts/crypto_tjr_study.json \
+            --markdown artifacts/crypto_tjr_study.md
+      - name: Run regime-breakout multi-symbol OOS study
+        run: |
+          python -m tradingagents.crypto.backtest.regime_breakout_study \
+            --symbols BTC/USDT ETH/USDT BNB/USDT \
+            --cache ./crypto-cache \
+            --warmup-bars 250 \
+            --test-bars 100 \
+            --out artifacts/regime_breakout_oos.json
+      - name: Upload immutable research reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: strategy-research-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
