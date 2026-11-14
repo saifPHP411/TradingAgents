@@ -127,3 +127,33 @@ def test_default_simulated_portfolio_inherits_adaptive_risk_caps(monkeypatch):
     )
     assert result.trades
     assert result.trades[0].quantity * result.trades[0].entry_price == pytest.approx(2000.0)
+
+
+def test_next_open_gap_that_erases_net_reward_risk_is_rejected(monkeypatch):
+    import tradingagents.crypto.backtest.adaptive_study as module
+
+    frame = _flat_frame(90)
+    frame.iloc[56, frame.columns.get_loc("open")] = 102.8
+    frame.iloc[56, frame.columns.get_loc("high")] = 103.0
+    frame.iloc[56, frame.columns.get_loc("low")] = 102.7
+    frame.iloc[56, frame.columns.get_loc("close")] = 102.85
+
+    def fake_analyze(data, features, index, **kwargs):
+        if index == 55:
+            return AdaptiveDecision(
+                "buy_candidate", "bull_trend", "trend_pullback", .8,
+                100.0, 99.0, 103.0, ("test setup",), (), {},
+            )
+        return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None)
+
+    monkeypatch.setattr(module, "_analyze_market_at", fake_analyze)
+    result = run_adaptive_backtest(
+        frame,
+        execution=AdaptiveExecutionCosts(0, 0, 0),
+        portfolio=AdaptivePortfolio(initial_cash=1000, risk_fraction=.01, max_notional_fraction=.5),
+        start_index=55,
+        end_index=60,
+    )
+
+    assert result.trades == []
+    assert result.rejections["next-open gap/cost invalidated net reward-risk"] == 1
