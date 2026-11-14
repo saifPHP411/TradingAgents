@@ -255,3 +255,17 @@ def test_report_contains_per_fill_fee_adjusted_markout():
     fill = replay.report()["fill_results"][0]
     assert fill["estimated_maker_fee"] == pytest.approx(0.02)
     assert fill["net_markout_30s"] is not None
+
+
+def test_collector_disconnect_invalidates_orderbook_until_reconnect_snapshot():
+    replay = BybitExecutionReplay(maker_fee_bps=1)
+    replay.process(book(1))
+    replay.process({
+        "collector_status": "disconnected", "received_ts_ms": 2,
+    })
+    assert replay.book.bid is None
+    assert replay.connection_interruptions == 1
+    replay.process(trade(3, "Sell", price="100", qty="10"))
+    assert replay.book.bid is None
+    replay.process(book(4))
+    assert replay.book.bid == Decimal("100")
