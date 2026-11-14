@@ -182,6 +182,7 @@ def test_cancel_replace_loses_queue_priority_and_counts_cancellation():
         "old", new_order_id="new", timestamp_ms=3, side="Buy",
         price="100", quantity="1", latency_ms=0,
     )
+    replay.process(book(4, bid_qty="2", kind="delta"))
     assert replay.orders["old"].status == "cancelled"
     assert replay.orders["new"].queue_ahead == Decimal("2")
     assert replay.report()["cancellations"] == 1
