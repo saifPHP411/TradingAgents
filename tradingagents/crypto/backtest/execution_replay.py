@@ -51,7 +51,7 @@ class InstrumentRules:
             symbol=str(item["symbol"]),
             tick_size=_d(price.get("tickSize"), "tickSize"),
             qty_step=_d(lot.get("qtyStep"), "qtyStep"),
-            min_order_qty=_d(lot.get("minOrderQty", lot.get("basePrecision")), "minOrderQty"),
+            min_order_qty=(\n                Decimal(str(lot["minOrderQty"]))\n                if category != "spot" and lot.get("minOrderQty")\n                else Decimal("0")\n            ),
             min_notional=Decimal(str(minimum_notional)),
             max_order_qty=(
                 Decimal(str(lot["maxOrderQty"])) if lot.get("maxOrderQty") else None
@@ -215,6 +215,11 @@ class BybitExecutionReplay:
             price=price, quantity=quantity, latency_ms=latency_ms, ttl_ms=ttl_ms,
         )
 
+    def _expire_due(self, timestamp_ms: int) -> None:
+        for order in self.orders.values():
+            if order.status in ("open", "partial") and timestamp_ms >= order.expires_ts_ms:
+                order.status = "expired"
+
     def _activate_due(self, timestamp_ms: int) -> None:
         for order in self.orders.values():
             if order.status != "pending" or order.active_ts_ms > timestamp_ms:
@@ -235,6 +240,7 @@ class BybitExecutionReplay:
         """Consume normalized or raw Bybit WebSocket event JSON."""
         self.events_seen += 1
         received = int(event.get("received_ts_ms", event.get("ts", 0)))
+        self._expire_due(received)
         topic = str(event.get("topic", ""))
         data = event.get("data") or {}
         event_type = event.get("type")
@@ -427,12 +433,29 @@ def record_public_market_data(
     return count
 
 
-def replay_jsonl(path: str, *, maker_fee_bps: float, queue_factor: float = 1.5) -> BybitExecutionReplay:
-    """Replay captured market data. Orders are injected separately by callers."""
+def replay_jsonl(
+    path: str, *, maker_fee_bps: float, queue_factor: float = 1.5,
+    orders: list[dict[str, Any]] | None = None,
+) -> BybitExecutionReplay:
+    """Replay captured market data with simulated submissions interleaved by time.
+
+    Each order dict uses submit_order keyword names: order_id, timestamp_ms, side,
+    price, quantity, and optional latency_ms/ttl_ms.
+    """
     replay = BybitExecutionReplay(maker_fee_bps=maker_fee_bps, queue_factor=queue_factor)
     with Path(path).open(encoding="utf-8") as source:
         events = [json.loads(line) for line in source if line.strip()]
-    events.sort(key=lambda event: int(event.get("received_ts_ms", event.get("ts", 0))))
-    for event in events:
-        replay.process(event)
+    timeline = [
+        (int(event.get("received_ts_ms", event.get("ts", 0))), 0, event)
+        for event in events
+    ]
+    timeline.extend(
+        (int(order["timestamp_ms"]), 1, order) for order in (orders or [])
+    )
+    timeline.sort(key=lambda item: (item[0], item[1]))
+    for _, kind, payload in timeline:
+        if kind == 0:
+            replay.process(payload)
+        else:
+            replay.submit_order(**payload)
     return replay
