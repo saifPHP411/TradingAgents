@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from io import StringIO
+import json
 
 import pytest
 
@@ -8,6 +10,7 @@ from tradingagents.crypto.backtest.execution_replay import (
     BybitExecutionReplay,
     InstrumentRules,
     validate_post_only_order,
+    _write_jsonl_record,
 )
 
 pytestmark = pytest.mark.unit
@@ -269,3 +272,13 @@ def test_collector_disconnect_invalidates_orderbook_until_reconnect_snapshot():
     assert replay.book.bid is None
     replay.process(book(4))
     assert replay.book.bid == Decimal("100")
+
+
+def test_jsonl_writer_emits_one_parseable_record_per_line():
+    output = StringIO()
+    _write_jsonl_record(output, {"event": "first", "value": 1})
+    _write_jsonl_record(output, {"event": "second", "value": 2})
+
+    lines = output.getvalue().splitlines()
+    assert len(lines) == 2
+    assert [json.loads(line)["event"] for line in lines] == ["first", "second"]
