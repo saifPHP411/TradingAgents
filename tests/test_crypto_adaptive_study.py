@@ -111,7 +111,6 @@ def test_default_simulated_portfolio_inherits_adaptive_risk_caps(monkeypatch):
     import tradingagents.crypto.backtest.adaptive_study as module
 
     frame = _flat_frame(70)
-    captured = []
 
     def candidate(history, **kwargs):
         return AdaptiveDecision(
