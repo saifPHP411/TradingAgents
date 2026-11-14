@@ -200,7 +200,7 @@ def test_jsonl_replay_interleaves_submissions_and_expires_orders(tmp_path):
         book(20, bid="99", ask="100"),
     ]
     path.write_text(
-        "".join(json.dumps(event) + "\\n" for event in events),
+        "".join(json.dumps(event) + "\n" for event in events),
         encoding="utf-8",
     )
     replay = replay_jsonl(
