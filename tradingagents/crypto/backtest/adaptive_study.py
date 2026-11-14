@@ -221,6 +221,7 @@ def run_adaptive_backtest(
                     risk_per_unit <= 0
                     or target <= entry_fill
                     or net_reward_risk < effective_config.min_net_reward_risk
+                    or (target - entry_fill) < cost_distance * effective_config.min_edge_cost_multiple
                 ):
                     result.rejections["next-open gap/cost invalidated net reward-risk"] = (
                         result.rejections.get(
