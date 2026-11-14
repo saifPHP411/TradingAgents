@@ -54,3 +54,33 @@ def test_long_only_action_vocabulary():
     result=analyze_market(frame(),spread_bps=2)
     assert result.action in {"buy_candidate","no_trade"}
     assert result.strategy in {"trend_pullback","range_reversion","breakout","none"}
+
+def pullback_frame():
+    x = frame()
+    close = x.close.to_numpy().copy()
+    close[-2] -= 3.0
+    close[-1] += 5.0
+    x["close"] = close
+    x["open"] = close - 0.02
+    x["high"] = close + 0.08
+    x["low"] = close - 0.08
+    return x
+
+
+def test_bull_trend_pullback_expert_can_emit_explainable_candidate():
+    result = analyze_market(pullback_frame(), spread_bps=2)
+    assert result.regime == "bull_trend"
+    assert result.strategy == "trend_pullback"
+    assert result.action == "buy_candidate"
+    assert result.stop_price < result.reference_price < result.target_price
+    assert result.reasons
+
+
+def test_same_candidate_is_vetoed_when_costs_are_excessive():
+    result = analyze_market(
+        pullback_frame(),
+        spread_bps=2,
+        config=AdaptiveConfig(estimated_round_trip_cost_bps=1000),
+    )
+    assert result.action == "no_trade"
+    assert "estimated round-trip costs" in result.blockers[0]
