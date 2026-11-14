@@ -288,8 +288,16 @@ def run_backtest(
                 "stop": stop,
                 "target": target,
                 "entry_fee": entry_fee,
+                "entry_debit": total_debit,
             }
-        marked_equity = cash + (position["quantity"] * float(row["close"]) if position else 0.0)
+        # The order is filled at the next bar open. Until that bar begins,
+        # the position is pending and must not affect this bar's marked equity.
+        if position is None:
+            marked_equity = cash
+        elif position["entry_index"] > i:
+            marked_equity = cash + position["entry_debit"]
+        else:
+            marked_equity = cash + position["quantity"] * float(row["close"])
         result.equity_curve.append(marked_equity)
 
     if position is not None and len(data):
