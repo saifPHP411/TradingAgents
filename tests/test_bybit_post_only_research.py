@@ -4,7 +4,6 @@ import pytest
 
 from tradingagents.crypto.backtest.bybit_execution import build_post_only_limit_payload
 
-
 pytestmark = pytest.mark.unit
 
 
