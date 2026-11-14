@@ -169,4 +169,5 @@ def test_pending_next_bar_entry_does_not_change_signal_bar_equity():
     )
     # The signal is known only at this bar's close; its next-open order cannot
     # create a position valuation or artificial drawdown at the signal timestamp.
+    assert len(result.equity_curve) == 2
     assert result.equity_curve[0] == pytest.approx(result.initial_cash)
