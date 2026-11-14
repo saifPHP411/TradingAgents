@@ -62,7 +62,8 @@ def _validate(frame: pd.DataFrame) -> pd.DataFrame:
     if not frame.index.is_monotonic_increasing or frame.index.has_duplicates:
         raise ValueError("OHLCV index must be strictly chronological and unique")
     data = frame.loc[:, ["open", "high", "low", "close", "volume"]].astype(float)
-    if data.isna().any().any() or not data.map(lambda x: pd.notna(x) and abs(x) != float("inf")).all().all():
+    if data.isna().any().any() or not data.map(lambda x:
+        pd.notna(x) and abs(x) != float("inf")).all().all():
         raise ValueError("OHLCV values must be finite and non-null")
     if (data[["open", "high", "low", "close"]] <= 0).any().any() or (data.volume < 0).any():
         raise ValueError("prices must be positive and volume non-negative")
@@ -107,12 +108,17 @@ def analyze_market(frame: pd.DataFrame, *, config: AdaptiveConfig = AdaptiveConf
     """Return a deterministic analysis of the latest completed bar, never an order."""
     data = _validate(frame)
     blockers = []
-    if not data_is_fresh: blockers.append("market data is stale")
-    if not closed_bars_only: blockers.append("forming bars cannot drive decisions")
-    if spread_bps is None: blockers.append("spread is unknown")
-    elif spread_bps < 0 or spread_bps > config.max_spread_bps: blockers.append("spread exceeds liquidity limit")
+    if not data_is_fresh:
+        blockers.append("market data is stale")
+    if not closed_bars_only:
+        blockers.append("forming bars cannot drive decisions")
+    if spread_bps is None:
+        blockers.append("spread is unknown")
+    elif spread_bps < 0 or spread_bps > config.max_spread_bps:
+        blockers.append("spread exceeds liquidity limit")
     needed = max(config.slow_ema, config.lookback, config.breakout_lookback, config.atr_period)+5
-    if len(data) < needed: blockers.append("insufficient closed-bar history")
+    if len(data) < needed:
+        blockers.append("insufficient closed-bar history")
     if blockers:
         return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None, (), tuple(blockers), {"bars":len(data)})
     x = _features(data, config)
@@ -125,11 +131,16 @@ def analyze_market(frame: pd.DataFrame, *, config: AdaptiveConfig = AdaptiveConf
     bullish = r.ema_fast > r.ema_slow and price > r.ema_slow
     bearish = r.ema_fast < r.ema_slow and price < r.ema_slow
     expanding = r.atr_base > 0 and r.atr_pct > r.atr_base*2
-    if r.atr_pct > config.max_atr_pct or expanding: regime: Regime = "high_volatility"
-    elif bullish and r.adx >= config.adx_trend_min and r.efficiency >= config.efficiency_trend_min: regime = "bull_trend"
-    elif bearish and r.adx >= config.adx_trend_min and r.efficiency >= config.efficiency_trend_min: regime = "bear_trend"
-    elif r.adx <= config.adx_range_max and r.efficiency <= config.efficiency_range_max: regime = "range"
-    else: regime = "uncertain"
+    if r.atr_pct > config.max_atr_pct or expanding:
+        regime: Regime = "high_volatility"
+    elif bullish and r.adx >= config.adx_trend_min and r.efficiency >= config.efficiency_trend_min:
+        regime = "bull_trend"
+    elif bearish and r.adx >= config.adx_trend_min and r.efficiency >= config.efficiency_trend_min:
+        regime = "bear_trend"
+    elif r.adx <= config.adx_range_max and r.efficiency <= config.efficiency_range_max:
+        regime = "range"
+    else:
+        regime = "uncertain"
     strategy: Strategy = "none"
     confidence, reasons = 0.0, []
     if regime == "bull_trend":
@@ -146,9 +157,12 @@ def analyze_market(frame: pd.DataFrame, *, config: AdaptiveConfig = AdaptiveConf
             reasons += ["low ADX and path efficiency indicate range", "oversold near lower range boundary"]
         elif width > 0 and r.rsi >= 70 and price >= r.prior_high-width*.15:
             reasons.append("overbought at upper range boundary; long-only engine abstains")
-    elif regime == "bear_trend": reasons.append("bear trend detected; shorting is disabled")
-    elif regime == "high_volatility": reasons.append("volatility expansion suspends entries")
-    else: reasons.append("mixed market structure; no expert has a clear setup")
+    elif regime == "bear_trend":
+        reasons.append("bear trend detected; shorting is disabled")
+    elif regime == "high_volatility":
+        reasons.append("volatility expansion suspends entries")
+    else:
+        reasons.append("mixed market structure; no expert has a clear setup")
     stop = target = None
     if strategy != "none":
         stop = price-2*atr
@@ -157,7 +171,8 @@ def analyze_market(frame: pd.DataFrame, *, config: AdaptiveConfig = AdaptiveConf
         if stop <= 0 or 2-cost_r < config.min_net_reward_risk:
             blockers.append("estimated round-trip costs erase minimum net reward/risk")
             strategy, confidence, stop, target = "none", 0.0, None, None
-        else: reasons.append("reference risk geometry passes estimated-cost gate")
+        else:
+            reasons.append("reference risk geometry passes estimated-cost gate")
     diagnostics = {"bar_time":str(data.index[-1]), "bars":len(data), "price":price,
                    "atr":atr, "atr_pct":float(r.atr_pct), "adx":float(r.adx),
                    "efficiency_ratio":float(r.efficiency), "rsi":float(r.rsi),
