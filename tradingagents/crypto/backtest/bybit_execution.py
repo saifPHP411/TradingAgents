@@ -5,7 +5,7 @@ credentials, and never submits or cancels an exchange order.
 """
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Literal
 
 
