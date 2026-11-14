@@ -30,16 +30,16 @@ def test_backtest_uses_next_open_and_applies_two_sided_costs(monkeypatch):
     frame = _flat_frame(90)
     calls = {"count": 0}
 
-    def fake_analyze(history, **kwargs):
+    def fake_analyze(data, features, index, **kwargs):
         calls["count"] += 1
-        if len(history) == 56:
+        if index == 55:
             return AdaptiveDecision(
                 "buy_candidate", "bull_trend", "trend_pullback", .8,
                 100.0, 99.0, 103.0, ("test setup",), (), {},
             )
         return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None)
 
-    monkeypatch.setattr(module, "analyze_market", fake_analyze)
+    monkeypatch.setattr(module, "_analyze_market_at", fake_analyze)
     result = run_adaptive_backtest(
         frame, execution=AdaptiveExecutionCosts(10, 1, 2),
         portfolio=AdaptivePortfolio(initial_cash=1000, risk_fraction=.01, max_notional_fraction=.5),
@@ -90,11 +90,11 @@ def test_execution_cost_scenario_sets_matching_signal_cost_gate(monkeypatch):
     frame = _flat_frame(70)
     observed = []
 
-    def no_trade(history, **kwargs):
+    def no_trade(data, features, index, **kwargs):
         observed.append(kwargs["config"].estimated_round_trip_cost_bps)
         return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None)
 
-    monkeypatch.setattr(module, "analyze_market", no_trade)
+    monkeypatch.setattr(module, "_analyze_market_at", no_trade)
     run_adaptive_backtest(
         frame, execution=AdaptiveExecutionCosts(0, 0, 0),
         start_index=55, end_index=60,
@@ -112,13 +112,13 @@ def test_default_simulated_portfolio_inherits_adaptive_risk_caps(monkeypatch):
 
     frame = _flat_frame(70)
 
-    def candidate(history, **kwargs):
+    def candidate(data, features, index, **kwargs):
         return AdaptiveDecision(
             "buy_candidate", "bull_trend", "trend_pullback", .8,
             100.0, 99.0, 103.0, ("test setup",), (), {},
         )
 
-    monkeypatch.setattr(module, "analyze_market", candidate)
+    monkeypatch.setattr(module, "_analyze_market_at", candidate)
     result = run_adaptive_backtest(
         frame,
         config=AdaptiveConfig(risk_fraction=0.01, max_notional_fraction=0.2),

@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field, replace
 
 import pandas as pd
 
-from ..adaptive import AdaptiveConfig, analyze_market
+from ..adaptive import AdaptiveConfig, _analyze_market_at, _features, _validate
 
 
 @dataclass(frozen=True)
@@ -141,7 +141,9 @@ def run_adaptive_backtest(
         return AdaptiveBacktestResult(portfolio.initial_cash, portfolio.initial_cash)
     if not frame.index.is_monotonic_increasing or frame.index.has_duplicates:
         raise ValueError("OHLCV index must be strictly chronological and unique")
-    end_index = len(frame) - 1 if end_index is None else end_index
+    data = _validate(frame)
+    features = _features(data, effective_config)
+    end_index = len(data) - 1 if end_index is None else end_index
     if start_index < 0 or end_index >= len(frame) or start_index > end_index:
         raise ValueError("start_index/end_index must select a valid non-empty window")
     cash = float(portfolio.initial_cash)
@@ -152,8 +154,8 @@ def run_adaptive_backtest(
     warmup = max(config.slow_ema, config.lookback, config.breakout_lookback, config.atr_period) + 5
 
     for i in range(start_index, end_index + 1):
-        row = frame.iloc[i]
-        stamp = frame.index[i]
+        row = data.iloc[i]
+        stamp = data.index[i]
         if position is not None:
             held = i - position["entry_index"]
             exit_raw = None
@@ -188,17 +190,21 @@ def run_adaptive_backtest(
                 position = None
 
         if position is None and i >= warmup and i + 1 <= end_index:
-            history = frame.iloc[:i + 1]
-            decision = analyze_market(
-                history, config=effective_config, spread_bps=effective_spread_bps,
-                data_is_fresh=data_is_fresh, closed_bars_only=True,
+            decision = _analyze_market_at(
+                data,
+                features,
+                i,
+                config=effective_config,
+                spread_bps=effective_spread_bps,
+                data_is_fresh=data_is_fresh,
+                closed_bars_only=True,
             )
             result.regimes[decision.regime] = result.regimes.get(decision.regime, 0) + 1
             if decision.blockers:
                 for blocker in decision.blockers:
                     result.rejections[blocker] = result.rejections.get(blocker, 0) + 1
             if decision.action == "buy_candidate":
-                next_open = float(frame.iloc[i + 1].open)
+                next_open = float(data.iloc[i + 1].open)
                 entry_fill = next_open * (1 + impact)
                 stop = float(decision.stop_price)
                 target = float(decision.target_price)
@@ -233,7 +239,7 @@ def run_adaptive_backtest(
         result.equity_curve.append(mark)
 
     result.final_equity = cash + (
-        position["quantity"] * float(frame.iloc[end_index].close) if position is not None else 0.0
+        position["quantity"] * float(data.iloc[end_index].close) if position is not None else 0.0
     )
     return result
 

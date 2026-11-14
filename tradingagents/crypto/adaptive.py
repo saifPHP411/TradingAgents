@@ -124,60 +124,85 @@ def _features(data: pd.DataFrame, cfg: AdaptiveConfig) -> pd.DataFrame:
     x["atr_base"] = x.atr_pct.rolling(cfg.lookback, min_periods=cfg.lookback).median().shift(1)
     return x
 
-def analyze_market(frame: pd.DataFrame, *, config: AdaptiveConfig = AdaptiveConfig(),
-                   spread_bps: float | None = None, data_is_fresh: bool = True,
-                   closed_bars_only: bool = True) -> AdaptiveDecision:
-    """Return a deterministic analysis of the latest completed bar, never an order."""
-    data = _validate(frame)
+def _analyze_market_at(
+    data: pd.DataFrame,
+    features: pd.DataFrame,
+    index: int,
+    *,
+    config: AdaptiveConfig,
+    spread_bps: float | None,
+    data_is_fresh: bool,
+    closed_bars_only: bool,
+) -> AdaptiveDecision:
+    """Analyze one bar from causal, precomputed features without recomputing history."""
+    history_count = index + 1
     blockers = []
     if not data_is_fresh:
         blockers.append("market data is stale")
     if not closed_bars_only:
         blockers.append("forming bars cannot drive decisions")
-    if spread_bps is None:
+    if spread_bps is None or not pd.notna(spread_bps):
         blockers.append("spread is unknown")
     elif spread_bps < 0 or spread_bps > config.max_spread_bps:
         blockers.append("spread exceeds liquidity limit")
-    needed = max(config.slow_ema, config.lookback, config.breakout_lookback, config.atr_period)+5
-    if len(data) < needed:
+    needed = max(config.slow_ema, config.lookback, config.breakout_lookback, config.atr_period) + 5
+    if history_count < needed:
         blockers.append("insufficient closed-bar history")
     if blockers:
-        return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None, (), tuple(blockers), {"bars":len(data)})
-    x = _features(data, config)
-    r = x.iloc[-1]
-    required = ("atr", "atr_pct", "ema_fast", "ema_slow", "adx", "efficiency", "rsi",
-                "prior_high", "prior_low", "volume_base", "atr_base")
-    if any(pd.isna(r[k]) for k in required):
-        return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None, (), ("indicator warm-up incomplete",), {"bars":len(data)})
-    price, atr = float(r.close), float(r.atr)
-    bullish = r.ema_fast > r.ema_slow and price > r.ema_slow
-    bearish = r.ema_fast < r.ema_slow and price < r.ema_slow
-    expanding = r.atr_base > 0 and r.atr_pct > r.atr_base*2
-    if r.atr_pct > config.max_atr_pct or expanding:
+        return AdaptiveDecision(
+            "no_trade", "uncertain", "none", 0, None, None, None,
+            (), tuple(blockers), {"bars": history_count},
+        )
+
+    row = features.iloc[index]
+    required = (
+        "atr", "atr_pct", "ema_fast", "ema_slow", "adx", "efficiency", "rsi",
+        "prior_high", "prior_low", "volume_base", "atr_base",
+    )
+    if any(pd.isna(row[key]) for key in required):
+        return AdaptiveDecision(
+            "no_trade", "uncertain", "none", 0, None, None, None,
+            (), ("indicator warm-up incomplete",), {"bars": history_count},
+        )
+
+    price, atr = float(row.close), float(row.atr)
+    bullish = row.ema_fast > row.ema_slow and price > row.ema_slow
+    bearish = row.ema_fast < row.ema_slow and price < row.ema_slow
+    expanding = row.atr_base > 0 and row.atr_pct > row.atr_base * 2
+    if row.atr_pct > config.max_atr_pct or expanding:
         regime: Regime = "high_volatility"
-    elif bullish and r.adx >= config.adx_trend_min and r.efficiency >= config.efficiency_trend_min:
+    elif bullish and row.adx >= config.adx_trend_min and row.efficiency >= config.efficiency_trend_min:
         regime = "bull_trend"
-    elif bearish and r.adx >= config.adx_trend_min and r.efficiency >= config.efficiency_trend_min:
+    elif bearish and row.adx >= config.adx_trend_min and row.efficiency >= config.efficiency_trend_min:
         regime = "bear_trend"
-    elif r.adx <= config.adx_range_max and r.efficiency <= config.efficiency_range_max:
+    elif row.adx <= config.adx_range_max and row.efficiency <= config.efficiency_range_max:
         regime = "range"
     else:
         regime = "uncertain"
+
     strategy: Strategy = "none"
     confidence, reasons = 0.0, []
     if regime == "bull_trend":
-        if price > r.ema_fast and x.close.iloc[-2] <= x.ema_fast.iloc[-2]:
-            strategy, confidence = "trend_pullback", min(.90, .55+(float(r.adx)-config.adx_trend_min)/100+float(r.efficiency)*.25)
+        previous_close = float(features.close.iloc[index - 1])
+        previous_fast_ema = float(features.ema_fast.iloc[index - 1])
+        if price > row.ema_fast and previous_close <= previous_fast_ema:
+            strategy = "trend_pullback"
+            confidence = min(
+                .90,
+                .55 + (float(row.adx) - config.adx_trend_min) / 100
+                + float(row.efficiency) * .25,
+            )
             reasons += ["bullish EMA structure", "completed bar reclaimed fast EMA after pullback"]
-        elif price > r.prior_high and r.volume >= r.volume_base*config.relative_volume_min:
-            strategy, confidence = "breakout", min(.90, .58+float(r.efficiency)*.25)
+        elif price > row.prior_high and row.volume >= row.volume_base * config.relative_volume_min:
+            strategy = "breakout"
+            confidence = min(.90, .58 + float(row.efficiency) * .25)
             reasons += ["close broke prior-bar range high", "relative volume confirms breakout"]
     elif regime == "range":
-        width = float(r.prior_high-r.prior_low)
-        if width > 0 and r.rsi <= 30 and price <= r.prior_low+width*.15:
+        width = float(row.prior_high - row.prior_low)
+        if width > 0 and row.rsi <= 30 and price <= row.prior_low + width * .15:
             strategy, confidence = "range_reversion", .62
             reasons += ["low ADX and path efficiency indicate range", "oversold near lower range boundary"]
-        elif width > 0 and r.rsi >= 70 and price >= r.prior_high-width*.15:
+        elif width > 0 and row.rsi >= 70 and price >= row.prior_high - width * .15:
             reasons.append("overbought at upper range boundary; long-only engine abstains")
     elif regime == "bear_trend":
         reasons.append("bear trend detected; shorting is disabled")
@@ -185,11 +210,12 @@ def analyze_market(frame: pd.DataFrame, *, config: AdaptiveConfig = AdaptiveConf
         reasons.append("volatility expansion suspends entries")
     else:
         reasons.append("mixed market structure; no expert has a clear setup")
+
     stop = target = None
     if strategy != "none":
         if strategy == "range_reversion":
             stop = price - 1.5 * atr
-            target = (float(r.prior_high) + float(r.prior_low)) / 2
+            target = (float(row.prior_high) + float(row.prior_low)) / 2
         else:
             stop = price - 2 * atr
             target = price + 4 * atr
@@ -202,22 +228,68 @@ def analyze_market(frame: pd.DataFrame, *, config: AdaptiveConfig = AdaptiveConf
             strategy, confidence, stop, target = "none", 0.0, None, None
         else:
             reasons.append("reference risk geometry passes estimated-cost gate")
-    diagnostics = {"bar_time":str(data.index[-1]), "bars":len(data), "price":price,
-                   "atr":atr, "atr_pct":float(r.atr_pct), "adx":float(r.adx),
-                   "efficiency_ratio":float(r.efficiency), "rsi":float(r.rsi),
-                   "ema_fast":float(r.ema_fast), "ema_slow":float(r.ema_slow),
-                   "prior_range_high":float(r.prior_high), "prior_range_low":float(r.prior_low),
-                   "relative_volume":float(r.volume/r.volume_base) if r.volume_base > 0 else None,
-                   "spread_bps":spread_bps, "estimated_round_trip_cost_bps":config.estimated_round_trip_cost_bps,
-                   "risk_fraction_cap":config.risk_fraction, "max_notional_fraction":config.max_notional_fraction,
-                   "estimated_net_reward_risk": (
-                       (target - price - (config.estimated_round_trip_cost_bps / 10_000) * price)
-                       / (price - stop + (config.estimated_round_trip_cost_bps / 10_000) * price)
-                       if stop is not None and target is not None and stop < price else None
-                   )}
+
+    diagnostics = {
+        "bar_time": str(data.index[index]),
+        "bars": history_count,
+        "price": price,
+        "atr": atr,
+        "atr_pct": float(row.atr_pct),
+        "adx": float(row.adx),
+        "efficiency_ratio": float(row.efficiency),
+        "rsi": float(row.rsi),
+        "ema_fast": float(row.ema_fast),
+        "ema_slow": float(row.ema_slow),
+        "prior_range_high": float(row.prior_high),
+        "prior_range_low": float(row.prior_low),
+        "relative_volume": float(row.volume / row.volume_base) if row.volume_base > 0 else None,
+        "spread_bps": spread_bps,
+        "estimated_round_trip_cost_bps": config.estimated_round_trip_cost_bps,
+        "risk_fraction_cap": config.risk_fraction,
+        "max_notional_fraction": config.max_notional_fraction,
+        "estimated_net_reward_risk": (
+            (target - price - (config.estimated_round_trip_cost_bps / 10_000) * price)
+            / (price - stop + (config.estimated_round_trip_cost_bps / 10_000) * price)
+            if stop is not None and target is not None and stop < price else None
+        ),
+    }
     action = "buy_candidate" if strategy != "none" and not blockers else "no_trade"
-    return AdaptiveDecision(action, regime, strategy, confidence,
-                            price if action == "buy_candidate" else None,
-                            stop if action == "buy_candidate" else None,
-                            target if action == "buy_candidate" else None,
-                            tuple(reasons), tuple(blockers), diagnostics)
+    return AdaptiveDecision(
+        action,
+        regime,
+        strategy,
+        confidence,
+        price if action == "buy_candidate" else None,
+        stop if action == "buy_candidate" else None,
+        target if action == "buy_candidate" else None,
+        tuple(reasons),
+        tuple(blockers),
+        diagnostics,
+    )
+
+
+def analyze_market(
+    frame: pd.DataFrame,
+    *,
+    config: AdaptiveConfig = AdaptiveConfig(),
+    spread_bps: float | None = None,
+    data_is_fresh: bool = True,
+    closed_bars_only: bool = True,
+) -> AdaptiveDecision:
+    """Return a deterministic analysis of the latest completed bar, never an order."""
+    data = _validate(frame)
+    if data.empty:
+        features = pd.DataFrame(index=data.index)
+        index = -1
+    else:
+        features = _features(data, config)
+        index = len(data) - 1
+    return _analyze_market_at(
+        data,
+        features,
+        index,
+        config=config,
+        spread_bps=spread_bps,
+        data_is_fresh=data_is_fresh,
+        closed_bars_only=closed_bars_only,
+    )
