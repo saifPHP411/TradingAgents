@@ -78,6 +78,7 @@ def run_walk_forward_study(
         raise ValueError("not enough history for one complete OOS fold")
 
     portfolio = portfolio or BacktestSettings(initial_cash=initial_cash)
+    initial_cash = portfolio.initial_cash
     folds = []
     for fold_number, start in enumerate(range(warmup_bars, bar_count - test_bars + 1, test_bars), 1):
         end = start + test_bars - 1
