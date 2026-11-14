@@ -6,6 +6,7 @@ from public L2 data; the model therefore exposes conservative queue assumptions.
 from __future__ import annotations
 
 import json
+from bisect import bisect_left
 import threading
 import time
 from collections import defaultdict
@@ -128,7 +129,7 @@ class ReplayFill:
     markout_1s: float | None = None
     markout_5s: float | None = None
     markout_30s: float | None = None
-    net_markout_30s: float | None = None
+    entry_fee_adjusted_markout_30s: float | None = None
 
 
 @dataclass
@@ -348,16 +349,18 @@ class BybitExecutionReplay:
             order.status = "filled" if order.filled_qty >= order.quantity else "partial"
 
     def finalize_markouts(self) -> None:
+        mid_times = [timestamp for timestamp, _ in self.mid_history]
         for fill in self.fills:
             signed = 1.0 if fill.side == BUY else -1.0
             for horizon, attr in ((1_000, "markout_1s"), (5_000, "markout_5s"), (30_000, "markout_30s")):
                 target = fill.timestamp_ms + horizon
-                mid = next((m for t, m in self.mid_history if t >= target), None)
+                index = bisect_left(mid_times, target)
+                mid = self.mid_history[index][1] if index < len(self.mid_history) else None
                 if mid is not None and fill.mid_at_fill is not None:
                     setattr(fill, attr, signed * (mid - fill.price))
             if fill.markout_30s is not None:
                 fee = fill.price * self.maker_fee_bps / 10_000
-                fill.net_markout_30s = fill.markout_30s - fee
+                fill.entry_fee_adjusted_markout_30s = fill.markout_30s - fee
 
     def report(self) -> dict[str, Any]:
         self.finalize_markouts()
@@ -365,10 +368,10 @@ class BybitExecutionReplay:
         filled_orders = sum(o.filled_qty > 0 for o in self.orders.values())
         complete = sum(o.status == "filled" for o in self.orders.values())
         markout_values = [
-            f.net_markout_30s / f.price * 10_000
-            for f in self.fills if f.net_markout_30s is not None and f.price > 0
+            f.entry_fee_adjusted_markout_30s / f.price * 10_000
+            for f in self.fills if f.entry_fee_adjusted_markout_30s is not None and f.price > 0
         ]
-        markouts = [f.net_markout_30s * f.quantity for f in self.fills if f.net_markout_30s is not None]
+        markouts = [f.entry_fee_adjusted_markout_30s * f.quantity for f in self.fills if f.entry_fee_adjusted_markout_30s is not None]
         mean_markout = _mean(markout_values)
         variance = (
             sum((value - mean_markout) ** 2 for value in markout_values) / (len(markout_values) - 1)
@@ -408,25 +411,25 @@ class BybitExecutionReplay:
                     "markout_1s": fill.markout_1s, "markout_5s": fill.markout_5s,
                     "markout_30s": fill.markout_30s,
                     "estimated_maker_fee": fill.price * fill.quantity * fill.maker_fee_bps / 10_000,
-                    "net_markout_30s": (
-                        fill.net_markout_30s * fill.quantity
-                        if fill.net_markout_30s is not None else None
+                    "entry_fee_adjusted_markout_30s": (
+                        fill.entry_fee_adjusted_markout_30s * fill.quantity
+                        if fill.entry_fee_adjusted_markout_30s is not None else None
                     ),
-                    "net_markout_30s_bps": (
-                        fill.net_markout_30s / fill.price * 10_000
-                        if fill.net_markout_30s is not None and fill.price > 0 else None
+                    "entry_fee_adjusted_markout_30s_bps": (
+                        fill.entry_fee_adjusted_markout_30s / fill.price * 10_000
+                        if fill.entry_fee_adjusted_markout_30s is not None and fill.price > 0 else None
                     ),
                 }
                 for fill in self.fills
             ],
-            "mean_net_markout_30s_bps": mean_markout,
+            "mean_entry_fee_adjusted_markout_30s_bps": mean_markout,
             "per_fill_markout_sharpe_unannualized": (
                 mean_markout / variance ** 0.5 if variance and variance > 0 else None
             ),
             "markout_max_drawdown_quote_units": max_drawdown,
             "estimated_maker_fees_quote": total_fees,
             "cancellations": self.cancellations,
-            "markout_profit_factor": gains / losses if losses else (float("inf") if gains else 0.0),
+            "entry_fee_adjusted_markout_profit_factor": gains / losses if losses else (float("inf") if gains else 0.0),
             "maker_fee_bps": self.maker_fee_bps,
             "queue_factor": float(self.queue_factor),
             "queue_cancellation_credit": 0.0,
@@ -434,7 +437,7 @@ class BybitExecutionReplay:
             "connection_interruptions": self.connection_interruptions,
             "symbol": self.symbol,
             "funding_model": "not modeled; do not interpret linear/perpetual results as net returns",
-            "warning": "Markout is a post-fill mid-price proxy, not realized round-trip PnL; queue priority is estimated.",
+            "warning": "Markout is a post-fill mid-price proxy, not realized round-trip PnL; only the entry maker fee is deducted, exit fees and exit execution are not modeled; queue priority is estimated.",
         }
 
 
