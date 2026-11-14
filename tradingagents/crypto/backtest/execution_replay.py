@@ -181,6 +181,7 @@ class BybitExecutionReplay:
         self.mid_history: list[tuple[int, float]] = []
         self.rejects: dict[str, int] = defaultdict(int)
         self.events_seen = 0
+        self.cancellations = 0
 
     def submit_order(
         self, *, order_id: str, timestamp_ms: int, side: str,
@@ -193,6 +194,25 @@ class BybitExecutionReplay:
         self.orders[order_id] = ReplayOrder(
             order_id, int(timestamp_ms), side, _d(price, "price"),
             _d(quantity, "quantity"), int(latency_ms), int(ttl_ms), self.queue_factor,
+        )
+
+    def cancel_order(self, order_id: str) -> None:
+        """Cancel a simulated resting order; already executed quantity is retained."""
+        order = self.orders[order_id]
+        if order.status in ("pending", "open", "partial"):
+            order.status = "cancelled"
+            self.cancellations += 1
+
+    def replace_order(
+        self, order_id: str, *, new_order_id: str, timestamp_ms: int,
+        side: str, price: Any, quantity: Any, latency_ms: int = 100,
+        ttl_ms: int = 30_000,
+    ) -> None:
+        """Cancel/replace with a fresh queue position; never preserves old priority."""
+        self.cancel_order(order_id)
+        self.submit_order(
+            order_id=new_order_id, timestamp_ms=timestamp_ms, side=side,
+            price=price, quantity=quantity, latency_ms=latency_ms, ttl_ms=ttl_ms,
         )
 
     def _activate_due(self, timestamp_ms: int) -> None:
@@ -293,7 +313,19 @@ class BybitExecutionReplay:
         total = len(self.orders)
         filled_orders = sum(o.filled_qty > 0 for o in self.orders.values())
         complete = sum(o.status == "filled" for o in self.orders.values())
+        markout_values = [f.net_markout_30s for f in self.fills if f.net_markout_30s is not None]
         markouts = [f.net_markout_30s * f.quantity for f in self.fills if f.net_markout_30s is not None]
+        mean_markout = _mean(markout_values)
+        variance = (
+            sum((value - mean_markout) ** 2 for value in markout_values) / (len(markout_values) - 1)
+            if len(markout_values) > 1 and mean_markout is not None else None
+        )
+        cumulative = peak = max_drawdown = 0.0
+        for value in markouts:
+            cumulative += value
+            peak = max(peak, cumulative)
+            max_drawdown = max(max_drawdown, peak - cumulative)
+        total_fees = sum(f.price * f.quantity * f.maker_fee_bps / 10_000 for f in self.fills)
         gains = sum(x for x in markouts if x > 0)
         losses = abs(sum(x for x in markouts if x < 0))
         fill_delays = [
@@ -314,7 +346,13 @@ class BybitExecutionReplay:
             "mean_markout_1s": _mean([f.markout_1s for f in self.fills]),
             "mean_markout_5s": _mean([f.markout_5s for f in self.fills]),
             "mean_markout_30s": _mean([f.markout_30s for f in self.fills]),
-            "mean_net_markout_30s": _mean([f.net_markout_30s for f in self.fills]),
+            "mean_net_markout_30s": mean_markout,
+            "per_fill_markout_sharpe_unannualized": (
+                mean_markout / variance ** 0.5 if variance and variance > 0 else None
+            ),
+            "markout_max_drawdown_quote_units": max_drawdown,
+            "estimated_maker_fees_quote": total_fees,
+            "cancellations": self.cancellations,
             "markout_profit_factor": gains / losses if losses else (float("inf") if gains else 0.0),
             "maker_fee_bps": self.maker_fee_bps,
             "queue_factor": float(self.queue_factor),
