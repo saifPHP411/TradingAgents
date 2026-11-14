@@ -6,9 +6,9 @@ reported separately by symbol and execution-cost scenario.
 """
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import asdict
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -47,7 +47,7 @@ def run_walk_forward_study(
     warmup_bars: int = 250,
     test_bars: int = 120,
     initial_cash: float = 10_000,
-    strategy: RegimeBreakoutSettings = RegimeBreakoutSettings(),
+    strategy: RegimeBreakoutSettings | None = None,
     portfolio: BacktestSettings | None = None,
     scenarios: Mapping[str, ExecutionCosts] = COST_SCENARIOS,
 ) -> dict:
@@ -63,7 +63,7 @@ def run_walk_forward_study(
         raise ValueError("at least one symbol is required")
     if initial_cash <= 0:
         raise ValueError("initial_cash must be positive")
-    ordered = {symbol: frame for symbol, frame in sorted(frames.items())}
+    ordered = dict(sorted(frames.items()))
     lengths = {len(frame) for frame in ordered.values()}
     if len(lengths) != 1:
         raise ValueError("all symbols must have aligned bar counts")
@@ -77,6 +77,7 @@ def run_walk_forward_study(
     if bar_count < warmup_bars + test_bars:
         raise ValueError("not enough history for one complete OOS fold")
 
+    strategy = strategy or RegimeBreakoutSettings()
     portfolio = portfolio or BacktestSettings(initial_cash=initial_cash)
     initial_cash = portfolio.initial_cash
     folds = []
