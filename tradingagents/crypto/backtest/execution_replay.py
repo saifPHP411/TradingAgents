@@ -426,7 +426,7 @@ def record_public_market_data(
     *, symbols: list[str], output_path: str, category: str = "spot",
     depth: int = 50, duration_seconds: int = 300,
 ) -> int:
-    """Record raw public Bybit orderbook/trade WebSocket messages as JSONL."""
+    """Record public Bybit orderbook/trade streams to JSONL with reconnect markers."""
     try:
         import websocket
     except ImportError as exc:
@@ -442,44 +442,63 @@ def record_public_market_data(
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
-    stop = threading.Event()
+    deadline = time.monotonic() + duration_seconds
+    backoff_seconds = 1
 
     with path.open("a", encoding="utf-8") as output:
-        def on_open(ws):
-            ws.send(json.dumps({"op": "subscribe", "args": topics}))
+        while time.monotonic() < deadline:
+            def write_status(status: str, **details: Any) -> None:
+                record = {
+                    "collector_status": status,
+                    "received_ts_ms": time.time_ns() // 1_000_000,
+                    "category": category,
+                    "symbols": symbols,
+                    **details,
+                }
+                output.write(json.dumps(record, separators=(",", ":")) + "\\n")
+                output.flush()
 
-        def on_message(ws, message):
-            nonlocal count
-            received = time.time_ns() // 1_000_000
+            def on_open(ws):
+                nonlocal backoff_seconds
+                backoff_seconds = 1
+                write_status("connected")
+                ws.send(json.dumps({"op": "subscribe", "args": topics}))
+
+            def on_message(_ws, message):
+                nonlocal count
+                received = time.time_ns() // 1_000_000
+                try:
+                    payload = json.loads(message)
+                except json.JSONDecodeError:
+                    return
+                if "topic" not in payload:
+                    return
+                payload["received_ts_ms"] = received
+                output.write(json.dumps(payload, separators=(",", ":")) + "\\n")
+                output.flush()
+                count += 1
+
+            def on_error(_ws, error):
+                write_status("error", message=str(error))
+
+            def on_close(_ws, status_code, message):
+                write_status("disconnected", status_code=status_code, message=message)
+
+            ws = websocket.WebSocketApp(
+                endpoint, on_open=on_open, on_message=on_message,
+                on_error=on_error, on_close=on_close,
+            )
+            remaining = max(0.1, deadline - time.monotonic())
+            timer = threading.Timer(remaining, ws.close)
+            timer.start()
             try:
-                payload = json.loads(message)
-            except json.JSONDecodeError:
-                return
-            if "topic" not in payload:
-                return
-            payload["received_ts_ms"] = received
-            output.write(json.dumps(payload, separators=(",", ":")) + "\n")
-            output.flush()
-            count += 1
-
-        def on_error(_ws, error):
-            stop.set()
-            raise RuntimeError(f"Bybit public WebSocket error: {error}")
-
-        def on_close(_ws, _status, _message):
-            stop.set()
-
-        ws = websocket.WebSocketApp(
-            endpoint, on_open=on_open, on_message=on_message,
-            on_error=on_error, on_close=on_close,
-        )
-        timer = threading.Timer(duration_seconds, ws.close)
-        timer.start()
-        try:
-            ws.run_forever(ping_interval=20, ping_timeout=10)
-        finally:
-            timer.cancel()
-            stop.set()
+                ws.run_forever(ping_interval=20, ping_timeout=10)
+            finally:
+                timer.cancel()
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(backoff_seconds, remaining))
+                backoff_seconds = min(backoff_seconds * 2, 15)
     return count
 
 
