@@ -134,12 +134,12 @@ def run_walk_forward_study(
             for row in fold["scenarios"][scenario_name]["symbols"].values()
         ]
         total_trades = sum(row["trades"] for row in all_symbol_rows)
-        total_gross_profit = sum(row["gross_profit"] for row in all_symbol_rows)
-        total_gross_loss = sum(row["gross_loss"] for row in all_symbol_rows)
+        total_net_profit = sum(row["net_profit_on_winners"] for row in all_symbol_rows)
+        total_net_loss = sum(row["net_loss_on_losers"] for row in all_symbol_rows)
         total_net_pnl = sum(row["net_pnl"] for row in all_symbol_rows)
         aggregate_profit_factor = (
-            total_gross_profit / total_gross_loss if total_gross_loss else
-            ("infinite" if total_gross_profit else 0.0)
+            total_net_profit / total_net_loss if total_net_loss else
+            ("infinite" if total_net_profit else 0.0)
         )
         worst_intraperiod_drawdown = max(
             (row["max_drawdown_pct"] for row in all_symbol_rows), default=0.0
