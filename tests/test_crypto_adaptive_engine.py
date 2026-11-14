@@ -110,7 +110,26 @@ def test_bear_trend_is_classified_but_short_entry_is_never_emitted():
 def test_breakout_requires_relative_volume_confirmation():
     x = frame()
     x.iloc[-1, x.columns.get_loc("volume")] = 1500.0
-    result = analyze_market(x, spread_bps=2)
+    result = analyze_market(
+        x, spread_bps=2, config=AdaptiveConfig(estimated_round_trip_cost_bps=0)
+    )
     assert result.regime == "bull_trend"
     assert result.strategy == "breakout"
     assert result.action == "buy_candidate"
+
+
+def test_range_reversion_expert_uses_range_midpoint_as_target():
+    x = frame()
+    phase = (np.arange(len(x)) - (len(x) - 1)) * (2 * np.pi / 20) - np.pi / 2
+    close = 100 + 2 * np.sin(phase)
+    x["close"] = close
+    x["open"] = close + 0.01
+    x["high"] = close + 0.08
+    x["low"] = close - 0.08
+    result = analyze_market(
+        x, spread_bps=2, config=AdaptiveConfig(estimated_round_trip_cost_bps=0)
+    )
+    assert result.regime == "range"
+    assert result.strategy == "range_reversion"
+    assert result.action == "buy_candidate"
+    assert result.target_price > result.reference_price

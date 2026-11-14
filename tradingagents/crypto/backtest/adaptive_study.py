@@ -248,7 +248,8 @@ def _buy_and_hold_return(
 ) -> float:
     impact = (costs.half_spread_bps + costs.slippage_bps) / 10_000
     fee_rate = costs.commission_bps / 10_000
-    buy = float(frame.iloc[start].open) * (1 + impact)
+    entry_index = start + 1
+    buy = float(frame.iloc[entry_index].open) * (1 + impact)
     sell = float(frame.iloc[end].close) * (1 - impact)
     quantity = initial_cash / (buy * (1 + fee_rate))
     final_cash = quantity * sell * (1 - fee_rate)
