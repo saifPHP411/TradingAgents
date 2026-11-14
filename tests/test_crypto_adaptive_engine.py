@@ -136,3 +136,27 @@ def test_range_reversion_expert_uses_range_midpoint_as_target():
     assert result.strategy == "range_reversion"
     assert result.action == "buy_candidate"
     assert result.target_price > result.reference_price
+
+
+def test_features_include_causal_bollinger_and_rolling_vwap():
+    from tradingagents.crypto.adaptive import _features, _validate
+
+    x = frame(220)
+    features = _features(_validate(x), AdaptiveConfig())
+    assert np.isfinite(features.bb_lower.iloc[-1])
+    assert np.isfinite(features.rolling_vwap.iloc[-1])
+    assert features.rolling_vwap.iloc[-1] > 0
+
+
+def test_minimum_expected_edge_must_exceed_round_trip_cost_multiple():
+    x = pullback_frame()
+    low_cost = analyze_market(
+        x, spread_bps=2,
+        config=AdaptiveConfig(estimated_round_trip_cost_bps=10, min_edge_cost_multiple=3),
+    )
+    high_cost = analyze_market(
+        x, spread_bps=2,
+        config=AdaptiveConfig(estimated_round_trip_cost_bps=500, min_edge_cost_multiple=3),
+    )
+    assert low_cost.action == "buy_candidate"
+    assert high_cost.action == "no_trade"
