@@ -315,7 +315,12 @@ class BybitExecutionReplay:
         remaining_trade = quantity
         eligible_orders = sorted(
             self.orders.values(),
-            key=lambda order: (order.active_ts_ms, order.submitted_ts_ms, order.order_id),
+            key=lambda order: (
+                -order.price if passive_side == BUY else order.price,
+                order.active_ts_ms,
+                order.submitted_ts_ms,
+                order.order_id,
+            ),
         )
         for order in eligible_orders:
             if remaining_trade <= 0:
