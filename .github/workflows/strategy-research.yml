@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: strategy-research-pipeline
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   validate:
@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.12"]
     steps:
       - name: Check out research candidate
         uses: actions/checkout@v4
