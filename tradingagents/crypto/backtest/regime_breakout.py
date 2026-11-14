@@ -85,12 +85,19 @@ class BreakoutBacktestResult:
     trades: list[BreakoutTrade] = field(default_factory=list)
     total_fees: float = 0.0
     total_slippage_spread: float = 0.0
+    equity_curve: list[float] = field(default_factory=list)
 
     def metrics(self) -> dict:
         wins = [t.net_pnl for t in self.trades if t.net_pnl > 0]
         losses = [t.net_pnl for t in self.trades if t.net_pnl < 0]
         gross_profit = sum(wins)
         gross_loss = abs(sum(losses))
+        peak = self.initial_cash
+        max_drawdown = 0.0
+        for equity in self.equity_curve:
+            peak = max(peak, equity)
+            if peak > 0:
+                max_drawdown = max(max_drawdown, (peak - equity) / peak)
         return {
             "initial_equity": self.initial_cash,
             "final_equity": self.final_equity,
@@ -175,6 +182,8 @@ def run_backtest(
     strategy: RegimeBreakoutSettings = RegimeBreakoutSettings(),
     execution: ExecutionCosts = ExecutionCosts(),
     portfolio: BacktestSettings = BacktestSettings(),
+    start_index: int = 0,
+    end_index: int | None = None,
 ) -> BreakoutBacktestResult:
     """Backtest one spot symbol; signals use closed bars and fill at next open.
 
@@ -182,18 +191,26 @@ def run_backtest(
     the last close if the data ends before its stop/target/time exit.
     """
     data = indicators(frame, strategy)
+    if data.empty:
+        return BreakoutBacktestResult(initial_cash=portfolio.initial_cash, final_equity=portfolio.initial_cash)
+    end_index = len(data) - 1 if end_index is None else end_index
+    if start_index < 0 or end_index >= len(data) or start_index > end_index:
+        raise ValueError("start_index/end_index must select a valid non-empty window")
     cash = float(portfolio.initial_cash)
     result = BreakoutBacktestResult(initial_cash=cash, final_equity=cash)
     position: dict | None = None
     impact = (execution.half_spread_bps + execution.slippage_bps) / 10_000.0
 
-    for i, (stamp, row) in enumerate(data.iterrows()):
+    for i in range(start_index, end_index + 1):
+        row = data.iloc[i]
+        stamp = data.index[i]
         if position is not None:
             held = i - position["entry_index"]
             exit_price = None
             reason = None
             if float(row["low"]) <= position["stop"]:
-                exit_price, reason = position["stop"], "stop"
+                # A stop-market order cannot fill at the stop after a gap below it.
+                exit_price, reason = min(position["stop"], float(row["open"])), "stop"
             elif float(row["high"]) >= position["target"]:
                 exit_price, reason = position["target"], "target"
             elif held >= strategy.max_holding_bars:
@@ -225,7 +242,7 @@ def run_backtest(
                 position = None
 
         # Signal at this close; the earliest fill is the next bar's open.
-        if position is None and i + 1 < len(data) and bool(row["long_entry"]):
+        if position is None and i + 1 <= end_index and bool(row["long_entry"]):
             levels = entry_levels(row, strategy)
             if levels is None:
                 continue
@@ -265,10 +282,12 @@ def run_backtest(
                 "target": target,
                 "entry_fee": entry_fee,
             }
+        marked_equity = cash + (position["quantity"] * float(row["close"]) if position else 0.0)
+        result.equity_curve.append(marked_equity)
 
     if position is not None and len(data):
-        stamp = data.index[-1]
-        raw_exit = float(data.iloc[-1]["close"])
+        stamp = data.index[end_index]
+        raw_exit = float(data.iloc[end_index]["close"])
         fill = raw_exit * (1.0 - impact)
         notional = position["quantity"] * fill
         fee = notional * execution.commission_bps / 10_000.0
@@ -286,6 +305,10 @@ def run_backtest(
         ))
 
     result.final_equity = cash
+    if result.equity_curve:
+        result.equity_curve[-1] = cash
+    else:
+        result.equity_curve.append(cash)
     return result
 
 
