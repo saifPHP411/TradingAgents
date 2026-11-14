@@ -470,7 +470,7 @@ def record_public_market_data(
                     "symbols": symbols,
                     **details,
                 }
-                output.write(json.dumps(record, separators=(",", ":")) + "\\n")
+                output.write(json.dumps(record, separators=(",", ":")) + "\n")
                 output.flush()
 
             def on_open(ws):
@@ -489,7 +489,7 @@ def record_public_market_data(
                 if "topic" not in payload:
                     return
                 payload["received_ts_ms"] = received
-                output.write(json.dumps(payload, separators=(",", ":")) + "\\n")
+                output.write(json.dumps(payload, separators=(",", ":")) + "\n")
                 output.flush()
                 count += 1
 
