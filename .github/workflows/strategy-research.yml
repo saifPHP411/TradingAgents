@@ -55,6 +55,8 @@ jobs:
           python-version: "3.12"
       - name: Install Ruff
         run: pip install "ruff>=0.16"
+      - name: Diagnose Ruff import ordering
+        run: ruff check --diff tradingagents/crypto/backtest/regime_breakout_study.py || true
       - name: Lint complete repository
         run: ruff check .
 
