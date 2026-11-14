@@ -69,7 +69,14 @@ def pullback_frame():
 
 
 def test_bull_trend_pullback_expert_can_emit_explainable_candidate():
-    result = analyze_market(pullback_frame(), spread_bps=2)
+    result = analyze_market(
+        pullback_frame(),
+        spread_bps=2,
+        config=AdaptiveConfig(
+            estimated_round_trip_cost_bps=5,
+            min_net_reward_risk=1.0,
+        ),
+    )
     assert result.regime == "bull_trend"
     assert result.strategy == "trend_pullback"
     assert result.action == "buy_candidate"
