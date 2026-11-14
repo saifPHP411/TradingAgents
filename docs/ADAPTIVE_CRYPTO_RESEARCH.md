@@ -96,12 +96,12 @@ The offline replay:
 - Models submission latency, PostOnly crossing rejection at activation, TTL expiry,
   and partial fills. Queue cancellation credit is zero by default.
 - Reports any-fill/full-fill rates, partial/unfilled/rejected orders, time-to-first-fill,
-  and signed 1s/5s/30s mid-price markouts net of the supplied maker-fee assumption.
+  and signed 1s/5s/30s mid-price markouts; the diagnostic deducts only the supplied entry maker fee.
 
 Important limitations:
 - Public L2 does not reveal individual order identities or exact FIFO queue priority;
   queue factor is a conservative sensitivity assumption, not observed position.
-- The markout is a post-fill mid-price diagnostic, not realized round-trip PnL.
+- The entry-fee-adjusted markout is a post-fill mid-price diagnostic, not realized round-trip PnL; it excludes exit fees, exit fills, and exit slippage.
   A complete strategy evaluation must model exit orders, exit taker/maker fees,
   inventory exposure, and realized cash/equity paths.
 - The collector records a bounded session to JSONL and reconnects with backoff;
