@@ -796,3 +796,43 @@ class TestExecutionProviderStateIsolation:
         )
         assert alpaca._source_state_path(filename) == root / filename
         assert bybit._source_state_path(filename) != alpaca._source_state_path(filename)
+
+
+
+# ---------------------------------------------------------------------------
+# P1 regression: the broker object must match the configured execution venue
+# ---------------------------------------------------------------------------
+
+
+class TestBrokerObjectMatchesConfiguredProvider:
+    def test_bybit_worker_refuses_an_alpaca_broker_before_connect(self, tmp_path, monkeypatch):
+        """A mismatched injected factory must fail closed before any broker I/O.
+
+        The configured provider is not proof of the object returned by a factory.
+        A future/custom factory could otherwise connect an Alpaca broker while
+        the controller and status view continue to label the worker Bybit Demo.
+        """
+        from tradingagents.paper_experiment.broker import PreflightError
+
+        _demo_credentials(monkeypatch)
+        controller = _controller(
+            _experiment_root(tmp_path),
+            execution_provider=EXECUTION_PROVIDER_BYBIT_DEMO,
+        )
+        worker = controller._build_worker()  # noqa: SLF001 - routing invariant
+
+        calls: list[str] = []
+
+        class _WrongAlpacaBroker(AlpacaPaperBroker):
+            def connect(self):
+                calls.append("connect")
+                raise AssertionError("mismatched broker must be rejected before connect")
+
+        worker._broker_factory = lambda: _WrongAlpacaBroker()  # noqa: SLF001
+
+        with pytest.raises(PreflightError) as error:
+            worker.preflight()
+
+        assert error.value.check == "broker_provider"
+        assert calls == []
+        assert worker._broker is None  # noqa: SLF001 - no wrong broker may be retained
