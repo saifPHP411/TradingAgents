@@ -65,6 +65,8 @@ def test_walk_forward_has_disjoint_oos_folds_and_cost_scenarios():
     assert report["folds"][0]["oos_end"] < report["folds"][1]["oos_start"]
     assert set(report["summary"]) == {"frictionless", "realistic_estimate", "conservative_estimate"}
     assert report["summary"]["realistic_estimate"]["trades"] == 0
+    assert "mean_buy_hold_return_pct" in report["summary"]["realistic_estimate"]
+    assert "buy_hold_return_pct" in report["folds"][0]["scenarios"]["realistic_estimate"]["symbols"]["BTC/USDT"]
 
 
 def test_walk_forward_rejects_misaligned_symbols():

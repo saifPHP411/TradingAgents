@@ -239,6 +239,22 @@ DEFAULT_COST_SCENARIOS = {
 }
 
 
+def _buy_and_hold_return(
+    frame: pd.DataFrame,
+    start: int,
+    end: int,
+    initial_cash: float,
+    costs: AdaptiveExecutionCosts,
+) -> float:
+    impact = (costs.half_spread_bps + costs.slippage_bps) / 10_000
+    fee_rate = costs.commission_bps / 10_000
+    buy = float(frame.iloc[start].open) * (1 + impact)
+    sell = float(frame.iloc[end].close) * (1 - impact)
+    quantity = initial_cash / (buy * (1 + fee_rate))
+    final_cash = quantity * sell * (1 - fee_rate)
+    return (final_cash / initial_cash - 1) * 100
+
+
 def run_adaptive_walk_forward_study(
     frames: collections.abc.Mapping[str, pd.DataFrame],
     *,
@@ -282,10 +298,16 @@ def run_adaptive_walk_forward_study(
                     frame, config=config, execution=costs, portfolio=base_portfolio,
                     spread_bps=spread_bps, start_index=start, end_index=end,
                 )
-                symbol_rows[symbol] = result.metrics()
+                metrics = result.metrics()
+                metrics["buy_hold_return_pct"] = _buy_and_hold_return(
+                    frame, start, end, base_portfolio.initial_cash, costs
+                )
+                symbol_rows[symbol] = metrics
             returns = [row["net_return_pct"] for row in symbol_rows.values()]
+            benchmarks = [row["buy_hold_return_pct"] for row in symbol_rows.values()]
             fold["scenarios"][scenario_name] = {
                 "equal_weight_net_return_pct": sum(returns) / len(returns),
+                "equal_weight_buy_hold_return_pct": sum(benchmarks) / len(benchmarks),
                 "symbols": symbol_rows,
             }
         folds.append(fold)
@@ -293,6 +315,9 @@ def run_adaptive_walk_forward_study(
     summary = {}
     for scenario_name in scenarios:
         returns = [fold["scenarios"][scenario_name]["equal_weight_net_return_pct"] for fold in folds]
+        benchmarks = [
+            fold["scenarios"][scenario_name]["equal_weight_buy_hold_return_pct"] for fold in folds
+        ]
         equity = base_portfolio.initial_cash
         peak, max_drawdown = equity, 0.0
         all_rows = [row for fold in folds for row in fold["scenarios"][scenario_name]["symbols"].values()]
@@ -316,6 +341,7 @@ def run_adaptive_walk_forward_study(
             "folds": len(folds), "trades": trades, "expectancy_per_trade": pnl / trades if trades else 0.0,
             "aggregate_profit_factor": winners / losers if losers else ("infinite" if winners else 0.0),
             "compounded_oos_return_pct": (equity / base_portfolio.initial_cash - 1) * 100,
+            "mean_buy_hold_return_pct": sum(benchmarks) / len(benchmarks),
             "max_drawdown_across_fold_returns_pct": max_drawdown * 100,
             "positive_folds": sum(value > 0 for value in returns),
             "per_symbol_compounded_oos_return_pct": per_symbol,

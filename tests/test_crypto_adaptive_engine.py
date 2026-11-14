@@ -59,12 +59,12 @@ def test_long_only_action_vocabulary():
 def pullback_frame():
     x = frame()
     close = x.close.to_numpy().copy()
-    close[-2] -= 3.0
-    close[-1] += 5.0
+    close[-2] -= 1.2
+    close[-1] += 0.2
     x["close"] = close
     x["open"] = close - 0.02
-    x["high"] = close + 0.08
-    x["low"] = close - 0.08
+    x["high"] = close + 0.30
+    x["low"] = close - 0.30
     return x
 
 
@@ -92,3 +92,25 @@ def test_persistent_uptrend_has_defined_rsi_instead_of_missing_indicator():
 
     features = _features(_validate(frame()), AdaptiveConfig())
     assert features.rsi.iloc[-1] == pytest.approx(100.0)
+
+
+def test_bear_trend_is_classified_but_short_entry_is_never_emitted():
+    x = frame()
+    close = 120 - np.arange(len(x)) * 0.1
+    x["close"] = close
+    x["open"] = close + 0.02
+    x["high"] = close + 0.08
+    x["low"] = close - 0.08
+    result = analyze_market(x, spread_bps=2)
+    assert result.regime == "bear_trend"
+    assert result.action == "no_trade"
+    assert result.strategy == "none"
+
+
+def test_breakout_requires_relative_volume_confirmation():
+    x = frame()
+    x.iloc[-1, x.columns.get_loc("volume")] = 1500.0
+    result = analyze_market(x, spread_bps=2)
+    assert result.regime == "bull_trend"
+    assert result.strategy == "breakout"
+    assert result.action == "buy_candidate"
