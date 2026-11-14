@@ -104,10 +104,13 @@ Important limitations:
 - The markout is a post-fill mid-price diagnostic, not realized round-trip PnL.
   A complete strategy evaluation must model exit orders, exit taker/maker fees,
   inventory exposure, and realized cash/equity paths.
-- The collector currently records a bounded session to JSONL; operators must
-  monitor reconnects and data continuity. Do not use incomplete sessions for
-  conclusions. No order placement, cancel endpoint, authentication, or private
-  account access exists in this module.
+- The collector records a bounded session to JSONL and reconnects with backoff;
+  disconnect/error markers invalidate the replay book until a fresh snapshot. Replay
+  also invalidates on detected orderbook update-ID gaps. Do not use incomplete sessions
+  for conclusions. No order placement, cancel endpoint, authentication, or private
+  account access exists in this module. Linear market-data capture is supported, but
+  funding cashflows, settlement, margin, and liquidation are not modeled; do not use
+  this prototype to claim net perpetual returns.
 - Instrument validation is a pure function over V5 instrument metadata. Spot uses
   `minOrderAmt`; linear/inverse use `minNotionalValue`, alongside tickSize,
   qtyStep, minOrderQty, and maxOrderQty where supplied. Fetch fresh metadata and
