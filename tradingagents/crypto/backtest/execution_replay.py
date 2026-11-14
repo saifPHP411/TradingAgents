@@ -226,7 +226,7 @@ class BybitExecutionReplay:
 
     def _expire_due(self, timestamp_ms: int) -> None:
         for order in self.orders.values():
-            if order.status in ("open", "partial") and timestamp_ms >= order.expires_ts_ms:
+            if order.status in ("pending", "open", "partial") and timestamp_ms >= order.expires_ts_ms:
                 order.status = "expired"
 
     def _activate_due(self, timestamp_ms: int) -> None:
@@ -311,7 +311,14 @@ class BybitExecutionReplay:
             return
         # A sell taker consumes bids; a buy taker consumes asks.
         passive_side = BUY if taker_side == SELL else SELL
-        for order in self.orders.values():
+        remaining_trade = quantity
+        eligible_orders = sorted(
+            self.orders.values(),
+            key=lambda order: (order.active_ts_ms, order.submitted_ts_ms, order.order_id),
+        )
+        for order in eligible_orders:
+            if remaining_trade <= 0:
+                break
             if order.status != "open" or order.side != passive_side:
                 continue
             if timestamp_ms >= order.expires_ts_ms:
@@ -320,7 +327,6 @@ class BybitExecutionReplay:
             eligible = price <= order.price if order.side == BUY else price >= order.price
             if not eligible:
                 continue
-            remaining_trade = quantity
             if order.queue_ahead > 0:
                 consumed = min(order.queue_ahead, remaining_trade)
                 order.queue_ahead -= consumed
