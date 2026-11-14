@@ -1,7 +1,9 @@
 from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 import pytest
+
 from tradingagents.crypto.adaptive import AdaptiveConfig, analyze_market
 pytestmark = pytest.mark.unit
 
@@ -43,8 +45,10 @@ def test_high_cost_assumption_can_veto_candidate():
 def test_bad_prices_and_nonchronological_data_are_rejected():
     x=frame()
     x.iloc[-1,x.columns.get_loc("close")]=0
-    with pytest.raises(ValueError,match="positive"): analyze_market(x,spread_bps=2)
-    with pytest.raises(ValueError,match="chronological"): analyze_market(frame().iloc[::-1],spread_bps=2)
+    with pytest.raises(ValueError, match="positive"):
+        analyze_market(x, spread_bps=2)
+    with pytest.raises(ValueError, match="chronological"):
+        analyze_market(frame().iloc[::-1], spread_bps=2)
 
 def test_long_only_action_vocabulary():
     result=analyze_market(frame(),spread_bps=2)
