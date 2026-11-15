@@ -8,6 +8,7 @@ It is a research candidate, not a claim of profitability and not wired to tradin
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import pandas as pd
