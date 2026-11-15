@@ -298,3 +298,33 @@ def test_pending_next_open_entry_does_not_create_phantom_drawdown(monkeypatch):
     # The entry signal is formed at bar 55 close; the simulated fill is at
     # bar 56 open. Equity at bar 55 must remain unchanged before that fill.
     assert result.equity_curve[0] == pytest.approx(1000.0)
+
+
+def test_max_holding_bars_counts_the_entry_candle(monkeypatch):
+    import tradingagents.crypto.backtest.adaptive_study as module
+
+    frame = _flat_frame(70)
+
+    def candidate(data, features, index, **kwargs):
+        if index == 55:
+            return AdaptiveDecision(
+                "buy_candidate", "bull_trend", "trend_pullback", .8,
+                100.0, 99.0, 103.0, ("test setup",), (), {},
+            )
+        return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None)
+
+    monkeypatch.setattr(module, "_analyze_market_at", candidate)
+    result = run_adaptive_backtest(
+        frame,
+        execution=AdaptiveExecutionCosts(0, 0, 0),
+        portfolio=AdaptivePortfolio(
+            initial_cash=1000, risk_fraction=.01, max_notional_fraction=.5,
+            max_holding_bars=2,
+        ),
+        start_index=55,
+        end_index=60,
+    )
+
+    assert len(result.trades) == 1
+    assert result.trades[0].exit_reason == "time"
+    assert result.trades[0].exit_time == frame.index[57].isoformat()

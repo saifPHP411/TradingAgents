@@ -157,7 +157,7 @@ def run_adaptive_backtest(
         row = data.iloc[i]
         stamp = data.index[i]
         if position is not None:
-            held = i - position["entry_index"]
+            held_bars = i - position["entry_index"] + 1
             exit_raw = None
             exit_reason = None
             if float(row.low) <= position["stop"]:
@@ -166,7 +166,7 @@ def run_adaptive_backtest(
             elif float(row.high) >= position["target"]:
                 exit_raw = position["target"]
                 exit_reason = "target"
-            elif held >= portfolio.max_holding_bars:
+            elif held_bars >= portfolio.max_holding_bars:
                 exit_raw = float(row.close)
                 exit_reason = "time"
             elif i == end_index:

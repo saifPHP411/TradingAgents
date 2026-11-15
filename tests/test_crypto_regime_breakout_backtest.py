@@ -172,3 +172,30 @@ def test_pending_next_bar_entry_does_not_change_signal_bar_equity():
     # create a position valuation or artificial drawdown at the signal timestamp.
     assert len(result.equity_curve) == 2
     assert result.equity_curve[0] == pytest.approx(result.initial_cash)
+
+
+def test_max_holding_bars_counts_the_entry_candle(monkeypatch):
+    import tradingagents.crypto.backtest.regime_breakout as module
+
+    frame = _bars(80)
+    signal_index = 55
+
+    def fake_indicators(data, settings):
+        out = data.copy()
+        out["long_entry"] = False
+        out.iloc[signal_index, out.columns.get_loc("long_entry")] = True
+        return out
+
+    monkeypatch.setattr(module, "indicators", fake_indicators)
+    monkeypatch.setattr(module, "entry_levels", lambda row, settings: (100.0, 90.0, 130.0))
+    result = module.run_backtest(
+        frame,
+        strategy=RegimeBreakoutSettings(max_holding_bars=2),
+        execution=module.ExecutionCosts(0, 0, 0),
+        start_index=signal_index,
+        end_index=60,
+    )
+
+    assert len(result.trades) == 1
+    assert result.trades[0].exit_reason == "time"
+    assert result.trades[0].exit_time == frame.index[57].isoformat()

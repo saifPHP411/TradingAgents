@@ -218,7 +218,7 @@ def run_backtest(
         row = data.iloc[i]
         stamp = data.index[i]
         if position is not None:
-            held = i - position["entry_index"]
+            held_bars = i - position["entry_index"] + 1
             exit_price = None
             reason = None
             if float(row["low"]) <= position["stop"]:
@@ -226,7 +226,7 @@ def run_backtest(
                 exit_price, reason = min(position["stop"], float(row["open"])), "stop"
             elif float(row["high"]) >= position["target"]:
                 exit_price, reason = position["target"], "target"
-            elif held >= strategy.max_holding_bars:
+            elif held_bars >= strategy.max_holding_bars:
                 exit_price, reason = float(row["close"]), "time"
             if exit_price is not None:
                 fill = exit_price * (1.0 - impact)
