@@ -309,18 +309,34 @@ def run_adaptive_walk_forward_study(
     if not frames:
         raise ValueError("at least one symbol is required")
     ordered = dict(sorted(frames.items()))
-    lengths = {len(frame) for frame in ordered.values()}
-    if len(lengths) != 1:
-        raise ValueError("all symbols must have aligned bar counts")
-    reference_index = next(iter(ordered.values())).index
+    original_bar_counts = {symbol: len(frame) for symbol, frame in ordered.items()}
     for frame in ordered.values():
         if frame.empty or not frame.index.is_monotonic_increasing or frame.index.has_duplicates:
             raise ValueError("all symbol frames must be non-empty and chronological")
-        if not frame.index.equals(reference_index):
-            raise ValueError("all symbols must have aligned timestamps")
-    bar_count = next(iter(lengths))
-    if bar_count < warmup_bars + test_bars:
-        raise ValueError("not enough history for one complete OOS fold")
+
+    # Symbols can have different listing dates or isolated endpoint differences.
+    # Compare them only on timestamps present in every symbol; never forward-fill
+    # or synthesize OHLCV bars to make their lengths match.
+    reference_index = next(iter(ordered.values())).index
+    common_index = reference_index
+    for frame in list(ordered.values())[1:]:
+        common_index = common_index.intersection(frame.index, sort=False)
+    common_index = common_index.sort_values()
+    if len(common_index) < warmup_bars + test_bars:
+        raise ValueError(
+            "not enough common aligned history for one complete OOS fold "
+            f"(common bars={len(common_index)}, required={warmup_bars + test_bars})"
+        )
+    if isinstance(common_index, pd.DatetimeIndex) and len(common_index) > 2:
+        intervals = common_index.to_series().diff().dropna()
+        if intervals.nunique() != 1:
+            raise ValueError(
+                "common symbol timestamps contain missing intervals; "
+                "refusing to compress gaps into adjacent backtest bars"
+            )
+    ordered = {symbol: frame.loc[common_index].copy() for symbol, frame in ordered.items()}
+    reference_index = common_index
+    bar_count = len(common_index)
     config = config or AdaptiveConfig()
     base_portfolio = portfolio or AdaptivePortfolio(
         risk_fraction=config.risk_fraction,
@@ -393,6 +409,16 @@ def run_adaptive_walk_forward_study(
         "parameters_fitted_on_oos": False,
         "data_source": "caller-provided historical OHLCV; venue and coverage must be recorded by caller",
         "symbols": list(ordered), "bar_count_per_symbol": bar_count,
+        "timestamp_alignment": {
+            "method": "exact common timestamp intersection; no forward-fill or synthetic bars",
+            "original_bar_counts": original_bar_counts,
+            "common_bar_count": bar_count,
+            "dropped_non_common_bars": {
+                symbol: original_bar_counts[symbol] - bar_count for symbol in ordered
+            },
+            "common_start": reference_index[0].isoformat(),
+            "common_end": reference_index[-1].isoformat(),
+        },
         "warmup_bars": warmup_bars, "test_bars_per_fold": test_bars,
         "cost_scenarios_per_fill_bps": {
             name: asdict(costs) for name, costs in scenarios.items()
