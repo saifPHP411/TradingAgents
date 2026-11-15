@@ -63,6 +63,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -95,7 +96,11 @@ from .alpaca_paper import (
     canonical_position_symbol,
 )
 from .bybit_demo import (
+    BrokerError as BybitBrokerError,
+    BrokerRejectedError as BybitBrokerRejectedError,
     BybitDemoBroker,
+    InsufficientFundsError as BybitInsufficientFundsError,
+    PaperRiskRejected as BybitPaperRiskRejected,
 )
 
 WORKER_STATE_SCHEMA_VERSION = 1
@@ -3529,7 +3534,7 @@ class PaperTradingWorker:
             self._save()
             try:
                 result = self.preflight()
-            except (BrokerError, PreflightError, WorkerError) as exc:
+            except (BrokerError, BybitBrokerError, PreflightError, WorkerError) as exc:
                 self.state.status = STATUS_ERROR
                 self.state.last_error = f"{type(exc).__name__}: {exc}"
                 self._save()
@@ -4070,7 +4075,14 @@ class PaperTradingWorker:
                 refresh=True,
                 crypto=self.config.crypto,
             )
-        except (PaperRiskRejected, BrokerRejectedError, BrokerError) as exc:
+        except (
+            PaperRiskRejected,
+            BybitPaperRiskRejected,
+            BrokerRejectedError,
+            BybitBrokerRejectedError,
+            BrokerError,
+            BybitBrokerError,
+        ) as exc:
             # A local refusal or a broker rejection is recorded, not hidden, and the
             # worker stays RUNNING so the next cycle can act.
             self.state.last_error = f"{type(exc).__name__}: {exc}"
@@ -4083,10 +4095,10 @@ class PaperTradingWorker:
             # from "the broker refused it".
             code = (
                 NO_TRADE_RISK_REJECTED
-                if isinstance(exc, PaperRiskRejected)
+                if isinstance(exc, (PaperRiskRejected, BybitPaperRiskRejected))
                 else (
                     NO_TRADE_INSUFFICIENT_FUNDS
-                    if isinstance(exc, InsufficientFundsError)
+                    if isinstance(exc, (InsufficientFundsError, BybitInsufficientFundsError))
                     else NO_TRADE_BROKER_REJECTED
                 )
             )
@@ -4746,29 +4758,33 @@ class PaperTradingWorker:
         ladder: list[Any],
         taken: list[Any],
         target: float | None,
-        entry_quantity: float | None = None,
+        reference_price: float | None = None,
     ) -> float:
-        """How much of the position this exit closes.
+        """Size an exit on the venue's quantity grid without creating sellable dust.
 
-        A **stop** closes the whole position: a stop is the end of the trade, not
-        a stage of it. A **target** closes the slice that target represents.
-
-        The slice is an equal share of the **original** position, one share per
-        remaining target, so a three-target ladder closes a third at the first
-        target, another third at the second, and the rest at the last. The
-        original size is the yardstick, not what happens to be held now: the
-        rungs have to add up to the position the entry opened, so a share is
-        never computed against a shrinking base.
-
-        That split is the simplest one that needs no extra level from the
-        strategy — the ladder says *where* to take profit, not *how much* at
-        each one.
-
-        The last target closes the remainder, and a single-target exit closes
-        everything. The result is never more than what is held and never
-        negative, and it is never zero: a zero-quantity order would be rejected
-        by the venue, so the whole remaining position is closed instead.
+        Partial targets are floored to the instrument's actual quantity step.
+        Before taking a partial exit, also check that both the submitted slice
+        and the remaining position satisfy Bybit's minimum order notional. If
+        either would be untradeable, collapse this rung into a full close while
+        the whole holding is still large enough to sell.
         """
+        broker = self._broker
+        instrument = None
+        get_instrument = getattr(broker, "get_instrument", None)
+        if callable(get_instrument):
+            instrument = get_instrument(symbol)
+        raw_step = getattr(instrument, "qty_step", None)
+        try:
+            step = Decimal(str(raw_step)) if raw_step is not None else Decimal("0")
+        except (TypeError, ValueError, ArithmeticError):
+            step = Decimal("0")
+        if not step.is_finite() or step <= 0:
+            step = Decimal("0")
+        try:
+            min_notional = float(getattr(instrument, "min_order_amt", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            min_notional = 0.0
+
         if reason != "take_profit" or not ladder or target is None:
             return float(held)
         remaining = [
@@ -4783,29 +4799,49 @@ class PaperTradingWorker:
         if len(remaining) <= 1:
             # The last target, or a single target: close what is left.
             return float(held)
-        base = entry_quantity if entry_quantity is not None else float(held)
-        if not math.isfinite(base) or base <= 0:
-            base = float(held)
-        # The share is of the original position, but it can never exceed what
-        # is actually held: the broker is the authority for what is held, and
-        # an order for more than the position would be refused as a short.
-        share = base / len(remaining)
-        if float(held) < base:
-            # The position is smaller than the entry recorded (it was reduced
-            # outside the worker), so the shares are of what is left.
-            share = float(held) / len(remaining)
-        slice_size = share
-        if not math.isfinite(slice_size) or slice_size <= 0:
+        try:
+            held_decimal = Decimal(str(held))
+        except (TypeError, ValueError, ArithmeticError):
             return float(held)
+        if not held_decimal.is_finite() or held_decimal <= 0:
+            return float(held)
+        # Divide the currently held quantity across the remaining rungs.
+        # Flooring the slice to qty_step means the remainder is never smaller
+        # than the slice, so a valid partial order cannot create a smaller,
+        # untradeable tail.
+        share = held_decimal / Decimal(len(remaining))
+        if not share.is_finite() or share <= 0:
+            return float(held)
+
         if self.config.whole_shares:
-            slice_size = math.floor(slice_size)
+            slice_decimal = share.to_integral_value(rounding=ROUND_DOWN)
+        elif step > 0:
+            units = (share / step).to_integral_value(rounding=ROUND_DOWN)
+            slice_decimal = units * step
         else:
-            slice_size = math.floor(slice_size * 1_000_000) / 1_000_000
-        if slice_size <= 0:
-            # A fractional slice too small to express: close the whole position
-            # rather than send an order the venue would reject.
+            micros = (share * Decimal("1000000")).to_integral_value(rounding=ROUND_DOWN)
+            slice_decimal = micros / Decimal("1000000")
+        if slice_decimal <= 0:
+            # A fractional slice smaller than one venue step is not a valid order.
+            # Close the whole position now instead of creating an untradeable tail.
             return float(held)
-        return min(float(held), slice_size)
+
+        slice_decimal = min(held_decimal, slice_decimal)
+        if reference_price is not None and math.isfinite(reference_price) and reference_price > 0:
+            price_decimal = Decimal(str(reference_price))
+            remaining_decimal = max(Decimal("0"), held_decimal - slice_decimal)
+            # The exchange minimum applies to every order, not just the original
+            # entry. Avoid a partial close if either side of the split would fall
+            # below that minimum; the full holding is still the executable choice.
+            if min_notional > 0:
+                minimum_decimal = Decimal(str(min_notional))
+                slice_notional = slice_decimal * price_decimal
+                remainder_notional = remaining_decimal * price_decimal
+                if slice_notional < minimum_decimal:
+                    return float(held)
+                if remaining_decimal > 0 and remainder_notional < minimum_decimal:
+                    return float(held)
+        return float(slice_decimal)
 
     def _check_exits(self) -> CycleResult | None:
         """Close a worker-held long whose recorded stop or target has triggered.
@@ -5083,9 +5119,7 @@ class PaperTradingWorker:
                 ladder=ladder,
                 taken=taken,
                 target=hit_target if reason == "take_profit" else None,
-                entry_quantity=_as_float(
-                    (self.state.protections.get(symbol) or {}).get("quantity")
-                ),
+                reference_price=exit_price,
             )
             try:
                 order = broker.submit_order(
@@ -5099,7 +5133,14 @@ class PaperTradingWorker:
                     refresh=True,
                     crypto=self.config.crypto,
                 )
-            except (PaperRiskRejected, BrokerRejectedError, BrokerError) as exc:
+            except (
+                PaperRiskRejected,
+                BybitPaperRiskRejected,
+                BrokerRejectedError,
+                BybitBrokerRejectedError,
+                BrokerError,
+                BybitBrokerError,
+            ) as exc:
                 self.state.last_error = f"{type(exc).__name__}: {exc}"
                 self.state.last_no_decision_reason = str(exc)
                 self.state.last_no_trade_code = NO_TRADE_EXIT_REFUSED

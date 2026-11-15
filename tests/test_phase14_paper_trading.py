@@ -886,7 +886,7 @@ class TestBanner:
         try:
             with urllib.request.urlopen(f"{base}/", timeout=10) as response:
                 html = response.read().decode()
-            assert "ALPACA PAPER — NOT LIVE" in html
+            assert "PAPER TRADING — NOT LIVE" in html
             assert "START PAPER TRADING" in html
             assert "STOP PAPER TRADING" in html
         finally:

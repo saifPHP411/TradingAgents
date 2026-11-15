@@ -4,8 +4,13 @@ on:
   push:
     branches:
       - bybit-demo-integration
+      - demo-ready-dashboard-2026
     paths:
       - ".github/workflows/crypto-tjr-study.yml"
+      - "tradingagents/crypto/**"
+      - "tradingagents/tjr/**"
+      - "tradingagents/paper_experiment/dashboard/**"
+      - "tests/**"
   workflow_dispatch:
 
 permissions:
