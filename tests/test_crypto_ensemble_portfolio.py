@@ -463,6 +463,33 @@ def test_opening_gap_rechecks_daily_loss_before_filling_pending_entries(monkeypa
     assert result.max_drawdown_pct >= 2.0
 
 
+def test_opening_gap_rechecks_max_drawdown_before_filling_pending_entries(monkeypatch):
+    _install_controlled_signals(monkeypatch)
+    btc, eth = _controlled_gap_frames()
+    result = run_portfolio_backtest(
+        {"BTC/USDT": btc, "ETH/USDT": eth},
+        settings=BacktestSettings(
+            warmup_bars=220,
+            risk_fraction=0.05,
+            max_notional_fraction=0.40,
+            trailing_stop_atr_multiple=3.0,
+        ),
+        portfolio_settings=PortfolioSettings(
+            max_open_positions=2,
+            max_alt_positions=1,
+            max_gross_exposure_fraction=1.0,
+            max_total_open_risk_fraction=0.05,
+            daily_loss_limit_fraction=None,
+            max_drawdown_fraction=0.02,
+        ),
+    )
+
+    assert result.trades == 1
+    assert result.trade_log[0]["symbol"] == "ETH/USDT"
+    assert result.blocked_entries["max_drawdown"] == 1
+    assert result.max_drawdown_pct >= 2.0
+
+
 def test_opening_gap_through_stop_releases_position_slot_before_new_entries(monkeypatch):
     _install_controlled_signals(monkeypatch)
     btc, eth = _controlled_gap_frames()
