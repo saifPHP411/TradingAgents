@@ -215,6 +215,8 @@ def run_portfolio_backtest(
     daily_blocked = False
     drawdown_blocked = False
     previous_equity = settings.initial_cash
+    # Include opening-gap marks in drawdown diagnostics and entry risk gates.
+    equity_marks = [settings.initial_cash]
 
     def close_position(symbol: str, timestamp, raw_price: float, reason: str) -> None:
         nonlocal cash, total_fees, total_slippage
@@ -263,6 +265,46 @@ def run_portfolio_backtest(
                 close_position(symbol, timestamp, float(data[symbol].open.iloc[j]), action["reason"])
                 pending.pop(symbol, None)
 
+        # Protective stops crossed by an opening gap are already executable
+        # at this open. Close them before sizing or counting any new positions.
+        for symbol in list(positions):
+            open_price = float(data[symbol].open.iloc[j])
+            if open_price <= positions[symbol]["stop"]:
+                close_position(symbol, timestamp, open_price, "atr_stop")
+                cooldown_until[symbol] = j + 1
+
+        # Re-check daily loss and peak drawdown at the executable open. A gap
+        # can breach a risk limit after the prior close but before a pending
+        # entry is filled. Reset the daily baseline before checking the first
+        # bar of a new UTC/data-calendar day.
+        day = timestamp.date()
+        if current_day != day:
+            current_day = day
+            daily_start_equity = previous_equity
+            daily_blocked = False
+
+        equity_at_open = cash + sum(
+            position["qty"] * float(data[symbol].open.iloc[j])
+            for symbol, position in positions.items()
+        )
+        equity_marks.append(equity_at_open)
+        peak_equity = max(peak_equity, equity_at_open)
+        open_drawdown = (
+            (peak_equity - equity_at_open) / peak_equity if peak_equity > 0 else 0.0
+        )
+        max_drawdown = max(max_drawdown, open_drawdown)
+        if (
+            portfolio_settings.daily_loss_limit_fraction is not None
+            and equity_at_open
+            <= daily_start_equity * (1.0 - portfolio_settings.daily_loss_limit_fraction)
+        ):
+            daily_blocked = True
+        if (
+            portfolio_settings.max_drawdown_fraction is not None
+            and open_drawdown >= portfolio_settings.max_drawdown_fraction
+        ):
+            drawdown_blocked = True
+
         # Deterministic symbol order prevents a simultaneous signal from
         # exceeding portfolio caps. BTC sorts before most altcoins.
         for symbol in symbols:
@@ -270,6 +312,12 @@ def run_portfolio_backtest(
             if not action or action["action"] != "entry":
                 continue
             pending.pop(symbol, None)
+            if daily_blocked:
+                blocked["daily_loss_limit"] += 1
+                continue
+            if drawdown_blocked:
+                blocked["max_drawdown"] += 1
+                continue
             if symbol in positions:
                 continue
             if len(positions) >= portfolio_settings.max_open_positions:
@@ -415,11 +463,6 @@ def run_portfolio_backtest(
             position["qty"] * float(data[symbol].close.iloc[j])
             for symbol, position in positions.items()
         )
-        day = timestamp.date()
-        if current_day != day:
-            current_day = day
-            daily_start_equity = previous_equity
-            daily_blocked = False
         if (
             portfolio_settings.daily_loss_limit_fraction is not None
             and equity <= daily_start_equity * (1.0 - portfolio_settings.daily_loss_limit_fraction)
@@ -436,6 +479,7 @@ def run_portfolio_backtest(
             drawdown_blocked = True
 
         curve.append({"time": timestamp.isoformat(), "equity": equity})
+        equity_marks.append(equity)
         previous_equity = equity
 
         if j == len(index) - 1:
@@ -467,8 +511,8 @@ def run_portfolio_backtest(
 
     peak = settings.initial_cash
     max_drawdown = 0.0
-    for point in curve:
-        value = float(point["equity"])
+    for value in equity_marks:
+        value = float(value)
         peak = max(peak, value)
         if peak > 0:
             max_drawdown = max(max_drawdown, (peak - value) / peak)
