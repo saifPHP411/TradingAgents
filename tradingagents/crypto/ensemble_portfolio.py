@@ -486,6 +486,7 @@ def run_portfolio_backtest(
             for symbol in list(positions):
                 close_position(symbol, timestamp, float(data[symbol].close.iloc[j]), "end_of_data")
             curve[-1]["equity"] = cash
+            equity_marks[-1] = cash
             break
 
         # Generate fresh entries only after all risk gates have evaluated the
