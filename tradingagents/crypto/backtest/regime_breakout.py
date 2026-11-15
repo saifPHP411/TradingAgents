@@ -28,12 +28,15 @@ class RegimeBreakoutSettings:
     def __post_init__(self) -> None:
         for name in ("fast_ema", "slow_ema", "breakout_lookback",
                      "volume_lookback", "atr_period", "max_holding_bars"):
-            if getattr(self, name) < 2:
-                raise ValueError(f"{name} must be at least 2")
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 2:
+                raise ValueError(f"{name} must be an integer at least 2")
         if self.fast_ema >= self.slow_ema:
             raise ValueError("fast_ema must be smaller than slow_ema")
-        if self.volume_multiple <= 0 or self.stop_atr_multiple <= 0 or self.reward_risk <= 0:
-            raise ValueError("volume_multiple, stop_atr_multiple and reward_risk must be positive")
+        for name in ("volume_multiple", "stop_atr_multiple", "reward_risk"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
 
 
 @dataclass(frozen=True)
@@ -44,8 +47,9 @@ class ExecutionCosts:
     slippage_bps: float = 2.0
 
     def __post_init__(self) -> None:
-        if min(self.commission_bps, self.half_spread_bps, self.slippage_bps) < 0:
-            raise ValueError("execution costs cannot be negative")
+        values = (self.commission_bps, self.half_spread_bps, self.slippage_bps)
+        if any(not math.isfinite(value) or value < 0 for value in values):
+            raise ValueError("execution costs must be finite and non-negative")
 
 
 @dataclass(frozen=True)
@@ -55,12 +59,12 @@ class BacktestSettings:
     max_notional_fraction: float = 0.10
 
     def __post_init__(self) -> None:
-        if self.initial_cash <= 0:
-            raise ValueError("initial_cash must be positive")
-        if not 0 < self.risk_fraction <= 0.02:
-            raise ValueError("risk_fraction must be in (0, 0.02]")
-        if not 0 < self.max_notional_fraction <= 1:
-            raise ValueError("max_notional_fraction must be in (0, 1]")
+        if not math.isfinite(self.initial_cash) or self.initial_cash <= 0:
+            raise ValueError("initial_cash must be finite and positive")
+        if not math.isfinite(self.risk_fraction) or not 0 < self.risk_fraction <= 0.02:
+            raise ValueError("risk_fraction must be finite and in (0, 0.02]")
+        if not math.isfinite(self.max_notional_fraction) or not 0 < self.max_notional_fraction <= 1:
+            raise ValueError("max_notional_fraction must be finite and in (0, 1]")
 
 
 @dataclass
@@ -134,6 +138,8 @@ def indicators(frame: pd.DataFrame, settings: RegimeBreakoutSettings = RegimeBre
     if not frame.index.is_monotonic_increasing or frame.index.has_duplicates:
         raise ValueError("OHLCV index must be strictly chronological and unique")
     out = frame.loc[:, ["open", "high", "low", "close", "volume"]].astype(float).copy()
+    if out.isna().any().any() or not out.map(math.isfinite).all().all():
+        raise ValueError("OHLCV values must be finite and non-null")
     if (out[["open", "high", "low", "close"]] <= 0).any().any() or (out["volume"] < 0).any():
         raise ValueError("prices must be positive and volume cannot be negative")
     if (out["high"] < out[["open", "close", "low"]].max(axis=1)).any():

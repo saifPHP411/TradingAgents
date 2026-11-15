@@ -5,6 +5,8 @@ import pandas as pd
 import pytest
 
 from tradingagents.crypto.backtest.regime_breakout import (
+    BacktestSettings,
+    ExecutionCosts,
     RegimeBreakoutSettings,
     entry_levels,
     indicators,
@@ -84,3 +86,20 @@ def test_settings_validate_periods_and_risk_geometry():
         RegimeBreakoutSettings(fast_ema=50, slow_ema=20)
     with pytest.raises(ValueError, match="positive"):
         RegimeBreakoutSettings(reward_risk=0)
+
+
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+def test_non_finite_ohlcv_values_are_rejected(bad_value):
+    frame = _bars()
+    frame.loc[frame.index[-1], "close"] = bad_value
+    with pytest.raises(ValueError, match="finite and non-null"):
+        indicators(frame)
+
+
+def test_strategy_and_execution_settings_reject_non_finite_values():
+    with pytest.raises(ValueError, match="finite and positive"):
+        RegimeBreakoutSettings(volume_multiple=float("nan"))
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        ExecutionCosts(commission_bps=float("inf"))
+    with pytest.raises(ValueError, match="finite and positive"):
+        BacktestSettings(initial_cash=float("nan"))
