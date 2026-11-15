@@ -34,8 +34,9 @@ class AdaptiveConfig:
 
     def __post_init__(self):
         for name in ("fast_ema", "slow_ema", "atr_period", "lookback", "breakout_lookback", "mean_reversion_period", "vwap_period"):
-            if getattr(self, name) < 2:
-                raise ValueError(f"{name} must be >= 2")
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 2:
+                raise ValueError(f"{name} must be an integer >= 2")
         if self.fast_ema >= self.slow_ema:
             raise ValueError("fast_ema must be smaller than slow_ema")
         numeric_limits = (

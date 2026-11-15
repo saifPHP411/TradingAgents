@@ -39,8 +39,12 @@ class AdaptivePortfolio:
             raise ValueError("risk_fraction must be in (0, 0.02]")
         if not 0 < self.max_notional_fraction <= 1:
             raise ValueError("max_notional_fraction must be in (0, 1]")
-        if self.max_holding_bars < 1:
-            raise ValueError("max_holding_bars must be positive")
+        if (
+            isinstance(self.max_holding_bars, bool)
+            or not isinstance(self.max_holding_bars, int)
+            or self.max_holding_bars < 1
+        ):
+            raise ValueError("max_holding_bars must be a positive integer")
 
 
 @dataclass

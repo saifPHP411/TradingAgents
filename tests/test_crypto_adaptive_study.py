@@ -328,3 +328,12 @@ def test_max_holding_bars_counts_the_entry_candle(monkeypatch):
     assert len(result.trades) == 1
     assert result.trades[0].exit_reason == "time"
     assert result.trades[0].exit_time == frame.index[57].isoformat()
+
+
+def test_adaptive_period_and_holding_bar_counts_must_be_integers():
+    with pytest.raises(ValueError, match="fast_ema.*integer"):
+        AdaptiveConfig(fast_ema=20.5)
+    with pytest.raises(ValueError, match="max_holding_bars.*integer"):
+        AdaptivePortfolio(max_holding_bars=float("nan"))
+    with pytest.raises(ValueError, match="max_holding_bars.*integer"):
+        AdaptivePortfolio(max_holding_bars=1.5)
