@@ -302,6 +302,7 @@ def run_adaptive_walk_forward_study(
     portfolio: AdaptivePortfolio | None = None,
     scenarios: collections.abc.Mapping[str, AdaptiveExecutionCosts] = DEFAULT_COST_SCENARIOS,
     spread_bps: float = 2.0,
+    expected_interval: pd.Timedelta | str = "1h",
 ) -> dict:
     """Run disjoint chronological OOS folds, with identical timestamps per symbol."""
     if warmup_bars < 60 or test_bars < 20:
@@ -327,12 +328,19 @@ def run_adaptive_walk_forward_study(
             "not enough common aligned history for one complete OOS fold "
             f"(common bars={len(common_index)}, required={warmup_bars + test_bars})"
         )
-    if isinstance(common_index, pd.DatetimeIndex) and len(common_index) > 2:
+    if isinstance(common_index, pd.DatetimeIndex) and len(common_index) > 1:
+        try:
+            expected_delta = pd.Timedelta(expected_interval)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expected_interval must be a positive pandas-compatible duration") from exc
+        if pd.isna(expected_delta) or expected_delta <= pd.Timedelta(0):
+            raise ValueError("expected_interval must be a positive pandas-compatible duration")
         intervals = common_index.to_series().diff().dropna()
-        if intervals.nunique() != 1:
+        if not intervals.eq(expected_delta).all():
             raise ValueError(
-                "common symbol timestamps contain missing intervals; "
-                "refusing to compress gaps into adjacent backtest bars"
+                "common symbol timestamps contain missing or irregular intervals; "
+                f"expected every bar to be {expected_delta}, refusing to compress gaps "
+                "into adjacent backtest bars"
             )
     ordered = {symbol: frame.loc[common_index].copy() for symbol, frame in ordered.items()}
     reference_index = common_index

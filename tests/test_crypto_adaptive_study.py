@@ -96,6 +96,27 @@ def test_walk_forward_rejects_gaps_in_common_timestamps():
         )
 
 
+def test_walk_forward_rejects_uniformly_skipped_hourly_bars_by_default():
+    btc = _flat_frame(420).iloc[::2]
+    eth = _flat_frame(420).iloc[::2]
+
+    with pytest.raises(ValueError, match="expected every bar to be 0 days 01:00:00"):
+        run_adaptive_walk_forward_study(
+            {"BTC/USDT": btc, "ETH/USDT": eth},
+            warmup_bars=100, test_bars=20,
+        )
+
+
+def test_walk_forward_accepts_an_explicit_non_hourly_interval():
+    btc = _flat_frame(420).iloc[::2]
+    eth = _flat_frame(420).iloc[::2]
+    report = run_adaptive_walk_forward_study(
+        {"BTC/USDT": btc, "ETH/USDT": eth},
+        warmup_bars=100, test_bars=20, expected_interval="2h",
+    )
+    assert report["bar_count_per_symbol"] == 210
+
+
 def test_execution_costs_and_portfolio_reject_invalid_values():
     with pytest.raises(ValueError, match="finite and non-negative"):
         AdaptiveExecutionCosts(float("inf"), 0, 0)
