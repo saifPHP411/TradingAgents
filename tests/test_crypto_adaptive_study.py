@@ -190,3 +190,32 @@ def test_risk_sizing_includes_estimated_round_trip_execution_costs(monkeypatch):
         trade.entry_price - trade.stop_price + round_trip_cost_per_unit
     )
     assert modeled_risk <= 10.0
+
+
+def test_pending_next_open_entry_does_not_create_phantom_drawdown(monkeypatch):
+    import tradingagents.crypto.backtest.adaptive_study as module
+
+    frame = _flat_frame(70)
+
+    def candidate(data, features, index, **kwargs):
+        if index == 55:
+            return AdaptiveDecision(
+                "buy_candidate", "bull_trend", "trend_pullback", .8,
+                100.0, 99.0, 103.0, ("test setup",), (), {},
+            )
+        return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None)
+
+    monkeypatch.setattr(module, "_analyze_market_at", candidate)
+    result = run_adaptive_backtest(
+        frame,
+        execution=AdaptiveExecutionCosts(10, 1, 2),
+        portfolio=AdaptivePortfolio(
+            initial_cash=1000, risk_fraction=.01, max_notional_fraction=.5
+        ),
+        start_index=55,
+        end_index=56,
+    )
+
+    # The entry signal is formed at bar 55 close; the simulated fill is at
+    # bar 56 open. Equity at bar 55 must remain unchanged before that fill.
+    assert result.equity_curve[0] == pytest.approx(1000.0)
