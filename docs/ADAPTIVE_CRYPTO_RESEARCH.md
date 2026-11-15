@@ -22,9 +22,10 @@ half-spread and slippage scenarios. Simulated quantity is bounded by risk-per-tr
 and notional caps. The backtest is single-position per symbol; it is not a shared
 multi-asset execution portfolio and it does not create executable order quantities.
 The CI study prefers Binance public Spot 1h candles, with completed 1m aggregation
-as a fallback. The walk-forward runner validates every common timestamp against an
-explicit expected interval (1h by default), so a uniformly skipped bar sequence cannot
-silently masquerade as complete hourly history. The research workflow fetches a 2-year hourly history for ten liquid
+as a fallback. The 1m fallback emits only hourly buckets containing all 60 minute
+candles; partial hours are discarded. The walk-forward runner validates every common
+timestamp against an explicit expected interval (1h by default), so uniformly skipped
+bars cannot silently masquerade as complete hourly history. The research workflow fetches a 2-year hourly history for ten liquid
 USDT pairs, while the legacy benchmark cache retains its 120-day 1m sample.
 Binance history is only a cross-venue proxy for Bybit Demo Spot.
 

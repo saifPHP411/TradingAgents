@@ -10,6 +10,7 @@ from tradingagents.crypto.backtest.adaptive_study import (
     AdaptivePortfolio,
     run_adaptive_backtest,
     run_adaptive_walk_forward_study,
+    load_hourly_frames,
 )
 
 pytestmark = pytest.mark.unit
@@ -115,6 +116,44 @@ def test_walk_forward_accepts_an_explicit_non_hourly_interval():
         warmup_bars=100, test_bars=20, expected_interval="2h",
     )
     assert report["bar_count_per_symbol"] == 210
+
+
+
+
+def test_hourly_fallback_discards_partial_minute_buckets(monkeypatch):
+    from tradingagents.crypto.backtest import history
+
+    minute_index = pd.date_range(
+        "2025-01-01T00:00:00Z", periods=120, freq="min"
+    )
+    prices = np.full(len(minute_index), 100.0)
+    minute_frame = pd.DataFrame(
+        {
+            "open": prices,
+            "high": prices + 0.1,
+            "low": prices - 0.1,
+            "close": prices,
+            "volume": np.full(len(minute_index), 10.0),
+        },
+        index=minute_index,
+    ).drop(minute_index[30])
+
+    class FakeHistoryCache:
+        def __init__(self, root):
+            self.root = root
+
+        def load(self, symbol, interval):
+            if interval == "1h":
+                return None
+            return minute_frame.copy()
+
+    monkeypatch.setattr(history, "HistoryCache", FakeHistoryCache)
+    frames = load_hourly_frames("/unused", ("BTC/USDT",))
+
+    hourly = frames["BTC/USDT"]
+    assert len(hourly) == 1
+    assert hourly.index[0] == minute_index[60]
+    assert hourly.iloc[0]["volume"] == pytest.approx(600.0)
 
 
 def test_execution_costs_and_portfolio_reject_invalid_values():

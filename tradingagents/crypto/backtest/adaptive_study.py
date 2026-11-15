@@ -452,8 +452,18 @@ def load_hourly_frames(cache_dir: str, symbols: tuple[str, ...]) -> dict[str, pd
             minutes = cache.load(symbol, "1m")
             if minutes is None or minutes.empty:
                 raise ValueError(f"missing cached 1h or 1m history for {symbol}")
-            hourly = minutes.resample("1h", label="left", closed="left").agg(
-                {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+            # Only accept complete 60-candle UTC hours. A partial hour can look
+            # like a valid OHLCV bar after resampling and silently distort signals.
+            aggregated = minutes.resample("1h", label="left", closed="left").agg(
+                open=("open", "first"),
+                high=("high", "max"),
+                low=("low", "min"),
+                close=("close", "last"),
+                volume=("volume", "sum"),
+                minute_bars=("close", "count"),
+            )
+            hourly = aggregated.loc[aggregated["minute_bars"] == 60].drop(
+                columns=["minute_bars"]
             ).dropna()
         hourly = hourly.loc[hourly.index + pd.Timedelta(hours=1) <= now]
         if hourly.empty:
