@@ -69,10 +69,29 @@ def test_walk_forward_has_disjoint_oos_folds_and_cost_scenarios():
     assert "buy_hold_return_pct" in report["folds"][0]["scenarios"]["realistic_estimate"]["symbols"]["BTC/USDT"]
 
 
-def test_walk_forward_rejects_misaligned_symbols():
-    with pytest.raises(ValueError, match="aligned bar counts"):
+def test_walk_forward_aligns_symbols_on_common_timestamps_without_filling():
+    btc = _flat_frame(420)
+    eth = _flat_frame(421)
+    report = run_adaptive_walk_forward_study(
+        {"BTC/USDT": btc, "ETH/USDT": eth},
+        warmup_bars=250, test_bars=60,
+    )
+
+    alignment = report["timestamp_alignment"]
+    assert alignment["method"] == "exact common timestamp intersection; no forward-fill or synthetic bars"
+    assert alignment["original_bar_counts"] == {"BTC/USDT": 420, "ETH/USDT": 421}
+    assert alignment["common_bar_count"] == 420
+    assert alignment["dropped_non_common_bars"] == {"BTC/USDT": 0, "ETH/USDT": 1}
+
+
+def test_walk_forward_rejects_gaps_in_common_timestamps():
+    btc = _flat_frame(420)
+    eth = _flat_frame(420)
+    eth = eth.drop(eth.index[300])
+
+    with pytest.raises(ValueError, match="missing intervals"):
         run_adaptive_walk_forward_study(
-            {"BTC/USDT": _flat_frame(420), "ETH/USDT": _flat_frame(421)},
+            {"BTC/USDT": btc, "ETH/USDT": eth},
             warmup_bars=250, test_bars=60,
         )
 
