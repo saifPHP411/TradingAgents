@@ -491,3 +491,24 @@ def test_opening_gap_through_stop_releases_position_slot_before_new_entries(monk
     assert eth_trade["reason"] == "atr_stop"
     assert eth_trade["raw_exit_price"] == pytest.approx(89.0)
     assert btc_trade["entry_time"] == eth.index[222].isoformat()
+
+
+
+def test_final_equity_drawdown_includes_end_of_data_exit_costs():
+    frame = _rising_frame()
+    result = run_portfolio_backtest(
+        {"BTC/USDT": frame},
+        settings=BacktestSettings(warmup_bars=220),
+        portfolio_settings=PortfolioSettings(
+            daily_loss_limit_fraction=None,
+            max_drawdown_fraction=None,
+        ),
+    )
+
+    assert result.trades == 1
+    assert result.trade_log[0]["reason"] == "end_of_data"
+    realized_drawdown_pct = max(
+        0.0,
+        (10_000.0 - result.final_equity) / 10_000.0 * 100.0,
+    )
+    assert result.max_drawdown_pct >= realized_drawdown_pct
