@@ -1,5 +1,8 @@
 # Railway deployment readiness
 
+> **Current deployment target:** Bybit Demo Spot. Follow [`BYBIT_DEMO_DEPLOYMENT.md`](BYBIT_DEMO_DEPLOYMENT.md) for the active configuration and operator steps. The historical Alpaca Paper details below are retained for the alternate provider and must not be used to configure the current Bybit Demo service.
+
+
 This document states what deploying this project to Railway requires, and what it
 does not. It covers two distinct workloads, and they must not be confused:
 
