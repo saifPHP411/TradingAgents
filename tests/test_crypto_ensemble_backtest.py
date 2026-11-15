@@ -190,3 +190,53 @@ def test_chandelier_trailing_stop_tightens_only_for_following_bar():
     assert loose.trade_log[0]["final_stop"] == pytest.approx(
         loose.trade_log[0]["initial_stop"]
     )
+
+
+def test_single_symbol_stop_risk_budget_includes_fees_and_adverse_slippage():
+    settings = BacktestSettings(
+        warmup_bars=220,
+        risk_fraction=0.05,
+        max_notional_fraction=1.0,
+        fee_bps=10.0,
+        slippage_bps=5.0,
+    )
+    result = run_backtest(_rising_breakout_frame(), settings=settings)
+    assert result.trades == 1
+    trade = result.trade_log[0]
+    fee_rate = settings.fee_bps / 10_000.0
+    slip_rate = settings.slippage_bps / 10_000.0
+    stop_fill = trade["initial_stop"] * (1.0 - slip_rate)
+    estimated_loss = trade["quantity"] * (
+        trade["entry_price"] * (1.0 + fee_rate)
+        - stop_fill * (1.0 - fee_rate)
+    )
+    assert estimated_loss == pytest.approx(trade["estimated_stop_risk"])
+    assert estimated_loss <= trade["entry_equity"] * settings.risk_fraction + 1e-8
+    assert trade["entry_price"] * trade["quantity"] + trade["entry_fee"] <= trade["entry_equity"] + 1e-8
+
+
+def test_single_symbol_backtest_does_not_trade_before_oos_start():
+    frame = _rising_breakout_frame()
+    result = run_backtest(
+        frame,
+        settings=BacktestSettings(warmup_bars=220),
+        trading_start_ts=frame.index[260],
+    )
+    assert result.trades == 0
+
+
+def test_single_symbol_backtest_requires_timezone_aware_oos_start():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        run_backtest(
+            _rising_breakout_frame(),
+            settings=BacktestSettings(warmup_bars=220),
+            trading_start_ts="2025-01-12 00:00:00",
+        )
+
+
+def test_backtest_rejects_slippage_that_would_make_exit_fill_negative():
+    with pytest.raises(ValueError, match="below 10000 bps"):
+        run_backtest(
+            _flat_frame(),
+            settings=BacktestSettings(slippage_bps=10_000, warmup_bars=220),
+        )
