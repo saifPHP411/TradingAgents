@@ -177,7 +177,7 @@ def test_pending_next_bar_entry_does_not_change_signal_bar_equity():
 def test_max_holding_bars_counts_the_entry_candle(monkeypatch):
     import tradingagents.crypto.backtest.regime_breakout as module
 
-    frame = _trend_with_breakouts(80)
+    frame = _trend_with_breakouts(180)
     signal_index = 55
 
     def fake_indicators(data, settings):

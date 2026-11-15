@@ -90,7 +90,7 @@ def test_walk_forward_rejects_gaps_in_common_timestamps():
     eth = _flat_frame(420)
     eth = eth.drop(eth.index[300])
 
-    with pytest.raises(ValueError, match="missing intervals"):
+    with pytest.raises(ValueError, match="missing or irregular intervals"):
         run_adaptive_walk_forward_study(
             {"BTC/USDT": btc, "ETH/USDT": eth},
             warmup_bars=250, test_bars=60,
