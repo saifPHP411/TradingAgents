@@ -30,10 +30,11 @@ COST_SCENARIOS = {
 def _buy_and_hold_return(
     frame: pd.DataFrame, start: int, end: int, initial_cash: float, costs: ExecutionCosts
 ) -> float:
-    """Long-only buy-and-hold return with two-sided fees and execution impact."""
+    """Long-only buy-and-hold return aligned to the strategy's next-open entry."""
     impact = (costs.half_spread_bps + costs.slippage_bps) / 10_000
     fee_rate = costs.commission_bps / 10_000
-    buy = float(frame.iloc[start]["open"]) * (1 + impact)
+    entry_index = start + 1
+    buy = float(frame.iloc[entry_index]["open"]) * (1 + impact)
     sell = float(frame.iloc[end]["close"]) * (1 - impact)
     quantity = initial_cash / (buy * (1 + fee_rate))
     final_cash = quantity * sell * (1 - fee_rate)
@@ -49,6 +50,7 @@ def run_walk_forward_study(
     strategy: RegimeBreakoutSettings | None = None,
     portfolio: BacktestSettings | None = None,
     scenarios: collections.abc.Mapping[str, ExecutionCosts] = COST_SCENARIOS,
+    expected_interval: pd.Timedelta | str = "1h",
 ) -> dict:
     """Run fixed-parameter, expanding-context OOS folds for every symbol.
 
@@ -72,6 +74,19 @@ def run_walk_forward_study(
             raise ValueError("all symbol frames must be non-empty and chronological")
         if not frame.index.equals(reference_index):
             raise ValueError("all symbols must have aligned timestamps")
+    if isinstance(reference_index, pd.DatetimeIndex) and len(reference_index) > 1:
+        try:
+            expected_delta = pd.Timedelta(expected_interval)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expected_interval must be a positive pandas-compatible duration") from exc
+        if pd.isna(expected_delta) or expected_delta <= pd.Timedelta(0):
+            raise ValueError("expected_interval must be a positive pandas-compatible duration")
+        intervals = reference_index.to_series().diff().dropna()
+        if not intervals.eq(expected_delta).all():
+            raise ValueError(
+                "symbol timestamps contain missing or irregular intervals; "
+                f"expected every bar to be {expected_delta}"
+            )
     bar_count = next(iter(lengths))
     if bar_count < warmup_bars + test_bars:
         raise ValueError("not enough history for one complete OOS fold")
@@ -178,6 +193,7 @@ def run_walk_forward_study(
         "parameters_fitted_on_oos": False,
         "warmup_bars": warmup_bars,
         "test_bars_per_fold": test_bars,
+        "expected_interval": str(expected_delta) if isinstance(reference_index, pd.DatetimeIndex) and len(reference_index) > 1 else None,
         "symbols": list(ordered),
         "bar_count_per_symbol": bar_count,
         "first_bar": next(iter(ordered.values())).index[0].isoformat(),
@@ -212,8 +228,18 @@ def load_hourly_frames(cache_dir: str, symbols: tuple[str, ...]) -> dict[str, pd
         minutes = cache.load(symbol, "1m")
         if minutes is None or minutes.empty:
             raise ValueError(f"missing cached 1m history for {symbol}")
-        hourly = minutes.resample("1h", label="left", closed="left").agg(
-            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        # Refuse partial hours: resampling alone would make 59/60 minutes
+        # look like a complete OHLCV candle and distort indicators and fills.
+        aggregated = minutes.resample("1h", label="left", closed="left").agg(
+            open=("open", "first"),
+            high=("high", "max"),
+            low=("low", "min"),
+            close=("close", "last"),
+            volume=("volume", "sum"),
+            minute_bars=("close", "count"),
+        )
+        hourly = aggregated.loc[aggregated["minute_bars"] == 60].drop(
+            columns=["minute_bars"]
         ).dropna()
         hourly = hourly.loc[hourly.index + pd.Timedelta(hours=1) <= now]
         if hourly.empty:

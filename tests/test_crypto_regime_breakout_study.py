@@ -4,7 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tradingagents.crypto.backtest.regime_breakout_study import run_walk_forward_study
+from tradingagents.crypto.backtest.regime_breakout import ExecutionCosts
+from tradingagents.crypto.backtest.regime_breakout_study import (
+    _buy_and_hold_return,
+    load_hourly_frames,
+    run_walk_forward_study,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -91,3 +96,64 @@ def test_summary_reports_compounded_returns_for_each_symbol_and_symbol_fold_brea
     assert summary["symbol_fold_count"] == len(report["folds"]) * 2
     assert 0 <= summary["positive_symbol_folds"] <= summary["symbol_fold_count"]
     assert isinstance(summary["all_symbol_folds_positive"], bool)
+
+
+def test_walkforward_rejects_uniformly_skipped_hourly_bars_by_default():
+    frame = _flat_frame(420).iloc[::2]
+    with pytest.raises(ValueError, match="expected every bar to be 0 days 01:00:00"):
+        run_walk_forward_study(
+            {"BTC/USDT": frame}, warmup_bars=100, test_bars=20
+        )
+
+
+def test_walkforward_accepts_explicit_non_hourly_interval():
+    frame = _flat_frame(420).iloc[::2]
+    report = run_walk_forward_study(
+        {"BTC/USDT": frame}, warmup_bars=100, test_bars=20,
+        expected_interval="2h",
+    )
+    assert report["expected_interval"] == "0 days 02:00:00"
+
+
+def test_buy_and_hold_benchmark_starts_at_next_open_like_strategy():
+    frame = _flat_frame(4)
+    frame.iloc[0, frame.columns.get_loc("open")] = 100.0
+    frame.iloc[1, frame.columns.get_loc("open")] = 200.0
+    frame.iloc[3, frame.columns.get_loc("close")] = 210.0
+    result = _buy_and_hold_return(
+        frame, 0, 3, 1000.0, ExecutionCosts(0, 0, 0)
+    )
+    assert result == pytest.approx(5.0)
+
+
+def test_hourly_fallback_discards_partial_minute_buckets(monkeypatch):
+    from tradingagents.crypto.backtest import history
+
+    minute_index = pd.date_range(
+        "2025-01-01T00:00:00Z", periods=120, freq="min"
+    )
+    prices = np.full(len(minute_index), 100.0)
+    minute_frame = pd.DataFrame(
+        {
+            "open": prices,
+            "high": prices + 0.1,
+            "low": prices - 0.1,
+            "close": prices,
+            "volume": np.full(len(minute_index), 10.0),
+        },
+        index=minute_index,
+    ).drop(minute_index[30])
+
+    class FakeHistoryCache:
+        def __init__(self, root):
+            self.root = root
+
+        def load(self, symbol, interval):
+            return minute_frame.copy()
+
+    monkeypatch.setattr(history, "HistoryCache", FakeHistoryCache)
+    frames = load_hourly_frames("/unused", ("BTC/USDT",))
+    hourly = frames["BTC/USDT"]
+    assert len(hourly) == 1
+    assert hourly.index[0] == minute_index[60]
+    assert hourly.iloc[0]["volume"] == pytest.approx(600.0)
