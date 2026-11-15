@@ -249,8 +249,18 @@ def run_adaptive_backtest(
                             result.rejections.get("insufficient cash after entry fees", 0) + 1
                         )
         mark = cash
-        if position is not None and i >= position["entry_index"]:
-            mark += position["quantity"] * float(row.close)
+        if position is not None:
+            if i >= position["entry_index"]:
+                mark += position["quantity"] * float(row.close)
+            else:
+                # The signal is known at this close, but the order fills only
+                # at the next bar open. Restore the reserved debit when marking
+                # this pre-fill bar so the equity curve does not show a phantom
+                # drawdown before a position exists.
+                mark += (
+                    position["quantity"] * position["entry_price"]
+                    + position["entry_fee"]
+                )
         result.equity_curve.append(mark)
 
     result.final_equity = cash + (
