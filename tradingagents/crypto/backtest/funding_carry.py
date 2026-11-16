@@ -12,7 +12,7 @@ import argparse
 import json
 import math
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
