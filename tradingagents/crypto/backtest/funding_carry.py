@@ -276,6 +276,7 @@ def simulate_symbol(symbol: str, data: dict[str, Any], *, annualized_entry_thres
         rows.append({
             "symbol": symbol, "entry_ms": entry_ms, "exit_ms": exit_ms,
             "observed_funding_rate": observed_rate,
+            "realized_next_funding_rate": float(funding[index + 1]["rate"]),
             "realized_funding_return_pct": funding_return * 100,
             "funding_events_held": exit_index - index,
             "observed_annualized_rate_pct": annualized * 100,
