@@ -3650,6 +3650,51 @@ class PaperTradingWorker:
                 self._fail_cycle(exc)
                 break
 
+    def _refresh_learning_report_if_due(self) -> None:
+        """Persist a read-only Bybit Demo feedback report every 15 minutes.
+
+        This runs after a completed decision cycle. It reads execution history
+        only; it never feeds suggestions back into TJR, changes risk, or places
+        or modifies an order.
+        """
+        if self.config.execution_provider != EXECUTION_PROVIDER_BYBIT_DEMO:
+            return
+        broker = self._broker
+        state_path = self.config.state_path
+        if broker is None or state_path is None:
+            return
+        now = time.monotonic()
+        if now - self._last_learning_refresh_monotonic < 900.0:
+            return
+        self._last_learning_refresh_monotonic = now
+        report_path = Path(state_path).with_name("learning_report.json")
+        try:
+            read_history = getattr(broker, "read_execution_history", None)
+            if not callable(read_history):
+                return
+            rows, truncated = read_history(max_pages=10)
+            from ..learning import build_learning_report
+
+            report = build_learning_report(
+                self.state.to_dict(),
+                rows,
+                history_complete=not truncated,
+            )
+            report["available"] = True
+            report["execution_provider"] = EXECUTION_PROVIDER_BYBIT_DEMO
+        except Exception as exc:  # noqa: BLE001 - feedback must not affect trading
+            report = {
+                "schema_version": 1,
+                "observed_at": datetime.now(UTC).isoformat(),
+                "mode": "read_only_feedback",
+                "available": False,
+                "reason": f"execution history unavailable ({type(exc).__name__})",
+                "strategy_mutation_enabled": False,
+                "automatic_promotion_enabled": False,
+            }
+        with contextlib.suppress(OSError, TypeError, ValueError):
+            _atomic_write(report_path, json.dumps(report, indent=2) + "\n")
+
     def _observation_interval(self) -> float | None:
         """How often the market-data seam is re-read, or ``None`` for no tick.
 
