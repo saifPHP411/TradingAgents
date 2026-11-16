@@ -905,11 +905,15 @@ class PaperTradingController:
         try:
             broker = BybitDemoBroker(state_path=broker_state_path)
             broker.connect()
-            rows, complete = broker.read_execution_history(max_pages=10)
+            rows, truncated = broker.read_execution_history(max_pages=10)
+            broker_orders = getattr(getattr(broker, "_state", None), "orders", {}) or {}
+            known_orders = dict(broker_orders)
+            known_orders.update(worker_payload.get("orders") or {})
+            learning_state = {**worker_payload, "orders": known_orders}
             report = build_learning_report(
-                worker_payload,
+                learning_state,
                 rows,
-                history_complete=not complete,
+                history_complete=not truncated,
             )
             report["available"] = True
             report["execution_provider"] = EXECUTION_PROVIDER_BYBIT_DEMO
