@@ -3665,7 +3665,8 @@ class PaperTradingWorker:
         if broker is None or state_path is None:
             return
         now = time.monotonic()
-        if now - self._last_learning_refresh_monotonic < 900.0:
+        last_refresh = self._last_learning_refresh_monotonic
+        if last_refresh > 0.0 and now - last_refresh < 900.0:
             return
         self._last_learning_refresh_monotonic = now
         report_path = Path(state_path).with_name("learning_report.json")
