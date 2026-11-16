@@ -103,3 +103,16 @@ def test_factor_interaction_rejects_missing_common_hour():
 def test_factor_interaction_rejects_short_history():
     with pytest.raises(ValueError, match="at least 1000 common hourly bars"):
         run_factor_interaction_study(_frames(900), config=_config())
+
+def test_factor_interaction_drops_currently_forming_hour():
+    now = pd.Timestamp.now(tz="UTC")
+    end = now.floor("h")
+    index = pd.date_range(end=end, periods=1200, freq="h")
+    frames = _frames()
+    for frame in frames.values():
+        frame.index = index
+    report = run_factor_interaction_study(
+        frames, costs=FactorCosts(0, 0, 0), config=_config()
+    )
+    assert report["last_bar"] == (end - pd.Timedelta(hours=1)).isoformat()
+    assert report["bars"] == 1199
