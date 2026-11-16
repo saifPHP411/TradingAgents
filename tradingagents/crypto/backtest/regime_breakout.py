@@ -214,6 +214,7 @@ def run_backtest(
     result = BreakoutBacktestResult(initial_cash=cash, final_equity=cash)
     position: dict | None = None
     impact = (execution.half_spread_bps + execution.slippage_bps) / 10_000.0
+    fee_rate = execution.commission_bps / 10_000.0
 
     for i in range(start_index, end_index + 1):
         row = data.iloc[i]
@@ -232,7 +233,7 @@ def run_backtest(
             if exit_price is not None:
                 fill = exit_price * (1.0 - impact)
                 notional = position["quantity"] * fill
-                fee = notional * execution.commission_bps / 10_000.0
+                fee = notional * fee_rate
                 cash += notional - fee
                 gross = (fill - position["entry_price"]) * position["quantity"]
                 net = gross - position["entry_fee"] - fee
@@ -262,8 +263,15 @@ def run_backtest(
                 _, signal_stop, _ = levels
                 next_open = float(data.iloc[i + 1]["open"])
                 fill = next_open * (1.0 + impact)
-                risk_per_unit = fill - signal_stop
-                if risk_per_unit > 0:
+                # Size against the modeled net loss at a normal stop fill,
+                # including adverse entry/exit impact and both commission charges.
+                # A gap through the stop can still exceed this budget.
+                stop_exit_fill = signal_stop * (1.0 - impact)
+                risk_per_unit = (
+                    fill - stop_exit_fill
+                    + fee_rate * (fill + stop_exit_fill)
+                )
+                if stop_exit_fill > 0 and risk_per_unit > 0:
                     risk_budget = cash * portfolio.risk_fraction
                     quantity_by_risk = risk_budget / risk_per_unit
                     quantity_by_notional = cash * portfolio.max_notional_fraction / fill
@@ -274,11 +282,11 @@ def run_backtest(
                         stop = signal_stop
                         target = fill + strategy.reward_risk * (fill - stop)
                         entry_notional = quantity * fill
-                        entry_fee = entry_notional * execution.commission_bps / 10_000.0
+                        entry_fee = entry_notional * fee_rate
                         total_debit = entry_notional + entry_fee
                         if total_debit > cash:
                             quantity = cash / (
-                                fill * (1.0 + execution.commission_bps / 10_000.0)
+                                fill * (1.0 + fee_rate)
                             )
                             entry_notional = quantity * fill
                             entry_fee = entry_notional * execution.commission_bps / 10_000.0
