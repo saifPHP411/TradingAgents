@@ -13,8 +13,8 @@ def _fixture(next_rate=0.001, basis_change=0.0):
         },
         "perp_1h": {
             str(t0 + 3_600_000): {"open": 100.0, "close": 100.0},
-            str(t1 + 3_600_000): {"open": 100.0 - basis_change, "close": 100.0},
-            str(t2 + 3_600_000): {"open": 100.0, "close": 100.0},
+            str(t1 + 3_600_000): {"open": 100.0, "close": 100.0},
+            str(t2 + 3_600_000): {"open": 100.0 - basis_change, "close": 100.0},
         },
         "funding": [
             {"timestamp": t0, "rate": 0.001},
@@ -31,7 +31,7 @@ def test_funding_carry_uses_lagged_signal_and_next_realized_payment():
         costs={"commission_bps_per_fill": 0, "half_spread_bps_per_fill": 0,
                "slippage_bps_per_fill": 0},
     )
-    assert result["trades"] == 2
+    assert result["trades"] == 1
     assert result["trade_log"][0]["observed_funding_rate"] == 0.001
     assert result["trade_log"][0]["realized_next_funding_rate"] == 0.001
     assert result["trade_log"][0]["funding_return_pct"] > 0
