@@ -52,7 +52,8 @@ def normalize_execution_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         price = _number(row.get("execPrice"))
         if not execution_id or execution_id in seen or not order_id or not symbol:
             continue
-        if side not in {"buy", "sell"} or quantity is None or price is None:
+        executed_at = _timestamp(row.get("execTime"))
+        if side not in {"buy", "sell"} or quantity is None or price is None or not executed_at:
             continue
         if quantity <= 0 or price <= 0:
             continue
@@ -66,7 +67,7 @@ def normalize_execution_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             "price": price,
             "fee": _number(row.get("execFee")),
             "fee_currency": str(row.get("feeCurrency") or "").strip().upper() or None,
-            "executed_at": _timestamp(row.get("execTime")),
+            "executed_at": executed_at,
             "raw_time": _number(row.get("execTime")) or 0.0,
         })
     normalized.sort(key=lambda item: (item["raw_time"], item["execution_id"]))
@@ -102,11 +103,14 @@ def build_learning_report(
     lots: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
     trades: list[dict[str, Any]] = []
     unmatched_sells = 0
+    unattributed_executions = 0
 
     for fill in fills:
-        order = orders.get(fill["order_id"], {})
+        order = orders.get(fill["order_id"])
         if not isinstance(order, dict):
-            order = {}
+            # Never fold manual/untracked account activity into the bot's PnL.
+            unattributed_executions += 1
+            continue
         if fill["side"] == "buy":
             decision = order.get("decision_snapshot")
             lots[fill["symbol"]].append({
@@ -184,6 +188,7 @@ def build_learning_report(
         and fee_complete
         and closed >= minimum_trades
         and len(net_values) == closed
+        and unattributed_executions == 0
     )
 
     symbol_stats: dict[str, dict[str, Any]] = {}
@@ -205,6 +210,8 @@ def build_learning_report(
         suggestions.append("Execution history is truncated; do not draw performance conclusions yet.")
     if not fee_complete and closed:
         suggestions.append("Some matched trades lack quote-currency fee data; net PnL is not fully verified.")
+    if unattributed_executions:
+        suggestions.append("Unattributed account executions were excluded; verify no manual or external orders affected this sample.")
     if closed < minimum_trades:
         suggestions.append(f"Collect at least {minimum_trades - closed} more completed trades before judging the strategy.")
     if metrics_ready and profit_factor is not None and profit_factor <= 1.0:
@@ -223,6 +230,7 @@ def build_learning_report(
         "closed_trades": closed,
         "open_lots": sum(len(queue) for queue in lots.values()),
         "unmatched_sell_executions": unmatched_sells,
+        "unattributed_executions": unattributed_executions,
         "fee_data_complete": fee_complete,
         "metrics_ready": metrics_ready,
         "minimum_trades_required": minimum_trades,
