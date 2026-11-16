@@ -545,6 +545,10 @@ def make_handler(dashboard: Dashboard):
                     )
                 elif path == "/api/paper/status":
                     self._send_json(200, dashboard.paper.status())
+                elif path == "/api/paper/learning":
+                    # Read-only feedback endpoint. It does not construct or start
+                    # the worker and cannot place, amend, or cancel an order.
+                    self._send_json(200, dashboard.paper.learning_report())
                 elif path == "/api/paper/account-check":
                     if dashboard.paper.execution_provider != EXECUTION_PROVIDER_BYBIT_DEMO:
                         self._send_json(409, {
