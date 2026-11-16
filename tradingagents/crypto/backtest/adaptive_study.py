@@ -209,57 +209,65 @@ def run_adaptive_backtest(
             if decision.blockers:
                 for blocker in decision.blockers:
                     result.rejections[blocker] = result.rejections.get(blocker, 0) + 1
-            if decision.action == "buy_candidate" and (
-                learning_policy is None or learning_policy.allows(decision.strategy, stamp)
-            ):
-                next_open = float(data.iloc[i + 1].open)
-            elif decision.action == "buy_candidate":
-                result.rejections["online learner blocked underperforming expert"] = (
-                    result.rejections.get("online learner blocked underperforming expert", 0) + 1
-                )
-                entry_fill = next_open * (1 + impact)
-                stop = float(decision.stop_price)
-                target = float(decision.target_price)
-                risk_per_unit = entry_fill - stop
-                cost_distance = (
-                    effective_config.estimated_round_trip_cost_bps / 10_000
-                ) * entry_fill
-                net_reward_risk = (
-                    (target - entry_fill - cost_distance)
-                    / (risk_per_unit + cost_distance)
-                    if risk_per_unit > 0 else float("-inf")
-                )
-                if (
-                    risk_per_unit <= 0
-                    or target <= entry_fill
-                    or net_reward_risk < effective_config.min_net_reward_risk
-                    or (target - entry_fill) < cost_distance * effective_config.min_edge_cost_multiple
+            if decision.action == "buy_candidate":
+                if learning_policy is not None and not learning_policy.allows(
+                    decision.strategy, stamp
                 ):
-                    result.rejections["next-open gap/cost invalidated net reward-risk"] = (
-                        result.rejections.get(
-                            "next-open gap/cost invalidated net reward-risk", 0
-                        ) + 1
+                    result.rejections["online learner blocked underperforming expert"] = (
+                        result.rejections.get("online learner blocked underperforming expert", 0) + 1
                     )
                 else:
-                    risk_budget = cash * portfolio.risk_fraction
-                    notional_cap = cash * portfolio.max_notional_fraction
-                    quantity = min(risk_budget / (risk_per_unit + cost_distance), notional_cap / entry_fill)
-                    entry_notional = quantity * entry_fill
-                    entry_fee = entry_notional * fee_rate
-                    if quantity > 0 and entry_notional + entry_fee <= cash:
-                        cash -= entry_notional + entry_fee
-                        result.total_fees += entry_fee
-                        result.total_spread_slippage += abs(entry_fill - next_open) * quantity
-                        position = {
-                            "entry_index": i + 1, "entry_time": frame.index[i + 1].isoformat(),
-                            "strategy": decision.strategy, "quantity": quantity,
-                            "entry_price": entry_fill, "entry_fee": entry_fee,
-                            "stop": stop, "target": target,
-                        }
-                    else:
-                        result.rejections["insufficient cash after entry fees"] = (
-                            result.rejections.get("insufficient cash after entry fees", 0) + 1
+                    next_open = float(data.iloc[i + 1].open)
+                    entry_fill = next_open * (1 + impact)
+                    stop = float(decision.stop_price)
+                    target = float(decision.target_price)
+                    risk_per_unit = entry_fill - stop
+                    cost_distance = (
+                        effective_config.estimated_round_trip_cost_bps / 10_000
+                    ) * entry_fill
+                    net_reward_risk = (
+                        (target - entry_fill - cost_distance)
+                        / (risk_per_unit + cost_distance)
+                        if risk_per_unit > 0 else float("-inf")
+                    )
+                    if (
+                        risk_per_unit <= 0
+                        or target <= entry_fill
+                        or net_reward_risk < effective_config.min_net_reward_risk
+                        or (target - entry_fill) < cost_distance * effective_config.min_edge_cost_multiple
+                    ):
+                        result.rejections["next-open gap/cost invalidated net reward-risk"] = (
+                            result.rejections.get(
+                                "next-open gap/cost invalidated net reward-risk", 0
+                            ) + 1
                         )
+                    else:
+                        risk_budget = cash * portfolio.risk_fraction
+                        notional_cap = cash * portfolio.max_notional_fraction
+                        quantity = min(
+                            risk_budget / (risk_per_unit + cost_distance),
+                            notional_cap / entry_fill,
+                        )
+                        entry_notional = quantity * entry_fill
+                        entry_fee = entry_notional * fee_rate
+                        if quantity > 0 and entry_notional + entry_fee <= cash:
+                            cash -= entry_notional + entry_fee
+                            result.total_fees += entry_fee
+                            result.total_spread_slippage += abs(entry_fill - next_open) * quantity
+                            position = {
+                                "entry_index": i + 1,
+                                "entry_time": frame.index[i + 1].isoformat(),
+                                "strategy": decision.strategy,
+                                "quantity": quantity,
+                                "entry_price": entry_fill,
+                                "entry_fee": entry_fee,
+                                "stop": stop,
+                                "target": target,
+                            }
+                        else:
+                            result.rejections["insufficient cash after entry fees"] = (
+                                result.rejections.get("insufficient cash after entry fees", 0) + 1
+                            )
         mark = cash
         if position is not None:
             if i >= position["entry_index"]:
