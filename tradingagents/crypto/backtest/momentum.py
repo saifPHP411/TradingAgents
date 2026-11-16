@@ -5,8 +5,8 @@ one fixed 24-hour holding period. No exchange/order integration exists here.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 import pandas as pd
 
