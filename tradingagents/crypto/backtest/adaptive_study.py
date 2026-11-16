@@ -374,8 +374,11 @@ def run_adaptive_walk_forward_study(
     # One independent learner per symbol. Each learner is frozen during a fold
     # and updated only after that symbol's fold has completely closed.
     learners = {symbol: OnlineExpertLearner() for symbol in ordered}
+    conservative_learners = {symbol: OnlineExpertLearner() for symbol in ordered}
     learning_fold_returns = []
     learning_all_rows = []
+    conservative_learning_fold_returns = []
+    conservative_learning_all_rows = []
     for fold_number, start in enumerate(range(warmup_bars, bar_count - test_bars + 1, test_bars), 1):
         end = start + test_bars - 1
         fold = {
@@ -437,6 +440,44 @@ def run_adaptive_walk_forward_study(
             ),
         }
         learning_fold_returns.append(fold["online_learning"]["equal_weight_net_return_pct"])
+
+        # Independent conservative-cost learner: it receives only its own
+        # prior closed-fold conservative outcomes, never realistic-cost labels.
+        conservative_rows = {}
+        conservative_costs = scenarios.get(
+            "conservative_estimate", AdaptiveExecutionCosts(15, 3, 5)
+        )
+        for symbol, frame in ordered.items():
+            learner = conservative_learners[symbol]
+            result = run_adaptive_backtest(
+                frame, config=config, execution=conservative_costs,
+                portfolio=base_portfolio, spread_bps=spread_bps,
+                start_index=start, end_index=end, learning_policy=learner,
+            )
+            metrics = result.metrics()
+            for trade in result.trades:
+                entry_notional = trade.quantity * trade.entry_price
+                net_return_pct = (
+                    trade.net_pnl / entry_notional * 100 if entry_notional > 0 else 0.0
+                )
+                learner.update(trade.strategy, trade.exit_time, net_return_pct)
+            metrics["learner_state_after_fold"] = learner.snapshot(
+                reference_index[end] + pd.Timedelta(nanoseconds=1)
+            )
+            conservative_rows[symbol] = metrics
+            conservative_learning_all_rows.append(metrics)
+        conservative_returns = [row["net_return_pct"] for row in conservative_rows.values()]
+        fold["online_learning_conservative"] = {
+            "equal_weight_net_return_pct": sum(conservative_returns) / len(conservative_returns),
+            "symbols": conservative_rows,
+            "policy": (
+                "independent per-symbol learner trained only on prior closed-fold "
+                "conservative-cost outcomes; fixed risk limits and conservative costs"
+            ),
+        }
+        conservative_learning_fold_returns.append(
+            fold["online_learning_conservative"]["equal_weight_net_return_pct"]
+        )
         folds.append(fold)
 
     summary = {}
@@ -506,6 +547,49 @@ def run_adaptive_walk_forward_study(
         "risk_limits_changed": False,
         "execution_costs_changed": False,
         "uses_only_prior_closed_fold_outcomes": True,
+    }
+    conservative_equity = base_portfolio.initial_cash
+    conservative_peak = conservative_equity
+    conservative_max_drawdown = 0.0
+    for value in conservative_learning_fold_returns:
+        conservative_equity *= 1 + value / 100
+        conservative_peak = max(conservative_peak, conservative_equity)
+        if conservative_peak > 0:
+            conservative_max_drawdown = max(
+                conservative_max_drawdown,
+                (conservative_peak - conservative_equity) / conservative_peak,
+            )
+    conservative_learning_wins = sum(
+        row["net_profit_on_winners"] for row in conservative_learning_all_rows
+    )
+    conservative_learning_losses = sum(
+        row["net_loss_on_losers"] for row in conservative_learning_all_rows
+    )
+    conservative_learning_trades = sum(
+        row["trades"] for row in conservative_learning_all_rows
+    )
+    summary["online_learning_conservative"] = {
+        "folds": len(conservative_learning_fold_returns),
+        "trades": conservative_learning_trades,
+        "compounded_oos_return_pct": (
+            conservative_equity / base_portfolio.initial_cash - 1
+        ) * 100,
+        "aggregate_profit_factor": (
+            conservative_learning_wins / conservative_learning_losses
+            if conservative_learning_losses else (
+                "infinite" if conservative_learning_wins else 0.0
+            )
+        ),
+        "expectancy_per_trade": (
+            sum(row["net_pnl"] for row in conservative_learning_all_rows)
+            / conservative_learning_trades if conservative_learning_trades else 0.0
+        ),
+        "positive_folds": sum(value > 0 for value in conservative_learning_fold_returns),
+        "max_drawdown_across_fold_returns_pct": conservative_max_drawdown * 100,
+        "risk_limits_changed": False,
+        "execution_costs_changed": False,
+        "uses_only_prior_closed_fold_outcomes": True,
+        "uses_conservative_cost_outcomes_only": True,
     }
     return {
         "study": "adaptive_multi_regime_chronological_oos",
