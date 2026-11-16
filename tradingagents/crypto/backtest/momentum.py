@@ -147,11 +147,13 @@ def run_momentum_screen(
 
     if not period_returns:
         raise ValueError("no completed trades or rebalance periods")
-    # Report contiguous thirds as quick chronological diagnostic slices.
-    chunk = max(1, len(period_returns) // 3)
-    for start in range(0, len(period_returns), chunk):
+    # Report exactly three contiguous chronological slices. Integer boundaries
+    # distribute any remainder without creating a fourth diagnostic segment.
+    for part in range(3):
+        start = part * len(period_returns) // 3
+        end = (part + 1) * len(period_returns) // 3
         value = 1.0
-        for r in period_returns[start:start + chunk]:
+        for r in period_returns[start:end]:
             value *= 1 + r
         fold_returns.append((value - 1) * 100)
 
