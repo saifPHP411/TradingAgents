@@ -3259,6 +3259,9 @@ class PaperTradingWorker:
         self.state.status = STATUS_STOPPED
         self.state.strategy_id = config.strategy_id
         self.last_cycle: CycleResult | None = None
+        # Read-only execution feedback is refreshed at most every 15 minutes;
+        # it never participates in the decision or order path.
+        self._last_learning_refresh_monotonic = 0.0
         # The decision id the source last handed this worker in the current run,
         # used only to keep the honest no-trade reason visible once the source
         # stops re-offering it. In-memory: a restart is a fresh observation.
@@ -3640,6 +3643,9 @@ class PaperTradingWorker:
                     self.state.cycles_completed += 1
                     self._save()
                     self._next_cycle_at = self._in_seconds(self.config.poll_interval_seconds)
+                # Independent, read-only feedback cadence. Any analytics failure
+                # is contained and cannot stop or alter the trading cycle.
+                self._refresh_learning_report_if_due()
             except Exception as exc:  # noqa: BLE001 - a cycle failure must not crash the process
                 self._fail_cycle(exc)
                 break
