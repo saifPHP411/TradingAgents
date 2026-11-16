@@ -47,12 +47,12 @@ jobs:
       - name: Install data-fetch dependencies
         run: python -m pip install --upgrade pip pandas numpy requests python-dotenv pydantic
 
-      - name: Fetch 14-day BTC 1m and 120-day multi-symbol 1h Binance candles
+      - name: Fetch 14-day BTC/ETH/BNB 1m and 2-year multi-symbol 1h Binance candles
         run: |
-          # TJR quick-screen data: 14 days of 1m bars for BTC only.
-          # Broader 1h history remains available to the multi-symbol studies below.
+          # TJR uses BTC only; regime-breakout requires 1m cache for BTC, ETH and BNB.
+          # Keep this fast 14-day multi-timeframe screen separate from the 2-year 1h adaptive study.
           python -m tradingagents.crypto.backtest.fetch \
-            --symbols BTC/USDT \
+            --symbols BTC/USDT ETH/USDT BNB/USDT \
             --interval 1m \
             --limit 20160 \
             --cache ./crypto-cache
