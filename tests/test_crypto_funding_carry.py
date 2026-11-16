@@ -8,12 +8,12 @@ def _fixture(next_rate=0.001, basis_change=0.0):
     return {
         "spot_1h": {
             str(t0 + 3_600_000): {"open": 100.0, "close": 100.0},
-            str(t1 + 3_600_000): {"open": 100.0 + basis_change, "close": 100.0},
+            str(t1 + 3_600_000): {"open": 100.0, "close": 100.0},
             str(t2 + 3_600_000): {"open": 100.0, "close": 100.0},
         },
         "perp_1h": {
             str(t0 + 3_600_000): {"open": 100.0, "close": 100.0},
-            str(t1 + 3_600_000): {"open": 100.0, "close": 100.0},
+            str(t1 + 3_600_000): {"open": 100.0 - basis_change, "close": 100.0},
             str(t2 + 3_600_000): {"open": 100.0, "close": 100.0},
         },
         "funding": [
@@ -62,7 +62,7 @@ def test_funding_costs_charge_four_legs_and_can_reverse_small_carry():
 
 
 def test_funding_basis_change_is_included_in_pnl():
-    data = _fixture(next_rate=0.001, basis_change=-1.0)
+    data = _fixture(next_rate=0.001, basis_change=1.0)
     result = simulate_symbol(
         "BTCUSDT", data, annualized_entry_threshold=0.10,
         costs={"commission_bps_per_fill": 0, "half_spread_bps_per_fill": 0,
