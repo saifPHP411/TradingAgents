@@ -587,7 +587,11 @@ class PortfolioBacktester:
             return
         sold = quantity
         exit_price = price
-        exit_fee = self.config.costs.fee_for_fill(quantity=sold, price=exit_price)
+        exit_fee = self.config.costs.fee_for_fill(
+            quantity=sold,
+            price=exit_price,
+            is_maker=order.order_type is OrderType.LIMIT,
+        )
         entry_fee_share = (
             position.entry_fees * (sold / position.quantity) if position.quantity else 0.0
         )
@@ -732,7 +736,11 @@ class PortfolioBacktester:
         blends it, rather than a single cumulative charge.
         """
         existing = self._open.get(order_symbol := item.order.symbol)
-        fees = self.config.costs.fee_for_fill(quantity=quantity, price=price)
+        fees = self.config.costs.fee_for_fill(
+            quantity=quantity,
+            price=price,
+            is_maker=item.order.order_type is OrderType.LIMIT,
+        )
         if existing is None:
             self._open[order_symbol] = OpenPosition(
                 symbol=order_symbol,
