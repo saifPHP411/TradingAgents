@@ -1794,6 +1794,20 @@ class BybitDemoBroker:
 
         return all_rows, truncated
 
+    def read_execution_history(
+        self, *, max_pages: int = 10
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Read the account's Spot execution rows for read-only performance analysis.
+
+        This calls only GET /v5/execution/list. It never submits, amends or cancels
+        an order. The caller must first confirm the account with connect().
+        """
+        if not self._state.confirmed:
+            raise BrokerError("the account has not been confirmed; call connect() first")
+        if isinstance(max_pages, bool) or not isinstance(max_pages, int) or max_pages < 1:
+            raise BrokerError("max_pages must be a positive integer")
+        return self._read_execution_rows(max_pages=max_pages)
+
     def _parse_order(self, payload: Any, fallback_client_id: str | None = None) -> BrokerOrder:
         if not isinstance(payload, dict):
             raise BrokerError("the broker order response was not the expected object")
