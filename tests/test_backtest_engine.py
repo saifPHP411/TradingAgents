@@ -1054,7 +1054,7 @@ def test_scheduled_open_exit_precedes_later_intraday_stop_and_target_touches():
         opens=[100.0, 100.0, 100.0, 105.0, 100.0, 100.0],
         closes=[100.0] * 6,
         highs=[101.0, 101.0, 101.0, 120.0, 101.0, 101.0],
-        lows=[99.0, 99.5, 99.5, 95.0, 99.0, 99.0],
+        lows=[99.5, 99.5, 99.5, 95.0, 99.0, 99.0],
     )
     config = BacktestConfig(
         holding_period_days=2,
