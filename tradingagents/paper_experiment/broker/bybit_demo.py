@@ -1759,9 +1759,9 @@ class BybitDemoBroker:
         the id names one trade, so the same trade is never counted twice no
         matter how many times the list is read.
 
-        The second element says whether the read was complete. A truncated
-        read is not evidence: a trade that was not read proves nothing about
-        what traded.
+        The second element is ``truncated``: True means a next-page cursor
+        remained after the page limit. A truncated read is not evidence: a
+        trade that was not read proves nothing about what traded.
         """
         all_rows: list[dict[str, Any]] = []
         cursor: str | None = None
@@ -1793,6 +1793,22 @@ class BybitDemoBroker:
             truncated = bool(cursor)
 
         return all_rows, truncated
+
+    def read_execution_history(
+        self, *, max_pages: int = 10
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Read the account's Spot execution rows for read-only performance analysis.
+
+        This calls only GET /v5/execution/list. It never submits, amends or cancels
+        an order. The caller must first confirm the account with connect().
+        Returns ``(rows, truncated)``; True means performance conclusions must
+        be withheld.
+        """
+        if not self._state.confirmed:
+            raise BrokerError("the account has not been confirmed; call connect() first")
+        if isinstance(max_pages, bool) or not isinstance(max_pages, int) or max_pages < 1:
+            raise BrokerError("max_pages must be a positive integer")
+        return self._read_execution_rows(max_pages=max_pages)
 
     def _parse_order(self, payload: Any, fallback_client_id: str | None = None) -> BrokerOrder:
         if not isinstance(payload, dict):

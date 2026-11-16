@@ -866,6 +866,69 @@ class PaperTradingController:
                 out[str(symbol)] = _strategy_row_from_record(record)
         return out
 
+    def learning_report(self) -> dict[str, Any]:
+        """Read Bybit Demo executions and produce a strategy-feedback report.
+
+        Read-only: this creates a stateless broker reader, confirms the Demo
+        account, and calls only the execution-history GET endpoint. It never
+        builds or starts the PaperTradingWorker and never submits an order.
+        """
+        if self.execution_provider != EXECUTION_PROVIDER_BYBIT_DEMO:
+            return {
+                "mode": "read_only_feedback",
+                "available": False,
+                "reason": "learning analytics currently supports Bybit Demo Spot only",
+            }
+
+        from ..broker.bybit_demo import BybitDemoBroker
+        from ..learning import build_learning_report
+
+        worker_path = self._worker_state_path()
+        try:
+            worker_payload = json.loads(worker_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            worker_payload = {"orders": {}}
+        except (OSError, json.JSONDecodeError) as exc:
+            return {
+                "mode": "read_only_feedback",
+                "available": False,
+                "reason": f"worker state could not be read ({type(exc).__name__})",
+            }
+        if not isinstance(worker_payload, dict):
+            return {
+                "mode": "read_only_feedback",
+                "available": False,
+                "reason": "worker state is not a JSON object",
+            }
+
+        broker_state_path = worker_path.with_name("broker_state.json")
+        try:
+            broker = BybitDemoBroker(state_path=broker_state_path)
+            broker.connect()
+            rows, truncated = broker.read_execution_history(max_pages=10)
+            broker_orders = getattr(getattr(broker, "_state", None), "orders", {}) or {}
+            known_orders = dict(broker_orders)
+            known_orders.update(worker_payload.get("orders") or {})
+            learning_state = {**worker_payload, "orders": known_orders}
+            report = build_learning_report(
+                learning_state,
+                rows,
+                history_complete=not truncated,
+            )
+            report["available"] = True
+            report["execution_provider"] = EXECUTION_PROVIDER_BYBIT_DEMO
+            report["endpoint"] = _endpoint_for_provider(self.execution_provider)
+            return report
+        except Exception as exc:  # noqa: BLE001 - no secrets or raw transport text
+            return {
+                "mode": "read_only_feedback",
+                "available": False,
+                "execution_provider": EXECUTION_PROVIDER_BYBIT_DEMO,
+                "reason": f"execution history unavailable ({type(exc).__name__})",
+                "strategy_mutation_enabled": False,
+                "automatic_promotion_enabled": False,
+            }
+
     def _source_state_filename(self) -> str:
         """The decision source's own state file, per the configured source kind.
 

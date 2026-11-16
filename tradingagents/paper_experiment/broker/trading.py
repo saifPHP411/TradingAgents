@@ -60,6 +60,7 @@ import math
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -3259,6 +3260,9 @@ class PaperTradingWorker:
         self.state.status = STATUS_STOPPED
         self.state.strategy_id = config.strategy_id
         self.last_cycle: CycleResult | None = None
+        # Read-only execution feedback is refreshed at most every 15 minutes;
+        # it never participates in the decision or order path.
+        self._last_learning_refresh_monotonic = 0.0
         # The decision id the source last handed this worker in the current run,
         # used only to keep the honest no-trade reason visible once the source
         # stops re-offering it. In-memory: a restart is a fresh observation.
@@ -3640,9 +3644,65 @@ class PaperTradingWorker:
                     self.state.cycles_completed += 1
                     self._save()
                     self._next_cycle_at = self._in_seconds(self.config.poll_interval_seconds)
+                # Independent, read-only feedback cadence. Any analytics failure
+                # is contained and cannot stop or alter the trading cycle.
+                self._refresh_learning_report_if_due()
             except Exception as exc:  # noqa: BLE001 - a cycle failure must not crash the process
                 self._fail_cycle(exc)
                 break
+
+    def _refresh_learning_report_if_due(self) -> None:
+        """Persist a read-only Bybit Demo feedback report every 15 minutes.
+
+        This runs after a completed decision cycle. It reads execution history
+        only; it never feeds suggestions back into TJR, changes risk, or places
+        or modifies an order.
+        """
+        if self.config.execution_provider != EXECUTION_PROVIDER_BYBIT_DEMO:
+            return
+        broker = self._broker
+        state_path = self.config.state_path
+        if broker is None or state_path is None:
+            return
+        now = time.monotonic()
+        last_refresh = self._last_learning_refresh_monotonic
+        if last_refresh > 0.0 and now - last_refresh < 900.0:
+            return
+        self._last_learning_refresh_monotonic = now
+        report_path = Path(state_path).with_name("learning_report.json")
+        try:
+            read_history = getattr(broker, "read_execution_history", None)
+            if not callable(read_history):
+                return
+            rows, truncated = read_history(max_pages=10)
+            from ..learning import build_learning_report
+
+            broker_orders = getattr(getattr(broker, "_state", None), "orders", {}) or {}
+            known_orders = dict(broker_orders)
+            known_orders.update(self.state.orders or {})
+            learning_state = {"orders": known_orders}
+            report = build_learning_report(
+                learning_state,
+                rows,
+                history_complete=not truncated,
+            )
+            report["available"] = True
+            report["execution_provider"] = EXECUTION_PROVIDER_BYBIT_DEMO
+        except Exception as exc:  # noqa: BLE001 - feedback must not affect trading
+            report = {
+                "schema_version": 1,
+                "observed_at": datetime.now(UTC).isoformat(),
+                "mode": "read_only_feedback",
+                "available": False,
+                "reason": f"execution history unavailable ({type(exc).__name__})",
+                "strategy_mutation_enabled": False,
+                "automatic_promotion_enabled": False,
+            }
+        try:
+            _atomic_write(report_path, json.dumps(report, indent=2) + "\n")
+        except (OSError, TypeError, ValueError):
+            # Feedback persistence is best-effort and must never affect orders.
+            return
 
     def _observation_interval(self) -> float | None:
         """How often the market-data seam is re-read, or ``None`` for no tick.
@@ -3821,7 +3881,21 @@ class PaperTradingWorker:
             self._mark_ordered(decision.decision_id)
             self.state.last_no_trade_decision_id = None
             self.state.last_no_trade_decision_code = None
-            self._record_order(order)
+            self._record_order(
+                order,
+                decision_id=decision.decision_id,
+                decision_snapshot={
+                    "symbol": decision.symbol,
+                    "side": decision.side,
+                    "notional": decision.notional,
+                    "quantity": decision.quantity,
+                    "rationale": decision.rationale,
+                    "stop_loss": decision.stop_loss,
+                    "take_profit": decision.take_profit,
+                    "targets": list(decision.targets or ()),
+                    "strategy_name": decision.strategy_name,
+                },
+            )
             result = CycleResult(
                 ran=False,
                 decision_id=decision.decision_id,
@@ -4136,7 +4210,21 @@ class PaperTradingWorker:
         self.state.last_no_trade_code = None
         self.state.last_no_trade_decision_id = None
         self.state.last_no_trade_decision_code = None
-        self._record_order(order)
+        self._record_order(
+            order,
+            decision_id=decision.decision_id,
+            decision_snapshot={
+                "symbol": decision.symbol,
+                "side": decision.side,
+                "notional": decision.notional,
+                "quantity": decision.quantity,
+                "rationale": decision.rationale,
+                "stop_loss": decision.stop_loss,
+                "take_profit": decision.take_profit,
+                "targets": list(decision.targets or ()),
+                "strategy_name": decision.strategy_name,
+            },
+        )
         self._record_exit_levels(decision, order)
         result = CycleResult(
             ran=True,
@@ -5464,8 +5552,20 @@ class PaperTradingWorker:
             raise WorkerError("the worker has no broker")
         return broker._reconcile(client_order_id)
 
-    def _record_order(self, order: BrokerOrder) -> None:
-        self.state.orders[order.client_order_id] = {
+    def _record_order(
+        self,
+        order: BrokerOrder,
+        *,
+        decision_id: str | None = None,
+        decision_snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        # Reconciliation updates the venue fields but must preserve the original
+        # decision attribution. This is the join key used by the read-only
+        # learning report; it never participates in order sizing or execution.
+        previous = self.state.orders.get(order.client_order_id, {})
+        if not isinstance(previous, dict):
+            previous = {}
+        record = {
             "client_order_id": order.client_order_id,
             "broker_order_id": order.broker_order_id,
             "symbol": order.symbol,
@@ -5476,6 +5576,15 @@ class PaperTradingWorker:
             "status": order.status,
             "submitted_at": order.submitted_at,
         }
+        if decision_id is not None:
+            record["decision_id"] = decision_id
+        elif previous.get("decision_id") is not None:
+            record["decision_id"] = previous["decision_id"]
+        if decision_snapshot is not None:
+            record["decision_snapshot"] = dict(decision_snapshot)
+        elif isinstance(previous.get("decision_snapshot"), dict):
+            record["decision_snapshot"] = dict(previous["decision_snapshot"])
+        self.state.orders[order.client_order_id] = record
         self._save()
 
     def _apply_broker_fill(self, order: BrokerOrder) -> None:

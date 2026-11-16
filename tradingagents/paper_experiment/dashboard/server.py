@@ -545,6 +545,10 @@ def make_handler(dashboard: Dashboard):
                     )
                 elif path == "/api/paper/status":
                     self._send_json(200, dashboard.paper.status())
+                elif path == "/api/paper/learning":
+                    # Read-only feedback endpoint. It does not construct or start
+                    # the worker and cannot place, amend, or cancel an order.
+                    self._send_json(200, dashboard.paper.learning_report())
                 elif path == "/api/paper/account-check":
                     if dashboard.paper.execution_provider != EXECUTION_PROVIDER_BYBIT_DEMO:
                         self._send_json(409, {
@@ -1548,6 +1552,15 @@ INDEX_HTML = """<!doctype html>
         <div id="eng-exits"></div>
       </div>
       <div class="card" style="margin-top:12px">
+        <h2>Trade feedback &amp; learning <span class="spacer"></span>
+          <button class="act ghost" onclick="refreshLearning()">Analyze Demo executions</button></h2>
+        <p class="muted" style="margin:0 0 12px">
+          Read-only review of Bybit Demo fills and actual quote-currency fees.
+          It does not train or change the strategy, risk limits, or orders.
+        </p>
+        <div id="learning-report" class="kv">Not analyzed yet. Press Analyze Demo executions.</div>
+      </div>
+      <div class="card" style="margin-top:12px">
         <h2>Last cycle <span class="spacer"></span>
           <button class="act ghost" onclick="refreshEngine()">Refresh</button></h2>
         <div id="eng-lasterr" class="err" style="display:none"></div>
@@ -1978,6 +1991,47 @@ async function doBybitAccountCheck(){
     showErr(e.message);
   }finally{
     button.disabled = false;
+  }
+}
+async function refreshLearning(){
+  const target = $("learning-report");
+  target.textContent = "Reading Bybit Demo execution history…";
+  try{
+    const r = await api("/api/paper/learning");
+    if(!r.available){
+      target.textContent = r.reason || "Learning report unavailable.";
+      return;
+    }
+    const rows = {
+      "Completed trades": r.closed_trades,
+      "Execution rows": r.execution_rows,
+      "History complete": r.history_complete ? "yes" : "NO — truncated",
+      "Fees verified": r.fee_data_complete ? "yes" : "NO",
+      "Metrics ready": r.metrics_ready ? "yes" : "collecting more evidence",
+      "Net PnL": r.net_pnl===null ? "N/A" : money(r.net_pnl) + " USDT",
+      "Net win rate": r.net_win_rate===null ? "N/A" : (100*r.net_win_rate).toFixed(1)+"%",
+      "Net profit factor": r.net_profit_factor===null ? "N/A" : num(r.net_profit_factor,3),
+      "Net expectancy": r.net_expectancy===null ? "N/A" : money(r.net_expectancy)+" USDT/trade",
+      "Strategy changes": "disabled",
+      "Automatic promotion": "disabled"
+    };
+    let html = kv(rows);
+    if(r.suggestions && r.suggestions.length){
+      html += '<h3 style="margin:14px 0 8px">Observations</h3><ul>' +
+        r.suggestions.map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul>';
+    }
+    if(r.by_symbol && Object.keys(r.by_symbol).length){
+      html += '<h3 style="margin:14px 0 8px">By symbol</h3>'+kv(
+        Object.fromEntries(Object.entries(r.by_symbol).map(([k,v])=>[
+          k, v.net_pnl===null ? (v.closed_trades+" trades · net PnL N/A")
+            : (v.closed_trades+" trades · "+money(v.net_pnl)+" USDT")
+        ]))
+      );
+    }
+    target.innerHTML = html;
+  }catch(e){
+    target.textContent = "Learning report failed: " + e.message;
+    showErr(e.message);
   }
 }
 
