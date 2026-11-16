@@ -347,3 +347,32 @@ def test_crypto_tjr_does_not_open_a_new_position_at_the_utc_session_close(monkey
     assert engine.ledger.position_quantity("BTC/USDT") == 0.0
     assert engine.result.entries_per_session == {}
     assert engine.result.trades == []
+
+
+def test_a_gap_below_the_stop_fills_at_the_bar_open_not_the_stop_level():
+    bars = BULLISH_BARS[:15] + [
+        (95.0, 95.5, 94.0, 95.2),
+    ]
+    result = _run(bars)
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_reason == "stop"
+    assert trade.stop is not None
+    assert trade.stop > 95.0
+    assert trade.exit_price == pytest.approx(95.0)
+    assert trade.net_pnl < (trade.stop - trade.entry_price) * trade.quantity
+
+
+def test_a_favorable_gap_above_the_target_gets_open_price_improvement():
+    bars = BULLISH_BARS[:15] + [
+        (110.0, 112.0, 109.0, 111.0),
+    ]
+    result = _run(bars)
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_reason == "target"
+    assert trade.target is not None
+    assert trade.target < 110.0
+    assert trade.exit_price == pytest.approx(110.0)
