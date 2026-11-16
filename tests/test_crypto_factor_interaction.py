@@ -60,6 +60,8 @@ def test_factor_interaction_is_research_only_and_uses_next_open_fills():
     assert report["research_only"] is True
     assert report["strategy"] == "weekly_refit_cross_sectional_factor_interaction_ridge"
     assert report["folds"] >= 1
+    assert "equal_weight_universe_buy_hold_20pct_return_pct" in report
+    assert "btc_buy_hold_20pct_return_pct" in report
     assert report["aggregate"]["trades"] == len(report["trade_log"])
     assert all(t["entry_time"] > t["signal_time"] for t in report["trade_log"])
     assert all(t["exit_time"] > t["entry_time"] for t in report["trade_log"])
