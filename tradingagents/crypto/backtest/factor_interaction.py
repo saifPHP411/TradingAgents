@@ -103,8 +103,9 @@ def _validate_frames(frames: Mapping[str, pd.DataFrame]) -> tuple[list[str], pd.
         raise ValueError("at least 1000 completed common hourly bars are required")
     if not (common.to_series().diff().dropna() == pd.Timedelta(hours=1)).all():
         raise ValueError("common hourly timestamps contain gaps")
-    if any(not frames[s].index.equals(common) for s in symbols):
-        raise ValueError("all symbols must share the exact same hourly timestamps")
+    # Endpoint lengths can differ when an asset listing begins later or one
+    # fetch ends a bar earlier. The caller reindexes every frame to this exact
+    # timestamp intersection; no forward-fill or synthetic candles are allowed.
     return symbols, common
 
 
