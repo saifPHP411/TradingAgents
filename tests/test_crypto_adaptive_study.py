@@ -339,3 +339,36 @@ def test_adaptive_period_and_holding_bar_counts_must_be_integers():
         AdaptivePortfolio(max_holding_bars=float("nan"))
     with pytest.raises(ValueError, match="max_holding_bars.*integer"):
         AdaptivePortfolio(max_holding_bars=1.5)
+
+
+
+def test_online_learner_blocks_an_expert_using_only_prior_closed_results(monkeypatch):
+    from tradingagents.crypto.backtest.learning import OnlineExpertLearner
+    import tradingagents.crypto.backtest.adaptive_study as module
+
+    frame = _flat_frame(70)
+
+    def candidate(data, features, index, **kwargs):
+        if index == 55:
+            return AdaptiveDecision(
+                "buy_candidate", "bull_trend", "trend_pullback", .8,
+                100.0, 99.0, 103.0, ("test setup",), (), {},
+            )
+        return AdaptiveDecision("no_trade", "uncertain", "none", 0, None, None, None)
+
+    learner = OnlineExpertLearner(min_observations=2)
+    learner.update("trend_pullback", "2024-12-30T00:00:00+00:00", -1.0)
+    learner.update("trend_pullback", "2024-12-31T00:00:00+00:00", -1.0)
+    monkeypatch.setattr(module, "_analyze_market_at", candidate)
+    result = run_adaptive_backtest(
+        frame,
+        execution=AdaptiveExecutionCosts(0, 0, 0),
+        portfolio=AdaptivePortfolio(
+            initial_cash=1000, risk_fraction=.01, max_notional_fraction=.5
+        ),
+        start_index=55,
+        end_index=60,
+        learning_policy=learner,
+    )
+    assert result.trades == []
+    assert result.rejections["online learner blocked underperforming expert"] == 1
