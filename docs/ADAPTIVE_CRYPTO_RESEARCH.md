@@ -153,3 +153,36 @@ account fees/spread/slippage, model partial fills and order lifecycle, and pass
 predefined after-cost robustness gates across symbols and market regimes.
 The research branch remains isolated; none of these studies is connected to the
 paper worker or dashboard order path.
+
+
+## Newer exact-head verification — 2026-11-16 (supersedes the earlier figures above)
+
+A newer run was completed against documentation/PR head
+`8567fb56a9051831198f6e1f512e884a2b7763e8`:
+- CI run [43883034014](https://github.com/saifPHP411/TradingAgents/actions/runs/43883034014): all six jobs passed (Python 3.11–3.14, strict Ruff, clean-install smoke).
+- Research run [43883033954](https://github.com/saifPHP411/TradingAgents/actions/runs/43883033954): all four jobs passed (bounded history fetch, adaptive OOS, TJR screen, regime-breakout OOS).
+- Artifacts inspected: adaptive `14233164276`, TJR `14233652539`, regime breakout `14234305208`.
+
+The exact newer adaptive artifact reports:
+| Model | Compounded OOS | Net PF | Trades | Positive folds |
+|---|---:|---:|---:|---:|
+| Fixed baseline, realistic | -0.1795% | 0.9835 | 731 | 26/82 |
+| Fixed baseline, conservative | -0.5851% | 0.9324 | 502 | 23/82 |
+| Online learner, realistic | +0.5700% | 1.1000 | 435 | 24/82 |
+| Online learner, conservative | +0.0821% | 1.0175 | 306 | 16/82 |
+| Frictionless baseline (diagnostic) | +1.3192% | 1.1207 | 976 | 33/82 |
+
+Despite positive aggregate learner totals, the learner's fold consistency remains weak (24/82 and 16/82 positive folds), and the fixed baseline loses after both cost assumptions. The results remain simulated on Binance public Spot candles, not Bybit fills.
+
+The newer TJR artifact covers 15 BTC/USDT trades from 2026-11-02 to 2026-11-16:
+- Realistic: final equity 99,823.65 from 100,000 (-0.1764%), PF 0.1936, expectancy -11.76, 1 win / 14 losses.
+- Conservative: final equity 99,688.94 (-0.3111%), PF 0.0966, expectancy -20.74, 1 win / 14 losses.
+- Frictionless: final equity 100,018.53 (+0.0185%), PF 1.3460, 4 wins / 11 losses.
+This reinforces that the tiny gross edge is erased by modeled costs.
+
+The regime-breakout artifact (3 symbols, 172 chronological folds) is also negative:
+- Realistic: -3.4616% compounded OOS, PF 0.8437, expectancy -1.7001, 54/172 positive folds.
+- Conservative: -6.9588%, PF 0.7114, expectancy -3.5195, 47/172 positive folds.
+- Frictionless diagnostic: +1.4288%, PF 1.0765.
+
+**Decision remains NO-GO for Worker activation.** Green CI means code checks passed; it does not reverse the negative after-cost evidence or validate Bybit execution. Railway remains on the production/demo-ready branch; the research PR remains open and draft. No Worker was started and no orders were submitted.
