@@ -49,10 +49,12 @@ jobs:
 
       - name: Fetch 120 days of public Binance candles
         run: |
+          # TJR quick-screen data: 14 days of 1m bars for BTC only.
+          # Broader 1h history remains available to the multi-symbol studies below.
           python -m tradingagents.crypto.backtest.fetch \
-            --symbols BTC/USDT ETH/USDT BNB/USDT \
+            --symbols BTC/USDT \
             --interval 1m \
-            --limit 172800 \
+            --limit 20160 \
             --cache ./crypto-cache
           python -m tradingagents.crypto.backtest.fetch \
             --symbols BTC/USDT ETH/USDT BNB/USDT SOL/USDT XRP/USDT DOGE/USDT AVAX/USDT LINK/USDT LTC/USDT BCH/USDT \
@@ -70,10 +72,10 @@ jobs:
           compression-level: 1
 
   tjr-study:
-    name: TJR cost-scenario study
+    name: TJR quick cost-scenario screen
     needs: fetch-history
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -93,12 +95,12 @@ jobs:
           name: crypto-history-cache
           path: crypto-cache/
 
-      - name: Run TJR study with explicit frictionless, realistic and conservative costs
+      - name: Run fast 14-day BTC TJR screen with explicit frictionless, realistic and conservative costs
         run: |
           mkdir -p artifacts
           python -m tradingagents.crypto.backtest.run \
-            --symbols BTC/USDT ETH/USDT BNB/USDT \
-            --periods 7 30 \
+            --symbols BTC/USDT \
+            --periods 7 14 \
             --cache ./crypto-cache \
             --no-sensitivity \
             --out artifacts/crypto_tjr_study.json \
