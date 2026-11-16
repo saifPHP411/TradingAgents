@@ -3676,8 +3676,12 @@ class PaperTradingWorker:
             rows, truncated = read_history(max_pages=10)
             from ..learning import build_learning_report
 
+            broker_orders = getattr(getattr(broker, "_state", None), "orders", {}) or {}
+            known_orders = dict(broker_orders)
+            known_orders.update(self.state.orders or {})
+            learning_state = {**self.state.to_dict(), "orders": known_orders}
             report = build_learning_report(
-                self.state.to_dict(),
+                learning_state,
                 rows,
                 history_complete=not truncated,
             )
