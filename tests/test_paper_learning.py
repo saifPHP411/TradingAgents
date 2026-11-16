@@ -85,3 +85,32 @@ def test_insufficient_sample_does_not_claim_a_strategy_edge():
     assert report["metrics_ready"] is False
     assert report["net_win_rate"] is None
     assert any("more completed trades" in item for item in report["suggestions"])
+
+
+def test_worker_order_reconciliation_preserves_decision_attribution():
+    from types import SimpleNamespace
+
+    from tradingagents.paper_experiment.broker.trading import PaperTradingWorker, WorkerState
+
+    worker = PaperTradingWorker.__new__(PaperTradingWorker)
+    worker.state = WorkerState()
+    worker._store = None
+    order = SimpleNamespace(
+        client_order_id="entry-1",
+        broker_order_id="venue-1",
+        symbol="BTCUSDT",
+        side="buy",
+        quantity=0.1,
+        filled_quantity=0.1,
+        filled_avg_price=100.0,
+        status="filled",
+        submitted_at="2026-01-01T00:00:00+00:00",
+    )
+    snapshot = {"strategy_name": "tjr", "stop_loss": 95.0}
+    worker._record_order(order, decision_id="decision-1", decision_snapshot=snapshot)
+    order.filled_avg_price = 101.0
+    worker._record_order(order)
+    record = worker.state.orders["entry-1"]
+    assert record["decision_id"] == "decision-1"
+    assert record["decision_snapshot"] == snapshot
+    assert record["filled_avg_price"] == 101.0
