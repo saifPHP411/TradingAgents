@@ -391,6 +391,12 @@ class TjrBacktester:
     def _process_entries(
         self, session: str, instant: pd.Timestamp, day_start_equity: float
     ) -> None:
+        # The final close instant belongs to the previous session's last bar,
+        # but the next bar may already exist at the next session's open. Never
+        # turn a signal formed on that boundary into a fill in the next session
+        # and then close it against the previous session's final close.
+        if instant >= self.session_policy.session_close_utc(session):
+            return
         for symbol in self.symbols:
             if symbol in self._open:
                 continue
