@@ -228,10 +228,13 @@ def simulate_symbol(symbol: str, data: dict[str, Any], *, annualized_entry_thres
         funding_return = 0.0
         while exit_index < len(funding):
             settled = funding[exit_index]
-            funding_return += float(settled["rate"]) * (perp_entry / spot_entry)
+            settled_ts = int(settled["timestamp"])
+            funding_mark = _bar_at_or_after(perp, settled_ts)
+            if not funding_mark or funding_mark[1]["open"] <= 0:
+                raise RuntimeError(f"missing valid perpetual mark at funding settlement for {symbol}")
+            funding_return += float(settled["rate"]) * (funding_mark[1]["open"] / spot_entry)
             if exit_index == len(funding) - 1:
                 break
-            settled_ts = int(settled["timestamp"])
             following_ts = int(funding[exit_index + 1]["timestamp"])
             following_interval = following_ts - settled_ts
             if following_interval <= 0 or following_interval > 12 * HOUR_MS:
