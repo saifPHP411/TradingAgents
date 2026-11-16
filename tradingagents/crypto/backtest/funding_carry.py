@@ -221,11 +221,16 @@ def simulate_symbol(symbol: str, data: dict[str, Any], *, annualized_entry_thres
         spot_exit, perp_exit = sb1["open"], pb1["open"]
         if min(spot_entry, perp_entry, spot_exit, perp_exit) <= 0:
             continue
-        basis_pnl_fraction = (spot_exit / spot_entry - 1) - (perp_exit / perp_entry - 1)
+        # Equal base quantity on both legs: normalize the actual price PnL by
+        # initial Spot notional. This captures basis drift without assuming the
+        # Spot and Perp entry prices are identical.
+        basis_pnl_fraction = ((spot_exit - spot_entry) - (perp_exit - perp_entry)) / spot_entry
         realized_funding_rate = float(following["rate"])
         funding_return = realized_funding_rate * (perp_entry / spot_entry)
-        # Four executions: buy/sell Spot and sell/buy Perp.
-        cost_fraction = 4 * total_cost_bps / 10_000
+        # Four executions: Spot buy/sell and Perp sell/buy. Charge each fill
+        # against its own approximate notional, rather than assuming all prices match.
+        traded_notionals_over_initial = (spot_entry + spot_exit + perp_entry + perp_exit) / spot_entry
+        cost_fraction = traded_notionals_over_initial * total_cost_bps / 10_000
         net_return = basis_pnl_fraction + funding_return - cost_fraction
         rows.append({
             "symbol": symbol, "entry_ms": entry_ms, "exit_ms": exit_ms,
@@ -244,7 +249,10 @@ def simulate_symbol(symbol: str, data: dict[str, Any], *, annualized_entry_thres
         elapsed_days = max(0.0, (int(funding[-1]["timestamp"]) -
                                   int(funding[0]["timestamp"])) / (24 * HOUR_MS))
     summary = _metrics(rows, initial_capital, elapsed_days)
+    spot_times = sorted(spot)
+    benchmark_return = (spot[spot_times[-1]]["close"] / spot[spot_times[0]]["close"] - 1) * 100 if len(spot_times) > 1 else None
     summary.update({
+        "spot_buy_and_hold_return_pct": round(benchmark_return, 6) if benchmark_return is not None else None,
         "symbol": symbol,
         "entry_threshold_annualized_pct": annualized_entry_threshold * 100,
         "costs_per_fill_bps": costs,
