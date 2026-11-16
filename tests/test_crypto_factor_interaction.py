@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -63,6 +65,7 @@ def test_factor_interaction_is_research_only_and_uses_next_open_fills():
     assert "equal_weight_universe_buy_hold_20pct_return_pct" in report
     assert "btc_buy_hold_20pct_return_pct" in report
     assert report["aggregate"]["trades"] == len(report["trade_log"])
+    json.dumps(report)
     assert all(t["entry_time"] > t["signal_time"] for t in report["trade_log"])
     assert all(t["exit_time"] > t["entry_time"] for t in report["trade_log"])
     assert all(0 < t["allocation_pct"] <= 10 for t in report["trade_log"])
