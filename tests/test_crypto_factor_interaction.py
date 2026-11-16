@@ -116,3 +116,11 @@ def test_factor_interaction_drops_currently_forming_hour():
     )
     assert report["last_bar"] == (end - pd.Timedelta(hours=1)).isoformat()
     assert report["bars"] == 1199
+
+def test_factor_interaction_aligns_endpoint_differences_without_filling():
+    frames = _frames()
+    frames["ETH/USDT"] = frames["ETH/USDT"].iloc[1:]
+    report = run_factor_interaction_study(
+        frames, costs=FactorCosts(0, 0, 0), config=_config()
+    )
+    assert report["bars"] == 1199
