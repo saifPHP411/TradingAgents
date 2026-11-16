@@ -77,7 +77,7 @@ def test_incomplete_history_never_marks_metrics_ready():
 
 
 def test_insufficient_sample_does_not_claim_a_strategy_edge():
-    worker = {"orders": {}}
+    worker = {"orders": {"buy-1": {"side": "buy"}, "sell-1": {"side": "sell"}}}
     rows = [
         _fill("b1", "buy-1", "Buy", 1, 100, 0.1, 1000),
         _fill("s1", "sell-1", "Sell", 1, 110, 0.1, 2000),
