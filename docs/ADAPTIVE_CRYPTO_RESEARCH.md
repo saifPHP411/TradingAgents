@@ -90,11 +90,19 @@ it blocks an expert only when the lower 95% confidence bound of its mean net
 trade return is not positive. The learner has bounded observation memory and
 requires timezone-aware chronological timestamps.
 
-This overlay may abstain from an expert; it cannot change strategy parameters,
+The study reports two independent learning overlays: one trained and evaluated
+using realistic-cost outcomes, and one trained and evaluated using conservative-
+cost outcomes only. Their learners are separate per symbol and per cost scenario;
+conservative labels are never mixed with realistic labels. Both are updated only
+after each fold closes. This tests whether the gating effect survives a harsher
+cost assumption, but it is not nested hyperparameter selection and does not create
+an untouched holdout.
+
+These overlays may abstain from an expert; they cannot change strategy parameters,
 position sizing, risk fractions, notional caps, stops, targets, or cost
-assumptions. It does not train on open or hypothetical trades, and it has no
-exchange, worker, or order integration. The learning-overlay report is
-evaluated separately from the fixed baseline and is not evidence of a live
-learning advantage. Any future model/parameter adaptation must use nested
-chronological selection and a genuinely unseen future holdout; the already
-inspected historical sample is not a locked final holdout.
+assumptions. They do not train on open or hypothetical trades, and have no
+exchange, worker, or order integration. Learning-overlay reports are evaluated
+separately from the fixed baseline and are not evidence of a live learning
+advantage. Any future model/parameter adaptation must use nested chronological
+selection and a genuinely unseen future holdout; the already inspected historical
+sample is not a locked final holdout.
