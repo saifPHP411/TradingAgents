@@ -43,7 +43,7 @@ jobs:
         run: python -m pip install pandas requests python-dotenv
       - name: Collect public Bybit Spot trades and evaluate fixed imbalance rule
         run: |
-          python -m tradingagents.crypto.backtest.orderflow_probe \
+          python tradingagents/crypto/backtest/orderflow_probe.py \
             --duration-seconds "${{ inputs.duration_seconds || 600 }}" \
             --out artifacts/bybit_orderflow_probe.json
       - name: Upload probe report
