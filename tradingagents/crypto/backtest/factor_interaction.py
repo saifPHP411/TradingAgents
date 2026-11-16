@@ -179,6 +179,17 @@ def _fit_ridge(x: np.ndarray, y: np.ndarray, alpha: float) -> tuple[np.ndarray, 
     return coef, mean, scale
 
 
+def _to_python(value):
+    """Recursively convert NumPy scalars to JSON-safe Python primitives."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {key: _to_python(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_python(item) for item in value]
+    return value
+
+
 def _metrics(values: list[float]) -> dict:
     winners = [v for v in values if v > 0]
     losers = [-v for v in values if v < 0]
@@ -346,7 +357,7 @@ def run_factor_interaction_study(
         peak = max(peak, value)
         max_drawdown = max(max_drawdown, (peak - value) / peak if peak else 0.0)
     metrics = _metrics(trade_returns)
-    return {
+    return _to_python({
         "strategy": "weekly_refit_cross_sectional_factor_interaction_ridge",
         "data_interval": "1h",
         "symbols": symbols,
@@ -397,4 +408,4 @@ def run_factor_interaction_study(
             "Rolling 180-day training, 24-hour purged labels, weekly non-overlapping OOS folds; "
             "no parameter search and no use of future labels in training."
         ),
-    }
+    })
