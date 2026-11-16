@@ -258,3 +258,92 @@ def test_the_signal_for_a_completed_setup_is_a_buy_with_levels():
     assert signal.stop_loss == evaluation.stop
     assert signal.take_profit == evaluation.target
     assert signal.position_size is None
+
+
+@pytest.mark.unit
+def test_crypto_tjr_does_not_open_a_new_position_at_the_utc_session_close(monkeypatch):
+    import pandas as pd
+
+    from tradingagents.execution import CostModel
+    from tradingagents.risk import RiskLimits
+    from tradingagents.signals.contract import TradingSignal
+    from tradingagents.tjr.engine import TjrBacktester, TjrConfig
+    from tradingagents.tjr.frames import IntradaySeries
+    from tradingagents.tjr.rules import TjrEvaluation
+    from tradingagents.tjr.sessions import utc_day_session
+
+    session = "2026-11-16"
+    boundary = pd.Timestamp("2026-11-17T00:00:00Z")
+    index = pd.to_datetime(
+        [
+            "2026-11-16T23:50:00Z",
+            "2026-11-16T23:55:00Z",
+            "2026-11-17T00:00:00Z",
+            "2026-11-17T00:05:00Z",
+        ],
+        utc=True,
+    )
+    prices = [100.0, 101.0, 102.0, 103.0]
+    frame = pd.DataFrame(
+        {
+            "open": prices,
+            "high": [p + 1.0 for p in prices],
+            "low": [p - 1.0 for p in prices],
+            "close": [p + 0.5 for p in prices],
+            "volume": [1000.0] * len(prices),
+        },
+        index=index,
+    )
+    policy = utc_day_session()
+    five = IntradaySeries("BTC/USDT", "5m", frame, session=policy)
+    one = IntradaySeries("BTC/USDT", "1m", frame, session=policy)
+    config = TjrConfig(
+        initial_cash=100_000.0,
+        costs=CostModel(),
+        risk_limits=RiskLimits(
+            max_position_size=0.10,
+            max_portfolio_exposure=0.95,
+            max_open_positions=5,
+        ),
+        session_policy=policy,
+    )
+    engine = TjrBacktester(
+        one_minute={"BTC/USDT": one},
+        five_minute={"BTC/USDT": five},
+        config=config,
+    )
+    signal = TradingSignal(
+        symbol="BTC/USDT",
+        action=SignalAction.BUY,
+        confidence=0.9,
+        timestamp=boundary.to_pydatetime(),
+        as_of_date=session,
+        entry_price=102.0,
+        stop_loss=99.0,
+        take_profit=108.0,
+        position_size=0.10,
+    )
+    evaluation = TjrEvaluation(
+        symbol="BTC/USDT",
+        session=session,
+        as_of=boundary,
+        side="long",
+        stage="READY",
+        reason_code=TJR_READY,
+        entry=102.0,
+        stop=99.0,
+        target=108.0,
+    )
+    monkeypatch.setattr(
+        engine.strategy,
+        "signal",
+        lambda symbol, current_session, as_of: (signal, evaluation),
+    )
+
+    # This is the previous UTC session's final close. The next bar exists at
+    # this same instant, but an old-session signal must not fill into the next day.
+    engine._process_entries(session, boundary, engine.ledger.equity)
+
+    assert engine.ledger.position_quantity("BTC/USDT") == 0.0
+    assert engine.result.entries_per_session == {}
+    assert engine.result.trades == []
