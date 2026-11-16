@@ -94,7 +94,7 @@ def test_conservative_cost_threshold_is_higher_than_realistic():
 def test_factor_interaction_rejects_missing_common_hour():
     frames = _frames()
     frames["ETH/USDT"] = frames["ETH/USDT"].drop(frames["ETH/USDT"].index[700])
-    with pytest.raises(ValueError, match="exact same hourly timestamps"):
+    with pytest.raises(ValueError, match="common hourly timestamps contain gaps"):
         run_factor_interaction_study(frames, config=_config())
 
 
