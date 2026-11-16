@@ -19,7 +19,12 @@ from typing import Any
 import requests
 
 SPOT_HOSTS = ("https://data-api.binance.vision", "https://api.binance.com")
-PERP_HOSTS = ("https://fapi.binance.com", "https://fapi1.binance.com")
+PERP_HOSTS = (
+    "https://fapi.binance.com",
+    "https://fapi1.binance.com",
+    "https://fapi2.binance.com",
+    "https://fapi3.binance.com",
+)
 DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 HOUR_MS = 3_600_000
 FUNDING_INTERVAL_MS = 8 * HOUR_MS
@@ -35,8 +40,23 @@ def _get_json(session: requests.Session, hosts: tuple[str, ...], path: str,
                 last = requests.HTTPError(f"{host}{path}: HTTP {response.status_code}")
                 continue
             response.raise_for_status()
-            return response.json()
-        except (requests.RequestException, ValueError) as exc:
+            try:
+                payload = response.json()
+            except ValueError:
+                preview = response.text[:160].replace("\\n", " ")
+                last = ValueError(
+                    f"{host}{path}: non-JSON response "
+                    f"(content-type={response.headers.get('Content-Type')!r}, body={preview!r})"
+                )
+                continue
+            # Binance endpoints should return a JSON list for these public
+            # history routes. Reject HTML/proxy error objects and try the next
+            # regional hostname instead of treating them as valid empty data.
+            if not isinstance(payload, list):
+                last = ValueError(f"{host}{path}: unexpected JSON payload type {type(payload).__name__}")
+                continue
+            return payload
+        except requests.RequestException as exc:
             last = exc
     raise RuntimeError(f"public market-data endpoint unavailable for {path}: {last}") from None
 
