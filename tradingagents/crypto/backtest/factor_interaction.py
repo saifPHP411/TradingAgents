@@ -228,6 +228,9 @@ def run_factor_interaction_study(
     trade_log: list[dict] = []
     fold_returns: list[float] = []
     symbol_returns: dict[str, float] = dict.fromkeys(symbols, 1.0)
+    benchmark_equity = 1.0
+    btc_benchmark_equity = 1.0
+    btc_index = symbols.index("BTC/USDT")
     audit: list[dict] = []
     per_symbol_trade_returns: dict[str, list[float]] = {s: [] for s in symbols}
 
@@ -257,6 +260,14 @@ def run_factor_interaction_study(
         train_label_end = index[max(train_times) + config.holding_bars + 1]
         fold_equity_start = equity
         fold_trade_count = len(trade_log)
+        benchmark_entry = opens[start + 1]
+        benchmark_exit = opens[start + config.test_fold_bars]
+        benchmark_net = (
+            benchmark_exit * (1.0 - impact) * (1.0 - fee)
+            / (benchmark_entry * (1.0 + impact) * (1.0 + fee)) - 1.0
+        )
+        benchmark_equity *= 1.0 + 0.20 * float(np.mean(benchmark_net))
+        btc_benchmark_equity *= 1.0 + 0.20 * float(benchmark_net[btc_index])
 
         # Six daily decisions per seven-day fold. The final day is reserved so
         # every 24h position exits inside this fold, preventing boundary leakage.
@@ -357,6 +368,8 @@ def run_factor_interaction_study(
         "folds": len(audit),
         "positive_folds": sum(v > 0 for v in fold_returns),
         "compounded_oos_return_pct": (equity - 1.0) * 100.0,
+        "equal_weight_universe_buy_hold_20pct_return_pct": (benchmark_equity - 1.0) * 100.0,
+        "btc_buy_hold_20pct_return_pct": (btc_benchmark_equity - 1.0) * 100.0,
         "max_drawdown_pct": max_drawdown * 100.0,
         "aggregate": metrics,
         "per_symbol_compounded_return_pct": {
