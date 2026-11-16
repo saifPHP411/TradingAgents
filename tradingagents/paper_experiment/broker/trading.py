@@ -3679,7 +3679,7 @@ class PaperTradingWorker:
             broker_orders = getattr(getattr(broker, "_state", None), "orders", {}) or {}
             known_orders = dict(broker_orders)
             known_orders.update(self.state.orders or {})
-            learning_state = {**self.state.to_dict(), "orders": known_orders}
+            learning_state = {"orders": known_orders}
             report = build_learning_report(
                 learning_state,
                 rows,
@@ -3697,8 +3697,11 @@ class PaperTradingWorker:
                 "strategy_mutation_enabled": False,
                 "automatic_promotion_enabled": False,
             }
-        with contextlib.suppress(OSError, TypeError, ValueError):
+        try:
             _atomic_write(report_path, json.dumps(report, indent=2) + "\n")
+        except (OSError, TypeError, ValueError):
+            # Feedback persistence is best-effort and must never affect orders.
+            return
 
     def _observation_interval(self) -> float | None:
         """How often the market-data seam is re-read, or ``None`` for no tick.
