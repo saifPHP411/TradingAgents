@@ -6,9 +6,9 @@ risk limits, execution costs, or submit orders.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
-import math
 from statistics import mean, stdev
 
 
