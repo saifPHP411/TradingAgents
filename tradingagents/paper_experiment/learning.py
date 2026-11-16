@@ -100,6 +100,7 @@ def build_learning_report(
     if not isinstance(orders, dict):
         raise LearningDataError("worker-state orders must be a mapping")
     fills = normalize_execution_rows(execution_rows)
+    invalid_execution_rows = sum(1 for row in execution_rows if not _valid_execution_row(row))
     lots: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
     trades: list[dict[str, Any]] = []
     unmatched_sells = 0
@@ -189,6 +190,7 @@ def build_learning_report(
         and closed >= minimum_trades
         and len(net_values) == closed
         and unattributed_executions == 0
+        and invalid_execution_rows == 0
     )
 
     symbol_stats: dict[str, dict[str, Any]] = {}
@@ -212,6 +214,8 @@ def build_learning_report(
         suggestions.append("Some matched trades lack quote-currency fee data; net PnL is not fully verified.")
     if unattributed_executions:
         suggestions.append("Unattributed account executions were excluded; verify no manual or external orders affected this sample.")
+    if invalid_execution_rows:
+        suggestions.append("Malformed execution rows were found; net performance is withheld until the history is clean.")
     if closed < minimum_trades:
         suggestions.append(f"Collect at least {minimum_trades - closed} more completed trades before judging the strategy.")
     if metrics_ready and profit_factor is not None and profit_factor <= 1.0:
@@ -231,6 +235,7 @@ def build_learning_report(
         "open_lots": sum(len(queue) for queue in lots.values()),
         "unmatched_sell_executions": unmatched_sells,
         "unattributed_executions": unattributed_executions,
+        "invalid_execution_rows": invalid_execution_rows,
         "fee_data_complete": fee_complete,
         "metrics_ready": metrics_ready,
         "minimum_trades_required": minimum_trades,
