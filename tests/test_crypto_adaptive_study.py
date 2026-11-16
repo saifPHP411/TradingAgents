@@ -343,8 +343,8 @@ def test_adaptive_period_and_holding_bar_counts_must_be_integers():
 
 
 def test_online_learner_blocks_an_expert_using_only_prior_closed_results(monkeypatch):
-    from tradingagents.crypto.backtest.learning import OnlineExpertLearner
     import tradingagents.crypto.backtest.adaptive_study as module
+    from tradingagents.crypto.backtest.learning import OnlineExpertLearner
 
     frame = _flat_frame(70)
 
