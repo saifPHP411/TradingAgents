@@ -191,3 +191,22 @@ def test_malformed_execution_rows_block_net_metrics():
     assert report["invalid_execution_rows"] == 1
     assert report["metrics_ready"] is False
     assert report["net_pnl"] is None
+
+
+def test_bybit_execution_history_reader_requires_confirmed_account_and_is_read_only():
+    import pytest
+
+    from tradingagents.paper_experiment.broker.bybit_demo import (
+        BrokerError,
+        BybitDemoBroker,
+    )
+
+    broker = BybitDemoBroker(api_key="test-key", api_secret="test-secret")
+    with pytest.raises(BrokerError, match="call connect"):
+        broker.read_execution_history()
+
+    broker._state.confirmed = True
+    broker._read_execution_rows = lambda **kwargs: ([{"execId": "e1"}], False)
+    rows, truncated = broker.read_execution_history(max_pages=2)
+    assert rows == [{"execId": "e1"}]
+    assert truncated is False
