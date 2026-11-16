@@ -36,9 +36,10 @@ def test_resample_3m_keeps_only_complete_consecutive_groups():
     frame = _minute_frames([100.0, 101.0, 102.0, 103.0])
     frame = frame.drop(frame.index[4])
     result = resample_3m(frame, "BTC/USDT")
-    assert len(result) == 2
+    assert len(result) == 3
     assert result.index[0] == pd.Timestamp("2026-01-01T00:00:00Z")
     assert result.index[1] == pd.Timestamp("2026-01-01T00:06:00Z")
+    assert result.index[2] == pd.Timestamp("2026-01-01T00:09:00Z")
     assert result.iloc[0].volume == 300.0
 
 
