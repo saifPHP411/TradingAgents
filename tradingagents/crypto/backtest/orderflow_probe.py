@@ -16,13 +16,24 @@ from datetime import UTC, datetime
 
 import requests
 
-BASE_URL = "https://api.bybit.com"
+API_BASE_URLS = ("https://api.bybit.com", "https://api.bytick.com")
 DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")
 
 
 def _get(session: requests.Session, path: str, params: dict) -> dict:
-    response = session.get(f"{BASE_URL}{path}", params=params, timeout=10)
-    response.raise_for_status()
+    response = None
+    for base_url in API_BASE_URLS:
+        response = session.get(f"{base_url}{path}", params=params, timeout=10)
+        if response.status_code == 403:
+            continue
+        response.raise_for_status()
+        break
+    if response is None or response.status_code == 403:
+        raise requests.HTTPError(
+            "Bybit public API returned HTTP 403 from both official mainnet REST hosts; "
+            "the runner's network region may be restricted.",
+            response=response,
+        )
     payload = response.json()
     if payload.get("retCode") != 0:
         raise RuntimeError(f"Bybit public API error: {payload.get('retCode')} {payload.get('retMsg')}")
@@ -151,13 +162,29 @@ def main() -> int:
     parser.add_argument("--duration-seconds", type=int, default=1800)
     parser.add_argument("--out", type=pathlib.Path, default=pathlib.Path("artifacts/bybit_orderflow_probe.json"))
     args = parser.parse_args()
-    raw = collect_trades(tuple(args.symbols), args.duration_seconds)
-    report = evaluate_probe(raw)
-    report["collection"] = {key: raw[key] for key in ("started_at", "ended_at", "polls")}
+    try:
+        raw = collect_trades(tuple(args.symbols), args.duration_seconds)
+        report = evaluate_probe(raw)
+        report["status"] = "completed"
+        report["collection"] = {key: raw[key] for key in ("started_at", "ended_at", "polls")}
+    except requests.HTTPError as exc:
+        if exc.response is None or exc.response.status_code != 403:
+            raise
+        report = {
+            "study": "bybit_spot_aggressive_buy_imbalance_probe",
+            "status": "blocked_by_public_api_region_restriction",
+            "signals": 0,
+            "wins": 0,
+            "mean_net_return_pct": 0.0,
+            "aggregate_net_profit_factor": 0.0,
+            "error": str(exc),
+            "note": "No market data was collected; this is an infrastructure limitation, not a strategy result.",
+            "official_hosts_tried": list(API_BASE_URLS),
+        }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({key: report[key] for key in (
-        "signals", "wins", "mean_net_return_pct", "aggregate_net_profit_factor", "per_symbol"
+    print(json.dumps({key: report.get(key) for key in (
+        "status", "signals", "wins", "mean_net_return_pct", "aggregate_net_profit_factor", "per_symbol", "error"
     )}, indent=2))
     print(f"wrote {args.out}")
     return 0
