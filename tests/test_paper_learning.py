@@ -114,3 +114,39 @@ def test_worker_order_reconciliation_preserves_decision_attribution():
     assert record["decision_id"] == "decision-1"
     assert record["decision_snapshot"] == snapshot
     assert record["filled_avg_price"] == 101.0
+
+
+def test_worker_loop_feedback_refresh_is_read_only_and_persisted(tmp_path):
+    import json
+    import time
+    from types import SimpleNamespace
+
+    from tradingagents.paper_experiment.broker.trading import PaperTradingWorker, WorkerState
+
+    class FakeBroker:
+        calls = 0
+
+        def read_execution_history(self, *, max_pages):
+            self.calls += 1
+            assert max_pages == 10
+            return [], False
+
+    worker = PaperTradingWorker.__new__(PaperTradingWorker)
+    worker.config = SimpleNamespace(
+        execution_provider="bybit_demo",
+        state_path=tmp_path / "worker_state.json",
+    )
+    worker._broker = FakeBroker()
+    worker.state = WorkerState()
+    worker._last_learning_refresh_monotonic = 0.0
+    worker._refresh_learning_report_if_due()
+    report_path = tmp_path / "learning_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert worker._broker.calls == 1
+    assert report["available"] is True
+    assert report["strategy_mutation_enabled"] is False
+    assert report["automatic_promotion_enabled"] is False
+
+    worker._last_learning_refresh_monotonic = time.monotonic()
+    worker._refresh_learning_report_if_due()
+    assert worker._broker.calls == 1
