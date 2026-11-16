@@ -1,0 +1,44 @@
+name: Bybit Spot order-flow probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: "Bounded public-data capture duration (seconds)"
+        required: true
+        default: "1800"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bybit-orderflow-probe
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: strategy-research-cost-aware
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install minimal dependencies
+        run: python -m pip install pandas requests
+      - name: Collect public Bybit Spot trades and evaluate fixed imbalance rule
+        run: |
+          python -m tradingagents.crypto.backtest.orderflow_probe \
+            --duration-seconds "${{ inputs.duration_seconds }}" \
+            --out artifacts/bybit_orderflow_probe.json
+      - name: Upload probe report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bybit-orderflow-probe
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
