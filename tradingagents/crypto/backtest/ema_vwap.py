@@ -64,11 +64,13 @@ def resample_3m(frame: pd.DataFrame, symbol: str = "unknown") -> pd.DataFrame:
         "volume": groups["volume"].sum(),
         "minute_count": counts,
     })
-    # A group is valid only if all three minute timestamps are present and contiguous.
-    minute_diffs = source.index.to_series().groupby(source.index.floor("3min")).diff()
-    valid_minutes = minute_diffs.eq(pd.Timedelta(minutes=1)) | source.index.floor("3min").to_series().groupby(source.index.floor("3min")).cumcount().eq(0)
-    valid_counts = valid_minutes.groupby(source.index.floor("3min")).sum()
-    bars = bars.loc[(bars.minute_count == 3) & (valid_counts.reindex(bars.index).fillna(0) == 3)]
+    # A group is valid only if its exact UTC minute starts are present.
+    valid_groups = []
+    for bucket, group in source.groupby(source.index.floor("3min")):
+        expected = pd.date_range(bucket, periods=3, freq="min")
+        if len(group) == 3 and group.index.equals(expected):
+            valid_groups.append(bucket)
+    bars = bars.loc[(bars.minute_count == 3) & bars.index.isin(valid_groups)]
     return bars.drop(columns="minute_count")
 
 
