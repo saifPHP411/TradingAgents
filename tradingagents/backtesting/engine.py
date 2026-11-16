@@ -817,24 +817,21 @@ class PortfolioBacktester:
     def _exit_trigger(
         self, position: OpenPosition, bar, session: str
     ) -> tuple[float, str] | None:
-        """The price and reason to exit at, or ``None`` to keep holding.
+        """Return an intraday stop/target trigger, or None to keep holding.
 
-        Stops and targets are checked before the scheduled exit, and both fill at
-        the level rather than at the bar's open, because the level is the price
-        the order was placed to get. A gap through the level fills at the open,
-        which is the honest outcome: the stop could not have been honoured at its
-        own price if the session opened beyond it.
+        Scheduled holding-period exits are handled first by _process_exits at
+        this session's open, before the bar's later high/low can be consulted.
+        Here, stops and targets fill at their level unless the market gapped
+        through that level, in which case the open is the available fill.
+        If both levels fall inside one OHLC bar, stop remains the conservative
+        priority because the intrabar path is unknown.
         """
         if position.stop_loss is not None and bar.low <= position.stop_loss:
-            # Filling at the open when it gapped below the stop: the level could
-            # not have been honoured at its own price.
             price = min(bar.open, position.stop_loss)
             return price, "stop_loss"
         if position.take_profit is not None and bar.high >= position.take_profit:
             price = max(bar.open, position.take_profit)
             return price, "take_profit"
-        if position.holding_period_elapsed:
-            return bar.open, "holding_period"
         return None
 
     def _close_position(self, position: OpenPosition, session: str, price: float, reason: str) -> None:
