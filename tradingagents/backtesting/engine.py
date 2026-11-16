@@ -780,22 +780,38 @@ class PortfolioBacktester:
     # --- Exits --------------------------------------------------------------
 
     def _process_exits(self, session: str) -> None:
-        """Exit positions whose time is up, or whose stop or target was touched."""
+        """Exit at the open when the holding clock expires; otherwise check intraday stops.
+
+        A position becomes active as soon as its entry fills at the session open,
+        so its stop and target must be checked against that same session's range.
+        The holding-period clock is different: it advances only on later sessions.
+
+        When the time exit is due, it is a market exit at this session's open.
+        The day's later high/low cannot be used to choose a better or worse exit
+        after the position should already have been closed.
+        """
         for symbol, position in list(self._open.items()):
-            if position.entry_session == session:
-                # Entered at this session's open, so no full session has elapsed
-                # yet; its clock starts on the next session.
-                continue
             bar = self.feed.bar(symbol, session)
             if bar is None:
                 # The symbol did not trade; its clock does not advance either, so
                 # a five-session hold is five of the symbol's own sessions.
                 continue
-            position.sessions_held += 1
-            trigger = self._exit_trigger(position, bar, session)
-            if trigger is None:
-                continue
-            price, reason = trigger
+
+            if position.entry_session != session:
+                position.sessions_held += 1
+
+            if position.holding_period_elapsed:
+                # The scheduled exit is at the open. Do not inspect this session's
+                # later high/low once the time-based market exit is due.
+                price, reason = bar.open, "holding_period"
+            else:
+                # Stops and targets are active immediately after an entry fill,
+                # including the remainder of the entry session.
+                trigger = self._exit_trigger(position, bar, session)
+                if trigger is None:
+                    continue
+                price, reason = trigger
+
             self._close_position(position, session, price, reason)
 
     def _exit_trigger(
