@@ -5,7 +5,9 @@ import pandas as pd
 import pytest
 
 from tradingagents.crypto.backtest.momentum import (
-    MomentumConfig, MomentumCosts, run_momentum_screen,
+    MomentumConfig,
+    MomentumCosts,
+    run_momentum_screen,
 )
 
 pytestmark = pytest.mark.unit
