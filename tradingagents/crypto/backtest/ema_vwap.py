@@ -211,7 +211,7 @@ def run_ema_vwap_study(
     last = max(pd.Timestamp(v["last_bar"]) for v in per_symbol.values())
     boundaries = [first + (last - first) * k / 3 for k in (1, 2)]
     slices = []
-    for start, end in zip([first, *boundaries], [*boundaries, last]):
+    for start, end in zip([first, *boundaries], [*boundaries, last], strict=True):
         returns = []
         for symbol in symbols:
             sleeve = 1.0
