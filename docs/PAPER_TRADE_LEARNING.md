@@ -15,6 +15,9 @@ executions. It is deliberately separate from the decision source and order path.
 - A truncated history, missing fee data, or a sample below 20 completed trades
   prevents a net-performance verdict.
 - The report includes per-symbol outcomes and evidence-based observations.
+- While the Bybit Demo worker is running, it refreshes and persists the report at
+  most once every 15 minutes after a completed decision cycle. The dashboard
+  button can also request a fresh read-only report.
 
 ## Endpoint
 
@@ -25,8 +28,9 @@ GET /api/paper/learning
 ```
 
 The route creates a stateless Bybit Demo reader, confirms the account, and reads
-execution history. It does not construct or start the worker, submit/amend/cancel
-orders, or change strategy/risk settings.
+execution history. The background worker also refreshes the persisted report at
+most every 15 minutes after a completed cycle. Neither path starts the worker,
+submits/amends/cancels orders, or changes strategy/risk settings.
 
 ## What "learning" means here
 
