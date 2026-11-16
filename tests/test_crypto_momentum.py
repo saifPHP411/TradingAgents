@@ -32,6 +32,7 @@ def test_momentum_screen_uses_costs_and_next_open_fills():
     assert result["research_only"] is True
     assert result["round_trip_cost_bps"] == 26
     assert result["trades"] > 0
+    assert len(result["quick_chronological_slices_pct"]) == 3
     assert all(t["entry_time"] > t["signal_time"] for t in result["trade_log"])
     assert all(t["exit_time"] > t["entry_time"] for t in result["trade_log"])
     assert all(t["cost_round_trip_bps"] == 26 for t in result["trade_log"])
