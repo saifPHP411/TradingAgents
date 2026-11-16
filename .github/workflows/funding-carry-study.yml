@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install minimal dependencies
-        run: python -m pip install pandas requests python-dotenv yfinance
+        run: python -m pip install pandas requests python-dotenv yfinance pydantic
       - name: Run focused offline tests
         run: |
           python -m pip install pytest
