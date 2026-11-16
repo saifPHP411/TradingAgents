@@ -8,6 +8,11 @@ on:
       - ".github/workflows/bybit-orderflow-probe.yml"
       - "tradingagents/crypto/backtest/orderflow_probe.py"
       - "tests/test_crypto_orderflow_probe.py"
+  pull_request:
+    paths:
+      - ".github/workflows/bybit-orderflow-probe.yml"
+      - "tradingagents/crypto/backtest/orderflow_probe.py"
+      - "tests/test_crypto_orderflow_probe.py"
   workflow_dispatch:
     inputs:
       duration_seconds:
