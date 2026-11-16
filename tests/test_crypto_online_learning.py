@@ -14,7 +14,7 @@ def test_learner_starts_in_shadow_mode_and_uses_only_matured_outcomes():
     for day, value in enumerate((-1.0, -1.0, -1.0)):
         learner.update("trend_pullback", _stamp(day), value)
     assert learner.allows("trend_pullback", _stamp(2))
-    assert learner.allows("trend_pullback", _stamp(3))
+    assert not learner.allows("trend_pullback", _stamp(3))
     assert not learner.allows("trend_pullback", _stamp(4))
 
 
