@@ -192,50 +192,83 @@ def simulate_symbol(symbol: str, data: dict[str, Any], *, annualized_entry_thres
     funding = sorted(data["funding"], key=lambda item: int(item["timestamp"]))
     rows: list[dict[str, Any]] = []
     total_cost_bps = sum(float(costs[k]) for k in costs)
-    for index in range(len(funding) - 1):
+    index = 0
+    while index < len(funding) - 1:
         current = funding[index]
-        following = funding[index + 1]
-        t0, t1 = int(current["timestamp"]), int(following["timestamp"])
-        interval_ms = t1 - t0
+        t0 = int(current["timestamp"])
+        next_ts = int(funding[index + 1]["timestamp"])
+        interval_ms = next_ts - t0
         if interval_ms <= 0 or interval_ms > 12 * HOUR_MS:
+            index += 1
             continue
-        # A funding rate already settled at t0 is observable; use it only for
-        # the interval that follows. Never use following["rate"] to enter.
+        # The rate settled at t0 is observable and selects only the next
+        # interval. A qualifying carry position stays open across consecutive
+        # qualifying intervals so entry/exit costs are paid once per holding run.
         observed_rate = float(current["rate"])
         annualized = observed_rate * (365.25 * 24 * HOUR_MS / interval_ms)
         if annualized < annualized_entry_threshold:
+            index += 1
             continue
         entry = _bar_at_or_after(spot, t0 + HOUR_MS)
         entry_perp = _bar_at_or_after(perp, t0 + HOUR_MS)
-        exit_ = _bar_at_or_after(spot, t1 + HOUR_MS)
-        exit_perp = _bar_at_or_after(perp, t1 + HOUR_MS)
-        if not all((entry, entry_perp, exit_, exit_perp)):
+        if not entry or not entry_perp:
+            index += 1
             continue
         entry_ms, sb0 = entry
         _, pb0 = entry_perp
+        spot_entry, perp_entry = sb0["open"], pb0["open"]
+        if min(spot_entry, perp_entry) <= 0:
+            index += 1
+            continue
+
+        # Stay in the hedge until the newly settled rate no longer meets the
+        # predeclared threshold. The rate at each later settlement is credited
+        # for the interval just completed before deciding whether to continue.
+        exit_index = index + 1
+        funding_return = 0.0
+        while exit_index < len(funding):
+            settled = funding[exit_index]
+            funding_return += float(settled["rate"]) * (perp_entry / spot_entry)
+            if exit_index == len(funding) - 1:
+                break
+            settled_ts = int(settled["timestamp"])
+            following_ts = int(funding[exit_index + 1]["timestamp"])
+            following_interval = following_ts - settled_ts
+            if following_interval <= 0 or following_interval > 12 * HOUR_MS:
+                break
+            next_annualized = float(settled["rate"]) * (
+                365.25 * 24 * HOUR_MS / following_interval
+            )
+            if next_annualized < annualized_entry_threshold:
+                break
+            exit_index += 1
+
+        exit_ts = int(funding[exit_index]["timestamp"])
+        exit_ = _bar_at_or_after(spot, exit_ts + HOUR_MS)
+        exit_perp = _bar_at_or_after(perp, exit_ts + HOUR_MS)
+        if not exit_ or not exit_perp:
+            index = exit_index + 1
+            continue
         exit_ms, sb1 = exit_
         _, pb1 = exit_perp
-        # Use open prices after each funding timestamp. Both legs carry equal
-        # base quantity, so directional price moves largely cancel; basis drift remains.
-        spot_entry, perp_entry = sb0["open"], pb0["open"]
         spot_exit, perp_exit = sb1["open"], pb1["open"]
-        if min(spot_entry, perp_entry, spot_exit, perp_exit) <= 0:
+        if min(spot_exit, perp_exit) <= 0:
+            index = exit_index + 1
             continue
-        # Equal base quantity on both legs: normalize the actual price PnL by
-        # initial Spot notional. This captures basis drift without assuming the
+
+        # Equal base quantity on both legs; normalize actual price PnL by
+        # initial Spot notional. This captures basis drift without assuming
         # Spot and Perp entry prices are identical.
         basis_pnl_fraction = ((spot_exit - spot_entry) - (perp_exit - perp_entry)) / spot_entry
-        realized_funding_rate = float(following["rate"])
-        funding_return = realized_funding_rate * (perp_entry / spot_entry)
-        # Four executions: Spot buy/sell and Perp sell/buy. Charge each fill
-        # against its own approximate notional, rather than assuming all prices match.
+        # Four executions per complete holding run: Spot buy/sell and Perp sell/buy.
         traded_notionals_over_initial = (spot_entry + spot_exit + perp_entry + perp_exit) / spot_entry
         cost_fraction = traded_notionals_over_initial * total_cost_bps / 10_000
         net_return = basis_pnl_fraction + funding_return - cost_fraction
         rows.append({
             "symbol": symbol, "entry_ms": entry_ms, "exit_ms": exit_ms,
             "observed_funding_rate": observed_rate,
-            "realized_next_funding_rate": realized_funding_rate,
+            "realized_funding_return_pct": funding_return * 100,
+            "funding_events_held": exit_index - index,
             "observed_annualized_rate_pct": annualized * 100,
             "basis_return_pct": basis_pnl_fraction * 100,
             "funding_return_pct": funding_return * 100,
@@ -244,6 +277,7 @@ def simulate_symbol(symbol: str, data: dict[str, Any], *, annualized_entry_thres
             "net_return_pct": net_return * 100,
             "holding_hours": (exit_ms - entry_ms) / HOUR_MS,
         })
+        index = exit_index + 1
     elapsed_days = 0.0
     if funding:
         elapsed_days = max(0.0, (int(funding[-1]["timestamp"]) -
