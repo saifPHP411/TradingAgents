@@ -94,6 +94,13 @@ def _validate_frames(frames: Mapping[str, pd.DataFrame]) -> tuple[list[str], pd.
     if common is None or len(common) < 1000:
         raise ValueError("at least 1000 common hourly bars are required")
     common = common.sort_values()
+    # Binance may return the currently-forming hourly candle. Never use it as a
+    # signal, label or simulated fill in a historical study.
+    now_utc = pd.Timestamp.now(tz="UTC")
+    if common[-1].tz_convert("UTC") + pd.Timedelta(hours=1) > now_utc:
+        common = common[:-1]
+    if len(common) < 1000:
+        raise ValueError("at least 1000 completed common hourly bars are required")
     if not (common.to_series().diff().dropna() == pd.Timedelta(hours=1)).all():
         raise ValueError("common hourly timestamps contain gaps")
     if any(not frames[s].index.equals(common) for s in symbols):
