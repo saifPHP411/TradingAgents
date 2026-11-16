@@ -35,44 +35,55 @@ def _timestamp(value: Any) -> str:
         return ""
 
 
+def _valid_execution_row(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    quantity = _number(row.get("execQty"))
+    price = _number(row.get("execPrice"))
+    return bool(
+        str(row.get("execId") or "").strip()
+        and str(row.get("symbol") or "").strip()
+        and str(row.get("side") or "").strip().lower() in {"buy", "sell"}
+        and quantity is not None
+        and quantity > 0
+        and price is not None
+        and price > 0
+        and _timestamp(row.get("execTime"))
+    )
+
+
 def normalize_execution_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Validate and normalize raw Bybit V5 execution rows without guessing."""
+    """Validate and normalize raw Bybit V5 execution rows without guessing.
+
+    A blank orderLinkId is retained as an unattributed execution so it can block
+    performance claims; it is never silently discarded as if no trade occurred.
+    """
     if not isinstance(rows, list):
         raise LearningDataError("execution rows must be a list")
     normalized: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in rows:
-        if not isinstance(row, dict):
+        if not _valid_execution_row(row):
             continue
         execution_id = str(row.get("execId") or "").strip()
-        order_id = str(row.get("orderLinkId") or "").strip()
-        symbol = str(row.get("symbol") or "").strip().upper()
-        side = str(row.get("side") or "").strip().lower()
-        quantity = _number(row.get("execQty"))
-        price = _number(row.get("execPrice"))
-        if not execution_id or execution_id in seen or not order_id or not symbol:
-            continue
-        executed_at = _timestamp(row.get("execTime"))
-        if side not in {"buy", "sell"} or quantity is None or price is None or not executed_at:
-            continue
-        if quantity <= 0 or price <= 0:
+        if execution_id in seen:
             continue
         seen.add(execution_id)
+        symbol = str(row.get("symbol") or "").strip().upper()
         normalized.append({
             "execution_id": execution_id,
-            "order_id": order_id,
+            "order_id": str(row.get("orderLinkId") or "").strip(),
             "symbol": symbol,
-            "side": side,
-            "quantity": quantity,
-            "price": price,
+            "side": str(row.get("side") or "").strip().lower(),
+            "quantity": float(_number(row.get("execQty"))),
+            "price": float(_number(row.get("execPrice"))),
             "fee": _number(row.get("execFee")),
             "fee_currency": str(row.get("feeCurrency") or "").strip().upper() or None,
-            "executed_at": executed_at,
-            "raw_time": _number(row.get("execTime")) or 0.0,
+            "executed_at": _timestamp(row.get("execTime")),
+            "raw_time": float(_number(row.get("execTime")) or 0.0),
         })
     normalized.sort(key=lambda item: (item["raw_time"], item["execution_id"]))
     return normalized
-
 
 def _quote_asset(symbol: str) -> str | None:
     # Bybit V5 execution rows use the venue symbol without a slash (e.g. BTCUSDT).
