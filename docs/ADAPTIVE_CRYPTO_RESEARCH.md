@@ -106,3 +106,50 @@ separately from the fixed baseline and are not evidence of a live learning
 advantage. Any future model/parameter adaptation must use nested chronological
 selection and a genuinely unseen future holdout; the already inspected historical
 sample is not a locked final holdout.
+
+
+## Verified current-head evidence (2026-11-16)
+
+The following values were read from the JSON artifacts uploaded by the completed
+GitHub Actions run for commit
+`5017336dd403d7a3561b6a84170383cd30d5e64a` (run `43879827452`). They are
+simulated research results on Binance public Spot candles, not Bybit fills.
+
+### Adaptive study: 10 symbols, 82 chronological folds
+
+| Scenario | Compounded OOS return | Aggregate PF | Trades | Positive folds | Max fold-return DD |
+|---|---:|---:|---:|---:|---:|
+| Fixed baseline, realistic costs | -0.1130% | 0.9899 | 730 | 25/82 | 1.9385% |
+| Fixed baseline, conservative costs | -0.5153% | 0.9403 | 501 | 21/82 | 1.8491% |
+| Online learning, realistic outcomes | +0.5528% | 1.0972 | 435 | 24/82 | 0.8749% |
+| Online learning, conservative outcomes | +0.1140% | 1.0240 | 305 | 16/82 | 0.9778% |
+| Frictionless baseline (diagnostic only) | +1.3998% | 1.1293 | 972 | 33/82 | 1.3969% |
+
+The learning overlays use only prior completed-fold outcomes and do not change
+execution costs or risk limits. Their aggregate figures are positive, but only
+24/82 realistic-cost folds and 16/82 conservative-cost folds were positive.
+The baseline remains negative after costs, results vary substantially by symbol,
+and the learning overlay is not yet robust enough to justify Demo selection.
+The historical sample has already been inspected and is not an untouched final
+holdout. These figures do not establish a profitable edge.
+
+### TJR quick screen: BTC/USDT, 14-day 1m history
+
+The exact current-head artifact contains 15 trades. With the configured realistic
+cost assumptions, final equity was 99,811.59 from 100,000 (approximately -0.1884%),
+profit factor 0.1834, with 1 winning and 14 losing trades. Under conservative
+costs, final equity was 99,676.91 (approximately -0.3231%), profit factor 0.0933,
+with 1 winning and 14 losing trades. The frictionless result was 100,006.44
+(+0.0064%) with profit factor 1.0981, showing that the tiny apparent gross edge
+does not survive modeled costs. This is a short screen, not a validated strategy.
+
+### Decision
+
+**NO-GO for paper/Demo strategy activation.** CI passing proves the code and
+research workflow completed; it does not prove profitability or venue readiness.
+Before reconsideration: collect a genuinely future untouched holdout, validate
+the strategy on Bybit Demo market data and instrument filters, measure actual
+account fees/spread/slippage, model partial fills and order lifecycle, and pass
+predefined after-cost robustness gates across symbols and market regimes.
+The research branch remains isolated; none of these studies is connected to the
+paper worker or dashboard order path.
