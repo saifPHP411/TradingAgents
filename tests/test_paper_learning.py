@@ -169,3 +169,25 @@ def test_execution_without_timestamp_is_excluded_from_fifo_matching():
     row = _fill("e1", "buy-1", "Buy", 1, 100, 0.1, 1000)
     row.pop("execTime")
     assert normalize_execution_rows([row]) == []
+
+
+def test_execution_without_order_link_id_is_unattributed_and_blocks_metrics():
+    worker = {"orders": {"buy-1": {"side": "buy"}}}
+    buy = _fill("b1", "buy-1", "Buy", 1, 100, 0.1, 1000)
+    sell = _fill("s1", "sell-1", "Sell", 1, 110, 0.1, 2000)
+    sell.pop("orderLinkId")
+    report = build_learning_report(worker, [buy, sell], history_complete=True, minimum_trades=1)
+    assert report["unattributed_executions"] == 1
+    assert report["metrics_ready"] is False
+    assert report["net_pnl"] is None
+
+
+def test_malformed_execution_rows_block_net_metrics():
+    worker = {"orders": {"buy-1": {"side": "buy"}, "sell-1": {"side": "sell"}}}
+    buy = _fill("b1", "buy-1", "Buy", 1, 100, 0.1, 1000)
+    sell = _fill("s1", "sell-1", "Sell", 1, 110, 0.1, 2000)
+    sell.pop("execTime")
+    report = build_learning_report(worker, [buy, sell], history_complete=True, minimum_trades=1)
+    assert report["invalid_execution_rows"] == 1
+    assert report["metrics_ready"] is False
+    assert report["net_pnl"] is None
