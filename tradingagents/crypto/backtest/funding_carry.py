@@ -215,7 +215,10 @@ def simulate_symbol(symbol: str, data: dict[str, Any], *, annualized_entry_thres
             index += 1
             continue
         entry_ms, sb0 = entry
-        _, pb0 = entry_perp
+        entry_perp_ms, pb0 = entry_perp
+        if entry_ms != entry_perp_ms:
+            index += 1
+            continue
         spot_entry, perp_entry = sb0["open"], pb0["open"]
         if min(spot_entry, perp_entry) <= 0:
             index += 1
@@ -253,7 +256,10 @@ def simulate_symbol(symbol: str, data: dict[str, Any], *, annualized_entry_thres
             index = exit_index + 1
             continue
         exit_ms, sb1 = exit_
-        _, pb1 = exit_perp
+        exit_perp_ms, pb1 = exit_perp
+        if exit_ms != exit_perp_ms:
+            index = exit_index + 1
+            continue
         spot_exit, perp_exit = sb1["open"], pb1["open"]
         if min(spot_exit, perp_exit) <= 0:
             index = exit_index + 1
