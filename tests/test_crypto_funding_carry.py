@@ -34,6 +34,8 @@ def test_funding_carry_uses_lagged_signal_and_next_realized_payment():
     assert result["trades"] == 1
     assert result["trade_log"][0]["observed_funding_rate"] == 0.001
     assert result["trade_log"][0]["realized_next_funding_rate"] == 0.001
+    assert result["trade_log"][0]["realized_next_funding_rate"] == 0.001
+    assert result["trade_log"][0]["funding_events_held"] == 2
     assert result["trade_log"][0]["funding_return_pct"] > 0
 
 
@@ -56,7 +58,9 @@ def test_funding_costs_charge_four_legs_and_can_reverse_small_carry():
         costs={"commission_bps_per_fill": 10, "half_spread_bps_per_fill": 1,
                "slippage_bps_per_fill": 2},
     )
-    assert result["trades"] == 2
+    # Consecutive qualifying settlements are one continuous hedge, not
+    # separate trades that repeatedly pay entry/exit costs.
+    assert result["trades"] == 1
     assert result["trade_log"][0]["cost_pct"] == 0.52
     assert result["trade_log"][0]["net_return_pct"] < 0
 
