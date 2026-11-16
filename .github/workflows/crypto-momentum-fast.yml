@@ -26,7 +26,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install minimal research dependencies
-        run: python -m pip install pandas numpy requests python-dotenv pydantic
+        run: python -m pip install pandas numpy requests python-dotenv pydantic pytest
       - name: Run focused unit tests
         run: python -m pytest -q tests/test_crypto_momentum.py
       - name: Fetch bounded 30-day hourly Spot history
