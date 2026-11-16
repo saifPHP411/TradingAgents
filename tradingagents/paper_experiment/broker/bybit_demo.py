@@ -1801,7 +1801,8 @@ class BybitDemoBroker:
 
         This calls only GET /v5/execution/list. It never submits, amends or cancels
         an order. The caller must first confirm the account with connect().
-        Returns ``(rows, truncated)``; True means performance conclusions must be withheld.
+        Returns ``(rows, truncated)``; True means performance conclusions must
+        be withheld.
         """
         if not self._state.confirmed:
             raise BrokerError("the account has not been confirmed; call connect() first")
