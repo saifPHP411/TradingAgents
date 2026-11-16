@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field, replace
 import pandas as pd
 
 from ..adaptive import AdaptiveConfig, _analyze_market_at, _features, _validate
+from .learning import OnlineExpertLearner
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,7 @@ def run_adaptive_backtest(
     start_index: int = 0,
     end_index: int | None = None,
     data_is_fresh: bool = True,
+    learning_policy: OnlineExpertLearner | None = None,
 ) -> AdaptiveBacktestResult:
     """Backtest one Spot symbol with closed-bar signals and next-open fills."""
     config = config or AdaptiveConfig()
@@ -207,8 +209,14 @@ def run_adaptive_backtest(
             if decision.blockers:
                 for blocker in decision.blockers:
                     result.rejections[blocker] = result.rejections.get(blocker, 0) + 1
-            if decision.action == "buy_candidate":
+            if decision.action == "buy_candidate" and (
+                learning_policy is None or learning_policy.allows(decision.strategy, stamp)
+            ):
                 next_open = float(data.iloc[i + 1].open)
+            elif decision.action == "buy_candidate":
+                result.rejections["online learner blocked underperforming expert"] = (
+                    result.rejections.get("online learner blocked underperforming expert", 0) + 1
+                )
                 entry_fill = next_open * (1 + impact)
                 stop = float(decision.stop_price)
                 target = float(decision.target_price)
@@ -355,6 +363,11 @@ def run_adaptive_walk_forward_study(
         max_notional_fraction=config.max_notional_fraction,
     )
     folds = []
+    # One independent learner per symbol. Each learner is frozen during a fold
+    # and updated only after that symbol's fold has completely closed.
+    learners = {symbol: OnlineExpertLearner() for symbol in ordered}
+    learning_fold_returns = []
+    learning_all_rows = []
     for fold_number, start in enumerate(range(warmup_bars, bar_count - test_bars + 1, test_bars), 1):
         end = start + test_bars - 1
         fold = {
@@ -380,6 +393,42 @@ def run_adaptive_walk_forward_study(
                 "equal_weight_buy_hold_return_pct": sum(benchmarks) / len(benchmarks),
                 "symbols": symbol_rows,
             }
+
+        # Online-learning overlay: realistic costs only, same fixed risk limits.
+        # Past closed outcomes can gate an expert in later folds; no current-fold
+        # outcomes or future timestamps are visible to decisions in this fold.
+        learned_rows = {}
+        for symbol, frame in ordered.items():
+            learner = learners[symbol]
+            result = run_adaptive_backtest(
+                frame, config=config, execution=scenarios.get(
+                    "realistic_estimate", AdaptiveExecutionCosts()
+                ), portfolio=base_portfolio, spread_bps=spread_bps,
+                start_index=start, end_index=end, learning_policy=learner,
+            )
+            metrics = result.metrics()
+            for trade in result.trades:
+                entry_notional = trade.quantity * trade.entry_price
+                net_return_pct = (
+                    trade.net_pnl / entry_notional * 100 if entry_notional > 0 else 0.0
+                )
+                learner.update(trade.strategy, trade.exit_time, net_return_pct)
+            metrics["learner_state_after_fold"] = learner.snapshot(
+                reference_index[end] + pd.Timedelta(nanoseconds=1)
+            )
+            learned_rows[symbol] = metrics
+            learning_all_rows.append(metrics)
+        learned_returns = [row["net_return_pct"] for row in learned_rows.values()]
+        fold["online_learning"] = {
+            "equal_weight_net_return_pct": sum(learned_returns) / len(learned_returns),
+            "symbols": learned_rows,
+            "policy": (
+                "per-symbol; update after fold close; after 20 matured trades, "
+                "block an expert only when its lower 95% confidence bound of "
+                "after-cost mean return is not positive"
+            ),
+        }
+        learning_fold_returns.append(fold["online_learning"]["equal_weight_net_return_pct"])
         folds.append(fold)
 
     summary = {}
@@ -416,6 +465,40 @@ def run_adaptive_walk_forward_study(
             "positive_folds": sum(value > 0 for value in returns),
             "per_symbol_compounded_oos_return_pct": per_symbol,
         }
+    learning_equity = base_portfolio.initial_cash
+    learning_peak = learning_equity
+    learning_max_drawdown = 0.0
+    for value in learning_fold_returns:
+        learning_equity *= 1 + value / 100
+        learning_peak = max(learning_peak, learning_equity)
+        if learning_peak > 0:
+            learning_max_drawdown = max(
+                learning_max_drawdown, (learning_peak - learning_equity) / learning_peak
+            )
+    learning_wins = sum(row["net_profit_on_winners"] for row in learning_all_rows)
+    learning_losses = sum(row["net_loss_on_losers"] for row in learning_all_rows)
+    learning_trades = sum(row["trades"] for row in learning_all_rows)
+    summary["online_learning_realistic"] = {
+        "folds": len(learning_fold_returns),
+        "trades": learning_trades,
+        "compounded_oos_return_pct": (
+            learning_equity / base_portfolio.initial_cash - 1
+        ) * 100,
+        "aggregate_profit_factor": (
+            learning_wins / learning_losses if learning_losses else (
+                "infinite" if learning_wins else 0.0
+            )
+        ),
+        "expectancy_per_trade": (
+            sum(row["net_pnl"] for row in learning_all_rows) / learning_trades
+            if learning_trades else 0.0
+        ),
+        "positive_folds": sum(value > 0 for value in learning_fold_returns),
+        "max_drawdown_across_fold_returns_pct": learning_max_drawdown * 100,
+        "risk_limits_changed": False,
+        "execution_costs_changed": False,
+        "uses_only_prior_closed_fold_outcomes": True,
+    }
     return {
         "study": "adaptive_multi_regime_chronological_oos",
         "parameters_fitted_on_oos": False,
