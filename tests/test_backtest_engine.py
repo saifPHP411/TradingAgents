@@ -986,3 +986,95 @@ class TestTheStrategyCannotMoveTheBook:
 
         _run(strategy, config=BacktestConfig(initial_cash=100_000.0))
         assert observed["after_mutation"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Intraday exit timing: the entry candle is live, and a scheduled open exit
+# must not inspect that session's later high/low.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_stop_loss_is_active_during_the_entry_session():
+    feed = _feed(
+        opens=[100.0] * 6,
+        closes=[100.0, 99.0, 99.0, 99.0, 99.0, 99.0],
+        highs=[101.0] * 6,
+        lows=[99.0, 98.0, 98.0, 98.0, 98.0, 98.0],
+    )
+    config = BacktestConfig(
+        holding_period_days=5,
+        risk_limits=RiskLimits(max_position_size=0.1, max_portfolio_exposure=None),
+    )
+
+    result, _ = _run(
+        _buy_once("2026-01-05", entry_price=100.0, stop_loss=99.0),
+        feed,
+        config,
+    )
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.entry_session == "2026-01-06"
+    assert trade.exit_session == "2026-01-06"
+    assert trade.reason == "stop_loss"
+    assert trade.exit_price == pytest.approx(99.0)
+
+
+@pytest.mark.unit
+def test_take_profit_is_active_during_the_entry_session():
+    feed = _feed(
+        opens=[100.0] * 6,
+        closes=[100.0] * 6,
+        highs=[101.0, 112.0, 112.0, 112.0, 112.0, 112.0],
+        lows=[99.0] * 6,
+    )
+    config = BacktestConfig(
+        holding_period_days=5,
+        risk_limits=RiskLimits(max_position_size=0.1, max_portfolio_exposure=None),
+    )
+
+    result, _ = _run(
+        _buy_once("2026-01-05", entry_price=100.0, take_profit=110.0),
+        feed,
+        config,
+    )
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.entry_session == "2026-01-06"
+    assert trade.exit_session == "2026-01-06"
+    assert trade.reason == "take_profit"
+    assert trade.exit_price == pytest.approx(110.0)
+
+
+@pytest.mark.unit
+def test_scheduled_open_exit_precedes_later_intraday_stop_and_target_touches():
+    feed = _feed(
+        opens=[100.0, 100.0, 100.0, 105.0, 100.0, 100.0],
+        closes=[100.0] * 6,
+        highs=[101.0, 101.0, 101.0, 120.0, 101.0, 101.0],
+        lows=[99.0, 99.5, 99.5, 95.0, 99.0, 99.0],
+    )
+    config = BacktestConfig(
+        holding_period_days=2,
+        risk_limits=RiskLimits(max_position_size=0.1, max_portfolio_exposure=None),
+    )
+
+    result, _ = _run(
+        _buy_once(
+            "2026-01-05",
+            entry_price=100.0,
+            stop_loss=99.0,
+            take_profit=110.0,
+        ),
+        feed,
+        config,
+    )
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.entry_session == "2026-01-06"
+    assert trade.exit_session == "2026-01-08"
+    assert trade.reason == "holding_period"
+    assert trade.exit_price == pytest.approx(105.0)
