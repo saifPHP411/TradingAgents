@@ -3821,7 +3821,21 @@ class PaperTradingWorker:
             self._mark_ordered(decision.decision_id)
             self.state.last_no_trade_decision_id = None
             self.state.last_no_trade_decision_code = None
-            self._record_order(order)
+            self._record_order(
+                order,
+                decision_id=decision.decision_id,
+                decision_snapshot={
+                    "symbol": decision.symbol,
+                    "side": decision.side,
+                    "notional": decision.notional,
+                    "quantity": decision.quantity,
+                    "rationale": decision.rationale,
+                    "stop_loss": decision.stop_loss,
+                    "take_profit": decision.take_profit,
+                    "targets": list(decision.targets or ()),
+                    "strategy_name": decision.strategy_name,
+                },
+            )
             result = CycleResult(
                 ran=False,
                 decision_id=decision.decision_id,
@@ -4136,7 +4150,21 @@ class PaperTradingWorker:
         self.state.last_no_trade_code = None
         self.state.last_no_trade_decision_id = None
         self.state.last_no_trade_decision_code = None
-        self._record_order(order)
+        self._record_order(
+            order,
+            decision_id=decision.decision_id,
+            decision_snapshot={
+                "symbol": decision.symbol,
+                "side": decision.side,
+                "notional": decision.notional,
+                "quantity": decision.quantity,
+                "rationale": decision.rationale,
+                "stop_loss": decision.stop_loss,
+                "take_profit": decision.take_profit,
+                "targets": list(decision.targets or ()),
+                "strategy_name": decision.strategy_name,
+            },
+        )
         self._record_exit_levels(decision, order)
         result = CycleResult(
             ran=True,
@@ -5464,8 +5492,20 @@ class PaperTradingWorker:
             raise WorkerError("the worker has no broker")
         return broker._reconcile(client_order_id)
 
-    def _record_order(self, order: BrokerOrder) -> None:
-        self.state.orders[order.client_order_id] = {
+    def _record_order(
+        self,
+        order: BrokerOrder,
+        *,
+        decision_id: str | None = None,
+        decision_snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        # Reconciliation updates the venue fields but must preserve the original
+        # decision attribution. This is the join key used by the read-only
+        # learning report; it never participates in order sizing or execution.
+        previous = self.state.orders.get(order.client_order_id, {})
+        if not isinstance(previous, dict):
+            previous = {}
+        record = {
             "client_order_id": order.client_order_id,
             "broker_order_id": order.broker_order_id,
             "symbol": order.symbol,
@@ -5476,6 +5516,15 @@ class PaperTradingWorker:
             "status": order.status,
             "submitted_at": order.submitted_at,
         }
+        if decision_id is not None:
+            record["decision_id"] = decision_id
+        elif previous.get("decision_id") is not None:
+            record["decision_id"] = previous["decision_id"]
+        if decision_snapshot is not None:
+            record["decision_snapshot"] = dict(decision_snapshot)
+        elif isinstance(previous.get("decision_snapshot"), dict):
+            record["decision_snapshot"] = dict(previous["decision_snapshot"])
+        self.state.orders[order.client_order_id] = record
         self._save()
 
     def _apply_broker_fill(self, order: BrokerOrder) -> None:
