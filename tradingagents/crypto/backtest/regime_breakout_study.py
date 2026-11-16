@@ -218,30 +218,25 @@ def run_walk_forward_study(
 
 
 def load_hourly_frames(cache_dir: str, symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
-    """Load cached 1m bars and aggregate only completed UTC hourly candles."""
+    """Load completed cached UTC 1h candles for the multi-symbol breakout study."""
     from .history import HistoryCache
 
     cache = HistoryCache(cache_dir)
     now = pd.Timestamp.now(tz="UTC")
     frames = {}
     for symbol in symbols:
-        minutes = cache.load(symbol, "1m")
-        if minutes is None or minutes.empty:
-            raise ValueError(f"missing cached 1m history for {symbol}")
-        # Refuse partial hours: resampling alone would make 59/60 minutes
-        # look like a complete OHLCV candle and distort indicators and fills.
-        aggregated = minutes.resample("1h", label="left", closed="left").agg(
-            open=("open", "first"),
-            high=("high", "max"),
-            low=("low", "min"),
-            close=("close", "last"),
-            volume=("volume", "sum"),
-            minute_bars=("close", "count"),
+        hourly = cache.load(symbol, "1h")
+        if hourly is None or hourly.empty:
+            raise ValueError(f"missing cached 1h history for {symbol}")
+        hourly = hourly.sort_index()
+        if not hourly.index.is_monotonic_increasing or hourly.index.has_duplicates:
+            raise ValueError(f"cached 1h history for {symbol} must be chronological and unique")
+        # Keep only closed hourly candles. The shared research workflow already
+        # fetches two years of 1h data for all symbols; do not depend on the
+        # short 1m cache reserved for the fast TJR screen.
+        hourly = hourly.loc[hourly.index + pd.Timedelta(hours=1) <= now].dropna(
+            subset=["open", "high", "low", "close", "volume"]
         )
-        hourly = aggregated.loc[aggregated["minute_bars"] == 60].drop(
-            columns=["minute_bars"]
-        ).dropna()
-        hourly = hourly.loc[hourly.index + pd.Timedelta(hours=1) <= now]
         if hourly.empty:
             raise ValueError(f"no completed hourly candles for {symbol}")
         frames[symbol] = hourly
