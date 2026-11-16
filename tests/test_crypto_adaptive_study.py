@@ -64,7 +64,9 @@ def test_walk_forward_has_disjoint_oos_folds_and_cost_scenarios():
     assert report["parameters_fitted_on_oos"] is False
     assert len(report["folds"]) == 2
     assert report["folds"][0]["oos_end"] < report["folds"][1]["oos_start"]
-    assert set(report["summary"]) == {"frictionless", "realistic_estimate", "conservative_estimate"}
+    assert set(report["summary"]) == {"frictionless", "realistic_estimate", "conservative_estimate", "online_learning_realistic"}
+    assert report["summary"]["online_learning_realistic"]["uses_only_prior_closed_fold_outcomes"] is True
+    assert report["summary"]["online_learning_realistic"]["risk_limits_changed"] is False
     assert report["summary"]["realistic_estimate"]["trades"] == 0
     assert "mean_buy_hold_return_pct" in report["summary"]["realistic_estimate"]
     assert "buy_hold_return_pct" in report["folds"][0]["scenarios"]["realistic_estimate"]["symbols"]["BTC/USDT"]
