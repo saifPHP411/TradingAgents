@@ -227,7 +227,7 @@ def run_factor_interaction_study(
     equity_curve = [equity]
     trade_log: list[dict] = []
     fold_returns: list[float] = []
-    symbol_returns: dict[str, float] = {s: 1.0 for s in symbols}
+    symbol_returns: dict[str, float] = dict.fromkeys(symbols, 1.0)
     audit: list[dict] = []
     per_symbol_trade_returns: dict[str, list[float]] = {s: [] for s in symbols}
 
