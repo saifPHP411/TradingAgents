@@ -73,21 +73,25 @@ def collect_trades(symbols: tuple[str, ...], duration_seconds: int, poll_seconds
 
 
 def evaluate_probe(raw: dict, threshold: float = 0.35, min_trades: int = 20,
-                   round_trip_cost_bps: float = 26.0) -> dict:
+                   round_trip_cost_bps: float = 26.0,
+                   candles_by_symbol: dict | None = None) -> dict:
     """Evaluate fixed +0.35 buy-imbalance signal at next 1m open, exit 3m close."""
     if not 0 < threshold < 1 or min_trades < 1 or round_trip_cost_bps < 0:
         raise ValueError("invalid signal or cost settings")
-    session = requests.Session()
+    session = requests.Session() if candles_by_symbol is None else None
     start_ms = int(datetime.fromisoformat(raw["started_at"]).timestamp() * 1000) - 60_000
     end_ms = int(datetime.fromisoformat(raw["ended_at"]).timestamp() * 1000) + 240_000
     all_trades = []
     per_symbol = {}
     for symbol, minute_rows in raw["symbols"].items():
-        candles = _get(session, "/v5/market/kline", {
-            "category": "spot", "symbol": symbol, "interval": "1",
-            "start": start_ms, "end": end_ms, "limit": 1000,
-        }).get("list", [])
-        bars = {int(row[0]): {"open": float(row[1]), "close": float(row[4])} for row in candles}
+        if candles_by_symbol is None:
+            candles = _get(session, "/v5/market/kline", {
+                "category": "spot", "symbol": symbol, "interval": "1",
+                "start": start_ms, "end": end_ms, "limit": 1000,
+            }).get("list", [])
+            bars = {int(row[0]): {"open": float(row[1]), "close": float(row[4])} for row in candles}
+        else:
+            bars = candles_by_symbol.get(symbol, {})
         symbol_trades = []
         for minute_text, flow in minute_rows.items():
             minute = int(minute_text) * 60_000
