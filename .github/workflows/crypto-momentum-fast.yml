@@ -1,0 +1,68 @@
+name: Fast cross-sectional momentum screen
+
+on:
+  pull_request:
+    branches: [demo-ready-dashboard-2026]
+    paths:
+      - "tradingagents/crypto/backtest/momentum.py"
+      - "tests/test_crypto_momentum.py"
+      - ".github/workflows/crypto-momentum-fast.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crypto-momentum-fast-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick-screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install minimal research dependencies
+        run: python -m pip install pandas numpy requests python-dotenv pydantic
+      - name: Run focused unit tests
+        run: python -m pytest -q tests/test_crypto_momentum.py
+      - name: Fetch bounded 30-day hourly Spot history
+        run: |
+          python -m tradingagents.crypto.backtest.fetch \
+            --symbols BTC/USDT ETH/USDT BNB/USDT SOL/USDT XRP/USDT \
+            --interval 1h --limit 720 --cache ./crypto-cache
+      - name: Run realistic and conservative quick screen
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from tradingagents.crypto.backtest.history import HistoryCache
+          from tradingagents.crypto.backtest.momentum import MomentumCosts, run_momentum_screen
+
+          symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT"]
+          cache = HistoryCache("./crypto-cache")
+          frames = {symbol: cache.load(symbol, "1h") for symbol in symbols}
+          if any(frame is None for frame in frames.values()):
+              raise SystemExit("incomplete cached universe")
+          reports = {
+              "realistic": run_momentum_screen(frames, costs=MomentumCosts(10, 1, 2)),
+              "conservative": run_momentum_screen(frames, costs=MomentumCosts(15, 3, 5)),
+          }
+          Path("artifacts").mkdir(exist_ok=True)
+          Path("artifacts/cross_sectional_momentum.json").write_text(
+              json.dumps(reports, indent=2), encoding="utf-8"
+          )
+          print(json.dumps({k: {m: v for m, v in report.items() if m != "trade_log"}
+                            for k, report in reports.items()}, indent=2))
+          PY
+      - name: Upload quick-screen report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-sectional-momentum-fast-screen
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
