@@ -126,34 +126,34 @@ def test_buy_and_hold_benchmark_starts_at_next_open_like_strategy():
     assert result == pytest.approx(5.0)
 
 
-def test_hourly_fallback_discards_partial_minute_buckets(monkeypatch):
+def test_hourly_loader_uses_cached_hourly_history_and_discards_open_candle(monkeypatch):
     from tradingagents.crypto.backtest import history
 
-    minute_index = pd.date_range(
-        "2025-01-01T00:00:00Z", periods=120, freq="min"
-    )
-    prices = np.full(len(minute_index), 100.0)
-    minute_frame = pd.DataFrame(
+    now = pd.Timestamp.now(tz="UTC").floor("h")
+    index = pd.date_range(end=now, periods=420, freq="h", tz="UTC")
+    prices = np.full(len(index), 100.0)
+    hourly_frame = pd.DataFrame(
         {
             "open": prices,
             "high": prices + 0.1,
             "low": prices - 0.1,
             "close": prices,
-            "volume": np.full(len(minute_index), 10.0),
+            "volume": np.full(len(index), 600.0),
         },
-        index=minute_index,
-    ).drop(minute_index[30])
+        index=index,
+    )
 
     class FakeHistoryCache:
         def __init__(self, root):
             self.root = root
 
         def load(self, symbol, interval):
-            return minute_frame.copy()
+            assert interval == "1h"
+            return hourly_frame.copy()
 
     monkeypatch.setattr(history, "HistoryCache", FakeHistoryCache)
     frames = load_hourly_frames("/unused", ("BTC/USDT",))
-    hourly = frames["BTC/USDT"]
-    assert len(hourly) == 1
-    assert hourly.index[0] == minute_index[60]
-    assert hourly.iloc[0]["volume"] == pytest.approx(600.0)
+    loaded = frames["BTC/USDT"]
+    assert len(loaded) == 419
+    assert loaded.index[-1] == now - pd.Timedelta(hours=1)
+    assert loaded.iloc[-1]["volume"] == pytest.approx(600.0)
