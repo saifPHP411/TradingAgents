@@ -35,7 +35,8 @@ def test_fifo_pairing_calculates_net_pnl_from_actual_quote_fees():
             "buy-1": {
                 "decision_id": "d1",
                 "decision_snapshot": {"strategy_name": "tjr", "stop_loss": 95},
-            }
+            },
+            "sell-1": {"side": "sell"},
         }
     }
     rows = [
@@ -52,7 +53,7 @@ def test_fifo_pairing_calculates_net_pnl_from_actual_quote_fees():
 
 
 def test_net_metrics_are_withheld_when_fee_currency_is_not_quote_asset():
-    worker = {"orders": {}}
+    worker = {"orders": {"buy-1": {"side": "buy"}, "sell-1": {"side": "sell"}}}
     buy = _fill("b1", "buy-1", "Buy", 1, 100, 0.1, 1000)
     sell = _fill("s1", "sell-1", "Sell", 1, 110, 0.1, 2000)
     buy["feeCurrency"] = "BNB"
@@ -64,7 +65,7 @@ def test_net_metrics_are_withheld_when_fee_currency_is_not_quote_asset():
 
 
 def test_incomplete_history_never_marks_metrics_ready():
-    worker = {"orders": {}}
+    worker = {"orders": {"buy-1": {"side": "buy"}, "sell-1": {"side": "sell"}}}
     rows = [
         _fill("b1", "buy-1", "Buy", 1, 100, 0.1, 1000),
         _fill("s1", "sell-1", "Sell", 1, 110, 0.1, 2000),
@@ -150,3 +151,21 @@ def test_worker_loop_feedback_refresh_is_read_only_and_persisted(tmp_path):
     worker._last_learning_refresh_monotonic = time.monotonic()
     worker._refresh_learning_report_if_due()
     assert worker._broker.calls == 1
+
+
+def test_unattributed_account_executions_block_strategy_metrics():
+    worker = {"orders": {"buy-1": {"side": "buy"}}}
+    rows = [
+        _fill("b1", "buy-1", "Buy", 1, 100, 0.1, 1000),
+        _fill("manual-sell", "manual-order", "Sell", 1, 110, 0.1, 2000),
+    ]
+    report = build_learning_report(worker, rows, history_complete=True, minimum_trades=1)
+    assert report["unattributed_executions"] == 1
+    assert report["metrics_ready"] is False
+    assert report["net_pnl"] is None
+
+
+def test_execution_without_timestamp_is_excluded_from_fifo_matching():
+    row = _fill("e1", "buy-1", "Buy", 1, 100, 0.1, 1000)
+    row.pop("execTime")
+    assert normalize_execution_rows([row]) == []
