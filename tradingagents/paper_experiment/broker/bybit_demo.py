@@ -1759,9 +1759,9 @@ class BybitDemoBroker:
         the id names one trade, so the same trade is never counted twice no
         matter how many times the list is read.
 
-        The second element says whether the read was complete. A truncated
-        read is not evidence: a trade that was not read proves nothing about
-        what traded.
+        The second element is ``truncated``: True means a next-page cursor
+        remained after the page limit. A truncated read is not evidence: a
+        trade that was not read proves nothing about what traded.
         """
         all_rows: list[dict[str, Any]] = []
         cursor: str | None = None
@@ -1801,6 +1801,7 @@ class BybitDemoBroker:
 
         This calls only GET /v5/execution/list. It never submits, amends or cancels
         an order. The caller must first confirm the account with connect().
+        Returns ``(rows, truncated)``; True means performance conclusions must be withheld.
         """
         if not self._state.confirmed:
             raise BrokerError("the account has not been confirmed; call connect() first")
