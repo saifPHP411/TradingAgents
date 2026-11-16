@@ -1,0 +1,54 @@
+name: Funding rate carry research screen
+
+on:
+  pull_request:
+    branches: [demo-ready-dashboard-2026]
+    paths:
+      - "tradingagents/crypto/backtest/funding_carry.py"
+      - "tests/test_crypto_funding_carry.py"
+      - ".github/workflows/funding-carry-study.yml"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Bounded historical window (30-730 days)"
+        required: true
+        default: "180"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: funding-carry-study-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  funding-carry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install minimal dependencies
+        run: python -m pip install pandas requests
+      - name: Run focused offline tests
+        run: |
+          python -m pip install pytest
+          python -m pytest -q tests/test_crypto_funding_carry.py
+      - name: Fetch Spot, perpetual and funding history and run carry scenarios
+        run: |
+          python tradingagents/crypto/backtest/funding_carry.py \
+            --days "${{ inputs.days || 180 }}" \
+            --symbols BTCUSDT ETHUSDT SOLUSDT \
+            --threshold 0.10 \
+            --out artifacts/funding_carry.json
+      - name: Upload funding carry report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: funding-rate-carry-study
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
