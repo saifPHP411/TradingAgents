@@ -78,3 +78,23 @@ Causal/no-lookahead and stale-data tests; multi-symbol chronological walk-forwar
 across multiple market cycles; measured Bybit fees/spread/slippage; untouched final holdout;
 selection-bias analysis; buy-and-hold and cash baselines; per-symbol and per-regime
 expectancy, profit factor, compounded return, drawdown, turnover and uncertainty.
+
+## Leakage-safe online learning overlay
+
+The walk-forward study also runs a research-only online expert-learning overlay.
+Each symbol has an independent learner. It receives only closed trades from
+completed earlier OOS folds, measured after the selected cost scenario. It
+never sees outcomes from the fold currently being evaluated. During the first
+20 matured outcomes per expert it remains in shadow/exploration mode. Thereafter
+it blocks an expert only when the lower 95% confidence bound of its mean net
+trade return is not positive. The learner has bounded observation memory and
+requires timezone-aware chronological timestamps.
+
+This overlay may abstain from an expert; it cannot change strategy parameters,
+position sizing, risk fractions, notional caps, stops, targets, or cost
+assumptions. It does not train on open or hypothetical trades, and it has no
+exchange, worker, or order integration. The learning-overlay report is
+evaluated separately from the fixed baseline and is not evidence of a live
+learning advantage. Any future model/parameter adaptation must use nested
+chronological selection and a genuinely unseen future holdout; the already
+inspected historical sample is not a locked final holdout.
