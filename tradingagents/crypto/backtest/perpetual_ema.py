@@ -231,9 +231,12 @@ def run_backtest(
         rejected[reason] = rejected.get(reason, 0) + 1
 
     def close(raw_price: float, stamp: pd.Timestamp, reason: str) -> None:
-        nonlocal cash, position, consecutive_losses, global_halt
+        nonlocal cash, position, consecutive_losses, global_halt, pending_exit
         if position is None:
             return
+        # A queued risk exit belongs only to the position that triggered it.
+        # Clear it on every closure so it cannot leak into a later position.
+        pending_exit = None
         direction, qty = position["direction"], position["qty"]
         fill = raw_price * (1 - direction * fees.impact_rate)
         exit_fee = qty * fill * fees.fee_rate
@@ -306,16 +309,29 @@ def run_backtest(
             if not sizing.approved:
                 reject(sizing.rejection_reason or "sizing_rejected")
             else:
-                liq = estimate_isolated_liquidation_price(entry_price=fill, leverage=cfg.risk.leverage,
-                    maintenance_margin_rate=cfg.risk.maintenance_margin_rate, direction=direction)
+                liq = estimate_isolated_liquidation_price(
+                    entry_price=fill,
+                    leverage=cfg.risk.leverage,
+                    maintenance_margin_rate=cfg.risk.maintenance_margin_rate,
+                    direction=direction,
+                )
                 if (direction > 0 and liq >= fill) or (direction < 0 and liq <= fill):
                     reject("invalid_liquidation_estimate")
                 else:
-                    entry_fee = sizing.notional * fees.fee_rate
-                    cash -= entry_fee
-                    position = {"direction": direction, "qty": sizing.quantity, "entry": fill,
-                        "time": stamp.isoformat(), "index": i, "entry_fee": entry_fee,
-                        "margin": sizing.initial_margin, "stop": stop, "liq": liq, "funding": 0.0}
+                    buffer = cfg.risk.liquidation_buffer_fraction
+                    liquidation_clears_stop = (
+                        liq < stop * (1.0 - buffer)
+                        if direction > 0
+                        else liq > stop * (1.0 + buffer)
+                    )
+                    if not liquidation_clears_stop:
+                        reject("liquidation_too_close_to_atr_stop")
+                    else:
+                        entry_fee = sizing.notional * fees.fee_rate
+                        cash -= entry_fee
+                        position = {"direction": direction, "qty": sizing.quantity, "entry": fill,
+                            "time": stamp.isoformat(), "index": i, "entry_fee": entry_fee,
+                            "margin": sizing.initial_margin, "stop": stop, "liq": liq, "funding": 0.0}
             pending_signal, pending_atr = 0, math.nan
 
         if position is not None:
@@ -339,7 +355,7 @@ def run_backtest(
             global_halt, pending_signal, pending_atr = True, 0, math.nan
             if position is not None:
                 pending_exit = "max_drawdown_limit"
-        if not global_halt:
+        if not global_halt and not daily_halt:
             sig = int(features.iloc[i].signal)
             if sig:
                 pending_signal, pending_atr = sig, float(features.iloc[i].atr)
@@ -355,5 +371,6 @@ def run_backtest(
             "strategy": "EMA14/EMA50 cross + EMA200 trend + ADX, ATR trailing stop",
             "signal_timing": "completed 4h candle, next candle open", "funding_series_required": True,
             "mark_price_liquidation": True, "liquidation_estimate": "approximate, not Bybit tier formula",
+            "liquidation_buffer_fraction": cfg.risk.liquidation_buffer_fraction,
             "demo_ready": False},
     )
