@@ -78,7 +78,7 @@ from ..market_data_wiring import (
 )
 from ..providers.base import ProviderNotConfiguredError
 from .auth import DashboardAuthError, check_bearer, require_bindable, resolve_token
-from .chart import CryptoChartService, DEFAULT_CHART_INTERVAL, DEFAULT_CHART_LIMIT
+from .chart import DEFAULT_CHART_INTERVAL, DEFAULT_CHART_LIMIT, CryptoChartService
 from .crypto_view import CryptoViewService
 from .paper_control import PaperTradingController, PaperTradingDisabled, _endpoint_for_provider
 from .state import DashboardStateError, ExperimentView
