@@ -100,6 +100,9 @@ ROOT_ENV = "TRADINGAGENTS_EXPERIMENT_ROOT"
 """Environment variable the module entry point reads ``--root`` from."""
 
 HEALTH_PATH = "/healthz"
+
+AUTO_START_PERPETUAL_STUDY_ENV = "TRADINGAGENTS_AUTO_START_PERPETUAL_STUDY"
+
 """The unauthenticated liveness probe.
 
 The deployment's health check names this path, so it is a named constant rather
@@ -244,6 +247,22 @@ def _ensure_experiment(root: Path, *, crypto_symbols: tuple[str, ...] = ()) -> N
         raise RuntimeError(f"Failed to create crypto experiment: {exc}") from exc
 
 
+def _maybe_auto_start_perpetual_study(dashboard: Any, root: str | Path) -> None:
+    """Optionally start the read-only Bybit study once on a dedicated research service."""
+    enabled = os.environ.get(AUTO_START_PERPETUAL_STUDY_ENV, "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return
+    report_path = Path(root) / "perpetual_ema_walkforward.json"
+    if report_path.is_file():
+        print("  perpetual study auto-start: skipped (saved report already exists)", flush=True)
+        return
+    status = dashboard.start_perpetual_study()
+    print(
+        f"  perpetual study auto-start: {status.get('status', 'unknown')}",
+        flush=True,
+    )
+
+
 class Dashboard:
     """The dashboard's configuration and shared state, one per server."""
 
@@ -314,7 +333,40 @@ class Dashboard:
 
     def perpetual_study_status(self) -> dict[str, Any]:
         with self._perpetual_study_lock:
-            return dict(self._perpetual_study_status)
+            status = dict(self._perpetual_study_status)
+        if status.get("status") != "idle":
+            return status
+
+        # A completed report lives on the Railway volume. Recover its status after
+        # a container restart instead of showing "idle" beside a finished study.
+        report_path = self.root / "perpetual_ema_walkforward.json"
+        if not report_path.is_file():
+            return status
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            summary = {}
+            for key, value in report["reports"].items():
+                holdout = value["untouched_final_holdout"]
+                summary[key] = {
+                    "win_rate_pct": holdout["win_rate_pct"],
+                    "return_pct": holdout["equal_weight_return_pct"],
+                    "profit_factor": holdout["profit_factor"],
+                    "trades": holdout["trades"],
+                    "liquidations": holdout["liquidations"],
+                    "passed": value["acceptance_gate"]["passed"],
+                }
+        except (OSError, ValueError, KeyError, TypeError):
+            return status
+        return {
+            "status": "completed",
+            "completed_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(report_path.stat().st_mtime)
+            ),
+            "orders_submitted": False,
+            "demo_ready": False,
+            "report_file": report_path.name,
+            "summary": summary,
+        }
 
     def start_perpetual_study(self) -> dict[str, Any]:
         """Start a bounded public-data 1x/2x walk-forward study in the background."""
@@ -1267,6 +1319,7 @@ def serve(
         crypto_engine=crypto_engine,
         crypto_symbols=tuple(crypto_symbols),
     )
+    _maybe_auto_start_perpetual_study(dashboard, root)
     httpd = ThreadingHTTPServer((host, port), make_handler(dashboard))
     httpd.daemon_threads = True
     print(f"dashboard on http://{host}:{port}  (root: {Path(root).resolve()})")
