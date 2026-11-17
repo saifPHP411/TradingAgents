@@ -313,8 +313,11 @@ def run_study(args: argparse.Namespace) -> dict:
                     and holdout["equal_weight_return_pct"] > 0
                 ),
                 "profit_factor_pass": (
-                    isinstance(holdout["profit_factor"], (int, float))
-                    and holdout["profit_factor"] >= 1.2
+                    holdout["profit_factor"] == "infinite"
+                    or (
+                        isinstance(holdout["profit_factor"], (int, float))
+                        and holdout["profit_factor"] >= 1.2
+                    )
                 ),
                 "drawdown_pass": holdout["worst_symbol_max_drawdown_pct"] <= 10.0,
                 "no_liquidations": holdout["liquidations"] == 0,
