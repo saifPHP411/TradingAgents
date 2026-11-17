@@ -30,12 +30,14 @@ class TurtleTrendSettings:
     volume_period: int = 20
     min_adx: float | None = None
     min_relative_volume: float | None = None
+    benchmark_momentum_bars: int = 20
+    require_benchmark_momentum_positive: bool = False
 
     def __post_init__(self) -> None:
         for name in (
             "entry_lookback", "exit_lookback", "atr_period",
             "ema_period", "ema_slope_bars", "max_holding_bars",
-            "adx_period", "volume_period",
+            "adx_period", "volume_period", "benchmark_momentum_bars",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 2:
@@ -247,6 +249,9 @@ def _features(
     ).mean()
     features["benchmark_close"] = benchmark
     features["benchmark_ema"] = benchmark_ema
+    features["benchmark_momentum_positive"] = (
+        benchmark > benchmark.shift(settings.benchmark_momentum_bars)
+    )
     # Wilder-style ADX: the filter is optional, so the baseline signal remains
     # unchanged unless a refinement explicitly supplies min_adx.
     up_move = data.high.diff()
@@ -278,6 +283,10 @@ def _features(
         & (features.close > features.ema)
         & (features.ema > features.ema.shift(settings.ema_slope_bars))
         & (features.benchmark_close > features.benchmark_ema)
+        & (
+            features.benchmark_momentum_positive
+            if settings.require_benchmark_momentum_positive else True
+        )
         & (
             features.adx >= settings.min_adx
             if settings.min_adx is not None else True
@@ -637,6 +646,9 @@ def run_refinement_comparison(
         "relative_volume_1_2": TurtleTrendSettings(min_relative_volume=1.2),
         "adx_20_and_relative_volume_1_2": TurtleTrendSettings(
             min_adx=20.0, min_relative_volume=1.2
+        ),
+        "adx_20_and_btc_20bar_momentum": TurtleTrendSettings(
+            min_adx=20.0, require_benchmark_momentum_positive=True
         ),
     }
     reports = {}
