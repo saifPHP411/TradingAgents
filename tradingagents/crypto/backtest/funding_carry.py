@@ -658,11 +658,48 @@ def run_study(history: dict[str, Any], *, threshold: float = 0.10,
                                      costs=costs, initial_capital=initial_capital)
             for symbol, data in history["symbols"].items()
         }
+    data_coverage: dict[str, dict[str, Any]] = {}
+    for symbol, data in history["symbols"].items():
+        coverage = data.get("coverage", {})
+        data_coverage[symbol] = {
+            "spot_hourly_bars": coverage.get("spot_bars", len(data.get("spot_1h", {}))),
+            "perpetual_hourly_bars": coverage.get("perp_bars", len(data.get("perp_1h", {}))),
+            "funding_events": coverage.get("funding_events", len(data.get("funding", []))),
+            "spot_first_utc": (
+                datetime.fromtimestamp(int(coverage["spot_first"]) / 1000, UTC).isoformat()
+                if coverage.get("spot_first") is not None else None
+            ),
+            "spot_last_utc": (
+                datetime.fromtimestamp(int(coverage["spot_last"]) / 1000, UTC).isoformat()
+                if coverage.get("spot_last") is not None else None
+            ),
+            "perpetual_first_utc": (
+                datetime.fromtimestamp(int(coverage["perp_first"]) / 1000, UTC).isoformat()
+                if coverage.get("perp_first") is not None else None
+            ),
+            "perpetual_last_utc": (
+                datetime.fromtimestamp(int(coverage["perp_last"]) / 1000, UTC).isoformat()
+                if coverage.get("perp_last") is not None else None
+            ),
+            "funding_first_utc": (
+                datetime.fromtimestamp(int(coverage["funding_first"]) / 1000, UTC).isoformat()
+                if coverage.get("funding_first") is not None else None
+            ),
+            "funding_last_utc": (
+                datetime.fromtimestamp(int(coverage["funding_last"]) / 1000, UTC).isoformat()
+                if coverage.get("funding_last") is not None else None
+            ),
+            "perpetual_source": data.get("perp_1h_source", "unknown"),
+            "funding_source": data.get("funding_source", "unknown"),
+            "perpetual_archive": data.get("perp_archive"),
+            "funding_archive": data.get("funding_archive"),
+        }
     return {
         "study": "spot_perpetual_funding_carry",
         "data_source": history.get("data_source"),
         "requested_start_utc": history.get("requested_start_utc"),
         "requested_end_utc": history.get("requested_end_utc"),
+        "data_coverage": data_coverage,
         "entry_rule": "use previous settled funding rate; enter after settlement; exit after next settlement",
         "threshold_annualized_rate_pct": threshold * 100,
         "initial_capital_per_symbol": initial_capital,
