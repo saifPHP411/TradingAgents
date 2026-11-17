@@ -303,3 +303,39 @@ def test_funding_archive_fallback_uses_only_completed_months():
     assert len(session.urls) == 1
     assert "/monthly/fundingRate/BTCUSDT/" in session.urls[0]
     assert max(int(item["timestamp"]) for item in history) < int(archive_end.timestamp() * 1000)
+
+
+def test_run_study_preserves_actual_data_coverage_and_archive_sources():
+    data = _fixture()
+    data.update({
+        "coverage": {
+            "spot_bars": 12,
+            "perp_bars": 12,
+            "funding_events": 3,
+            "spot_first": 1_800_000_000_000,
+            "spot_last": 1_800_043_200_000,
+            "perp_first": 1_800_000_000_000,
+            "perp_last": 1_800_043_200_000,
+            "funding_first": 1_800_000_000_000,
+            "funding_last": 1_800_057_600_000,
+        },
+        "perp_1h_source": "binance_public_data_archive",
+        "funding_source": "binance_public_data_archive_monthly",
+        "perp_archive": {"downloaded_files": 2},
+        "funding_archive": {"downloaded_files": 1, "current_month_excluded": True},
+    })
+    report = run_study({
+        "data_source": "Binance public archive",
+        "requested_start_utc": "2026-10-31T00:00:00+00:00",
+        "requested_end_utc": "2026-11-17T00:00:00+00:00",
+        "symbols": {"BTCUSDT": data},
+    })
+
+    coverage = report["data_coverage"]["BTCUSDT"]
+    assert coverage["spot_hourly_bars"] == 12
+    assert coverage["perpetual_hourly_bars"] == 12
+    assert coverage["funding_events"] == 3
+    assert coverage["perpetual_source"] == "binance_public_data_archive"
+    assert coverage["funding_source"] == "binance_public_data_archive_monthly"
+    assert coverage["funding_archive"]["current_month_excluded"] is True
+    assert coverage["spot_first_utc"] == "2027-01-15T08:00:00+00:00"
