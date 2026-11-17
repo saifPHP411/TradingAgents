@@ -177,6 +177,14 @@ class BybitLinearDemoPositionClient:
         if side_raw not in {"buy", "sell"}:
             raise BybitPerpetualAccountError("Bybit Demo position direction is unknown")
         try:
+            position_idx = int(row.get("positionIdx", 0))
+        except (TypeError, ValueError):
+            raise BybitPerpetualAccountError("Bybit Demo position mode is unknown") from None
+        if position_idx != 0:
+            raise BybitPerpetualAccountError(
+                "hedge-mode positions are not supported by this one-way research dashboard"
+            )
+        try:
             leverage = float(row.get("leverage"))
             unrealized = float(row.get("unrealisedPnl") or 0)
         except (TypeError, ValueError):
