@@ -36,7 +36,7 @@ jobs:
           mkdir -p artifacts
           python -m tradingagents.crypto.backtest.perpetual_ema_walkforward \
             --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT \
-            --data-source binance-usdm \
+            --data-source bybit \
             --days 730 \
             --warmup-bars 260 \
             --test-bars 200 \
