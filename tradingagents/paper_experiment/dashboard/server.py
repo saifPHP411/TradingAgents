@@ -560,10 +560,11 @@ class Dashboard:
         return "open", position
 
     def perpetual_chart(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
-        """Read completed Bybit linear-perpetual candles and a real worker position.
+        """Read completed Bybit perpetual candles and an optional read-only Demo position.
 
-        Only the four supported USDT linear contracts are exposed. This endpoint is
-        public market data only; it never authenticates or sends an exchange order.
+        Only the four supported USDT linear contracts are exposed. Market candles
+        are public; a position is read through an authenticated GET-only Demo client
+        when its credential pair is configured. No order endpoint is called.
         """
         market = str(symbol).strip().upper()
         if market not in PERPETUAL_CHART_SYMBOLS:
