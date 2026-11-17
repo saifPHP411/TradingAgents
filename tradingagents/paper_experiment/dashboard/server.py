@@ -539,6 +539,13 @@ class Dashboard:
 
     def start_perpetual_lab(self) -> dict[str, Any]:
         """Run fixed candidates strictly before the previously inspected holdout."""
+        if not self.perpetual_only_mode:
+            return {
+                "status": "error",
+                "error": "The development-only strategy lab requires perpetual-only mode.",
+                "orders_submitted": False,
+                "demo_ready": False,
+            }
         report_path = self.root / PERPETUAL_LAB_REPORT_FILE
         if report_path.is_file():
             return {
