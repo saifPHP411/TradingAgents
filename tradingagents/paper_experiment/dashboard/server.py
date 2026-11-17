@@ -499,8 +499,13 @@ class Dashboard:
         if not report_path.is_file():
             return status
         try:
+            from tradingagents.crypto.backtest.perpetual_strategy_lab import (
+                PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES,
+            )
+
             report = json.loads(report_path.read_text(encoding="utf-8"))
             grouped = []
+            exclusions = PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES
             for item in report.get("rankings", []):
                 candidate = item["candidate"]
                 leverage = float(item["leverage"])
@@ -521,7 +526,26 @@ class Dashboard:
                         "liquidations": metrics.get("liquidations"),
                         "passed": row["acceptance_gate"]["passed"],
                     }
-                grouped.append({**item, "scenarios": scenario_rows})
+                rejection = exclusions.get(candidate)
+                grouped.append({
+                    **item,
+                    "scenarios": scenario_rows,
+                    "previous_holdout_rejected": rejection is not None,
+                    "previous_holdout_rejection_reason": rejection,
+                    "selection_eligible": (
+                        bool(item.get("development_gate_passed_all_costs"))
+                        and rejection is None
+                    ),
+                })
+            eligible = [row for row in grouped if row["selection_eligible"]]
+            eligible.sort(
+                key=lambda row: (
+                    row.get("minimum_scenario_profit_factor") or -math.inf,
+                    row.get("conservative_return_pct") or -math.inf,
+                ),
+                reverse=True,
+            )
+            best_candidate = eligible[0] if eligible else None
         except (OSError, ValueError, KeyError, TypeError):
             return {"status": "error", "error": "saved perpetual strategy lab report is invalid"}
         return {
@@ -534,7 +558,16 @@ class Dashboard:
             "final_holdout_evaluated": False,
             "previously_inspected_holdout_reused": False,
             "excluded_previous_holdout_start": report.get("excluded_previous_holdout_start"),
-            "best_candidate": report.get("best_candidate"),
+            "best_candidate": best_candidate,
+            "candidate_disqualifications": [
+                {"candidate": candidate, "reason": reason}
+                for candidate, reason in exclusions.items()
+            ],
+            "selection_rule": (
+                "A development candidate is eligible only when all three modeled cost gates "
+                "pass and no previously inspected independent holdout has rejected that "
+                "same fixed strategy. No eligible candidate means no selection."
+            ),
             "results": grouped,
             "report_file": report_path.name,
             "rerun_blocked": True,
