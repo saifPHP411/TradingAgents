@@ -6,9 +6,9 @@ and hedge mode are intentionally unsupported in this first implementation.
 """
 from __future__ import annotations
 
+import dataclasses
 import decimal
 import math
-from dataclasses import dataclass
 
 
 MAX_RESEARCH_LEVERAGE = 2.0
@@ -20,7 +20,7 @@ def _finite_positive(value: float, name: str) -> float:
     return float(value)
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class LinearPerpetualInstrument:
     """Current Bybit V5 rules needed before sizing a linear perpetual order."""
 
@@ -68,7 +68,7 @@ class LinearPerpetualInstrument:
             raise ValueError("funding_interval_minutes must be a positive integer")
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class PerpetualRiskSettings:
     """Hard limits for the isolated, one-way research simulator."""
 
@@ -116,7 +116,7 @@ class PerpetualRiskSettings:
             raise ValueError("max_consecutive_losses must be an integer in [1, 10]")
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class PositionSize:
     quantity: float
     notional: float
