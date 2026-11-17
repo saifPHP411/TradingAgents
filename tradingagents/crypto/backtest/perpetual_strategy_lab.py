@@ -25,6 +25,49 @@ from tradingagents.crypto.bybit_perpetual import BybitLinearPublicClient
 
 # Fixed before this tournament; this is a small family comparison, not a
 # parameter sweep over the historical holdout.
+# The original EMA14/EMA50/EMA200/ADX18 candidate is the same fixed
+# specification that already failed the prior independent final holdout at
+# both 1x and 2x under realistic, conservative and stress costs. Keep it in the
+# development comparison for transparency, but never select it again.
+PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES = {
+    "ema_14_50_adx18": (
+        "Same EMA14/EMA50/EMA200/ADX18 strategy failed the previously inspected "
+        "independent final holdout at both 1x and 2x across all three cost models."
+    )
+}
+
+
+def _rank_candidates(rankings: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Annotate historical disqualifications before selecting any development winner."""
+    annotated = []
+    for item in rankings:
+        row = dict(item)
+        reason = PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES.get(row["candidate"])
+        row["previous_holdout_rejected"] = reason is not None
+        row["previous_holdout_rejection_reason"] = reason
+        row["selection_eligible"] = (
+            bool(row.get("development_gate_passed_all_costs")) and reason is None
+        )
+        annotated.append(row)
+    eligible = [row for row in annotated if row["selection_eligible"]]
+    eligible.sort(
+        key=lambda row: (
+            row.get("minimum_scenario_profit_factor") or -math.inf,
+            row.get("conservative_return_pct") or -math.inf,
+        ),
+        reverse=True,
+    )
+    annotated.sort(
+        key=lambda row: (
+            row["selection_eligible"],
+            row.get("minimum_scenario_profit_factor") or -math.inf,
+            row.get("conservative_return_pct") or -math.inf,
+        ),
+        reverse=True,
+    )
+    return annotated, eligible
+
+
 CANDIDATES: dict[str, dict] = {
     "ema_14_50_adx18": {
         "signal_mode": "ema_cross", "fast": 14, "slow": 50, "trend": 200,
@@ -231,22 +274,7 @@ def run_lab(args: argparse.Namespace) -> dict:
                 }
             )
 
-    eligible = [row for row in rankings if row["development_gate_passed_all_costs"]]
-    eligible.sort(
-        key=lambda row: (
-            row["minimum_scenario_profit_factor"] or -math.inf,
-            row["conservative_return_pct"] or -math.inf,
-        ),
-        reverse=True,
-    )
-    rankings.sort(
-        key=lambda row: (
-            row["development_gate_passed_all_costs"],
-            row["minimum_scenario_profit_factor"] or -math.inf,
-            row["conservative_return_pct"] or -math.inf,
-        ),
-        reverse=True,
-    )
+    rankings, eligible = _rank_candidates(rankings)
     return {
         "schema_version": 1,
         "research_only": True,
@@ -267,8 +295,10 @@ def run_lab(args: argparse.Namespace) -> dict:
         "candidate_definitions_fixed_before_run": True,
         "selection_rule": (
             "A candidate is only shortlisted when every realistic, conservative and "
-            "stress development gate passes. No candidate passing all gates means no selection."
+            "stress development gate passes and it has not already failed a previously "
+            "inspected independent final holdout. No eligible candidate means no selection."
         ),
+        "previous_holdout_disqualifications": PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES,
         "best_candidate": eligible[0] if eligible else None,
         "rankings": rankings,
         "reports": reports,
