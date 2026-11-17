@@ -210,3 +210,58 @@ def test_optional_filter_thresholds_are_validated():
         TurtleTrendSettings(min_relative_volume=0.0)
     with pytest.raises(ValueError, match="min_relative_volume"):
         TurtleTrendSettings(min_relative_volume=float("nan"))
+
+
+def test_optional_benchmark_momentum_filter_rejects_weak_market_trend():
+    size = 80
+    steps = np.arange(size, dtype=float)
+    close = 100.0 + steps * 0.15 + 0.8 * np.sin(steps * 1.2)
+    close[-1] = float(np.max(close[-11:-1]) + 0.6)
+    open_price = close - 0.05
+    index = pd.date_range("2026-01-01T00:00:00Z", periods=size, freq="4h")
+    frame = pd.DataFrame(
+        {
+            "open": open_price,
+            "high": np.maximum(open_price, close) + 0.2,
+            "low": np.minimum(open_price, close) - 0.2,
+            "close": close,
+            "volume": np.full(size, 1000.0),
+        },
+        index=index,
+    )
+    benchmark_values = np.r_[np.linspace(80.0, 120.0, 60), np.linspace(120.0, 117.0, 20)]
+    benchmark = pd.Series(benchmark_values, index=index)
+    base_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=30,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+        benchmark_momentum_bars=20,
+    )
+    filtered_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=30,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+        benchmark_momentum_bars=20,
+        require_benchmark_momentum_positive=True,
+    )
+
+    baseline = _features(frame, benchmark, base_settings)
+    filtered = _features(frame, benchmark, filtered_settings)
+    expected = (
+        baseline.long_entry
+        & benchmark.gt(benchmark.shift(20))
+    ).rename("long_entry")
+
+    pd.testing.assert_series_equal(filtered.long_entry, expected)
+    assert baseline.long_entry.iloc[-1]
+    assert benchmark.iloc[-1] > baseline.benchmark_ema.iloc[-1]
+    assert benchmark.iloc[-1] < benchmark.iloc[-21]
+    assert not filtered.long_entry.iloc[-1]
