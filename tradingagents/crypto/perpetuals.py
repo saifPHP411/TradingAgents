@@ -10,7 +10,6 @@ import decimal
 import math
 from dataclasses import dataclass
 
-
 MAX_RESEARCH_LEVERAGE = 2.0
 
 
