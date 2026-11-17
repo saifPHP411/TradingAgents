@@ -6,12 +6,12 @@ isolated from paper/live execution and never submits exchange orders.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 import dataclasses
 import json
 import math
 import pathlib
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 import pandas as pd
 
