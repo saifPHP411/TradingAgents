@@ -79,6 +79,7 @@ class PerpetualRiskSettings:
     max_notional_fraction: float = 0.20
     maintenance_margin_rate: float = 0.005
     liquidation_fee_rate: float = 0.005
+    liquidation_buffer_fraction: float = 0.02
     max_daily_loss_fraction: float = 0.03
     max_drawdown_fraction: float = 0.10
     max_consecutive_losses: int = 3
@@ -87,7 +88,7 @@ class PerpetualRiskSettings:
         for name in (
             "leverage", "max_leverage", "risk_fraction", "max_margin_fraction",
             "max_notional_fraction", "maintenance_margin_rate", "liquidation_fee_rate",
-            "max_daily_loss_fraction", "max_drawdown_fraction",
+            "liquidation_buffer_fraction", "max_daily_loss_fraction", "max_drawdown_fraction",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value):
@@ -104,6 +105,8 @@ class PerpetualRiskSettings:
             raise ValueError("maintenance_margin_rate must be in (0, 0.10)")
         if not 0 <= self.liquidation_fee_rate <= 0.05:
             raise ValueError("liquidation_fee_rate must be in [0, 0.05]")
+        if not 0 < self.liquidation_buffer_fraction <= 0.10:
+            raise ValueError("liquidation_buffer_fraction must be in (0, 0.10]")
         if not 0 < self.max_daily_loss_fraction <= 0.05:
             raise ValueError("max_daily_loss_fraction must be in (0, 0.05]")
         if not 0 < self.max_drawdown_fraction <= 0.20:
