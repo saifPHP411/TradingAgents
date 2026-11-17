@@ -89,6 +89,16 @@ class BinanceUSDMPublicClient:
             raise BinancePerpetualDataError(f"invalid {name}")
         return parsed
 
+    @staticmethod
+    def _finite_number(value: object, name: str) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            raise BinancePerpetualDataError(f"missing or invalid {name}") from None
+        if not math.isfinite(parsed):
+            raise BinancePerpetualDataError(f"invalid {name}")
+        return parsed
+
     def _get_exchange_info(self) -> dict:
         if self._exchange_info is None:
             payload = self._get("/fapi/v1/exchangeInfo")
@@ -138,7 +148,12 @@ class BinanceUSDMPublicClient:
             if isinstance(item, dict)
         }
         price = filters.get("PRICE_FILTER", {})
-        market_lot = filters.get("MARKET_LOT_SIZE") or filters.get("LOT_SIZE") or {}
+        market_lot = filters.get("MARKET_LOT_SIZE") or {}
+        if not all(
+            self._positive(market_lot.get(field), "market " + field)
+            for field in ("minQty", "maxQty", "stepSize")
+        ):
+            market_lot = filters.get("LOT_SIZE") or {}
         notional_filter = filters.get("NOTIONAL") or filters.get("MIN_NOTIONAL") or {}
         min_notional_value = notional_filter.get("notional", notional_filter.get("minNotional"))
         if not all((price, market_lot)) or min_notional_value is None:
@@ -202,10 +217,10 @@ class BinanceUSDMPublicClient:
                 raise BinancePerpetualDataError("Binance kline response is not a list")
             if not payload:
                 break
+            if any(not isinstance(item, list) or len(item) < 7 for item in payload):
+                raise BinancePerpetualDataError("Binance kline row is malformed")
             page = sorted(payload, key=lambda item: int(item[0]))
             for item in page:
-                if not isinstance(item, list) or len(item) < 7:
-                    raise BinancePerpetualDataError("Binance kline row is malformed")
                 opened = int(item[0])
                 closed = int(item[6])
                 if start_ms <= opened <= end_ms and closed < end_ms:
@@ -282,10 +297,13 @@ class BinanceUSDMPublicClient:
                 raise BinancePerpetualDataError("Binance funding history response is not a list")
             if not payload:
                 break
+            if any(
+                not isinstance(item, dict) or "fundingTime" not in item or "fundingRate" not in item
+                for item in payload
+            ):
+                raise BinancePerpetualDataError("Binance funding history row is malformed")
             page = sorted(payload, key=lambda item: int(item["fundingTime"]))
             for item in page:
-                if not isinstance(item, dict) or "fundingTime" not in item or "fundingRate" not in item:
-                    raise BinancePerpetualDataError("Binance funding history row is malformed")
                 stamp = int(item["fundingTime"])
                 if start_ms <= stamp <= end_ms:
                     records.append(
