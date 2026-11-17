@@ -146,6 +146,149 @@ class BybitLinearDemoPositionClient:
             )
         return body["result"]
 
+    @staticmethod
+    def _finite_number(value: object, field: str, *, optional: bool = False,
+                       allow_negative: bool = False) -> float | None:
+        if value in (None, "") and optional:
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            raise BybitPerpetualAccountError(f"Bybit returned an invalid {field}") from None
+        if not math.isfinite(parsed) or (not allow_negative and parsed < 0):
+            raise BybitPerpetualAccountError(f"Bybit returned an invalid {field}") from None
+        return parsed
+
+    def get_wallet_balance(self) -> dict:
+        """Read the Unified USDT wallet and margin summary; signed GET only."""
+        result = self._get_signed(
+            "/v5/account/wallet-balance",
+            {"accountType": "UNIFIED", "coin": "USDT"},
+        )
+        rows = result.get("list")
+        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+            raise BybitPerpetualAccountError(
+                "Bybit Demo wallet response did not contain one Unified account"
+            )
+        account = rows[0]
+        required = {
+            "total_equity_usd": "totalEquity",
+            "total_wallet_balance_usd": "totalWalletBalance",
+        }
+        metrics: dict[str, float | None] = {}
+        for output, source in required.items():
+            metrics[output] = self._finite_number(account.get(source), source)
+        optional_fields = {
+            "total_margin_balance_usd": "totalMarginBalance",
+            "total_available_balance_usd": "totalAvailableBalance",
+            "total_perpetual_unrealized_pnl_usd": "totalPerpUPL",
+            "total_initial_margin_usd": "totalInitialMargin",
+            "total_maintenance_margin_usd": "totalMaintenanceMargin",
+        }
+        for output, source in optional_fields.items():
+            metrics[output] = self._finite_number(
+                account.get(source), source, optional=True
+            )
+        coins = account.get("coin")
+        if not isinstance(coins, list):
+            raise BybitPerpetualAccountError(
+                "Bybit Demo wallet response omitted its coin list"
+            )
+        usdt_rows = [
+            row for row in coins
+            if isinstance(row, dict) and str(row.get("coin", "")).upper() == "USDT"
+        ]
+        if len(usdt_rows) > 1:
+            raise BybitPerpetualAccountError(
+                "Bybit Demo wallet returned duplicate USDT balance rows"
+            )
+        usdt = usdt_rows[0] if usdt_rows else {}
+        coin_fields = {
+            "usdt_wallet_balance": "walletBalance",
+            "usdt_equity": "equity",
+            "usdt_unrealized_pnl": "unrealisedPnl",
+            "usdt_usd_value": "usdValue",
+            "usdt_locked": "locked",
+            "usdt_borrow_amount": "borrowAmount",
+        }
+        for output, source in coin_fields.items():
+            metrics[output] = self._finite_number(
+                usdt.get(source, "0"), source, optional=False,
+                allow_negative=source == "unrealisedPnl",
+            )
+        return {
+            "status": "ok",
+            "account_type": str(account.get("accountType", "UNIFIED")),
+            **metrics,
+            "updated_at_ms": self.clock_ms(),
+            "source": "Bybit Demo GET /v5/account/wallet-balance",
+            "quote_currency": "USDT",
+        }
+
+    def get_closed_pnl(self, *, limit: int = 100) -> dict:
+        """Read recent linear-perpetual closed PnL; Bybit defaults to the last 7 days."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("closed PnL limit must be an integer between 1 and 100")
+        result = self._get_signed(
+            "/v5/position/closed-pnl",
+            {"category": "linear", "limit": limit},
+        )
+        rows = result.get("list")
+        if not isinstance(rows, list):
+            raise BybitPerpetualAccountError(
+                "Bybit Demo closed-PnL response omitted its list"
+            )
+        records = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise BybitPerpetualAccountError(
+                    "Bybit Demo returned a malformed closed-PnL record"
+                )
+            symbol = str(row.get("symbol", "")).upper()
+            if not symbol.isalnum() or not 3 <= len(symbol) <= 30:
+                raise BybitPerpetualAccountError(
+                    "Bybit Demo returned an invalid closed-PnL symbol"
+                )
+            side = str(row.get("side", "")).lower()
+            if side not in {"buy", "sell"}:
+                raise BybitPerpetualAccountError(
+                    "Bybit Demo returned an invalid closed-PnL side"
+                )
+            try:
+                created_ms = int(row.get("createdTime"))
+                updated_ms = int(row.get("updatedTime"))
+            except (TypeError, ValueError):
+                raise BybitPerpetualAccountError(
+                    "Bybit Demo returned invalid closed-PnL timestamps"
+                ) from None
+            if created_ms <= 0 or updated_ms <= 0:
+                raise BybitPerpetualAccountError(
+                    "Bybit Demo returned invalid closed-PnL timestamps"
+                )
+            records.append({
+                "symbol": symbol,
+                "side": "long" if side == "buy" else "short",
+                "quantity": self._finite_number(row.get("closedSize", row.get("qty", "0")), "closedSize"),
+                "entry_price": self._finite_number(row.get("avgEntryPrice"), "avgEntryPrice", optional=True),
+                "exit_price": self._finite_number(row.get("avgExitPrice"), "avgExitPrice", optional=True),
+                "closed_pnl": self._finite_number(row.get("closedPnl"), "closedPnl", allow_negative=True),
+                "open_fee": self._finite_number(row.get("openFee", "0"), "openFee"),
+                "close_fee": self._finite_number(row.get("closeFee", "0"), "closeFee"),
+                "leverage": self._finite_number(row.get("leverage"), "leverage", optional=True),
+                "created_time_ms": created_ms,
+                "updated_time_ms": updated_ms,
+                "exec_type": str(row.get("execType", "")),
+            })
+        records.sort(key=lambda item: (item["created_time_ms"], item["updated_time_ms"]))
+        return {
+            "status": "ok",
+            "records": records,
+            "window": "Bybit default recent 7 days",
+            "updated_at_ms": self.clock_ms(),
+            "source": "Bybit Demo GET /v5/position/closed-pnl",
+            "next_page_available": bool(result.get("nextPageCursor")),
+        }
+
     def get_position(self, symbol: str) -> dict:
         """Return {status: flat|open, position: ...}; never infer from Spot."""
         market = str(symbol).strip().upper()
