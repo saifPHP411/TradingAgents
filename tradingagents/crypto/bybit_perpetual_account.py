@@ -45,8 +45,13 @@ def _optional_positive(value: object, field: str) -> float | None:
         parsed = float(value)
     except (TypeError, ValueError):
         raise BybitPerpetualAccountError(f"Bybit returned an invalid {field}") from None
-    if not math.isfinite(parsed) or parsed <= 0:
+    if not math.isfinite(parsed) or parsed < 0:
         raise BybitPerpetualAccountError(f"Bybit returned an invalid {field}")
+    # Bybit commonly uses "0" for an unset optional stop, target or liquidation
+    # price. Treat it as unavailable rather than rejecting an otherwise valid
+    # open position or drawing a fabricated zero-price line.
+    if parsed == 0:
+        return None
     return parsed
 
 
