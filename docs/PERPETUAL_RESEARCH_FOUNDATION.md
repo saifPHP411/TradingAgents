@@ -49,3 +49,13 @@ This fetches public market data and writes a JSON report under `results/`. It do
 ## Go / No-Go
 
 A passing unit test or completed data download proves only that code paths ran. It is not proof of profitability. The existing research history contains weak or cost-sensitive candidates; this EMA perpetual strategy has no validated return claim yet. The report marks `demo_ready=false`. Do not integrate it into the paper worker or production execution path until independent review and robust after-cost out-of-sample evidence exist.
+
+## Safety corrections and implementation status (2026-11-17)
+
+- Added a configurable 2% default separation buffer between the initial ATR stop and the simplified liquidation estimate. Entries are rejected when the estimated liquidation level is too close to, or beyond, the stop. This is an additional research guard, not a replacement for the exchange's live liquidation calculation.
+- Fixed pending daily/drawdown exits so they are cleared when their owning position closes; a queued exit cannot leak into and close a later position. Signals are not queued while the daily-loss halt is active.
+- Added regression tests for both conditions and for liquidation-buffer validation.
+- The simulator remains single-symbol and research-only. The read-only market adapter still has no authenticated account, set-leverage, place-order, cancel-order, or position-management methods. It does not connect to the dashboard or paper worker.
+- A real Bybit linear-perpetual execution adapter would need to use `POST /v5/position/set-leverage` for leverage and the `linear` category for USDT perpetual orders. The `isLeverage` flag belongs to Spot margin borrowing, not the perpetual leverage setting.
+- Before any Demo consideration, fetch the applicable `/v5/market/risk-limit` tier, use the exchange's current position/liquidation fields for reconciliation, and validate the actual UTA account mode, isolated/cross behavior, tick/quantity/minimum-notional rules, reduce-only protection, partial fills, clock synchronization, and order idempotency. The simple liquidation estimate in this module is not a substitute for Bybit's tier-aware calculation.
+- No production branch, Railway service, worker, credentials, or orders were touched. `demo_ready` remains false.
