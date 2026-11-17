@@ -33,17 +33,17 @@ def test_wallet_balance_uses_only_signed_demo_get_and_normalizes_unified_usdt():
                     "accountType": "UNIFIED",
                     "totalEquity": "1250.50",
                     "totalWalletBalance": "1200.25",
-                    "totalMarginBalance": "1235.50",
+                    "totalMarginBalance": "1185.25",
                     "totalAvailableBalance": "1000.00",
-                    "totalPerpUPL": "35.25",
+                    "totalPerpUPL": "-15.00",
                     "totalInitialMargin": "200.00",
                     "totalMaintenanceMargin": "40.00",
                     "coin": [{
                         "coin": "USDT",
                         "walletBalance": "1200.25",
-                        "equity": "1235.50",
-                        "unrealisedPnl": "35.25",
-                        "usdValue": "1235.50",
+                        "equity": "1185.25",
+                        "unrealisedPnl": "-15.00",
+                        "usdValue": "1185.25",
                         "locked": "0",
                         "borrowAmount": "0",
                     }],
@@ -62,6 +62,7 @@ def test_wallet_balance_uses_only_signed_demo_get_and_normalizes_unified_usdt():
     assert result["status"] == "ok"
     assert result["total_equity_usd"] == pytest.approx(1250.50)
     assert result["total_available_balance_usd"] == pytest.approx(1000.00)
+    assert result["total_perpetual_unrealized_pnl_usd"] == pytest.approx(-15.00)
     assert result["usdt_wallet_balance"] == pytest.approx(1200.25)
     assert calls[0]["method"] == "GET"
     assert calls[0]["url"] == "https://api-demo.bybit.com/v5/account/wallet-balance"
