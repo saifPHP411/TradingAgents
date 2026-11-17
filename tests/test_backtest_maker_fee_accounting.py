@@ -18,7 +18,11 @@ def test_limit_entry_and_exit_trade_fees_match_maker_fees_charged_to_ledger():
     )
     frame = pd.DataFrame(
         {
-            "open": [100.0] * 4,
+            # The entry executes at the Jan 6 open (101) with a 100 buy limit,
+            # then the exit executes at the Jan 7 open (99) with a 100 sell
+            # limit. Both limits are non-marketable at the reference open and
+            # are reached within the bar, so the simulated fills are maker.
+            "open": [100.0, 101.0, 99.0, 100.0],
             "high": [101.0] * 4,
             "low": [99.0] * 4,
             "close": [100.0] * 4,
@@ -70,7 +74,7 @@ def test_limit_entry_and_exit_trade_fees_match_maker_fees_charged_to_ledger():
     assert len(result.trades) == 1
     trade = result.trades[0]
 
-    # The position is $10,000 on each side. Two maker fills at 1 bp cost $2.
+    # Each $10,000 maker fill at 1 bp costs $1; two fills cost $2.
     assert engine.ledger.total_fees == pytest.approx(2.0)
     assert trade.fees == pytest.approx(engine.ledger.total_fees)
     assert trade.net_pnl == pytest.approx(engine.ledger.net_realized_pnl)
