@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tradingagents.paper_experiment.dashboard.server import INDEX_HTML
+from tradingagents.paper_experiment.dashboard.server import PERPETUAL_INDEX_HTML as INDEX_HTML
 
 
 def test_perpetual_win_rate_and_return_are_rendered_as_already_percent_values():
