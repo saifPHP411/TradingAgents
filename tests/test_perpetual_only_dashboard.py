@@ -16,6 +16,7 @@ from tradingagents.crypto.bybit_perpetual_account import (
     BybitPerpetualAccountError,
     BybitPerpetualAccountNotConfigured,
 )
+from tradingagents.paper_experiment.dashboard import server as dashboard_server
 from tradingagents.paper_experiment.dashboard.server import Dashboard, make_handler
 
 
@@ -270,3 +271,46 @@ def test_perpetual_only_http_surface_blocks_legacy_spot_api(tmp_path, allow_loop
         server.shutdown()
         thread.join(timeout=3)
         server.server_close()
+
+
+def test_perpetual_only_dashboard_does_not_construct_legacy_spot_components(
+    tmp_path, monkeypatch
+):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Spot/paper component was constructed in perpetual-only mode")
+
+    monkeypatch.setattr(dashboard_server, "PaperTradingController", forbidden)
+    monkeypatch.setattr(dashboard_server, "CryptoViewService", forbidden)
+    monkeypatch.setattr(dashboard_server, "CryptoChartService", forbidden)
+
+    dashboard = Dashboard(tmp_path, token="test-token", perpetual_only_mode=True)
+
+    assert dashboard.paper is None
+    assert dashboard.crypto is None
+    assert dashboard.chart_service is None
+
+
+def test_perpetual_only_entrypoint_skips_spot_provider_resolution(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("TRADINGAGENTS_PERPETUAL_ONLY", "1")
+    captured = {}
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Spot/paper settings were resolved in perpetual-only mode")
+
+    def fake_serve(*args, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(dashboard_server, "resolve_settings", forbidden)
+    monkeypatch.setattr(dashboard_server, "resolve_paper_settings", forbidden)
+    monkeypatch.setattr(dashboard_server, "_resolve_execution_provider", forbidden)
+    monkeypatch.setattr(dashboard_server, "_market_data_factory_for", forbidden)
+    monkeypatch.setattr(dashboard_server, "_crypto_symbols", forbidden)
+    monkeypatch.setattr(dashboard_server, "serve", fake_serve)
+
+    assert dashboard_server.main(["--root", str(tmp_path)]) == 0
+
+    assert captured["crypto_symbols"] == ()
+    assert captured["crypto_live"] is False
+    assert captured["market_data_factory"] is None
