@@ -38,7 +38,7 @@ jobs:
       - name: Install focused research dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pandas requests python-dotenv
+          python -m pip install pandas requests python-dotenv pydantic
 
       - name: Run fixed-parameter Bybit linear perpetual walk-forward study
         run: |
