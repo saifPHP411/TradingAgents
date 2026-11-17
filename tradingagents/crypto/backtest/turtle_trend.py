@@ -660,7 +660,7 @@ def run_refinement_comparison(
         "data_scope": "Previously inspected Binance Spot development history; not a locked holdout",
         "parameters_fitted_on_oos": False,
         "selection_warning": (
-            "All variants are exploratory. Do not select/promote based on these same " 
+            "All variants are exploratory. Do not select/promote based on these same "
             "historical folds; reserve future untouched data and measured Bybit costs."
         ),
         "variants": reports,
