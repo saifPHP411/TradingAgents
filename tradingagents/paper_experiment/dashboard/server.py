@@ -326,34 +326,37 @@ class Dashboard:
         self.last_run: dict[str, Any] | None = None
         self.refresh_policy = refresh_policy
         self.refresh_fetcher = refresh_fetcher
-        self.paper = PaperTradingController(
-            self.root,
-            enabled=allow_paper_trading and not self.perpetual_only_mode,
-            order_notional=paper_order_notional,
-            stub=stub,
-            broker_factory=broker_factory,
-            market_data_factory=market_data_factory,
-            whole_shares=paper_whole_shares,
-            market_data_provider=paper_market_data_provider,
-            market_data_max_age_seconds=paper_market_data_max_age_seconds,
-            decision_source_kind=paper_decision_source,
-            max_price_deviation=paper_max_price_deviation,
-            # The execution broker. Alpaca Paper is the default; Bybit Demo is
-            # an explicit opt-in that never falls back to Alpaca.
-            execution_provider=paper_execution_provider,
-        )
-        # The crypto half of the dashboard: a read-only view over the live crypto
-        # engine (Binance public market data) and the worker's recorded status.
-        # The engine is injected, so the dashboard reads the *same* engine the
-        # strategy and the worker read, and a test can drive it offline.
-        self.crypto = CryptoViewService(
-            engine=crypto_engine,
-            symbols=tuple(crypto_symbols),
-            worker_status=lambda: self.paper.status(),
-            strategy_evaluations=lambda: self.paper.strategy_evaluations(),
-        )
-        # Historical candles load lazily and are cached; this view is read-only.
-        self.chart_service = chart_service or CryptoChartService()
+        if self.perpetual_only_mode:
+            # Do not instantiate the legacy Spot/equity or paper-trading stack at
+            # all in this deployment. Perpetual routes own their own public
+            # market-data and optional read-only Demo position clients.
+            self.paper = None
+            self.crypto = None
+            self.chart_service = None
+        else:
+            self.paper = PaperTradingController(
+                self.root,
+                enabled=allow_paper_trading,
+                order_notional=paper_order_notional,
+                stub=stub,
+                broker_factory=broker_factory,
+                market_data_factory=market_data_factory,
+                whole_shares=paper_whole_shares,
+                market_data_provider=paper_market_data_provider,
+                market_data_max_age_seconds=paper_market_data_max_age_seconds,
+                decision_source_kind=paper_decision_source,
+                max_price_deviation=paper_max_price_deviation,
+                # The execution broker. Alpaca Paper is the default; Bybit Demo is
+                # an explicit opt-in that never falls back to Alpaca.
+                execution_provider=paper_execution_provider,
+            )
+            self.crypto = CryptoViewService(
+                engine=crypto_engine,
+                symbols=tuple(crypto_symbols),
+                worker_status=lambda: self.paper.status(),
+                strategy_evaluations=lambda: self.paper.strategy_evaluations(),
+            )
+            self.chart_service = chart_service or CryptoChartService()
         # Independent read-only Bybit linear-perpetual research job. This never
         # starts a broker worker and never submits an exchange order.
         self._perpetual_study_lock = threading.Lock()
@@ -1619,39 +1622,48 @@ def main(argv: list[str] | None = None) -> int:
     if not args.root:
         parser.error(f"an experiment directory is required: pass --root or set {ROOT_ENV}")
     port = args.port if args.port is not None else int(os.environ.get("PORT", "8000"))
-    try:
-        provider, max_age, whole_shares = resolve_settings(
-            provider=args.paper_market_data,
-            max_age=args.paper_snapshot_max_age_seconds,
-            fractional=args.paper_fractional_shares,
+    perpetual_only_mode = _perpetual_only_enabled()
+    if perpetual_only_mode:
+        # Avoid even resolving or logging Spot/paper providers on the futures-only service.
+        provider = PROVIDER_BAR_OPEN
+        max_age = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS
+        whole_shares = WHOLE_SHARES
+        decision_source = DECISION_SOURCE_HISTORY
+        execution_provider = EXECUTION_PROVIDER_ALPACA_PAPER
+        max_price_deviation = DEFAULT_MAX_PRICE_DEVIATION
+        crypto_symbols = ()
+        print("perpetual-only mode: Spot/equity providers and paper settings skipped", flush=True)
+    else:
+        try:
+            provider, max_age, whole_shares = resolve_settings(
+                provider=args.paper_market_data,
+                max_age=args.paper_snapshot_max_age_seconds,
+                fractional=args.paper_fractional_shares,
+            )
+            decision_source = resolve_paper_settings(
+                decision_source=args.paper_decision_source,
+            )[3]
+            execution_provider = _resolve_execution_provider(args)
+            max_price_deviation = _resolve_max_price_deviation(args)
+        except MarketDataWiringError as exc:
+            parser.error(str(exc))
+        print(
+            f"paper market data: {describe_provider(provider)}"
+            + (
+                f"; snapshot max age {max_age:.0f}s"
+                if provider == "alpaca_snapshot" and max_age is not None
+                else ""
+            ),
         )
-        decision_source = resolve_paper_settings(
-            decision_source=args.paper_decision_source,
-        )[3]
-        execution_provider = _resolve_execution_provider(args)
-        max_price_deviation = _resolve_max_price_deviation(args)
-    except MarketDataWiringError as exc:
-        parser.error(str(exc))
-    print(
-        f"paper market data: {describe_provider(provider)}"
-        + (
-            f"; snapshot max age {max_age:.0f}s"
-            if provider == "alpaca_snapshot" and max_age is not None
-            else ""
-        ),
-    )
-    print(f"paper decision source: {describe_decision_source(decision_source)}")
-    print(
-        f"paper execution provider: {describe_execution_provider(execution_provider)}",
-    )
-    # The endpoint the provider resolves to. The provider name alone does not say
-    # which host receives the order, and a mismatch between the two is exactly
-    # what made a Bybit selection appear to trade on Alpaca. Secret-free: a URL.
-    print(
-        "paper execution endpoint: "
-        f"{_endpoint_for_provider(execution_provider)}",
-    )
-    crypto_symbols = _crypto_symbols(args)
+        print(f"paper decision source: {describe_decision_source(decision_source)}")
+        print(
+            f"paper execution provider: {describe_execution_provider(execution_provider)}",
+        )
+        print(
+            "paper execution endpoint: "
+            f"{_endpoint_for_provider(execution_provider)}",
+        )
+        crypto_symbols = _crypto_symbols(args)
     try:
         serve(
             args.root,
@@ -1664,7 +1676,10 @@ def main(argv: list[str] | None = None) -> int:
             auto_interval=args.auto_interval,
             allow_paper_trading=args.allow_paper_trading,
             paper_order_notional=args.paper_order_notional,
-            market_data_factory=_market_data_factory_for(provider, max_age_seconds=max_age),
+            market_data_factory=(
+                None if perpetual_only_mode
+                else _market_data_factory_for(provider, max_age_seconds=max_age)
+            ),
             paper_whole_shares=whole_shares,
             paper_market_data_provider=provider,
             paper_market_data_max_age_seconds=max_age,
@@ -1672,7 +1687,7 @@ def main(argv: list[str] | None = None) -> int:
             paper_max_price_deviation=max_price_deviation,
             paper_execution_provider=execution_provider,
             crypto_symbols=crypto_symbols,
-            crypto_live=bool(getattr(args, "crypto_live", False)),
+            crypto_live=bool(getattr(args, "crypto_live", False)) and not perpetual_only_mode,
         )
     except DashboardAuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1761,16 +1776,21 @@ def serve(
     httpd.daemon_threads = True
     print(f"dashboard on http://{host}:{port}  (root: {Path(root).resolve()})")
     print(f"  auth: {'token required' if resolved else 'loopback only, no token'}")
-    print(f"  control: {'enabled' if allow_control else 'read-only'}")
-    print(
-        "  paper trading: "
-        + (
-            f"enabled ({banner_for_provider(paper_execution_provider)}, order notional {paper_order_notional:g})"
-            if allow_paper_trading
-            else "disabled (pass --allow-paper-trading to enable)"
+    print(f"  control: {'read-only' if perpetual_only_mode else ('enabled' if allow_control else 'read-only')}")
+    if perpetual_only_mode:
+        print("  mode: linear USDT perpetual research only; Spot/paper stack not initialized", flush=True)
+    else:
+        print(
+            "  paper trading: "
+            + (
+                f"enabled ({banner_for_provider(paper_execution_provider)}, order notional {paper_order_notional:g})"
+                if allow_paper_trading
+                else "disabled (pass --allow-paper-trading to enable)"
+            )
         )
-    )
-    if auto_advance:
+    if auto_advance and perpetual_only_mode:
+        print("  auto-advance: disabled in perpetual-only mode", flush=True)
+    elif auto_advance:
         if not allow_control:
             print("  auto-advance: refused (needs --allow-control)", flush=True)
         else:
@@ -1787,10 +1807,11 @@ def serve(
         # Stop the paper worker's loop before the process exits, so a shutdown
         # never leaves a cycle mid-flight and never places a new order. This is
         # best-effort: a stop failure must not mask the server's own shutdown.
-        try:
-            dashboard.paper.shutdown()
-        except Exception as exc:  # noqa: BLE001 - shutdown must not raise
-            print(f"  paper trading: stop on shutdown failed: {type(exc).__name__}", flush=True)
+        if dashboard.paper is not None:
+            try:
+                dashboard.paper.shutdown()
+            except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+                print(f"  paper trading: stop on shutdown failed: {type(exc).__name__}", flush=True)
         httpd.server_close()
 
 
