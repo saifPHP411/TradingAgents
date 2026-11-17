@@ -306,6 +306,89 @@ class Dashboard:
             worker_status=lambda: self.paper.status(),
             strategy_evaluations=lambda: self.paper.strategy_evaluations(),
         )
+        # Independent read-only Bybit linear-perpetual research job. This never
+        # starts a broker worker and never submits an exchange order.
+        self._perpetual_study_lock = threading.Lock()
+        self._perpetual_study_thread: threading.Thread | None = None
+        self._perpetual_study_status: dict[str, Any] = {"status": "idle"}
+
+    def perpetual_study_status(self) -> dict[str, Any]:
+        with self._perpetual_study_lock:
+            return dict(self._perpetual_study_status)
+
+    def start_perpetual_study(self) -> dict[str, Any]:
+        """Start a bounded public-data 1x/2x walk-forward study in the background."""
+        with self._perpetual_study_lock:
+            if self._perpetual_study_thread is not None and self._perpetual_study_thread.is_alive():
+                return dict(self._perpetual_study_status)
+            started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._perpetual_study_status = {
+                "status": "running",
+                "started_at": started_at,
+                "orders_submitted": False,
+                "demo_ready": False,
+            }
+
+            def run() -> None:
+                try:
+                    from types import SimpleNamespace
+
+                    from tradingagents.crypto.backtest.perpetual_ema_walkforward import run_study
+
+                    args = SimpleNamespace(
+                        symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"],
+                        days=730,
+                        equity=1_000.0,
+                        leverage=[1.0, 2.0],
+                        warmup_bars=260,
+                        test_bars=200,
+                        holdout_fraction=0.20,
+                    )
+                    report = run_study(args)
+                    report_path = self.root / "perpetual_ema_walkforward.json"
+                    report_path.parent.mkdir(parents=True, exist_ok=True)
+                    report_path.write_text(
+                        json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    summary = {}
+                    for key, value in report["reports"].items():
+                        holdout = value["untouched_final_holdout"]
+                        summary[key] = {
+                            "win_rate_pct": holdout["win_rate_pct"],
+                            "return_pct": holdout["equal_weight_return_pct"],
+                            "profit_factor": holdout["profit_factor"],
+                            "trades": holdout["trades"],
+                            "liquidations": holdout["liquidations"],
+                            "passed": value["acceptance_gate"]["passed"],
+                        }
+                    with self._perpetual_study_lock:
+                        self._perpetual_study_status = {
+                            "status": "completed",
+                            "started_at": started_at,
+                            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "orders_submitted": False,
+                            "demo_ready": False,
+                            "report_file": report_path.name,
+                            "summary": summary,
+                        }
+                except Exception as exc:  # noqa: BLE001 - report a failed research job, never crash the dashboard
+                    with self._perpetual_study_lock:
+                        self._perpetual_study_status = {
+                            "status": "error",
+                            "started_at": started_at,
+                            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "orders_submitted": False,
+                            "demo_ready": False,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc)[:500],
+                        }
+
+            self._perpetual_study_thread = threading.Thread(
+                target=run, name="perpetual-walkforward-study", daemon=True
+            )
+            self._perpetual_study_thread.start()
+            return dict(self._perpetual_study_status)
 
     def view(self) -> ExperimentView:
         return ExperimentView(self.root)
@@ -613,6 +696,8 @@ def make_handler(dashboard: Dashboard):
                     self._send_json(200, dashboard.crypto.health())
                 elif path == "/api/crypto":
                     self._send_json(200, dashboard.crypto.snapshot())
+                elif path == "/api/perpetual/study/status":
+                    self._send_json(200, dashboard.perpetual_study_status())
                 else:
                     self._send_json(404, {"error": "not found"})
             except DashboardStateError as exc:
@@ -622,6 +707,14 @@ def make_handler(dashboard: Dashboard):
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib name
             path = urlsplit(self.path).path
+            if path == "/api/perpetual/study/start":
+                if not self._authed():
+                    return
+                if (self.headers.get("X-Perpetual-Study-Confirm") or "").lower() != "yes":
+                    self._send_json(403, {"error": "explicit research confirmation required"})
+                    return
+                self._send_json(202, dashboard.start_perpetual_study())
+                return
             if path in ("/api/paper/start", "/api/paper/stop"):
                 self._handle_paper_control(path)
                 return
@@ -1407,6 +1500,116 @@ INDEX_HTML = """<!doctype html>
     .hrow{padding:10px 0}
     h1{font-size:15.5px}
   }
+
+  /* Orbital control-room redesign */
+  :root{
+    --bg:#050817;--card:rgba(13,21,46,.82);--line:rgba(133,153,255,.17);
+    --line2:rgba(142,164,255,.34);--fg:#edf3ff;--mut:#a0afd0;--mut2:#6f82ad;
+    --acc:#8b9cff;--ok:#4ce0c1;--warn:#ffcf75;--bad:#ff718f;
+    --radius:18px;--radius-sm:12px;
+  }
+  html{background:#050817}
+  body{
+    background:
+      radial-gradient(ellipse at 15% 0%,rgba(74,88,210,.22),transparent 42%),
+      radial-gradient(ellipse at 90% 18%,rgba(0,196,220,.12),transparent 34%),
+      radial-gradient(ellipse at 55% 100%,rgba(101,66,201,.13),transparent 42%),
+      #050817;
+    color:var(--fg);
+  }
+  body:before{
+    content:"";position:fixed;inset:0;pointer-events:none;z-index:-1;opacity:.42;
+    background-image:
+      radial-gradient(1px 1px at 8% 16%,#dce6ff 99%,transparent),
+      radial-gradient(1px 1px at 31% 72%,#b7c7ff 99%,transparent),
+      radial-gradient(1px 1px at 66% 28%,#dce6ff 99%,transparent),
+      radial-gradient(1px 1px at 84% 82%,#b7c7ff 99%,transparent),
+      radial-gradient(1px 1px at 92% 12%,#dce6ff 99%,transparent);
+    background-size:230px 210px,310px 280px,270px 240px,340px 310px,290px 260px;
+  }
+  .wrap{max-width:1480px;padding:0 22px}
+  header{
+    background:rgba(5,8,23,.76);backdrop-filter:blur(22px);
+    border-bottom:1px solid rgba(142,164,255,.16);
+    box-shadow:0 12px 40px rgba(0,0,0,.24)
+  }
+  .hrow{padding:16px 0}
+  h1{font-size:18px;letter-spacing:.08em;text-transform:uppercase}
+  .sub{color:#8498c7;letter-spacing:.05em}
+  nav{padding-bottom:12px;gap:7px}
+  nav button{border-radius:11px;padding:9px 15px}
+  nav button.on{background:linear-gradient(135deg,rgba(107,124,255,.22),rgba(30,206,221,.08));border-color:rgba(142,164,255,.32);box-shadow:inset 0 0 18px rgba(105,125,255,.08)}
+  .card{
+    background:linear-gradient(145deg,rgba(17,27,58,.88),rgba(8,14,34,.88));
+    border:1px solid rgba(137,157,255,.19);border-radius:18px;
+    box-shadow:0 18px 48px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.035);
+    backdrop-filter:blur(18px);padding:18px 20px
+  }
+  .card h2{color:#b5c3e7;font-size:11px;letter-spacing:.13em}
+  .stat .value{font-size:25px}
+  .stat .label{color:#9badd6;letter-spacing:.1em}
+  .kv .k{color:#98a9d0}
+  .sec-title{color:#9eaff0;letter-spacing:.15em;font-size:11px}
+  .banner{background:linear-gradient(90deg,rgba(99,121,255,.12),rgba(27,212,218,.06));border-color:rgba(135,155,255,.3);color:#c6d4ff}
+  .flag{background:rgba(7,13,32,.7);border-color:rgba(132,153,255,.16)}
+  .tablewrap{border-radius:12px}
+  table{font-size:12.5px}
+  th{color:#9badd6;border-color:rgba(142,164,255,.24)}
+  td{border-color:rgba(142,164,255,.11)}
+  button.act{background:linear-gradient(120deg,#8795ff,#54d8e8);color:#071026;border-radius:12px;box-shadow:0 8px 24px rgba(94,130,255,.2)}
+  button.act.stop{background:linear-gradient(120deg,#ff6f91,#ff9a85);color:#260812}
+  button.act.ghost{background:rgba(117,137,255,.08);border-color:rgba(142,164,255,.28);color:#dce5ff}
+  input{background:rgba(5,10,27,.86);border-color:rgba(142,164,255,.26)}
+  .mission-hero{
+    position:relative;overflow:hidden;margin:22px 0 18px;padding:24px;
+    border:1px solid rgba(125,149,255,.27);border-radius:24px;
+    background:
+      radial-gradient(ellipse at 100% 0%,rgba(28,202,220,.18),transparent 36%),
+      radial-gradient(ellipse at 0% 100%,rgba(111,93,255,.19),transparent 42%),
+      linear-gradient(135deg,rgba(16,27,64,.96),rgba(6,13,34,.96));
+    box-shadow:0 24px 70px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.06)
+  }
+  .mission-hero:after{
+    content:"";position:absolute;width:360px;height:360px;border:1px solid rgba(120,154,255,.13);
+    border-radius:50%;right:-130px;top:-220px;box-shadow:0 0 0 28px rgba(120,154,255,.025),0 0 0 58px rgba(120,154,255,.02);
+    pointer-events:none
+  }
+  .mission-kicker{font:700 10px ui-monospace,monospace;letter-spacing:.22em;color:#7ee8ef}
+  .mission-title{font-size:clamp(25px,4vw,42px);font-weight:800;letter-spacing:-.045em;margin:9px 0 5px}
+  .mission-copy{max-width:760px;color:#9eafd8;font-size:13px;margin:0 0 20px}
+  .launch-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;position:relative;z-index:1}
+  .launch-card{padding:17px;border:1px solid rgba(142,164,255,.23);border-radius:17px;background:rgba(6,13,34,.58)}
+  .launch-card.leverage{border-color:rgba(57,218,224,.32);background:linear-gradient(135deg,rgba(12,35,58,.72),rgba(8,15,39,.76))}
+  .launch-meta{font:700 10px ui-monospace,monospace;letter-spacing:.15em;color:#91a5e4}
+  .launch-card.leverage .launch-meta{color:#69e4e6}
+  .launch-card h3{font-size:17px;margin:8px 0 5px}
+  .launch-card p{font-size:12px;color:#9badd2;min-height:36px;margin:0 0 13px}
+  .launch-btn{width:100%;border:1px solid rgba(157,174,255,.35);border-radius:11px;padding:12px 14px;font:700 12px inherit;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:linear-gradient(110deg,#8291ff,#64cfe8);color:#071026}
+  .launch-card.leverage .launch-btn{background:linear-gradient(110deg,#4adbd4,#77a6ff)}
+  .launch-btn:disabled{opacity:.48;cursor:not-allowed}
+  .study-status{margin-top:13px;padding:12px 14px;border-radius:13px;border:1px solid rgba(118,150,255,.2);background:rgba(4,10,28,.55);color:#aebfe6;font-size:12px}
+  .study-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin-top:10px}
+  .study-metric{padding:9px 11px;border-radius:10px;background:rgba(113,137,255,.07);border:1px solid rgba(130,154,255,.12)}
+  .study-metric b{display:block;color:#e7eeff;font-size:13px;margin-bottom:3px}
+  .study-metric span{font-size:11px;color:#9aadd8}
+  .chart-section{margin:20px 0}
+  .chart-heading{display:flex;align-items:end;justify-content:space-between;gap:12px;margin:0 0 12px}
+  .chart-heading h2{font-size:15px;margin:0;letter-spacing:.02em}
+  .chart-heading p{font-size:11px;color:#8295c2;margin:3px 0 0}
+  .chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+  .chart-card{overflow:hidden;border-radius:17px;border:1px solid rgba(135,157,255,.22);background:rgba(8,14,34,.9);box-shadow:0 16px 40px rgba(0,0,0,.22)}
+  .chart-label{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;color:#dce6ff;font-size:11px;font-weight:700;letter-spacing:.09em}
+  .chart-label span{color:#7f93c5;font-size:10px;font-weight:500}
+  .chart-card iframe{display:block;width:100%;height:370px;border:0;background:#080e22}
+  @media(max-width:760px){
+    .wrap{padding:0 12px}
+    .mission-hero{padding:17px;margin-top:14px}
+    .launch-grid,.chart-grid{grid-template-columns:1fr}
+    .chart-card iframe{height:330px}
+    .chart-heading{align-items:flex-start;flex-direction:column}
+    .card{padding:15px}
+  }
+
 </style>
 </head>
 <body>
@@ -1447,6 +1650,46 @@ INDEX_HTML = """<!doctype html>
   </div>
 
   <main id="main" class="hide">
+    <div class="mission-hero">
+      <div class="mission-kicker">TRADINGAGENTS / ORBITAL CONTROL SYSTEM</div>
+      <div class="mission-title">Navigate the markets with clarity.</div>
+      <p class="mission-copy">A unified command surface for spot paper trading, leveraged strategy research, live market context and risk telemetry.</p>
+      <div class="launch-grid">
+        <div class="launch-card">
+          <div class="launch-meta">01 / SPOT ENGINE</div>
+          <h3>Normal paper trading</h3>
+          <p>Start the separately configured paper worker. Its broker and permissions remain controlled by the server configuration.</p>
+          <button class="launch-btn" id="launch-spot" onclick="doPaperStart()">START NORMAL PAPER</button>
+        </div>
+        <div class="launch-card leverage">
+          <div class="launch-meta">02 / LINEAR PERPETUALS</div>
+          <h3>Leveraged strategy lab</h3>
+          <p>Run the Bybit 1x / 2x historical walk-forward backtest with funding, fees, slippage and a reserved final holdout. No exchange orders.</p>
+          <button class="launch-btn" id="launch-leverage" onclick="doPerpetualStudy()">RUN LEVERAGE BACKTEST</button>
+        </div>
+      </div>
+      <div id="perp-study-status" class="study-status">Leverage execution is gated until the untouched holdout meets the 79% win-rate target and all after-cost risk checks pass.</div>
+    </div>
+    <div class="chart-section">
+      <div class="chart-heading">
+        <div><h2>Market observatory</h2><p>Always-open TradingView charts · external market-data visualization</p></div>
+        <span class="badge b-mut">LIVE CHARTS</span>
+      </div>
+      <div class="chart-grid">
+        <div class="chart-card"><div class="chart-label">BTC / USDT · SPOT <span>BINANCE · 1H</span></div>
+          <iframe title="Bitcoin USDT spot chart" loading="lazy" referrerpolicy="origin" allowfullscreen src="https://s.tradingview.com/widgetembed/?symbol=BINANCE%3ABTCUSDT&interval=60&theme=dark&style=1&locale=en&toolbar_bg=%23070b19&hide_side_toolbar=false&allow_symbol_change=true&save_image=false&withdateranges=true&hideideas=true&studies=%5B%5D&support_host=https%3A%2F%2Fwww.tradingview.com"></iframe>
+        </div>
+        <div class="chart-card"><div class="chart-label">BTC / USDT · PERPETUAL <span>BYBIT · 4H</span></div>
+          <iframe title="Bitcoin USDT perpetual chart" loading="lazy" referrerpolicy="origin" allowfullscreen src="https://s.tradingview.com/widgetembed/?symbol=BYBIT%3ABTCUSDT.P&interval=240&theme=dark&style=1&locale=en&toolbar_bg=%23070b19&hide_side_toolbar=false&allow_symbol_change=true&save_image=false&withdateranges=true&hideideas=true&studies=%5B%5D&support_host=https%3A%2F%2Fwww.tradingview.com"></iframe>
+        </div>
+        <div class="chart-card"><div class="chart-label">ETH / USDT · PERPETUAL <span>BYBIT · 4H</span></div>
+          <iframe title="Ethereum USDT perpetual chart" loading="lazy" referrerpolicy="origin" allowfullscreen src="https://s.tradingview.com/widgetembed/?symbol=BYBIT%3AETHUSDT.P&interval=240&theme=dark&style=1&locale=en&toolbar_bg=%23070b19&hide_side_toolbar=false&allow_symbol_change=true&save_image=false&withdateranges=true&hideideas=true&studies=%5B%5D&support_host=https%3A%2F%2Fwww.tradingview.com"></iframe>
+        </div>
+        <div class="chart-card"><div class="chart-label">SOL / USDT · PERPETUAL <span>BYBIT · 4H</span></div>
+          <iframe title="Solana USDT perpetual chart" loading="lazy" referrerpolicy="origin" allowfullscreen src="https://s.tradingview.com/widgetembed/?symbol=BYBIT%3ASOLUSDT.P&interval=240&theme=dark&style=1&locale=en&toolbar_bg=%23070b19&hide_side_toolbar=false&allow_symbol_change=true&save_image=false&withdateranges=true&hideideas=true&studies=%5B%5D&support_host=https%3A%2F%2Fwww.tradingview.com"></iframe>
+        </div>
+      </div>
+    </div>
     <section id="overview" class="on">
       <div class="sec-title">Live engine</div>
       <div class="card">
@@ -1949,6 +2192,51 @@ async function refreshEngine(){
     renderEngine(e);
   }catch(err){ showErr(err.message); }
 }
+async function doPerpetualStudy(){
+  const button = $("launch-leverage");
+  button.disabled = true;
+  button.textContent = "STARTING RESEARCH…";
+  try{
+    await api("/api/perpetual/study/start", {
+      method:"POST",
+      headers:{"X-Perpetual-Study-Confirm":"yes"}
+    });
+    await refreshPerpetualStudy();
+  }catch(e){
+    showErr(e.message);
+  }finally{
+    await refreshPerpetualStudy();
+  }
+}
+async function refreshPerpetualStudy(){
+  try{
+    const s = await api("/api/perpetual/study/status");
+    const button = $("launch-leverage");
+    const box = $("perp-study-status");
+    button.disabled = s.status === "running";
+    button.textContent = s.status === "running" ? "RESEARCH RUNNING…" : "RUN LEVERAGE BACKTEST";
+    if(s.status === "running"){
+      box.textContent = "Bybit public history is being fetched and tested across BTC, ETH, SOL and BNB at 1x and 2x. No exchange orders are submitted.";
+    }else if(s.status === "error"){
+      box.textContent = "Research failed (" + (s.error_type || "error") + "): " + (s.error || "No further detail available.");
+    }else if(s.status === "completed"){
+      const rows = Object.entries(s.summary || {}).map(([name, m]) =>
+        '<div class="study-metric"><b>' + esc(name) + '</b><span>Win rate: ' +
+        (m.win_rate_pct === null ? "N/A" : num(m.win_rate_pct, 1) + "%") +
+        ' · Return: ' + (m.return_pct === null ? "N/A" : num(m.return_pct, 2) + "%") +
+        ' · PF: ' + esc(m.profit_factor) + ' · Trades: ' + esc(m.trades) +
+        ' · Gate: ' + (m.passed ? "PASS" : "NOT PASSED") + '</span></div>'
+      ).join("");
+      box.innerHTML = "Final holdout report completed. This is research only; the leveraged execution path remains disabled. " +
+        '<div class="study-metrics">' + rows + '</div>';
+    }else{
+      box.textContent = "Leverage execution is gated until the untouched holdout meets the 79% win-rate target and all after-cost risk checks pass.";
+    }
+  }catch(e){
+    const box = $("perp-study-status");
+    if(box) box.textContent = "Leveraged research status is unavailable: " + e.message;
+  }
+}
 async function doPaperStart(){
   $("pstart").disabled = true;
   try{ await api("/api/paper/start", {method:"POST", headers:{"X-Paper-Confirm":"yes"}}); }
@@ -2313,6 +2601,7 @@ async function refresh(){
     renderOverview(s);
     await refreshEngine();
     await refreshOverviewAccount();
+    await refreshPerpetualStudy();
   }catch(e){
     if(/unauthorized/i.test(e.message)){
       $("auth").classList.remove("hide");
