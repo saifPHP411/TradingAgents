@@ -886,12 +886,20 @@ class Dashboard:
                     else BybitLinearDemoPositionClient()
                 )
                 wallet = client.get_wallet_balance()
-                closed = client.get_closed_pnl(limit=100)
-                if wallet.get("status") != "ok" or closed.get("status") != "ok":
-                    raise ValueError("Bybit account payload did not pass validation")
+                if wallet.get("status") != "ok":
+                    raise ValueError("Bybit wallet payload did not pass validation")
                 equity = float(wallet["total_equity_usd"])
                 if not math.isfinite(equity) or equity < 0:
                     raise ValueError("Bybit returned an invalid account equity")
+                try:
+                    closed = client.get_closed_pnl(limit=100)
+                    if closed.get("status") != "ok":
+                        raise ValueError("closed-PnL payload did not pass validation")
+                    closed_error_type = None
+                except Exception as exc:  # noqa: BLE001 - wallet data remains independently useful
+                    closed = {"status": "error", "records": [], "window": None,
+                              "next_page_available": False}
+                    closed_error_type = type(exc).__name__
             except BybitPerpetualAccountNotConfigured:
                 return {
                     "status": "not_configured",
@@ -946,6 +954,13 @@ class Dashboard:
                             "orders_submitted": False,
                         }
                 else:
+                    if equity <= 0:
+                        return {
+                            "status": "error",
+                            "error_type": "ZeroInitialEquity",
+                            "detail": "The first verified wallet equity is zero; set the actual original capital with TRADINGAGENTS_INITIAL_CAPITAL_USDT before calculating a return.",
+                            "orders_submitted": False,
+                        }
                     baseline = equity
                     baseline_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                     baseline_path.parent.mkdir(parents=True, exist_ok=True)
@@ -988,7 +1003,7 @@ class Dashboard:
                 history = []
                 history_error = "Equity history could not be read or persisted."
 
-            records = closed.get("records", [])
+            records = closed.get("records", []) if closed.get("status") == "ok" else []
             cumulative = 0.0
             closed_curve = []
             for record in records:
@@ -1010,6 +1025,8 @@ class Dashboard:
                 "equity_history": history,
                 "closed_pnl_curve": closed_curve,
                 "closed_trades": records,
+                "closed_pnl_status": closed.get("status", "error"),
+                "closed_pnl_error_type": closed_error_type,
                 "closed_pnl_window": closed.get("window"),
                 "closed_pnl_next_page_available": bool(closed.get("next_page_available")),
                 "equity_history_note": history_error,
