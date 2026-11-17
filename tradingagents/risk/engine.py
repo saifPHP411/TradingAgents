@@ -159,6 +159,17 @@ class RiskLimits(BaseModel):
             "the decision records that it could not be."
         ),
     )
+    risk_per_trade_fraction: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Optional fraction of current equity to risk on one new position, "
+            "measured as quantity x (entry - stop). This is a risk budget, not "
+            "a notional allocation. It is disabled by default and combines with "
+            "max_risk_per_trade by taking the tighter budget."
+        ),
+    )
     default_position_size: float = Field(
         default=0.05,
         gt=0.0,
@@ -456,7 +467,7 @@ class RiskEngine:
             value = cash
 
         risk_bound = False
-        risk_headroom = self._risk_headroom_value(signal, price, decision)
+        risk_headroom = self._risk_headroom_value(signal, price, equity, decision)
         if risk_headroom is not None and risk_headroom < value:
             risk_bound = True
             decision.notes.append(
@@ -477,7 +488,7 @@ class RiskEngine:
         )
 
     def _risk_headroom_value(
-        self, signal: TradingSignal, price: float, decision: RiskDecision
+        self, signal: TradingSignal, price: float, equity: float, decision: RiskDecision
     ) -> float | None:
         """Value that keeps ``quantity x (entry - stop)`` within ``max_risk_per_trade``.
 
@@ -497,20 +508,32 @@ class RiskEngine:
         the risk of a new position is only ever a long's, and there is no mirror
         geometry to handle here.
         """
-        cap = self.limits.max_risk_per_trade
-        if cap is None:
+        budgets = [
+            value
+            for value in (
+                self.limits.max_risk_per_trade,
+                (
+                    equity * self.limits.risk_per_trade_fraction
+                    if self.limits.risk_per_trade_fraction is not None
+                    else None
+                ),
+            )
+            if value is not None
+        ]
+        if not budgets:
             return None
+        cap = min(budgets)
         stop = signal.stop_loss
         if stop is None or not math.isfinite(stop):
             decision.notes.append(
-                "max_risk_per_trade not applied: the signal carries no usable stop to "
+                "per-trade risk budget not applied: the signal carries no usable stop to "
                 "measure per-unit risk against"
             )
             return None
         risk_per_unit = price - stop
         if risk_per_unit <= 0:
             decision.notes.append(
-                f"max_risk_per_trade not applied: the stop {stop:g} is not below the entry "
+                f"per-trade risk budget not applied: the stop {stop:g} is not below the entry "
                 f"{price:g}, so there is no positive per-unit risk to cap"
             )
             return None
