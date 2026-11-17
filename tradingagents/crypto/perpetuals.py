@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal, ROUND_DOWN
 
 
 MAX_RESEARCH_LEVERAGE = 2.0

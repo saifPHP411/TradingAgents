@@ -37,7 +37,7 @@ def test_leverage_ceiling_and_conservative_default():
     assert MAX_RESEARCH_LEVERAGE == 2.0
     assert PerpetualRiskSettings().leverage == 1.0
     with pytest.raises(ValueError, match="hard 2x ceiling"):
-        PerpetualRiskSettings(leverage=3.0, "max_leverage": 3.0)
+        PerpetualRiskSettings(leverage=3.0, max_leverage=3.0)
 
 
 def test_sizing_respects_stop_risk_margin_and_notional_caps():
