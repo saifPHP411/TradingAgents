@@ -505,24 +505,24 @@ class Dashboard:
 
         path = self.root / PERPETUAL_POSITION_FILE
         if not path.is_file():
-            return "unavailable", None
+            return "unavailable", None, None
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return "invalid", None
+            return "invalid", None, None
         if not isinstance(raw, dict):
-            return "invalid", None
+            return "invalid", None, None
         state = str(raw.get("state", "")).strip().upper()
         raw_symbol = str(raw.get("symbol", "")).strip().upper()
         if raw_symbol != symbol:
-            return "invalid", None
+            return "invalid", None, None
         if state == "FLAT":
-            return "flat", None
+            return "flat", None, "validated local futures snapshot"
         if state != "OPEN":
-            return "invalid", None
+            return "invalid", None, None
         side = str(raw.get("side", "")).strip().lower()
         if side not in {"long", "short"}:
-            return "invalid", None
+            return "invalid", None, None
 
         def positive(name: str, *, optional: bool = False):
             value = raw.get(name)
@@ -556,8 +556,8 @@ class Dashboard:
                     raise ValueError("unrealized_pnl")
                 position["unrealized_pnl"] = float(pnl)
         except (TypeError, ValueError, OverflowError):
-            return "invalid", None
-        return "open", position
+            return "invalid", None, None
+        return "open", position, "validated local futures snapshot"
 
     def perpetual_chart(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
         """Read completed Bybit perpetual candles and an optional read-only Demo position.
