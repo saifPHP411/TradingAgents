@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from tradingagents.crypto.binance_perpetual import BinanceUSDMPublicClient
@@ -10,7 +12,7 @@ def _transport_for(payloads):
     def transport(*, url, params, headers, timeout):
         for suffix, payload in payloads.items():
             if url.endswith(suffix):
-                return HttpResponse(200, __import__("json").dumps(payload))
+                return HttpResponse(200, json.dumps(payload))
         raise AssertionError(f"unexpected public endpoint: {url}")
     return transport
 
