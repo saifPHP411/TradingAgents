@@ -6,6 +6,8 @@ import pytest
 from tradingagents.crypto.backtest.perpetual_ema import PerpetualEMAStrategy, _features
 from tradingagents.crypto.backtest.perpetual_strategy_lab import (
     CANDIDATES,
+    PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES,
+    _rank_candidates,
     acceptance_gate,
 )
 
@@ -128,3 +130,58 @@ def test_donchian_breakout_uses_only_previous_completed_candles_for_channel():
 def test_invalid_signal_mode_is_rejected():
     with pytest.raises(ValueError, match="signal_mode"):
         PerpetualEMAStrategy(signal_mode="future_prediction")
+
+
+@pytest.mark.unit
+def test_previous_holdout_failure_overrides_a_positive_development_gate():
+    rankings, eligible = _rank_candidates(
+        [
+            {
+                "candidate": "ema_14_50_adx18",
+                "leverage": 2.0,
+                "development_gate_passed_all_costs": True,
+                "minimum_scenario_profit_factor": 1.36,
+                "conservative_return_pct": 1.92,
+            },
+            {
+                "candidate": "donchian_20_adx18",
+                "leverage": 2.0,
+                "development_gate_passed_all_costs": False,
+                "minimum_scenario_profit_factor": 0.97,
+                "conservative_return_pct": 1.69,
+            },
+        ]
+    )
+
+    assert "ema_14_50_adx18" in PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES
+    rejected = next(row for row in rankings if row["candidate"] == "ema_14_50_adx18")
+    assert rejected["development_gate_passed_all_costs"] is True
+    assert rejected["previous_holdout_rejected"] is True
+    assert rejected["selection_eligible"] is False
+    assert eligible == []
+
+
+@pytest.mark.unit
+def test_a_non_rejected_all_cost_candidate_can_still_be_shortlisted():
+    rankings, eligible = _rank_candidates(
+        [
+            {
+                "candidate": "ema_14_50_adx18",
+                "leverage": 2.0,
+                "development_gate_passed_all_costs": True,
+                "minimum_scenario_profit_factor": 1.72,
+                "conservative_return_pct": 1.92,
+            },
+            {
+                "candidate": "donchian_20_adx18",
+                "leverage": 1.0,
+                "development_gate_passed_all_costs": True,
+                "minimum_scenario_profit_factor": 1.12,
+                "conservative_return_pct": 1.05,
+            },
+        ]
+    )
+
+    assert len(eligible) == 1
+    assert eligible[0]["candidate"] == "donchian_20_adx18"
+    assert not rankings[0]["selection_eligible"] or rankings[0]["candidate"] != "ema_14_50_adx18"
