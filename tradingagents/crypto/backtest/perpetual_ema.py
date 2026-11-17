@@ -29,6 +29,8 @@ class PerpetualEMAStrategy:
     atr_period: int = 14
     atr_multiple: float = 2.5
     min_adx: float | None = 18.0
+    signal_mode: str = "ema_cross"
+    breakout_period: int = 20
     max_holding_bars: int = 180
     interval_minutes: int = 240
     risk: PerpetualRiskSettings = field(default_factory=PerpetualRiskSettings)
@@ -46,6 +48,14 @@ class PerpetualEMAStrategy:
             raise ValueError("ATR multiple must be finite and positive")
         if self.min_adx is not None and (not math.isfinite(self.min_adx) or not 0 <= self.min_adx <= 100):
             raise ValueError("min_adx must be in [0, 100]")
+        if self.signal_mode not in {"ema_cross", "donchian_breakout"}:
+            raise ValueError("signal_mode must be ema_cross or donchian_breakout")
+        if (
+            isinstance(self.breakout_period, bool)
+            or not isinstance(self.breakout_period, int)
+            or not 2 <= self.breakout_period <= 200
+        ):
+            raise ValueError("breakout_period must be an integer in [2, 200]")
 
 
 @dataclass(frozen=True)
@@ -165,8 +175,35 @@ def _features(data: pd.DataFrame, cfg: PerpetualEMAStrategy) -> pd.DataFrame:
     x["adx"] = dx.ewm(alpha=alpha, adjust=False, min_periods=cfg.atr_period).mean()
     adx_ok = x.adx >= cfg.min_adx if cfg.min_adx is not None else True
     x["signal"] = 0
-    x.loc[(x.fast > x.slow) & (x.fast.shift(1) <= x.slow.shift(1)) & (x.close > x.trend) & adx_ok, "signal"] = 1
-    x.loc[(x.fast < x.slow) & (x.fast.shift(1) >= x.slow.shift(1)) & (x.close < x.trend) & adx_ok, "signal"] = -1
+    if cfg.signal_mode == "ema_cross":
+        x.loc[
+            (x.fast > x.slow)
+            & (x.fast.shift(1) <= x.slow.shift(1))
+            & (x.close > x.trend)
+            & adx_ok,
+            "signal",
+        ] = 1
+        x.loc[
+            (x.fast < x.slow)
+            & (x.fast.shift(1) >= x.slow.shift(1))
+            & (x.close < x.trend)
+            & adx_ok,
+            "signal",
+        ] = -1
+    else:
+        # Previous-window channels are shifted before comparing the current
+        # completed close, preventing the current candle from entering its own
+        # breakout threshold.
+        prior_high = x.high.rolling(
+            cfg.breakout_period, min_periods=cfg.breakout_period
+        ).max().shift(1)
+        prior_low = x.low.rolling(
+            cfg.breakout_period, min_periods=cfg.breakout_period
+        ).min().shift(1)
+        x["prior_channel_high"] = prior_high
+        x["prior_channel_low"] = prior_low
+        x.loc[(x.close > prior_high) & (x.close > x.trend) & adx_ok, "signal"] = 1
+        x.loc[(x.close < prior_low) & (x.close < x.trend) & adx_ok, "signal"] = -1
     return x
 
 
@@ -377,7 +414,7 @@ def run_backtest(
         equity_curve=curve, rejections=rejected,
         assumptions={"instrument": instrument.symbol, "contract": "linear USDT perpetual", "margin_mode": "isolated",
             "position_mode": "one-way", "leverage": cfg.risk.leverage, "research_leverage_ceiling": 2.0,
-            "strategy": "EMA14/EMA50 cross + EMA200 trend + ADX, ATR trailing stop",
+            "strategy": (f"EMA14/EMA50 cross + EMA200 trend + ADX, ATR trailing stop" if cfg.signal_mode == "ema_cross" else f"Donchian {cfg.breakout_period} breakout + EMA{cfg.trend} regime + ADX, ATR trailing stop"),
             "signal_timing": "completed 4h candle, next candle open", "funding_series_required": True,
             "mark_price_liquidation": True, "liquidation_estimate": "approximate, not Bybit tier formula",
             "liquidation_buffer_fraction": cfg.risk.liquidation_buffer_fraction,
