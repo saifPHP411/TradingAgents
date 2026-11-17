@@ -600,6 +600,8 @@ class Dashboard:
                         json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
                         encoding="utf-8",
                     )
+                    with self._perpetual_lab_lock:
+                        self._perpetual_lab_status = {"status": "idle"}
                     recovered = self.perpetual_lab_status()
                     with self._perpetual_lab_lock:
                         self._perpetual_lab_status = {
@@ -1133,6 +1135,9 @@ def make_handler(dashboard: Dashboard):
             path = urlsplit(self.path).path
             if path == "/api/perpetual/lab/start":
                 if not self._authed():
+                    return
+                if not dashboard.perpetual_only_mode:
+                    self._send_json(409, {"error": "perpetual-only mode is required for the strategy lab"})
                     return
                 if (self.headers.get("X-Perpetual-Lab-Confirm") or "").lower() != "yes":
                     self._send_json(403, {"error": "explicit strategy-lab confirmation required"})
@@ -1837,7 +1842,7 @@ body{padding:env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 20px)
 <aside class="side">
 <section class="panel pad"><div class="panelhead" style="padding:0 0 12px;border:0"><h2>Market snapshot</h2></div><div class="metrics"><div class="metric"><label>Last close</label><b id="last-price">—</b><small id="last-time">—</small></div><div class="metric"><label>4H candles</label><b id="bars">—</b><small>Completed only</small></div><div class="metric"><label>Instrument</label><b id="instrument">—</b><small>USDT linear</small></div><div class="metric"><label>Data updated</label><b id="updated">—</b><small>Bybit public endpoint</small></div></div></section>
 <section class="panel pad"><div class="position-head"><h2 style="font-size:12px;letter-spacing:.12em;margin:0">Open futures position</h2><span id="position-badge" class="pill">UNKNOWN</span></div><div id="position-body" class="empty-state" style="margin-top:11px">Checking position source…</div></section>
-<section class="panel pad wide"><div class="position-head"><h2 style="font-size:12px;letter-spacing:.12em;margin:0">Walk-forward study</h2><span id="study-badge" class="pill">IDLE</span></div><p id="study-status" class="study-status">A study compares 1x and 2x across realistic, conservative and stress cost scenarios.</p><button id="run-study" class="action primary" type="button" style="width:100%">Run perpetual research</button><div id="study-results" class="study-grid" style="margin-top:12px"></div></section>
+<section class="panel pad wide"><div class="position-head"><h2 style="font-size:12px;letter-spacing:.12em;margin:0">Strategy tournament</h2><span id="study-badge" class="pill">IDLE</span></div><p id="study-status" class="study-status">Five fixed EMA and Donchian families · 1x / 2x · three cost models · development folds only.</p><button id="run-study" class="action primary" type="button" style="width:100%">Run strategy tournament</button><div id="study-results" class="study-grid" style="margin-top:12px"></div></section>
 </aside></section>
 <div class="footer">Bybit public market data · completed 4-hour candles · no authenticated account · no orders submitted</div>
 </main>
@@ -1876,15 +1881,15 @@ function renderPosition(d){var s=d.position_status||"unavailable",p=d.position,b
  '<div class="muted small">Snapshot: '+esc(p.updated_at||"unknown")+'</div>';
 }
 async function refreshChart(){var symbol=$("symbol").value;$("chart-title").textContent=symbol+" · 4H";$("market-state").textContent="LOADING";try{var d=await api("/api/perpetual/chart?symbol="+encodeURIComponent(symbol));DATA=d;var bars=d.candles||[],last=bars[bars.length-1]||{};$("market-state").textContent="LIVE DATA";$("market-state").className="pill safe";$("last-price").textContent=fmt(last.close,4);$("last-time").textContent=last.time?new Date(last.time).toLocaleString():"—";$("bars").textContent=String(bars.length);$("instrument").textContent=d.category==="linear"?"USDT LINEAR":"—";$("updated").textContent=d.updated_at?new Date(d.updated_at).toLocaleTimeString():"—";$("chart-sub").textContent="Bybit public · completed candles only";renderPosition(d);drawChart(d);showError("");}catch(e){$("market-state").textContent="UNAVAILABLE";$("market-state").className="pill warn";$("chart-empty").style.display="flex";$("chart-empty").textContent=e.message;$("position-badge").textContent="UNKNOWN";$("position-body").className="empty-state";$("position-body").textContent="Position status unavailable.";showError(e.message);}}
-function renderStudy(s){var b=$("study-badge"),st=$("study-status"),box=$("study-results"),btn=$("run-study");b.textContent=String(s.status||"idle").toUpperCase();b.className="pill "+(s.status==="completed"?"safe":s.status==="error"?"warn":"");btn.disabled=s.status==="running";btn.textContent=s.status==="running"?"RESEARCH RUNNING…":"Run perpetual research";
- if(s.status==="running"){st.textContent="Fetching public Bybit history and calculating 1x/2x results. No exchange orders are submitted.";return;}
+function renderStudy(s){var b=$("study-badge"),st=$("study-status"),box=$("study-results"),btn=$("run-study");b.textContent=String(s.status||"idle").toUpperCase();b.className="pill "+(s.status==="completed"?"safe":s.status==="error"?"warn":"");btn.disabled=s.status==="running"||s.status==="completed";btn.textContent=s.status==="running"?"TOURNAMENT RUNNING…":s.status==="completed"?"LAB COMPLETE · RERUN LOCKED":"Run strategy tournament";
+ if(s.status==="running"){st.textContent="Comparing fixed EMA and Donchian candidates only on time-ordered development folds before the already-inspected holdout. No exchange orders are submitted.";return;}
  if(s.status==="error"){st.textContent="Research failed: "+(s.error||s.error_type||"unknown error");box.innerHTML="";return;}
- if(s.status!=="completed"){st.textContent="No completed study report loaded. Start a research run to calculate trade statistics.";box.innerHTML="";return;}
- st.textContent="Completed study · orders submitted: no · Demo approval: no. Holdout statistics are historical research results, not a guarantee.";
- box.innerHTML=Object.entries(s.summary||{}).map(function(x){var m=x[1];return '<div class="study-row"><strong>'+esc(x[0])+' <span class="'+(m.passed?"gate-pass":"gate-fail")+'">'+(m.passed?"GATE PASSED":"GATE NOT PASSED")+'</span></strong><p>Win rate: '+(m.win_rate_pct===null?"—":fmt(m.win_rate_pct,1)+"%")+' · Return: '+(m.return_pct===null?"—":fmt(m.return_pct,2)+"%")+' · PF: '+esc(m.profit_factor)+' · Trades: '+esc(m.trades)+' · Liquidations: '+esc(m.liquidations)+'</p></div>';}).join("");
+ if(s.status!=="completed"){st.textContent="No tournament report loaded. Start the fixed-candidate development study.";box.innerHTML="";return;}
+ var best=s.best_candidate;st.textContent=best?"Development shortlist: "+best.candidate+" at "+fmt(best.leverage,1)+"x. This is not an independent validation result.":"No candidate passed all three after-cost development gates. No strategy is selected; execution remains disabled.";
+ box.innerHTML=(s.results||[]).map(function(row){var scenarios=row.scenarios||{},r=scenarios.realistic_estimate||{},c=scenarios.conservative||{},x=scenarios.stress||{},ok=row.development_gate_passed_all_costs;function m(v){return "WR "+(v.win_rate_pct===null?"—":fmt(v.win_rate_pct,1)+"%")+" · R "+(v.return_pct===null?"—":fmt(v.return_pct,2)+"%")+" · PF "+esc(v.profit_factor)+" · N "+esc(v.trades);}return '<div class="study-row"><strong>'+esc(row.candidate)+' · '+fmt(row.leverage,1)+'x <span class="'+(ok?"gate-pass":"gate-fail")+'">'+(ok?"ALL COST GATES PASS":"NOT SELECTED")+'</span></strong><p>Realistic: '+m(r)+'</p><p>Conservative: '+m(c)+'</p><p>Stress: '+m(x)+'</p><p>Consistent folds: '+esc(c.positive_folds)+'/'+esc(c.fold_count)+' · Positive symbols: '+esc(c.positive_symbols)+'/'+esc(c.symbol_count)+' · Liquidations: '+esc(c.liquidations)+'</p></div>';}).join("");
 }
-async function refreshStudy(){try{renderStudy(await api("/api/perpetual/study/status"));}catch(e){$("study-status").textContent="Study status unavailable: "+e.message;}}
-async function runStudy(){var b=$("run-study");b.disabled=true;try{renderStudy(await api("/api/perpetual/study/start",{method:"POST",headers:{"X-Perpetual-Study-Confirm":"yes"}}));setTimeout(refreshStudy,1200);}catch(e){showError(e.message);}finally{setTimeout(refreshStudy,1500);}}
+async function refreshStudy(){try{renderStudy(await api("/api/perpetual/lab/status"));}catch(e){$("study-status").textContent="Lab status unavailable: "+e.message;}}
+async function runStudy(){var b=$("run-study");b.disabled=true;try{renderStudy(await api("/api/perpetual/lab/start",{method:"POST",headers:{"X-Perpetual-Lab-Confirm":"yes"}}));setTimeout(refreshStudy,1200);}catch(e){showError(e.message);}finally{setTimeout(refreshStudy,1500);}}
 $("connect").addEventListener("click",connect);$("token").addEventListener("keydown",function(e){if(e.key==="Enter")connect();});$("symbol").addEventListener("change",refreshChart);$("refresh").addEventListener("click",refreshChart);$("run-study").addEventListener("click",runStudy);window.addEventListener("resize",function(){if(DATA)drawChart(DATA);});if(TOKEN)boot();else $("auth").style.display="block";
 })();
 </script>
