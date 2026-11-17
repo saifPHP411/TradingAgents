@@ -607,6 +607,43 @@ class Dashboard:
                         json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
                         encoding="utf-8",
                     )
+                    best = report.get("best_candidate")
+                    print(
+                        "perpetual strategy lab completed: "
+                        f"best_candidate={best.get('candidate') if best else 'NONE'} "
+                        f"leverage={best.get('leverage') if best else 'NONE'} "
+                        f"development_folds={report.get('development_folds')} "
+                        "previous_holdout_reused=False final_holdout_evaluated=False "
+                        "orders_submitted=False demo_ready=False",
+                        flush=True,
+                    )
+                    # Emit reproducible aggregate Win Rate / Return / PF results
+                    # to platform logs so the report can be audited without
+                    # reading dashboard credentials or exposing account secrets.
+                    for ranking in report.get("rankings", []):
+                        candidate = ranking["candidate"]
+                        leverage = float(ranking["leverage"])
+                        for scenario in ("realistic_estimate", "conservative", "stress"):
+                            key = f"{candidate}/{leverage:g}x/{scenario}"
+                            item = report["reports"][key]
+                            metrics = item["development_only"]
+                            gate = item["acceptance_gate"]
+                            print(
+                                "perpetual strategy result: "
+                                f"candidate={candidate} leverage={leverage:g}x "
+                                f"scenario={scenario} "
+                                f"win_rate_pct={metrics.get('win_rate_pct')} "
+                                f"return_pct={metrics.get('equal_weight_compounded_return_pct')} "
+                                f"profit_factor={metrics.get('profit_factor')} "
+                                f"trades={metrics.get('trades')} "
+                                f"positive_folds={metrics.get('positive_folds')}/"
+                                f"{metrics.get('fold_count')} "
+                                f"positive_symbols={metrics.get('positive_symbols')}/"
+                                f"{metrics.get('symbol_count')} "
+                                f"liquidations={metrics.get('liquidations')} "
+                                f"gate_passed={gate.get('passed')}",
+                                flush=True,
+                            )
                     with self._perpetual_lab_lock:
                         self._perpetual_lab_status = {"status": "idle"}
                     recovered = self.perpetual_lab_status()
