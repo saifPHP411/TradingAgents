@@ -179,13 +179,22 @@ def run_backtest(
     initial_equity: float = 1_000.0,
     strategy: PerpetualEMAStrategy | None = None,
     costs: PerpetualCosts | None = None,
+    trade_start_index: int = 1,
 ) -> PerpetualBacktestResult:
-    """Simulate a single symbol; missing or misaligned funding/mark data fail closed."""
+    """Simulate a single symbol; missing or misaligned funding/mark data fail closed.
+
+    trade_start_index lets a walk-forward fold use preceding candles only for
+    indicator warm-up. No signal is accepted before this index.
+    """
     cfg, fees = strategy or PerpetualEMAStrategy(), costs or PerpetualCosts()
     if not cfg.enabled:
         raise ValueError("strategy is disabled by default; enable explicitly for research")
     if not math.isfinite(initial_equity) or initial_equity <= 0:
         raise ValueError("initial_equity must be finite and positive")
+    if isinstance(trade_start_index, bool) or not isinstance(trade_start_index, int):
+        raise ValueError("trade_start_index must be an integer")
+    if trade_start_index < 1 or trade_start_index >= len(traded):
+        raise ValueError("trade_start_index must be within the candle window")
     if cfg.risk.leverage > instrument.max_leverage or cfg.risk.leverage < instrument.min_leverage:
         raise ValueError("configured leverage is outside current instrument limits")
     trade = _validate(traded, "traded candles")
@@ -355,7 +364,7 @@ def run_backtest(
             global_halt, pending_signal, pending_atr = True, 0, math.nan
             if position is not None:
                 pending_exit = "max_drawdown_limit"
-        if not global_halt and not daily_halt:
+        if i >= trade_start_index and not global_halt and not daily_halt:
             sig = int(features.iloc[i].signal)
             if sig:
                 pending_signal, pending_atr = sig, float(features.iloc[i].atr)
