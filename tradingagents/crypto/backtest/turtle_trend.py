@@ -26,11 +26,16 @@ class TurtleTrendSettings:
     atr_stop_multiple: float = 3.0
     max_holding_bars: int = 180
     max_entry_gap_atr: float = 1.0
+    adx_period: int = 14
+    volume_period: int = 20
+    min_adx: float | None = None
+    min_relative_volume: float | None = None
 
     def __post_init__(self) -> None:
         for name in (
             "entry_lookback", "exit_lookback", "atr_period",
             "ema_period", "ema_slope_bars", "max_holding_bars",
+            "adx_period", "volume_period",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 2:
@@ -41,6 +46,18 @@ class TurtleTrendSettings:
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        if self.min_adx is not None and (
+            isinstance(self.min_adx, bool)
+            or not math.isfinite(self.min_adx)
+            or not 0 <= self.min_adx <= 100
+        ):
+            raise ValueError("min_adx must be in [0, 100] when supplied")
+        if self.min_relative_volume is not None and (
+            isinstance(self.min_relative_volume, bool)
+            or not math.isfinite(self.min_relative_volume)
+            or self.min_relative_volume <= 0
+        ):
+            raise ValueError("min_relative_volume must be finite and positive")
 
 
 @dataclass(frozen=True)
@@ -230,11 +247,45 @@ def _features(
     ).mean()
     features["benchmark_close"] = benchmark
     features["benchmark_ema"] = benchmark_ema
+    # Wilder-style ADX: the filter is optional, so the baseline signal remains
+    # unchanged unless a refinement explicitly supplies min_adx.
+    up_move = data.high.diff()
+    down_move = -data.low.diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    alpha = 1.0 / settings.adx_period
+    smoothed_tr = true_range.ewm(
+        alpha=alpha, adjust=False, min_periods=settings.adx_period
+    ).mean()
+    plus_di = 100.0 * plus_dm.ewm(
+        alpha=alpha, adjust=False, min_periods=settings.adx_period
+    ).mean() / smoothed_tr.replace(0, math.nan)
+    minus_di = 100.0 * minus_dm.ewm(
+        alpha=alpha, adjust=False, min_periods=settings.adx_period
+    ).mean() / smoothed_tr.replace(0, math.nan)
+    directional_sum = (plus_di + minus_di).replace(0, math.nan)
+    dx = 100.0 * (plus_di - minus_di).abs() / directional_sum
+    features["adx"] = dx.ewm(
+        alpha=alpha, adjust=False, min_periods=settings.adx_period
+    ).mean()
+    prior_volume_mean = data.volume.rolling(
+        settings.volume_period, min_periods=settings.volume_period
+    ).mean().shift(1)
+    features["relative_volume"] = data.volume / prior_volume_mean.replace(0, math.nan)
+
     features["long_entry"] = (
         (features.close > features.entry_high)
         & (features.close > features.ema)
         & (features.ema > features.ema.shift(settings.ema_slope_bars))
         & (features.benchmark_close > features.benchmark_ema)
+        & (
+            features.adx >= settings.min_adx
+            if settings.min_adx is not None else True
+        )
+        & (
+            features.relative_volume >= settings.min_relative_volume
+            if settings.min_relative_volume is not None else True
+        )
     )
     return features
 
@@ -566,6 +617,56 @@ def run_walk_forward_study(
     }
 
 
+def run_refinement_comparison(
+    frames: Mapping[str, pd.DataFrame],
+    *,
+    warmup_bars: int = 300,
+    test_bars: int = 180,
+    portfolio: TurtlePortfolioSettings | None = None,
+    scenarios: Mapping[str, TurtleExecutionCosts] = COST_SCENARIOS,
+    benchmark_symbol: str = "BTC/USDT",
+) -> dict:
+    """Compare a small, predeclared filter ablation set on historical development data.
+
+    This is a diagnostic comparison, not an untouched holdout or permission to
+    promote whichever variant happens to rank first on the inspected history.
+    """
+    variants = {
+        "baseline": TurtleTrendSettings(),
+        "adx_20": TurtleTrendSettings(min_adx=20.0),
+        "relative_volume_1_2": TurtleTrendSettings(min_relative_volume=1.2),
+        "adx_20_and_relative_volume_1_2": TurtleTrendSettings(
+            min_adx=20.0, min_relative_volume=1.2
+        ),
+    }
+    reports = {}
+    for name, candidate_settings in variants.items():
+        report = run_walk_forward_study(
+            frames,
+            warmup_bars=warmup_bars,
+            test_bars=test_bars,
+            settings=candidate_settings,
+            portfolio=portfolio,
+            scenarios=scenarios,
+            benchmark_symbol=benchmark_symbol,
+        )
+        reports[name] = {
+            "settings": dataclasses.asdict(candidate_settings),
+            "summary": report["summary"],
+            "folds": report["folds"],
+        }
+    return {
+        "study": "4h_donchian_filter_refinement_comparison",
+        "data_scope": "Previously inspected Binance Spot development history; not a locked holdout",
+        "parameters_fitted_on_oos": False,
+        "selection_warning": (
+            "All variants are exploratory. Do not select/promote based on these same " 
+            "historical folds; reserve future untouched data and measured Bybit costs."
+        ),
+        "variants": reports,
+    }
+
+
 def load_hourly_frames(cache_dir: str, symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
     """Load completed cached UTC 1h candles; no network calls are made."""
     from .history import HistoryCache
@@ -601,17 +702,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warmup-bars", type=int, default=300)
     parser.add_argument("--test-bars", type=int, default=180)
     parser.add_argument(
+        "--compare-refinements", action="store_true",
+        help="Compare baseline with predeclared ADX and relative-volume filters.",
+    )
+    parser.add_argument(
         "--out", type=pathlib.Path,
         default=pathlib.Path("artifacts/turtle_trend_oos.json"),
     )
     args = parser.parse_args(argv)
     frames = load_hourly_frames(args.cache, tuple(args.symbols))
-    report = run_walk_forward_study(
-        frames, warmup_bars=args.warmup_bars, test_bars=args.test_bars
-    )
+    if args.compare_refinements:
+        report = run_refinement_comparison(
+            frames, warmup_bars=args.warmup_bars, test_bars=args.test_bars
+        )
+        printable = {
+            name: details["summary"] for name, details in report["variants"].items()
+        }
+    else:
+        report = run_walk_forward_study(
+            frames, warmup_bars=args.warmup_bars, test_bars=args.test_bars
+        )
+        printable = report["summary"]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps(report["summary"], indent=2, sort_keys=True))
+    print(json.dumps(printable, indent=2, sort_keys=True))
     print(f"wrote {args.out}")
     return 0
 
