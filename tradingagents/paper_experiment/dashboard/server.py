@@ -471,41 +471,37 @@ class Dashboard:
             self._perpetual_study_thread.start()
             return dict(self._perpetual_study_status)
 
-    def _perpetual_position_view(self, symbol: str) -> tuple[str, dict[str, Any] | None]:
+    def _perpetual_position_view(self, symbol: str) -> tuple[str, dict[str, Any] | None, str | None]:
         """Read a genuine Bybit Demo linear position, falling back to a validated local snapshot.
 
         The live account path is signed and GET-only. Missing credentials mean
         "unavailable", never "flat"; Spot positions are never consulted.
         """
+        from tradingagents.crypto.bybit_perpetual_account import (
+            BybitLinearDemoPositionClient,
+            BybitPerpetualAccountNotConfigured,
+        )
         try:
-            if self._perpetual_account_client_factory is None:
-                from tradingagents.crypto.bybit_perpetual_account import (
-                    BybitLinearDemoPositionClient,
-                )
-                account_client = BybitLinearDemoPositionClient()
-            else:
-                account_client = self._perpetual_account_client_factory()
+            account_client = (
+                self._perpetual_account_client_factory()
+                if self._perpetual_account_client_factory is not None
+                else BybitLinearDemoPositionClient()
+            )
             result = account_client.get_position(symbol)
             status = result.get("status")
             position = result.get("position")
             if status == "flat" and position is None:
-                return "flat", None
+                return "flat", None, "Bybit Demo read-only position endpoint"
             if status == "open" and isinstance(position, dict):
-                return "open", position
-            return "invalid", None
-        except Exception as exc:  # noqa: BLE001 - credentials/errors never reach the page
-            from_file = isinstance(
-                exc,
-                __import__(
-                    "tradingagents.crypto.bybit_perpetual_account",
-                    fromlist=["BybitPerpetualAccountNotConfigured"],
-                ).BybitPerpetualAccountNotConfigured,
-            )
-            if not from_file:
-                # A failed signed read must not be hidden by an older cached position.
-                # When no credentials are present only, an explicit worker snapshot is
-                # an acceptable alternative.
-                return "error", None
+                return "open", position, "Bybit Demo read-only position endpoint"
+            return "invalid", None, None
+        except BybitPerpetualAccountNotConfigured:
+            # With no credentials, a worker may still publish a validated local
+            # snapshot. A failed signed request, by contrast, must not be hidden
+            # by an older cached position.
+            pass
+        except Exception:  # noqa: BLE001 - account details/secrets never reach the page
+            return "error", None, None
 
         path = self.root / PERPETUAL_POSITION_FILE
         if not path.is_file():
@@ -608,7 +604,7 @@ class Dashboard:
             })
         if not candles:
             raise RuntimeError("Bybit returned no valid completed candles")
-        position_status, position = self._perpetual_position_view(market)
+        position_status, position, position_source = self._perpetual_position_view(market)
         return {
             "status": "ok",
             "venue": "Bybit V5 public linear perpetual market data",
@@ -619,10 +615,7 @@ class Dashboard:
             "candles": candles,
             "position_status": position_status,
             "position": position,
-            "position_source": (
-                (position or {}).get("position_source")
-                or ("Bybit Demo read-only position endpoint" if position_status == "flat" else None)
-            ),
+            "position_source": position_source,
             "orders_submitted": False,
         }
 
