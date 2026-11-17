@@ -23,11 +23,11 @@ from tradingagents.crypto.perpetuals import (
 
 def instrument(**overrides):
     values = {
-        symbol="BTCUSDT", base_coin="BTC", quote_coin="USDT", settle_coin="USDT",
-        status="Trading", contract_type="LinearPerpetual", min_quantity=0.001,
-        max_market_quantity=100.0, quantity_step=0.001, min_notional=5.0,
-        tick_size=0.1, min_leverage=1.0, max_leverage=50.0, leverage_step=0.01,
-        funding_interval_minutes=480,
+        "symbol": "BTCUSDT", "base_coin": "BTC", "quote_coin": "USDT", "settle_coin": "USDT",
+        "status": "Trading", "contract_type": "LinearPerpetual", "min_quantity": 0.001,
+        "max_market_quantity": 100.0, "quantity_step": 0.001, "min_notional": 5.0,
+        "tick_size": 0.1, "min_leverage": 1.0, "max_leverage": 50.0, "leverage_step": 0.01,
+        "funding_interval_minutes": 480,
     }
     values.update(overrides)
     return LinearPerpetualInstrument(**values)
@@ -37,7 +37,7 @@ def test_leverage_ceiling_and_conservative_default():
     assert MAX_RESEARCH_LEVERAGE == 2.0
     assert PerpetualRiskSettings().leverage == 1.0
     with pytest.raises(ValueError, match="hard 2x ceiling"):
-        PerpetualRiskSettings(leverage=3.0, max_leverage=3.0)
+        PerpetualRiskSettings(leverage=3.0, "max_leverage": 3.0)
 
 
 def test_sizing_respects_stop_risk_margin_and_notional_caps():
