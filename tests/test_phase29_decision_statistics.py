@@ -315,7 +315,9 @@ class TestStatisticsAreObservational:
         assert worker.state.orders == {}
 
     def test_the_dashboard_page_shows_the_perpetual_chart_and_live_position_levels(self):
-        from tradingagents.paper_experiment.dashboard.server import PERPETUAL_INDEX_HTML as INDEX_HTML
+        from tradingagents.paper_experiment.dashboard.server import (
+            PERPETUAL_INDEX_HTML as INDEX_HTML,
+        )
 
         assert 'id="chart"' in INDEX_HTML
         assert "function drawChart(payload)" in INDEX_HTML
