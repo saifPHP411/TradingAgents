@@ -265,3 +265,106 @@ def test_optional_benchmark_momentum_filter_rejects_weak_market_trend():
     assert benchmark.iloc[-1] > baseline.benchmark_ema.iloc[-1]
     assert benchmark.iloc[-1] < benchmark.iloc[-21]
     assert not filtered.long_entry.iloc[-1]
+
+
+
+def test_positive_directional_movement_filter_is_optional_and_causal():
+    size = 120
+    steps = np.arange(size, dtype=float)
+    close = 100.0 + steps * 0.10 + 1.4 * np.sin(steps * 0.9)
+    close[-1] = float(np.max(close[-11:-1]) + 0.8)
+    open_price = close - 0.08
+    frame = pd.DataFrame(
+        {
+            "open": open_price,
+            "high": np.maximum(open_price, close) + 0.25,
+            "low": np.minimum(open_price, close) - 0.25,
+            "close": close,
+            "volume": np.full(size, 1000.0),
+        },
+        index=pd.date_range("2026-01-01T00:00:00Z", periods=size, freq="4h"),
+    )
+    base_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=20,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+    )
+    filtered_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=20,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+        require_positive_di=True,
+    )
+
+    baseline = _features(frame, frame.close, base_settings)
+    filtered = _features(frame, frame.close, filtered_settings)
+    expected = (
+        baseline.long_entry & baseline.plus_di.gt(baseline.minus_di)
+    ).rename("long_entry")
+
+    pd.testing.assert_series_equal(filtered.long_entry, expected)
+    assert baseline.long_entry.iloc[-1]
+    assert baseline.plus_di.notna().any()
+    assert baseline.minus_di.notna().any()
+
+
+def test_rising_adx_filter_requires_prior_completed_adx_value():
+    size = 120
+    steps = np.arange(size, dtype=float)
+    close = 100.0 + steps * 0.10 + 1.4 * np.sin(steps * 0.9)
+    close[-1] = float(np.max(close[-11:-1]) + 0.8)
+    open_price = close - 0.08
+    frame = pd.DataFrame(
+        {
+            "open": open_price,
+            "high": np.maximum(open_price, close) + 0.25,
+            "low": np.minimum(open_price, close) - 0.25,
+            "close": close,
+            "volume": np.full(size, 1000.0),
+        },
+        index=pd.date_range("2026-01-01T00:00:00Z", periods=size, freq="4h"),
+    )
+    base_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=20,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+    )
+    filtered_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=20,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+        require_adx_rising=True,
+    )
+
+    baseline = _features(frame, frame.close, base_settings)
+    filtered = _features(frame, frame.close, filtered_settings)
+    expected = (
+        baseline.long_entry & baseline.adx.gt(baseline.adx.shift(1))
+    ).rename("long_entry")
+
+    pd.testing.assert_series_equal(filtered.long_entry, expected)
+    assert baseline.long_entry.iloc[-1]
+    assert pd.isna(baseline.adx.shift(1).iloc[0])
+
+
+def test_new_dmi_switches_require_real_booleans():
+    with pytest.raises(ValueError, match="require_positive_di"):
+        TurtleTrendSettings(require_positive_di=1)
+    with pytest.raises(ValueError, match="require_adx_rising"):
+        TurtleTrendSettings(require_adx_rising="yes")
