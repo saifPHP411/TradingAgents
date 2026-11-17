@@ -384,7 +384,17 @@ class Dashboard:
         }
 
     def start_perpetual_study(self) -> dict[str, Any]:
-        """Start a bounded public-data 1x/2x walk-forward study in the background."""
+        """Start the one-time historical holdout study; never overwrite a consumed holdout."""
+        report_path = self.root / "perpetual_ema_walkforward.json"
+        if report_path.is_file():
+            return {
+                **self.perpetual_study_status(),
+                "rerun_blocked": True,
+                "reason": (
+                    "The historical holdout has already been evaluated. Re-running "
+                    "the same rolling window would not create independent evidence."
+                ),
+            }
         with self._perpetual_study_lock:
             if self._perpetual_study_thread is not None and self._perpetual_study_thread.is_alive():
                 return dict(self._perpetual_study_status)
@@ -477,9 +487,11 @@ class Dashboard:
             return "invalid", None
         state = str(raw.get("state", "")).strip().upper()
         raw_symbol = str(raw.get("symbol", "")).strip().upper()
+        if raw_symbol != symbol:
+            return "invalid", None
         if state == "FLAT":
             return "flat", None
-        if state != "OPEN" or raw_symbol != symbol:
+        if state != "OPEN":
             return "invalid", None
         side = str(raw.get("side", "")).strip().lower()
         if side not in {"long", "short"}:
@@ -551,13 +563,16 @@ class Dashboard:
             values = [float(row[name]) for name in ("open", "high", "low", "close")]
             if not all(math.isfinite(value) and value > 0 for value in values):
                 continue
+            volume = float(row.get("volume", 0.0))
+            if not math.isfinite(volume) or volume < 0:
+                raise RuntimeError("Bybit returned an invalid candle volume")
             candles.append({
                 "time": stamp.isoformat(),
                 "open": values[0],
                 "high": values[1],
                 "low": values[2],
                 "close": values[3],
-                "volume": max(0.0, float(row.get("volume", 0.0))),
+                "volume": volume,
             })
         if not candles:
             raise RuntimeError("Bybit returned no valid completed candles")
