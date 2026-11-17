@@ -1,18 +1,7 @@
-name: Leveraged perpetual EMA walk-forward study
+name: Manual leveraged perpetual EMA walk-forward study
 
 on:
-  pull_request:
-    branches:
-      - demo-ready-dashboard-2026
-    paths:
-      - ".github/workflows/perpetual-ema-walkforward.yml"
-      - "tradingagents/crypto/backtest/perpetual_ema.py"
-      - "tradingagents/crypto/backtest/perpetual_ema_walkforward.py"
-      - "tradingagents/crypto/binance_perpetual.py"
-      - "tests/test_binance_perpetual.py"
-      - "tradingagents/crypto/bybit_perpetual.py"
-      - "tradingagents/crypto/perpetuals.py"
-      - "tests/test_perpetual_ema_walkforward.py"
+  # Manual only: exchange public APIs may be restricted from hosted CI regions.
   workflow_dispatch:
 
 permissions:
