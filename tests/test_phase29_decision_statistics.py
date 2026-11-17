@@ -314,12 +314,16 @@ class TestStatisticsAreObservational:
         assert result.order is None
         assert worker.state.orders == {}
 
-    def test_the_dashboard_page_shows_the_statistics_card(self):
+    def test_the_dashboard_page_shows_the_perpetual_chart_and_live_position_levels(self):
         from tradingagents.paper_experiment.dashboard.server import INDEX_HTML
 
-        assert 'id="eng-stats"' in INDEX_HTML
-        assert "Decision statistics" in INDEX_HTML
-        assert "renderDecisionStats" in INDEX_HTML
+        assert 'id="chart"' in INDEX_HTML
+        assert "function drawChart(payload)" in INDEX_HTML
+        assert "function renderPosition(d)" in INDEX_HTML
+        for level in ("ENTRY", "STOP", "TARGET", "LIQUIDATION"):
+            assert f'name:"{level}"' in INDEX_HTML
+        assert "@media(max-width:620px)" in INDEX_HTML
+        assert "@media(max-width:900px)" in INDEX_HTML
 
     def test_a_second_run_on_the_same_decision_does_not_double_count(self, tmp_path):
         # The same session's decision is re-offered after it already produced an
