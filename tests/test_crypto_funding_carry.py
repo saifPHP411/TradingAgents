@@ -11,10 +11,10 @@ import requests
 
 from tradingagents.crypto.backtest import funding_carry
 from tradingagents.crypto.backtest.funding_carry import (
+    _archive_funding_history,
     _archive_futures_klines,
     _get_json,
     _parse_funding_archive,
-    _archive_funding_history,
     _parse_futures_kline_archive,
     run_study,
     simulate_symbol,
