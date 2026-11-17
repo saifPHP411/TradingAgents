@@ -9,10 +9,13 @@ rate is credited only after the position has remained open through settlement.
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import math
 import time
-from datetime import UTC, datetime
+import zipfile
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,33 +35,156 @@ FUNDING_INTERVAL_MS = 8 * HOUR_MS
 
 def _get_json(session: requests.Session, hosts: tuple[str, ...], path: str,
               params: dict[str, Any]) -> Any:
-    last: Exception | None = None
+    errors: list[str] = []
     for host in hosts:
+        url = host + path
         try:
-            response = session.get(host + path, params=params, timeout=20)
-            if response.status_code in (403, 451):
-                last = requests.HTTPError(f"{host}{path}: HTTP {response.status_code}")
+            response = session.get(url, params=params, timeout=20)
+            if response.status_code in (403, 418, 429, 451):
+                errors.append(f"{url}: HTTP {response.status_code}")
                 continue
             response.raise_for_status()
             try:
                 payload = response.json()
             except ValueError:
-                preview = response.text[:160].replace("\\n", " ")
-                last = ValueError(
-                    f"{host}{path}: non-JSON response "
+                preview = response.text[:160].replace("\n", " ")
+                errors.append(
+                    f"{url}: non-JSON response "
                     f"(content-type={response.headers.get('Content-Type')!r}, body={preview!r})"
                 )
                 continue
-            # Binance endpoints should return a JSON list for these public
-            # history routes. Reject HTML/proxy error objects and try the next
-            # regional hostname instead of treating them as valid empty data.
             if not isinstance(payload, list):
-                last = ValueError(f"{host}{path}: unexpected JSON payload type {type(payload).__name__}")
+                errors.append(f"{url}: unexpected JSON payload type {type(payload).__name__}")
                 continue
             return payload
         except requests.RequestException as exc:
-            last = exc
-    raise RuntimeError(f"public market-data endpoint unavailable for {path}: {last}") from None
+            errors.append(f"{url}: {type(exc).__name__}: {exc}")
+    detail = "; ".join(errors) if errors else "no hosts configured"
+    raise RuntimeError(
+        f"public market-data endpoint unavailable for {path}; "
+        f"tried {len(hosts)} hosts: {detail}"
+    ) from None
+
+
+def _parse_futures_kline_archive(
+    content: bytes, *, start_ms: int, end_ms: int
+) -> dict[int, dict[str, float]]:
+    """Parse Binance USD-M Futures 1h kline CSV files from a public ZIP archive."""
+    rows: dict[int, dict[str, float]] = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            bad_member = archive.testzip()
+            if bad_member is not None:
+                raise ValueError(f"corrupt ZIP member: {bad_member}")
+            members = [name for name in archive.namelist() if name.lower().endswith(".csv")]
+            if not members:
+                raise ValueError("archive contains no CSV data file")
+            for name in members:
+                with archive.open(name) as stream:
+                    reader = csv.reader(io.TextIOWrapper(stream, encoding="utf-8-sig"))
+                    for item in reader:
+                        if len(item) < 5:
+                            continue
+                        try:
+                            timestamp = int(float(item[0]))
+                            open_price, close_price = float(item[1]), float(item[4])
+                        except (TypeError, ValueError, OverflowError):
+                            continue
+                        if timestamp > 100_000_000_000_000:
+                            timestamp //= 1000
+                        if not start_ms <= timestamp < end_ms:
+                            continue
+                        if (
+                            not math.isfinite(open_price)
+                            or not math.isfinite(close_price)
+                            or open_price <= 0
+                            or close_price <= 0
+                        ):
+                            raise ValueError(f"invalid OHLC price in archive row at {timestamp}")
+                        rows[timestamp] = {"open": open_price, "close": close_price}
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"invalid Binance archive ZIP: {exc}") from None
+    return rows
+
+
+def _archive_futures_klines(
+    session: requests.Session, symbol: str, start_ms: int, end_ms: int,
+    *, now: datetime | None = None,
+) -> tuple[dict[int, dict[str, float]], dict[str, Any]]:
+    """Fallback to Binance's official USD-M Futures monthly and daily public archives."""
+    now = now or datetime.now(UTC)
+    start_date = datetime.fromtimestamp(start_ms / 1000, UTC).date()
+    end_date = datetime.fromtimestamp((end_ms - 1) / 1000, UTC).date()
+    current_month = now.date().replace(day=1)
+    month_cursor = start_date.replace(day=1)
+    rows: dict[int, dict[str, float]] = {}
+    downloaded: list[str] = []
+    missing: list[str] = []
+    failures: list[str] = []
+
+    while month_cursor <= end_date:
+        if month_cursor == current_month:
+            first_day = max(start_date, month_cursor)
+            last_day = min(end_date, now.date() - timedelta(days=1))
+            days = (
+                first_day + timedelta(days=offset)
+                for offset in range(max(0, (last_day - first_day).days + 1))
+            ) if last_day >= first_day else ()
+            periods = (
+                ("daily", f"{symbol}-1h-{day.isoformat()}.zip")
+                for day in days
+            )
+        else:
+            periods = iter((
+                ("monthly", f"{symbol}-1h-{month_cursor.year}-{month_cursor.month:02d}.zip"),
+            ))
+
+        for frequency, filename in periods:
+            url = (
+                "https://data.binance.vision/data/futures/um/"
+                f"{frequency}/klines/{symbol}/1h/{filename}"
+            )
+            try:
+                response = session.get(url, timeout=30)
+                if response.status_code == 404:
+                    missing.append(url)
+                    continue
+                response.raise_for_status()
+                rows.update(
+                    _parse_futures_kline_archive(
+                        response.content, start_ms=start_ms, end_ms=end_ms
+                    )
+                )
+                downloaded.append(url)
+            except (requests.RequestException, ValueError, OSError) as exc:
+                failures.append(f"{url}: {type(exc).__name__}: {exc}")
+
+        month_cursor = date(
+            month_cursor.year + (1 if month_cursor.month == 12 else 0),
+            1 if month_cursor.month == 12 else month_cursor.month + 1,
+            1,
+        )
+
+    archive_end = min(
+        end_ms,
+        int(datetime.combine(now.date(), datetime.min.time(), UTC).timestamp() * 1000),
+    )
+    expected_bars = max(1, int((archive_end - start_ms) / HOUR_MS))
+    minimum_bars = int(expected_bars * 0.90)
+    if len(rows) < minimum_bars:
+        detail = "; ".join(failures[:8]) or "no archive download errors recorded"
+        raise RuntimeError(
+            f"Binance archive fallback incomplete for {symbol}: "
+            f"{len(rows)}/{expected_bars} hourly bars (minimum {minimum_bars}); "
+            f"downloaded={len(downloaded)}, missing={len(missing)}; {detail}"
+        )
+    return rows, {
+        "source": "binance_public_data_archive",
+        "downloaded_files": len(downloaded),
+        "missing_files": len(missing),
+        "first_bar_ms": min(rows),
+        "last_bar_ms": max(rows),
+    }
 
 
 def _paged_klines(session: requests.Session, hosts: tuple[str, ...], path: str,
@@ -129,13 +255,36 @@ def fetch_market_history(symbols: tuple[str, ...], days: int = 180,
     }
     for symbol in symbols:
         spot = _paged_klines(session, SPOT_HOSTS, "/api/v3/klines", symbol, start_ms, end_ms)
-        perp = _paged_klines(session, PERP_HOSTS, "/fapi/v1/klines", symbol, start_ms, end_ms)
+        perp_source = "binance_usdm_rest_api"
+        archive_metadata: dict[str, Any] | None = None
+        try:
+            perp = _paged_klines(
+                session, PERP_HOSTS, "/fapi/v1/klines", symbol, start_ms, end_ms
+            )
+        except RuntimeError as rest_error:
+            try:
+                perp, archive_metadata = _archive_futures_klines(
+                    session, symbol, start_ms, end_ms, now=now
+                )
+                perp_source = "binance_public_data_archive"
+                print(
+                    f"{symbol}: USD-M REST unavailable; recovered {len(perp)} "
+                    "hourly bars from Binance public archive",
+                    flush=True,
+                )
+            except RuntimeError as archive_error:
+                raise RuntimeError(
+                    f"USD-M perpetual klines unavailable for {symbol}; "
+                    f"REST failed ({rest_error}); archive fallback failed ({archive_error})"
+                ) from None
         funding = _funding_history(session, symbol, start_ms, end_ms)
         if not spot or not perp or len(funding) < 20:
             raise RuntimeError(f"insufficient synchronized history for {symbol}: "
                                f"spot={len(spot)} perp={len(perp)} funding={len(funding)}")
         output["symbols"][symbol] = {
             "spot_1h": spot, "perp_1h": perp, "funding": funding,
+            "perp_1h_source": perp_source,
+            "perp_archive": archive_metadata,
             "coverage": {
                 "spot_bars": len(spot), "perp_bars": len(perp),
                 "funding_events": len(funding),
@@ -371,9 +520,28 @@ def main() -> int:
                         help="minimum prior settled funding rate annualized as a decimal (0.10 = 10%%)")
     parser.add_argument("--out", type=Path, default=Path("artifacts/funding_carry.json"))
     args = parser.parse_args()
-    history = fetch_market_history(tuple(args.symbols), days=args.days)
-    report = run_study(history, threshold=args.threshold)
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        history = fetch_market_history(tuple(args.symbols), days=args.days)
+        report = run_study(history, threshold=args.threshold)
+    except Exception as exc:
+        # Keep a machine-readable diagnostic when a public endpoint is blocked.
+        # An empty/missing report must never be mistaken for a completed study.
+        report = {
+            "study": "spot_perpetual_funding_carry",
+            "status": "data_unavailable",
+            "decision": "no_strategy_result_no_demo_approval",
+            "requested_days": args.days,
+            "symbols": list(args.symbols),
+            "threshold_annualized_rate": args.threshold,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "note": "No backtest was run because synchronized market history was unavailable.",
+        }
+        args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        print(f"market-data fetch failed; wrote diagnostic artifact to {args.out}: {exc}", flush=True)
+        return 2
+
     args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     for scenario, symbols in report["scenarios"].items():
         print(f"\n{scenario.upper()}")
