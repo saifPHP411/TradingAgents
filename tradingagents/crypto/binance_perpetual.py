@@ -307,8 +307,8 @@ class BinanceUSDMPublicClient:
                 stamp = int(item["fundingTime"])
                 if start_ms <= stamp <= end_ms:
                     records.append(
-                        {"timestamp": stamp, "funding_rate": self._positive(
-                            item["fundingRate"], "fundingRate", allow_zero=True
+                        {"timestamp": stamp, "funding_rate": self._finite_number(
+                            item["fundingRate"], "fundingRate"
                         )}
                     )
             last_time = int(page[-1]["fundingTime"])
