@@ -337,6 +337,7 @@ class Dashboard:
 
                     args = SimpleNamespace(
                         symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"],
+                        base_url="https://api-demo.bybit.com",
                         days=730,
                         equity=1_000.0,
                         leverage=[1.0, 2.0],
