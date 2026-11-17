@@ -28,7 +28,11 @@ The development-only tournament compares five fixed configurations:
 
 Each candidate is evaluated at 1x and 2x under realistic, conservative and stress cost assumptions. It uses disjoint chronological development folds and excludes all candles on or after the final_holdout_start timestamp from the previously inspected EMA report. It does not evaluate or overwrite that consumed holdout. Repeated tournament execution on the same development sample is blocked to reduce selection bias.
 
-A development candidate is shortlisted only if every cost scenario passes its minimum trade count, Profit Factor, compounded return, positive-fold ratio, positive-symbol breadth, drawdown and zero-liquidation checks. The thresholds are stricter under higher modeled friction. If none passes all gates, no candidate is selected.
+A development candidate is shortlisted only if every cost scenario passes its minimum trade count, Profit Factor, compounded return, positive-fold ratio, positive-symbol breadth, drawdown and zero-liquidation checks.
+
+The original EMA14/EMA50 + EMA200 + ADX18 candidate is explicitly disqualified from reselection: it is the same fixed specification evaluated in the earlier independent final holdout, where both 1x and 2x failed the realistic, conservative and stress acceptance gates. Its favourable result in the later development-only tournament is reported for comparison, but cannot override that prior out-of-sample failure.
+
+After applying that exclusion, none of the remaining tested candidates passed all three cost scenarios and consistency gates. Therefore no strategy is selected or approved for Demo.
 
 ## Limits and safety
 
