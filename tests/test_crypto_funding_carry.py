@@ -13,6 +13,8 @@ from tradingagents.crypto.backtest import funding_carry
 from tradingagents.crypto.backtest.funding_carry import (
     _archive_futures_klines,
     _get_json,
+    _parse_funding_archive,
+    _archive_funding_history,
     _parse_futures_kline_archive,
     run_study,
     simulate_symbol,
@@ -50,6 +52,17 @@ def _zip_klines(rows):
         writer.writerow(["open_time", "open", "high", "low", "close", "volume"])
         writer.writerows(rows)
         archive.writestr("BTCUSDT-1h.csv", content.getvalue())
+    return buffer.getvalue()
+
+
+def _zip_funding(rows):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        content = io.StringIO()
+        writer = csv.writer(content)
+        writer.writerow(["calc_time", "funding_interval_hours", "last_funding_rate"])
+        writer.writerows(rows)
+        archive.writestr("BTCUSDT-fundingRate.csv", content.getvalue())
     return buffer.getvalue()
 
 
@@ -238,3 +251,55 @@ def test_main_writes_diagnostic_artifact_when_market_data_is_unavailable(
     assert report["status"] == "data_unavailable"
     assert report["decision"] == "no_strategy_result_no_demo_approval"
     assert "public futures endpoint blocked" in report["error"]
+
+
+
+def test_parse_funding_archive_reads_header_and_filters_requested_range():
+    start = 1_800_000_000_000
+    payload = _zip_funding([
+        [start - 1, 8, 0.0001],
+        [start, 8, 0.0002],
+        [start + 8 * 3_600_000, 4, -0.0001],
+    ])
+
+    parsed = _parse_funding_archive(
+        payload, start_ms=start, end_ms=start + 8 * 3_600_000
+    )
+
+    assert parsed == [
+        {"timestamp": float(start), "rate": 0.0002, "interval_hours": 8.0}
+    ]
+
+
+def test_funding_archive_fallback_uses_only_completed_months():
+    now = datetime(2026, 11, 17, 12, tzinfo=UTC)
+    start = datetime(2026, 10, 1, 0, tzinfo=UTC)
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = int(now.timestamp() * 1000)
+    rows = []
+    cursor = start
+    archive_end = datetime(2026, 11, 1, 0, tzinfo=UTC)
+    while cursor < archive_end:
+        rows.append([int(cursor.timestamp() * 1000), 8, 0.0001])
+        cursor += timedelta(hours=8)
+
+    class FundingArchiveSession:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, url, timeout):
+            self.urls.append(url)
+            return _Response(content=_zip_funding(rows))
+
+    session = FundingArchiveSession()
+    history, metadata = _archive_funding_history(
+        session, "BTCUSDT", start_ms, end_ms, now=now
+    )
+
+    assert len(history) == 93
+    assert metadata["source"] == "binance_public_data_archive_monthly"
+    assert metadata["current_month_excluded"] is True
+    assert metadata["downloaded_files"] == 1
+    assert len(session.urls) == 1
+    assert "/monthly/fundingRate/BTCUSDT/" in session.urls[0]
+    assert max(int(item["timestamp"]) for item in history) < int(archive_end.timestamp() * 1000)
