@@ -11,7 +11,6 @@ import json
 import math
 import time
 from collections import defaultdict
-from dataclasses import asdict
 from pathlib import Path
 
 import pandas as pd
