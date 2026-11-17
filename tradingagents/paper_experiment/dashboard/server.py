@@ -3301,7 +3301,7 @@ function drawSeries(canvasId,points,valueKey,color,baseline){
  var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),span=hi-lo;if(span<=0)span=Math.max(1,Math.abs(hi)*.02);lo-=span*.12;hi+=span*.12;
  var left=12,right=12,top=12,bottom=23,pw=w-left-right,ph=h-top-bottom;
  ctx.font="9px ui-monospace,monospace";ctx.fillStyle="#c4aab5";ctx.strokeStyle="rgba(196,170,181,.15)";
- for(var i=0;i<=3;i++){var y=top+ph*i/3;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(w-right,y);ctx.stroke();ctx.textAlign="left";ctx.fillText(fmt(hi-(hi-lo)*i/3,2),left+2,y-3);}
+ for(var i=0;i<=3;i++){var gridY=top+ph*i/3;ctx.beginPath();ctx.moveTo(left,gridY);ctx.lineTo(w-right,gridY);ctx.stroke();ctx.textAlign="left";ctx.fillText(fmt(hi-(hi-lo)*i/3,2),left+2,gridY-3);}
  function y(v){return top+(hi-v)/(hi-lo)*ph;}
  if(baseline!==null&&baseline!==undefined&&Number.isFinite(Number(baseline))){ctx.save();ctx.strokeStyle="rgba(233,184,111,.8)";ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(left,y(Number(baseline)));ctx.lineTo(w-right,y(Number(baseline)));ctx.stroke();ctx.restore();}
  if(points&&points.length){ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();points.forEach(function(p,i){var x=left+(points.length===1?pw/2:pw*i/(points.length-1)),v=Number(p[valueKey]);if(!Number.isFinite(v))return;if(i===0)ctx.moveTo(x,y(v));else ctx.lineTo(x,y(v));});ctx.stroke();var last=Number(points[points.length-1][valueKey]);if(Number.isFinite(last)){ctx.fillStyle=color;ctx.beginPath();ctx.arc(w-right-1,y(last),3.2,0,Math.PI*2);ctx.fill();}}
