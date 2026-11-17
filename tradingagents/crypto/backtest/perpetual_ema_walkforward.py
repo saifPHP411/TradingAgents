@@ -36,6 +36,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbols", nargs="+", default=list(DEFAULT_SYMBOLS))
     parser.add_argument("--days", type=int, default=730)
+    parser.add_argument(
+        "--base-url",
+        default="https://api-demo.bybit.com",
+        choices=(
+            "https://api.bybit.com",
+            "https://api-demo.bybit.com",
+            "https://api-testnet.bybit.com",
+        ),
+    )
     parser.add_argument("--equity", type=float, default=1_000.0)
     parser.add_argument("--leverage", nargs="+", type=float, default=[1.0, 2.0])
     parser.add_argument("--warmup-bars", type=int, default=260)
@@ -58,6 +67,12 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("holdout-fraction must be between 0.10 and 0.35")
     if not args.symbols or len(set(args.symbols)) != len(args.symbols):
         raise ValueError("symbols must be a non-empty unique list")
+    if args.base_url not in (
+        "https://api.bybit.com",
+        "https://api-demo.bybit.com",
+        "https://api-testnet.bybit.com",
+    ):
+        raise ValueError("base-url must be an approved Bybit public API host")
     if not args.leverage or any(
         isinstance(value, bool) or not math.isfinite(value) or value not in (1.0, 2.0)
         for value in args.leverage
@@ -237,7 +252,7 @@ def run_study(args: argparse.Namespace) -> dict:
     _validate_args(args)
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - args.days * 86_400_000
-    client = BybitLinearPublicClient()
+    client = BybitLinearPublicClient(base_url=args.base_url)
     history = {
         symbol: _fetch_history(client, symbol, start_ms, end_ms)
         for symbol in args.symbols
@@ -360,6 +375,7 @@ def run_study(args: argparse.Namespace) -> dict:
         "credentials_used": False,
         "demo_ready": False,
         "venue": "Bybit V5 public linear USDT perpetual market data",
+        "data_api_base_url": client.base_url,
         "symbols": list(aligned),
         "timeframe": "4h",
         "requested_days": args.days,
