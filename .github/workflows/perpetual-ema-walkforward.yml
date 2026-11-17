@@ -8,6 +8,8 @@ on:
       - ".github/workflows/perpetual-ema-walkforward.yml"
       - "tradingagents/crypto/backtest/perpetual_ema.py"
       - "tradingagents/crypto/backtest/perpetual_ema_walkforward.py"
+      - "tradingagents/crypto/binance_perpetual.py"
+      - "tests/test_binance_perpetual.py"
       - "tradingagents/crypto/bybit_perpetual.py"
       - "tradingagents/crypto/perpetuals.py"
       - "tests/test_perpetual_ema_walkforward.py"
