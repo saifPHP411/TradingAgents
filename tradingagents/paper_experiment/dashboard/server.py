@@ -78,6 +78,7 @@ from ..market_data_wiring import (
 )
 from ..providers.base import ProviderNotConfiguredError
 from .auth import DashboardAuthError, check_bearer, require_bindable, resolve_token
+from .chart import CryptoChartService, DEFAULT_CHART_INTERVAL, DEFAULT_CHART_LIMIT
 from .crypto_view import CryptoViewService
 from .paper_control import PaperTradingController, PaperTradingDisabled, _endpoint_for_provider
 from .state import DashboardStateError, ExperimentView
@@ -286,6 +287,7 @@ class Dashboard:
         paper_execution_provider: str = EXECUTION_PROVIDER_ALPACA_PAPER,
         crypto_engine=None,
         crypto_symbols: tuple[str, ...] = (),
+        chart_service: CryptoChartService | None = None,
         refresh_policy=None,
         refresh_fetcher=None,
     ) -> None:
@@ -325,6 +327,8 @@ class Dashboard:
             worker_status=lambda: self.paper.status(),
             strategy_evaluations=lambda: self.paper.strategy_evaluations(),
         )
+        # Historical candles load lazily and are cached; this view is read-only.
+        self.chart_service = chart_service or CryptoChartService()
         # Independent read-only Bybit linear-perpetual research job. This never
         # starts a broker worker and never submits an exchange order.
         self._perpetual_study_lock = threading.Lock()
@@ -528,6 +532,15 @@ class Dashboard:
             "banner": banner_for_provider(self.paper.execution_provider),
             "live": False,
         }
+
+    def chart(self, symbol: str, interval: str = DEFAULT_CHART_INTERVAL) -> dict[str, Any]:
+        """A bounded public Spot chart for a symbol configured on this dashboard."""
+        from tradingagents.crypto.symbols import parse_pair
+
+        canonical = parse_pair(symbol).canonical
+        if canonical not in set(self.crypto.symbols):
+            raise ValueError("symbol is not configured for this dashboard")
+        return self.chart_service.get(canonical, interval, DEFAULT_CHART_LIMIT)
 
     def trades(self) -> dict[str, Any]:
         """The trade journal: submitted orders and settled trades, kept apart."""
@@ -750,6 +763,12 @@ def make_handler(dashboard: Dashboard):
                     self._send_json(200, dashboard.crypto.health())
                 elif path == "/api/crypto":
                     self._send_json(200, dashboard.crypto.snapshot())
+                elif path == "/api/crypto/chart":
+                    query = parse_qs(urlsplit(self.path).query)
+                    default_symbol = dashboard.crypto.symbols[0] if dashboard.crypto.symbols else ""
+                    symbol = (query.get("symbol") or [default_symbol])[0]
+                    interval = (query.get("interval") or [DEFAULT_CHART_INTERVAL])[0]
+                    self._send_json(200, dashboard.chart(symbol, interval))
                 elif path == "/api/perpetual/study/status":
                     self._send_json(200, dashboard.perpetual_study_status())
                 else:
@@ -1665,6 +1684,51 @@ INDEX_HTML = """<!doctype html>
     .card{padding:15px}
   }
 
+
+  /* Responsive in-app candlestick chart */
+  .chart-main{padding:0;overflow:hidden}
+  .chart-toolbar{display:flex;align-items:end;gap:12px;flex-wrap:wrap;padding:14px 16px;border-bottom:1px solid rgba(142,164,255,.14)}
+  .chart-select-label{display:grid;gap:5px;color:#aebfe4;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em}
+  .chart-select-label select{min-width:112px;background:#0a1230;color:#edf3ff;border:1px solid rgba(142,164,255,.28);border-radius:9px;padding:8px 11px;font:600 13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+  .chart-source{margin-left:auto;color:#788dbb;font:10px ui-monospace,monospace;letter-spacing:.08em}
+  .chart-position-summary{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;background:rgba(4,10,28,.42);border-bottom:1px solid rgba(142,164,255,.1);font-size:12px}
+  .chart-position-state{font:800 10px ui-monospace,monospace;letter-spacing:.1em;color:#9aafd9}
+  .chart-position-state.long{color:#4ce0c1}.chart-position-state.short{color:#ff718f}
+  .chart-position-metrics{display:flex;gap:8px 14px;flex-wrap:wrap;color:#cbd7f4;font-variant-numeric:tabular-nums}
+  .chart-position-metrics b{color:#f0f4ff}
+  .chart-canvas-wrap{position:relative;width:100%;height:390px;min-width:0;background:linear-gradient(180deg,#081229,#070d20)}
+  #market-canvas{display:block;width:100%;height:100%;touch-action:pan-y}
+  .chart-empty{position:absolute;inset:0;display:grid;place-items:center;padding:22px;text-align:center;color:#91a4d2;font-size:13px;background:rgba(7,13,32,.8)}
+  .chart-legend{display:flex;gap:16px;flex-wrap:wrap;padding:11px 16px;border-top:1px solid rgba(142,164,255,.12);color:#a6b7de;font-size:10px}
+  .chart-legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend-dot{display:inline-block;width:8px;height:8px;border-radius:50%}
+  .legend-dot.up{background:#4ce0c1}.legend-dot.down{background:#ff718f}
+  .legend-line{display:inline-block;width:16px;border-top:2px dashed}
+  .legend-line.entry{border-color:#8fa5ff}.legend-line.stop{border-color:#ff718f}.legend-line.target{border-color:#4ce0c1}
+  .chart-footnote{padding:0 16px 14px;color:#758ab6;font-size:10.5px}
+  .chart-select-label select:focus-visible{outline:2px solid #69d9e8;outline-offset:2px}
+  @media(max-width:900px){.grid.two{grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr))}}
+  @media(max-width:760px){
+    .chart-toolbar{align-items:stretch;padding:12px;gap:9px}
+    .chart-select-label{flex:1;min-width:0}
+    .chart-select-label select{width:100%;min-width:0}
+    .chart-source{width:100%;margin:2px 0 0;font-size:9px}
+    .chart-position-summary{align-items:flex-start;flex-direction:column;padding:10px 12px}
+    .chart-canvas-wrap{height:320px}
+    .chart-legend{gap:10px 13px;padding:10px 12px}
+    .chart-footnote{padding:0 12px 12px}
+    .wrap{padding-left:11px;padding-right:11px}
+    .hrow{gap:8px;flex-wrap:wrap}
+    nav{gap:4px;padding-bottom:8px}
+    nav button{padding:8px 11px;font-size:12px}
+    .grid,.grid.two{grid-template-columns:minmax(0,1fr)}
+    .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .tablewrap{max-width:100%;overscroll-behavior-x:contain}
+    table{min-width:720px}
+    .launch-grid{grid-template-columns:minmax(0,1fr)}
+    button.act,.launch-btn{min-height:42px}
+  }
+  @media(max-width:380px){.chart-canvas-wrap{height:280px}.chart-legend{font-size:9px}}
 </style>
 </head>
 <body>
@@ -1723,26 +1787,41 @@ INDEX_HTML = """<!doctype html>
           <button class="launch-btn" id="launch-leverage" onclick="doPerpetualStudy()">RUN LEVERAGE BACKTEST</button>
         </div>
       </div>
-      <div id="perp-study-status" class="study-status">Leverage execution is gated until the untouched holdout meets the 79% win-rate target and all after-cost risk checks pass.</div>
+      <div id="perp-study-status" class="study-status">Research only: a 79% win-rate goal is not sufficient by itself. Any future gate also requires positive after-cost expectancy and profit factor, robust chronological folds, controlled drawdown, adequate trade count and a genuinely unseen holdout.</div>
     </div>
-    <div class="chart-section">
+    <div class="chart-section" id="market-chart-section">
       <div class="chart-heading">
-        <div><h2>Market observatory</h2><p>Always-open TradingView charts · external market-data visualization</p></div>
-        <span class="badge b-mut">LIVE CHARTS</span>
+        <div><h2>Market chart</h2><p>Completed Binance Spot candles · broker open-position levels are drawn directly over the candles</p></div>
+        <span class="badge b-mut" id="chart-status">WAITING FOR DATA</span>
       </div>
-      <div class="chart-grid">
-        <div class="chart-card"><div class="chart-label">BTC / USDT · SPOT <span>BINANCE · 1H</span></div>
-          <iframe title="Bitcoin USDT spot chart" loading="lazy" referrerpolicy="origin" allowfullscreen src="https://s.tradingview.com/widgetembed/?symbol=BINANCE%3ABTCUSDT&interval=60&theme=dark&style=1&locale=en&toolbar_bg=%23070b19&hide_side_toolbar=false&allow_symbol_change=true&save_image=false&withdateranges=true&hideideas=true&studies=%5B%5D&support_host=https%3A%2F%2Fwww.tradingview.com"></iframe>
+      <div class="chart-card chart-main">
+        <div class="chart-toolbar">
+          <label class="chart-select-label" for="chart-symbol">Market
+            <select id="chart-symbol" aria-label="Chart symbol"></select>
+          </label>
+          <label class="chart-select-label" for="chart-interval">Timeframe
+            <select id="chart-interval" aria-label="Chart timeframe">
+              <option value="15m">15m</option><option value="1h" selected>1H</option><option value="4h">4H</option>
+            </select>
+          </label>
+          <span class="chart-source">BINANCE PUBLIC SPOT · READ ONLY</span>
         </div>
-        <div class="chart-card"><div class="chart-label">BTC / USDT · PERPETUAL <span>BYBIT · 4H</span></div>
-          <iframe title="Bitcoin USDT perpetual chart" loading="lazy" referrerpolicy="origin" allowfullscreen src="https://s.tradingview.com/widgetembed/?symbol=BYBIT%3ABTCUSDT.P&interval=240&theme=dark&style=1&locale=en&toolbar_bg=%23070b19&hide_side_toolbar=false&allow_symbol_change=true&save_image=false&withdateranges=true&hideideas=true&studies=%5B%5D&support_host=https%3A%2F%2Fwww.tradingview.com"></iframe>
+        <div id="chart-position-summary" class="chart-position-summary">
+          <span class="chart-position-state">NO OPEN POSITION</span>
+          <span class="muted">No broker-held position for this pair. No trade levels are fabricated.</span>
         </div>
-        <div class="chart-card"><div class="chart-label">ETH / USDT · PERPETUAL <span>BYBIT · 4H</span></div>
-          <iframe title="Ethereum USDT perpetual chart" loading="lazy" referrerpolicy="origin" allowfullscreen src="https://s.tradingview.com/widgetembed/?symbol=BYBIT%3AETHUSDT.P&interval=240&theme=dark&style=1&locale=en&toolbar_bg=%23070b19&hide_side_toolbar=false&allow_symbol_change=true&save_image=false&withdateranges=true&hideideas=true&studies=%5B%5D&support_host=https%3A%2F%2Fwww.tradingview.com"></iframe>
+        <div class="chart-canvas-wrap">
+          <canvas id="market-canvas" role="img" aria-label="Candlestick market chart with open-position price levels"></canvas>
+          <div id="chart-empty" class="chart-empty hide">Waiting for completed market candles…</div>
         </div>
-        <div class="chart-card"><div class="chart-label">SOL / USDT · PERPETUAL <span>BYBIT · 4H</span></div>
-          <iframe title="Solana USDT perpetual chart" loading="lazy" referrerpolicy="origin" allowfullscreen src="https://s.tradingview.com/widgetembed/?symbol=BYBIT%3ASOLUSDT.P&interval=240&theme=dark&style=1&locale=en&toolbar_bg=%23070b19&hide_side_toolbar=false&allow_symbol_change=true&save_image=false&withdateranges=true&hideideas=true&studies=%5B%5D&support_host=https%3A%2F%2Fwww.tradingview.com"></iframe>
+        <div class="chart-legend">
+          <span><i class="legend-dot up"></i>Up candle</span>
+          <span><i class="legend-dot down"></i>Down candle</span>
+          <span><i class="legend-line entry"></i>Entry</span>
+          <span><i class="legend-line stop"></i>Stop loss</span>
+          <span><i class="legend-line target"></i>Take profit</span>
         </div>
+        <div class="chart-footnote" id="chart-footnote">No levels are shown until an open broker position exists for the selected pair.</div>
       </div>
     </div>
     <section id="overview" class="on">
@@ -1976,6 +2055,141 @@ async function api(path, opts){
     throw new Error(m);
   }
   return r.json();
+}
+
+
+let chartPositions = [];
+let chartLastPayload = null;
+let chartRefreshTimer = null;
+let chartResizeObserver = null;
+let chartControlsBound = false;
+
+function chartPrice(value){
+  const n=Number(value);
+  if(value===null||value===undefined||!Number.isFinite(n)||n<=0) return "—";
+  return n.toLocaleString(undefined,{maximumFractionDigits:n>=100?2:6});
+}
+function chartSymbolKey(value){return String(value||"").replace(/[^A-Z0-9]/gi,"").toUpperCase();}
+function chartSelectedSymbol(){return $("chart-symbol") ? $("chart-symbol").value : "";}
+function renderChartPosition(position){
+  const box=$("chart-position-summary");
+  if(!position){
+    box.innerHTML='<span class="chart-position-state">NO OPEN POSITION</span><span class="muted">No broker-held position for this pair. Entry, stop and target are not invented.</span>';
+    $("chart-footnote").textContent="Candles are public Binance Spot history. No active broker position exists for the selected pair.";
+    return;
+  }
+  const side=String(position.side||"").toLowerCase()==="short"?"short":"long";
+  let metrics='<span>Qty <b>'+esc(num(position.quantity,6))+'</b></span>'+
+    '<span>Entry <b>'+esc(chartPrice(position.entry_price))+'</b></span>'+
+    '<span>Mark <b>'+esc(chartPrice(position.current_price))+'</b></span>'+
+    '<span>uPnL <b class="'+cls(position.unrealized_pnl)+'">'+esc(sgn(position.unrealized_pnl))+'</b></span>';
+  if(position.stop_loss!==null&&position.stop_loss!==undefined) metrics+='<span>Stop <b>'+esc(chartPrice(position.stop_loss))+'</b></span>';
+  if(position.take_profit!==null&&position.take_profit!==undefined) metrics+='<span>Target <b>'+esc(chartPrice(position.take_profit))+'</b></span>';
+  box.innerHTML='<span class="chart-position-state '+side+'">OPEN '+side.toUpperCase()+'</span><span class="chart-position-metrics">'+metrics+'</span>';
+  $("chart-footnote").textContent="Price lines are sourced from the broker position snapshot. Any missing protection level remains absent. The candles are a Binance Spot visual reference, not a Bybit execution-price guarantee.";
+}
+function drawMarketChart(payload,position){
+  const canvas=$("market-canvas"), wrap=canvas.parentElement, emptyBox=$("chart-empty");
+  if(!payload||!Array.isArray(payload.candles)||!payload.candles.length){
+    canvas.style.display="none";emptyBox.classList.remove("hide");
+    emptyBox.textContent=(payload&&payload.detail)||"Market candles are unavailable.";
+    $("chart-status").textContent=(payload&&payload.status||"NO DATA").toUpperCase();return;
+  }
+  canvas.style.display="block";emptyBox.classList.add("hide");
+  const width=Math.max(260,Math.floor(wrap.clientWidth||canvas.clientWidth||600));
+  const height=Math.max(240,Math.floor(wrap.clientHeight||320));
+  const dpr=Math.min(3,Math.max(1,window.devicePixelRatio||1));
+  canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);
+  const ctx=canvas.getContext("2d");ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,width,height);
+  const pad={left:12,right:82,top:18,bottom:27}, plotW=width-pad.left-pad.right,plotH=height-pad.top-pad.bottom;
+  if(plotW<=0||plotH<=0)return;
+  const bars=payload.candles.slice(-180);
+  const overlays=[
+    ["ENTRY",position&&position.entry_price,"#8fa5ff"],
+    ["STOP",position&&position.stop_loss,"#ff718f"],
+    ["TARGET",position&&position.take_profit,"#4ce0c1"],
+    ["MARK",position&&position.current_price,"#ffc86f"]
+  ].map(x=>[x[0],Number(x[1]),x[2]]).filter(x=>x[1]!==null&&Number.isFinite(x[1])&&x[1]>0);
+  let low=Math.min.apply(null,bars.map(x=>Number(x.low)).filter(Number.isFinite));
+  let high=Math.max.apply(null,bars.map(x=>Number(x.high)).filter(Number.isFinite));
+  overlays.forEach(x=>{low=Math.min(low,x[1]);high=Math.max(high,x[1]);});
+  if(!Number.isFinite(low)||!Number.isFinite(high)||high<=low){low=1;high=2;}
+  const extra=(high-low)*.08||Math.max(high*.002,.000001);low-=extra;high+=extra;
+  const y=value=>pad.top+(high-value)/(high-low)*plotH;
+  const step=plotW/bars.length,bodyW=Math.max(2,Math.min(12,step*.62));
+  ctx.font="10px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.textBaseline="middle";
+  for(let n=0;n<=4;n++){
+    const value=high-(high-low)*n/4,yy=pad.top+plotH*n/4;
+    ctx.strokeStyle="rgba(153,174,224,.13)";ctx.lineWidth=1;ctx.beginPath();
+    ctx.moveTo(pad.left,yy);ctx.lineTo(width-pad.right+7,yy);ctx.stroke();
+    ctx.fillStyle="#8296c2";ctx.textAlign="left";
+    ctx.fillText(value.toLocaleString(undefined,{maximumFractionDigits:value>=100?2:5}),width-pad.right+12,yy);
+  }
+  bars.forEach((bar,index)=>{
+    const o=Number(bar.open),h=Number(bar.high),l=Number(bar.low),c=Number(bar.close);
+    if(![o,h,l,c].every(Number.isFinite))return;
+    const x=pad.left+step*(index+.5),color=c>=o?"#4ce0c1":"#ff718f";
+    ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,y(h));ctx.lineTo(x,y(l));ctx.stroke();
+    ctx.fillStyle=color;const top=y(Math.max(o,c)),bottom=y(Math.min(o,c));
+    ctx.fillRect(x-bodyW/2,top,bodyW,Math.max(1.5,bottom-top));
+  });
+  overlays.forEach(item=>{
+    const name=item[0],value=item[1],color=item[2],yy=y(value);
+    ctx.save();ctx.strokeStyle=color;ctx.fillStyle=color;
+    ctx.setLineDash(name==="MARK"?[2,4]:[7,4]);ctx.lineWidth=name==="ENTRY"?1.7:1.35;
+    ctx.beginPath();ctx.moveTo(pad.left,yy);ctx.lineTo(width-pad.right+3,yy);ctx.stroke();ctx.setLineDash([]);
+    const label=name+" "+value.toLocaleString(undefined,{maximumFractionDigits:value>=100?2:6});
+    const labelW=Math.min(79,Math.max(55,ctx.measureText(label).width+9));
+    const labelY=Math.max(pad.top,Math.min(height-pad.bottom-15,yy-8));
+    ctx.fillRect(width-labelW,labelY,labelW,16);ctx.fillStyle="#071126";ctx.textAlign="center";
+    ctx.fillText(label,width-labelW/2,labelY+8);ctx.restore();
+  });
+  ctx.fillStyle="#8296c2";ctx.textAlign="center";
+  [0,Math.floor((bars.length-1)/2),bars.length-1].forEach(index=>{
+    const date=new Date(Number(bars[index].time)*1000);
+    const label=date.toLocaleDateString(undefined,{month:"short",day:"numeric"})+" "+date.toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit"});
+    ctx.fillText(label,pad.left+step*(index+.5),height-12);
+  });
+  $("chart-status").textContent=(payload.status==="stale"?"STALE · ":"LIVE · ")+bars.length+" BARS";
+}
+async function refreshMarketChart(){
+  const symbol=chartSelectedSymbol();if(!symbol)return;
+  const interval=$("chart-interval").value;$("chart-status").textContent="LOADING…";
+  try{
+    const values=await Promise.all([
+      api("/api/crypto/chart?symbol="+encodeURIComponent(symbol)+"&interval="+encodeURIComponent(interval)),
+      api("/api/positions")
+    ]);
+    const payload=values[0],positions=values[1].positions||[];
+    const selected=positions.find(x=>chartSymbolKey(x.symbol)===chartSymbolKey(symbol))||null;
+    chartPositions=positions;chartLastPayload=payload;
+    renderChartPosition(selected);drawMarketChart(payload,selected);
+  }catch(e){
+    $("chart-status").textContent="UNAVAILABLE";$("chart-empty").classList.remove("hide");
+    $("chart-empty").textContent=e.message;$("market-canvas").style.display="none";
+  }
+}
+function configureMarketChart(market){
+  const select=$("chart-symbol"),rows=(market&&market.symbols)||[];
+  const symbols=rows.map(x=>x.symbol).filter(Boolean);if(!symbols.length)return;
+  const previous=select.value;
+  select.innerHTML=symbols.map(s=>'<option value="'+esc(s)+'">'+esc(s)+'</option>').join("");
+  if(symbols.includes(previous))select.value=previous;
+  if(!chartControlsBound){
+    select.addEventListener("change",refreshMarketChart);
+    $("chart-interval").addEventListener("change",refreshMarketChart);
+    chartControlsBound=true;
+  }
+  if(!chartResizeObserver&&typeof ResizeObserver!=="undefined"){
+    chartResizeObserver=new ResizeObserver(()=>{
+      if(!chartLastPayload)return;
+      const key=chartSymbolKey(chartSelectedSymbol());
+      const position=chartPositions.find(x=>chartSymbolKey(x.symbol)===key)||null;
+      drawMarketChart(chartLastPayload,position);
+    });
+    chartResizeObserver.observe($("market-canvas").parentElement);
+  }
+  if(!chartRefreshTimer)chartRefreshTimer=setInterval(refreshMarketChart,30000);
 }
 
 // -- Overview ---------------------------------------------------------------
@@ -2285,7 +2499,7 @@ async function refreshPerpetualStudy(){
       box.innerHTML = "Final holdout report completed. This is research only; the leveraged execution path remains disabled. " +
         '<div class="study-metrics">' + rows + '</div>';
     }else{
-      box.textContent = "Leverage execution is gated until the untouched holdout meets the 79% win-rate target and all after-cost risk checks pass.";
+      box.textContent = "Research only: a 79% win-rate goal is not sufficient by itself. Any future gate also requires positive after-cost expectancy and profit factor, robust chronological folds, controlled drawdown, adequate trade count and a genuinely unseen holdout.";
     }
   }catch(e){
     const box = $("perp-study-status");
@@ -2627,6 +2841,8 @@ async function refreshCrypto(){
     renderCryptoMarket(c.market);
     renderCryptoStrategy(c.strategy);
     renderCryptoHealth(c.health);
+    configureMarketChart(c.market);
+    if(!chartLastPayload) await refreshMarketChart();
   }catch(e){ showErr(e.message); }
 }
 
