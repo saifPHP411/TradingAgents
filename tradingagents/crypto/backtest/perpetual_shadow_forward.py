@@ -195,6 +195,9 @@ def run_shadow_cycle(
     state["last_checked_at"] = time.strftime(
         "%Y-%m-%dT%H:%M:%SZ", time.gmtime(current_ms / 1000)
     )
+    # Persist the immutable forward boundary before any network request. A Bybit
+    # outage or process restart must never move the start of the untouched sample.
+    _save_state(root_path, state)
 
     factory = client_factory or BybitLinearPublicClient
     fetch_history = history_fetcher or _fetch_history
