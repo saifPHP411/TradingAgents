@@ -1,4 +1,4 @@
-name: Bybit Spot order-flow probe
+name: Bybit Spot order-flow probe (disabled)
 
 on:
   push:
@@ -30,6 +30,10 @@ concurrency:
 
 jobs:
   probe:
+    # This probe requires calls to Bybit's public mainnet REST endpoints.
+    # It is disabled under the current research safety boundary; no live
+    # exchange endpoint should be contacted by this workflow.
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
