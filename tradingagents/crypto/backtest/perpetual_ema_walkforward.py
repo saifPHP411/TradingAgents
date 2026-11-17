@@ -37,11 +37,11 @@ TARGET_WIN_RATE_PCT = 79.0
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbols", nargs="+", default=list(DEFAULT_SYMBOLS))
-    parser.add_argument("--data-source", choices=("binance-usdm", "bybit"), default="binance-usdm")
+    parser.add_argument("--data-source", choices=("binance-usdm", "bybit"), default="bybit")
     parser.add_argument("--days", type=int, default=730)
     parser.add_argument(
         "--base-url",
-        default="https://api-demo.bybit.com",
+        default="https://api.bybit.com",
         choices=(
             "https://api.bybit.com",
             "https://api-demo.bybit.com",
