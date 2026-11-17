@@ -107,6 +107,7 @@ def test_donchian_close_exit_is_filled_at_following_open(monkeypatch):
     import tradingagents.crypto.backtest.turtle_trend as module
 
     frame = _hourly_frame(6, "2026-01-01T00:00:00Z")
+    frame.iloc[3, frame.columns.get_loc("open")] = 98.5
     frame.iloc[3, frame.columns.get_loc("close")] = 98.0
     frame.iloc[3, frame.columns.get_loc("high")] = 99.0
     frame.iloc[3, frame.columns.get_loc("low")] = 97.5
