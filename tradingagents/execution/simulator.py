@@ -323,13 +323,19 @@ class ExecutionSimulator:
                 price = max(reference, order.limit_price)
             return self._apply_liquidity_budget(order, remaining, liquidity_budget), price
 
+        # Participation and shared liquidity budgets determine the quantity
+        # that actually trades. Market impact must be based on that fill size,
+        # not the order's original requested size; otherwise a 10%-of-volume
+        # partial fill is charged as if the entire oversized order traded.
+        quantity = self._fillable_quantity(order, market, liquidity_budget=liquidity_budget)
+        if quantity <= 0:
+            return 0.0, 0.0
         fill_price, _, _ = self.costs.fill_price(
             side=Side.BUY if order.side is OrderSide.BUY else Side.SELL,
             reference_price=reference,
-            quantity=order.quantity,
+            quantity=quantity,
             average_daily_volume=market.average_daily_volume,
         )
-        quantity = self._fillable_quantity(order, market, liquidity_budget=liquidity_budget)
         return quantity, fill_price
 
     def _fillable_quantity(
