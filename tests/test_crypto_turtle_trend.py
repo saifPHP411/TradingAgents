@@ -114,7 +114,15 @@ def test_donchian_close_exit_is_filled_at_following_open(monkeypatch):
     frame.iloc[4, frame.columns.get_loc("high")] = 98.0
     frame.iloc[4, frame.columns.get_loc("low")] = 96.5
     frame.iloc[4, frame.columns.get_loc("close")] = 97.0
-    monkeypatch.setattr(module, "_features", _features_with_signal)
+    def features_with_channel_exit(data, benchmark_close, settings):
+        features = data.copy()
+        features["atr"] = 10.0
+        features["exit_low"] = 99.5
+        features["long_entry"] = False
+        features.iloc[1, features.columns.get_loc("long_entry")] = True
+        return features
+
+    monkeypatch.setattr(module, "_features", features_with_channel_exit)
     result = run_backtest(
         frame,
         execution=TurtleExecutionCosts(0, 1, 2),
