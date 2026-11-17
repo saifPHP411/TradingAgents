@@ -880,15 +880,20 @@ class TestDashboardPaperSurface:
 
 
 class TestBanner:
-    def test_the_index_page_shows_the_not_live_banner(self, tmp_path, allow_loopback):
+    def test_the_index_page_is_perpetual_research_only_and_has_no_spot_controls(
+        self, tmp_path, allow_loopback
+    ):
         dashboard = Dashboard(tmp_path, token=TOKEN, allow_paper_trading=True)
         httpd, base = _serve_in_thread(dashboard)
         try:
             with urllib.request.urlopen(f"{base}/", timeout=10) as response:
                 html = response.read().decode()
-            assert "PAPER TRADING — NOT LIVE" in html
-            assert "START PAPER TRADING" in html
-            assert "STOP PAPER TRADING" in html
+            assert "Linear perpetual research lab" in html
+            assert "RESEARCH ONLY" in html
+            assert "ORDERS DISABLED" in html
+            assert "START PAPER TRADING" not in html
+            assert "STOP PAPER TRADING" not in html
+            assert "PAPER TRADING — NOT LIVE" not in html
         finally:
             httpd.shutdown()
             httpd.server_close()
