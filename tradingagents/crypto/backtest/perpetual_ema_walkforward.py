@@ -20,6 +20,7 @@ from tradingagents.crypto.backtest.perpetual_ema import (
     PerpetualEMAStrategy,
     run_backtest,
 )
+from tradingagents.crypto.binance_perpetual import BinanceUSDMPublicClient
 from tradingagents.crypto.bybit_perpetual import BybitLinearPublicClient
 from tradingagents.crypto.perpetuals import PerpetualRiskSettings
 
@@ -35,6 +36,7 @@ TARGET_WIN_RATE_PCT = 79.0
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbols", nargs="+", default=list(DEFAULT_SYMBOLS))
+    parser.add_argument("--data-source", choices=("binance-usdm", "bybit"), default="binance-usdm")
     parser.add_argument("--days", type=int, default=730)
     parser.add_argument(
         "--base-url",
@@ -252,7 +254,10 @@ def run_study(args: argparse.Namespace) -> dict:
     _validate_args(args)
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - args.days * 86_400_000
-    client = BybitLinearPublicClient(base_url=args.base_url)
+    if args.data_source == "bybit":
+        client = BybitLinearPublicClient(base_url=args.base_url)
+    else:
+        client = BinanceUSDMPublicClient()
     history = {
         symbol: _fetch_history(client, symbol, start_ms, end_ms)
         for symbol in args.symbols
@@ -374,8 +379,16 @@ def run_study(args: argparse.Namespace) -> dict:
         "orders_submitted": False,
         "credentials_used": False,
         "demo_ready": False,
-        "venue": "Bybit V5 public linear USDT perpetual market data",
+        "venue": getattr(
+            client, "venue_name", "Bybit V5 public linear USDT perpetual market data"
+        ),
+        "data_source": args.data_source,
         "data_api_base_url": client.base_url,
+        "execution_venue_validation": (
+            "Bybit market-data study; authenticated Demo execution remains untested"
+            if args.data_source == "bybit"
+            else "Binance USD-M is a cross-venue perpetual proxy; this does not establish Bybit-specific profitability or fills"
+        ),
         "symbols": list(aligned),
         "timeframe": "4h",
         "requested_days": args.days,
@@ -398,6 +411,12 @@ def run_study(args: argparse.Namespace) -> dict:
             "mark-price candles used for liquidation triggers; simplified liquidation price remains an approximation",
             "historical Bybit funding settlements are applied at their event timestamps",
             "fees, spread and slippage are estimates, not account-specific measured fills",
+            (
+                "Bybit public market data is used; no authenticated Demo execution is tested"
+                if args.data_source == "bybit"
+                else "Binance USD-M perpetual candles, mark prices and funding are a cross-venue proxy, not Bybit data"
+            ),
+            "research leverage is capped at 2x; the Binance adapter does not query account-specific leverage brackets",
             "each symbol is simulated independently; aggregate returns are equal-weighted",
             "development OOS folds are disjoint; the final chronological holdout is evaluated once",
             "no parameter fitting or selection is performed on the final holdout",
