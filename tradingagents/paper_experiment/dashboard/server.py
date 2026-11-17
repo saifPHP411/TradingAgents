@@ -298,6 +298,7 @@ class Dashboard:
         refresh_policy=None,
         refresh_fetcher=None,
         perpetual_client_factory=None,
+        perpetual_account_client_factory=None,
         perpetual_only_mode: bool | None = None,
     ) -> None:
         self.root = Path(root)
@@ -305,6 +306,7 @@ class Dashboard:
         self.allow_control = allow_control
         self.perpetual_only_mode = _perpetual_only_enabled() if perpetual_only_mode is None else bool(perpetual_only_mode)
         self._perpetual_client_factory = perpetual_client_factory
+        self._perpetual_account_client_factory = perpetual_account_client_factory
         self.max_sessions_per_call = max_sessions_per_call
         self.stub = stub
         self._lock = threading.Lock()
@@ -470,12 +472,41 @@ class Dashboard:
             return dict(self._perpetual_study_status)
 
     def _perpetual_position_view(self, symbol: str) -> tuple[str, dict[str, Any] | None]:
-        """Read a validated futures-position snapshot written by a perpetual worker.
+        """Read a genuine Bybit Demo linear position, falling back to a validated local snapshot.
 
-        No broker is connected in the research deployment. Until a futures worker
-        writes this file, the view is explicitly unavailable rather than flat or
-        inferred from Spot positions.
+        The live account path is signed and GET-only. Missing credentials mean
+        "unavailable", never "flat"; Spot positions are never consulted.
         """
+        try:
+            if self._perpetual_account_client_factory is None:
+                from tradingagents.crypto.bybit_perpetual_account import (
+                    BybitLinearDemoPositionClient,
+                )
+                account_client = BybitLinearDemoPositionClient()
+            else:
+                account_client = self._perpetual_account_client_factory()
+            result = account_client.get_position(symbol)
+            status = result.get("status")
+            position = result.get("position")
+            if status == "flat" and position is None:
+                return "flat", None
+            if status == "open" and isinstance(position, dict):
+                return "open", position
+            return "invalid", None
+        except Exception as exc:  # noqa: BLE001 - credentials/errors never reach the page
+            from_file = isinstance(
+                exc,
+                __import__(
+                    "tradingagents.crypto.bybit_perpetual_account",
+                    fromlist=["BybitPerpetualAccountNotConfigured"],
+                ).BybitPerpetualAccountNotConfigured,
+            )
+            if not from_file:
+                # A failed signed read must not be hidden by an older cached position.
+                # When no credentials are present only, an explicit worker snapshot is
+                # an acceptable alternative.
+                return "error", None
+
         path = self.root / PERPETUAL_POSITION_FILE
         if not path.is_file():
             return "unavailable", None
@@ -521,6 +552,7 @@ class Dashboard:
                 "liquidation_price": positive("liquidation_price", optional=True),
                 "unrealized_pnl": raw.get("unrealized_pnl"),
                 "updated_at": raw.get("updated_at"),
+                "position_source": "validated local futures snapshot",
             }
             pnl = position["unrealized_pnl"]
             if pnl is not None:
@@ -588,7 +620,8 @@ class Dashboard:
             "position_status": position_status,
             "position": position,
             "position_source": (
-                PERPETUAL_POSITION_FILE if position_status in {"open", "flat"} else None
+                (position or {}).get("position_source")
+                or ("Bybit Demo read-only position endpoint" if position_status == "flat" else None)
             ),
             "orders_submitted": False,
         }
@@ -822,6 +855,11 @@ def make_handler(dashboard: Dashboard):
                 self._send_html(200, INDEX_HTML)
                 return
             if not self._authed():
+                return
+            if dashboard.perpetual_only_mode and path.startswith("/api/") and path not in {
+                "/api/perpetual/study/status", "/api/perpetual/chart"
+            }:
+                self._send_json(410, {"error": "Spot/equity API is disabled in perpetual-only mode"})
                 return
             try:
                 if path == "/api/summary":
