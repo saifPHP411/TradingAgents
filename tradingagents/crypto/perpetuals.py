@@ -6,9 +6,9 @@ and hedge mode are intentionally unsupported in this first implementation.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import decimal
 import math
+from dataclasses import dataclass
 
 
 MAX_RESEARCH_LEVERAGE = 2.0
