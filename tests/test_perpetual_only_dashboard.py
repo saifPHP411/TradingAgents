@@ -314,3 +314,20 @@ def test_perpetual_only_entrypoint_skips_spot_provider_resolution(
     assert captured["crypto_symbols"] == ()
     assert captured["crypto_live"] is False
     assert captured["market_data_factory"] is None
+
+
+def test_demo_position_reader_treats_zero_optional_levels_as_unavailable():
+    row = _position_row(liqPrice="0", stopLoss="", takeProfit="0")
+    client = BybitLinearDemoPositionClient(
+        api_key="key",
+        api_secret="secret",
+        transport=lambda **_: Response({"retCode": 0, "result": {"list": [row]}}),
+        clock_ms=lambda: 1,
+    )
+
+    result = client.get_position("BTCUSDT")
+
+    assert result["status"] == "open"
+    assert result["position"]["liquidation_price"] is None
+    assert result["position"]["stop_loss"] is None
+    assert result["position"]["take_profit"] is None
