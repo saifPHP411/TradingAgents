@@ -221,6 +221,19 @@ class TestLimitOrders:
         # The buy limit crosses the reference price and executes immediately.
         assert ledger.total_fees == pytest.approx(1.0)
 
+    def test_marketable_sell_limit_pays_taker_fee_not_maker_fee(self):
+        costs = CostModel(maker_fee_bps=1.0, taker_fee_bps=10.0)
+        sim, ledger = _sim(costs=costs)
+        ledger.apply_fill(
+            symbol="AAPL", quantity=10, price=100.0, fee=0.0, timestamp=T0
+        )
+        filled = sim.submit(
+            _order(side=OrderSide.SELL, order_type=OrderType.LIMIT, limit_price=95.0),
+            market=_market(110.0, timestamp=T1),
+        )
+        assert filled.status is OrderStatus.FILLED
+        assert ledger.total_fees == pytest.approx(1.1)
+
     def test_passive_buy_limit_reached_inside_bar_pays_maker_fee(self):
         costs = CostModel(maker_fee_bps=1.0, taker_fee_bps=10.0)
         sim, ledger = _sim(costs=costs)
