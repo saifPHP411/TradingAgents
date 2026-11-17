@@ -149,10 +149,10 @@ class BinanceUSDMPublicClient:
         }
         price = filters.get("PRICE_FILTER", {})
         market_lot = filters.get("MARKET_LOT_SIZE") or {}
-        if not all(
-            self._positive(market_lot.get(field), "market " + field)
-            for field in ("minQty", "maxQty", "stepSize")
-        ):
+        try:
+            for field in ("minQty", "maxQty", "stepSize"):
+                self._positive(market_lot.get(field), "market " + field)
+        except BinancePerpetualDataError:
             market_lot = filters.get("LOT_SIZE") or {}
         notional_filter = filters.get("NOTIONAL") or filters.get("MIN_NOTIONAL") or {}
         min_notional_value = notional_filter.get("notional", notional_filter.get("minNotional"))
