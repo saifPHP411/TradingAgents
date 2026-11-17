@@ -114,6 +114,7 @@ def test_donchian_close_exit_is_filled_at_following_open(monkeypatch):
     frame.iloc[4, frame.columns.get_loc("high")] = 98.0
     frame.iloc[4, frame.columns.get_loc("low")] = 96.5
     frame.iloc[4, frame.columns.get_loc("close")] = 97.0
+
     def features_with_channel_exit(data, benchmark_close, settings):
         features = data.copy()
         features["atr"] = 10.0
