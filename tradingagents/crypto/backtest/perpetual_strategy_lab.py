@@ -10,12 +10,10 @@ import argparse
 import json
 import math
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
 
-from tradingagents.crypto.backtest.perpetual_ema import PerpetualCosts
 from tradingagents.crypto.backtest.perpetual_ema_walkforward import (
     COST_SCENARIOS,
     DEFAULT_SYMBOLS,
