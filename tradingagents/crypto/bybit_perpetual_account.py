@@ -13,8 +13,7 @@ import math
 import os
 import time
 from collections.abc import Callable, Mapping
-from urllib.parse import quote
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import requests
 
