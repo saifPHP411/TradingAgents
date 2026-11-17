@@ -5,7 +5,6 @@ import socket
 import threading
 import urllib.error
 import urllib.request
-from datetime import UTC, datetime
 from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
 
