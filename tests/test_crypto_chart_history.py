@@ -33,8 +33,11 @@ class _Client:
 def test_chart_returns_only_completed_normalised_candles():
     client = _Client([
         _candle(offset=0), _candle(offset=1),
-        _candle(offset=2, close_delta=3600),
+        _candle(offset=2),
     ])
+    forming = _candle(offset=2)
+    forming.close_time = datetime.now(UTC) + timedelta(hours=1)
+    client.candles[-1] = forming
     service = CryptoChartService(client_factory=lambda: client)
     result = service.get("BTCUSDT", "1h", 60)
     assert result["status"] == "ok"
