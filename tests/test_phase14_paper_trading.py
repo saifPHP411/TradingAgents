@@ -883,7 +883,9 @@ class TestBanner:
     def test_the_index_page_is_perpetual_research_only_and_has_no_spot_controls(
         self, tmp_path, allow_loopback
     ):
-        dashboard = Dashboard(tmp_path, token=TOKEN, allow_paper_trading=True)
+        dashboard = Dashboard(
+            tmp_path, token=TOKEN, allow_paper_trading=True, perpetual_only_mode=True
+        )
         httpd, base = _serve_in_thread(dashboard)
         try:
             with urllib.request.urlopen(f"{base}/", timeout=10) as response:
