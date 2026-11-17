@@ -40,6 +40,17 @@ This is not a replication of the 500-asset academic study. The current ten-asset
 - Preserve a genuinely future untouched holdout. The existing two-year cache has already been examined by earlier studies and is not a final locked holdout.
 - Before any paper integration, measure Bybit account fees, spread, slippage, order filters and actual paper fill behavior. Binance history is not a Bybit execution record.
 
+## 4h Donchian trend candidate and preservation record (2026-11-17)
+
+- The best candidate found in the current research sweep is the existing fixed-rule 4h Donchian trend strategy with an optional **individual-asset ADX >= 20** entry confirmation. This is a research variant, not a default or execution approval.
+- The original baseline was preserved before changing it in branch [backup/turtle-trend-positive-20261117](https://github.com/saifPHP411/TradingAgents/tree/backup/turtle-trend-positive-20261117), pointing to commit `042965ea009329ee6b068b8930d87f3552be1a92`. A direct rerun of the baseline after adding disabled-by-default filters produced identical summary and fold records.
+- On 10 Binance Spot USDT pairs, 4h candles resampled from complete 1h bars, 22 non-overlapping chronological folds and 248 baseline trades, the baseline returned **+0.4043% realistic** (PF 1.103) but **-0.0134% conservative** (PF 1.000). These are estimated costs, not measured Bybit fills.
+- A predeclared filter comparison ran four variants on the same already-inspected two-year development history. The ADX >=20 variant returned **+0.5197% realistic** (PF 1.152; 220 trades; +$2.40 net expectancy/trade) and **+0.1526% conservative** (PF 1.044; 220 trades; +$0.73 expectancy/trade), with reported max drawdown across fold returns 0.683% realistic / 0.782% conservative. This was better than baseline on those aggregate metrics.
+- Important weakness: only **4 of 22 folds were positive** for ADX >=20; 5 folds had no trades. Fold-return t-statistics were very small (about 0.38 realistic and 0.12 conservative), and a naïve IID bootstrap interval crossed zero in both scenarios. Profits were concentrated in a few folds. Six of ten symbols were positive, so symbol-level breadth was not universal.
+- The relative-volume >=1.2 filter alone and combined ADX+relative-volume variant were weaker than ADX alone. Therefore relative volume was not selected as a default filter.
+- The data period has already been used to inspect multiple strategy families and is **not an untouched final holdout**. Do not keep tuning against it or call the ADX result statistically proven. A further BTC 20-bar momentum confirmation is being evaluated separately and must be compared against the preserved baseline and ADX-only candidate.
+- Artifacts: [filter comparison run](https://github.com/saifPHP411/TradingAgents/actions/runs/44071967660), artifact `14323586288`; [baseline study in the same run](https://github.com/saifPHP411/TradingAgents/actions/runs/44071967660), artifact `14322723886`.
+
 ## Rejected or deferred families
 
 - EMA9/VWAP 3m crossover: current 14-day BTC/ETH/BNB test lost before costs and deteriorated substantially after costs.
