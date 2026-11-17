@@ -187,7 +187,8 @@ class BybitLinearDemoPositionClient:
         }
         for output, source in optional_fields.items():
             metrics[output] = self._finite_number(
-                account.get(source), source, optional=True
+                account.get(source), source, optional=True,
+                allow_negative=source == "totalPerpUPL",
             )
         coins = account.get("coin")
         if not isinstance(coins, list):
