@@ -45,7 +45,7 @@ jobs:
           mkdir -p artifacts
           python -m tradingagents.crypto.backtest.perpetual_ema_walkforward \
             --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT \
-            --base-url https://api-demo.bybit.com \
+            --data-source binance-usdm \
             --days 730 \
             --warmup-bars 260 \
             --test-bars 200 \
