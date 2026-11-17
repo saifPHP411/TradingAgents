@@ -223,6 +223,11 @@ def _summarize_holdout(records: list[dict], symbols: list[str]) -> dict:
         "positive_symbols": sum(
             item["net_return_pct"] > 0 for item in per_symbol.values()
         ),
+        "symbols_meeting_win_rate_target": sum(
+            item["win_rate_pct"] is not None
+            and item["win_rate_pct"] >= TARGET_WIN_RATE_PCT
+            for item in per_symbol.values()
+        ),
         "symbol_count": len(per_symbol),
         "per_symbol": per_symbol,
     }
@@ -307,6 +312,10 @@ def run_study(args: argparse.Namespace) -> dict:
                 "win_rate_pass": (
                     holdout["win_rate_pct"] is not None
                     and holdout["win_rate_pct"] >= TARGET_WIN_RATE_PCT
+                ),
+                "symbol_win_rate_breadth_pass": (
+                    holdout["symbols_meeting_win_rate_target"]
+                    >= max(1, math.ceil(len(aligned) * 0.75))
                 ),
                 "positive_after_costs": (
                     holdout["equal_weight_return_pct"] is not None
