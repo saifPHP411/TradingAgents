@@ -378,12 +378,18 @@ def run_backtest(
                         )
                         position["stop"] = max(position["stop"], trailing_stop)
 
-        if position is None and pending_entry is None and i < end_index:
-            if bool(row.long_entry) and pd.notna(row.atr) and row.atr > 0:
-                pending_entry = {
-                    "signal_close": float(row.close),
-                    "signal_atr": float(row.atr),
-                }
+        if (
+            position is None
+            and pending_entry is None
+            and i < end_index
+            and bool(row.long_entry)
+            and pd.notna(row.atr)
+            and row.atr > 0
+        ):
+            pending_entry = {
+                "signal_close": float(row.close),
+                "signal_atr": float(row.atr),
+            }
 
         marked = cash
         if position is not None:
