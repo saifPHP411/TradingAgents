@@ -236,6 +236,132 @@ def _funding_history(session: requests.Session, symbol: str,
     return [rows[key] for key in sorted(rows)]
 
 
+def _parse_funding_archive(content: bytes, *, start_ms: int, end_ms: int) -> list[dict[str, float]]:
+    """Parse a Binance Vision monthly USD-M funding-rate CSV archive."""
+    rows: dict[int, dict[str, float]] = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            bad_member = archive.testzip()
+            if bad_member is not None:
+                raise ValueError(f"corrupt ZIP member: {bad_member}")
+            members = [name for name in archive.namelist() if name.lower().endswith(".csv")]
+            if not members:
+                raise ValueError("funding archive contains no CSV data file")
+            for name in members:
+                with archive.open(name) as stream:
+                    reader = csv.DictReader(io.TextIOWrapper(stream, encoding="utf-8-sig"))
+                    if not reader.fieldnames:
+                        raise ValueError("funding archive CSV is missing its header")
+                    fields = {field.strip().lower(): field for field in reader.fieldnames}
+                    if not {"calc_time", "last_funding_rate"}.issubset(fields):
+                        raise ValueError(
+                            "funding archive CSV must contain calc_time and last_funding_rate"
+                        )
+                    interval_field = fields.get("funding_interval_hours")
+                    for item in reader:
+                        try:
+                            timestamp = int(float(item[fields["calc_time"]]))
+                            rate = float(item[fields["last_funding_rate"]])
+                            interval_hours = float(item[interval_field]) if interval_field else 8.0
+                        except (TypeError, ValueError, OverflowError, KeyError):
+                            raise ValueError("invalid row in funding archive CSV") from None
+                        if timestamp > 100_000_000_000_000:
+                            timestamp //= 1000
+                        if not start_ms <= timestamp < end_ms:
+                            continue
+                        if (
+                            not math.isfinite(rate)
+                            or not math.isfinite(interval_hours)
+                            or interval_hours <= 0
+                            or interval_hours > 24
+                        ):
+                            raise ValueError(f"invalid funding observation at {timestamp}")
+                        rows[timestamp] = {
+                            "timestamp": float(timestamp),
+                            "rate": rate,
+                            "interval_hours": interval_hours,
+                        }
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"invalid funding archive ZIP: {exc}") from None
+    return [rows[key] for key in sorted(rows)]
+
+
+def _archive_funding_history(
+    session: requests.Session, symbol: str, start_ms: int, end_ms: int,
+    *, now: datetime | None = None,
+) -> tuple[list[dict[str, float]], dict[str, Any]]:
+    """Load completed monthly funding archives; the current partial month is excluded."""
+    now = now or datetime.now(UTC)
+    start_date = datetime.fromtimestamp(start_ms / 1000, UTC).date()
+    requested_end_date = datetime.fromtimestamp((end_ms - 1) / 1000, UTC).date()
+    current_month_start = now.date().replace(day=1)
+    archive_end_ms = min(
+        end_ms,
+        int(datetime.combine(current_month_start, datetime.min.time(), UTC).timestamp() * 1000),
+    )
+    if start_ms >= archive_end_ms:
+        raise RuntimeError(
+            f"no completed monthly funding archive is available for {symbol} in the requested range"
+        )
+
+    month_cursor = start_date.replace(day=1)
+    last_archive_month = datetime.fromtimestamp(
+        (archive_end_ms - 1) / 1000, UTC
+    ).date().replace(day=1)
+    rows: dict[int, dict[str, float]] = {}
+    downloaded: list[str] = []
+    missing: list[str] = []
+    failures: list[str] = []
+
+    while month_cursor <= last_archive_month:
+        filename = f"{symbol}-fundingRate-{month_cursor.year}-{month_cursor.month:02d}.zip"
+        url = (
+            "https://data.binance.vision/data/futures/um/monthly/fundingRate/"
+            f"{symbol}/{filename}"
+        )
+        try:
+            response = session.get(url, timeout=30)
+            if response.status_code == 404:
+                missing.append(url)
+            else:
+                response.raise_for_status()
+                for item in _parse_funding_archive(
+                    response.content, start_ms=start_ms, end_ms=archive_end_ms
+                ):
+                    rows[int(item["timestamp"])] = item
+                downloaded.append(url)
+        except (requests.RequestException, ValueError, OSError) as exc:
+            failures.append(f"{url}: {type(exc).__name__}: {exc}")
+
+        month_cursor = date(
+            month_cursor.year + (1 if month_cursor.month == 12 else 0),
+            1 if month_cursor.month == 12 else month_cursor.month + 1,
+            1,
+        )
+
+    expected_min_events = int(((archive_end_ms - start_ms) / (12 * HOUR_MS)) * 0.90)
+    minimum_events = max(20, expected_min_events)
+    if len(rows) < minimum_events:
+        detail = "; ".join(failures[:8]) or "no archive download errors recorded"
+        raise RuntimeError(
+            f"Binance funding archive incomplete for {symbol}: {len(rows)} events "
+            f"(expected at least {minimum_events}), downloaded={len(downloaded)}, "
+            f"missing={len(missing)}; {detail}"
+        )
+    return [rows[key] for key in sorted(rows)], {
+        "source": "binance_public_data_archive_monthly",
+        "downloaded_files": len(downloaded),
+        "missing_files": len(missing),
+        "first_funding_ms": min(rows),
+        "last_funding_ms": max(rows),
+        "requested_end_date": requested_end_date.isoformat(),
+        "archive_end_exclusive_utc": datetime.fromtimestamp(
+            archive_end_ms / 1000, UTC
+        ).isoformat(),
+        "current_month_excluded": True,
+    }
+
+
 def fetch_market_history(symbols: tuple[str, ...], days: int = 180,
                          now: datetime | None = None) -> dict[str, Any]:
     """Fetch synchronized public Spot, perpetual and realized funding history."""
@@ -277,7 +403,38 @@ def fetch_market_history(symbols: tuple[str, ...], days: int = 180,
                     f"USD-M perpetual klines unavailable for {symbol}; "
                     f"REST failed ({rest_error}); archive fallback failed ({archive_error})"
                 ) from None
-        funding = _funding_history(session, symbol, start_ms, end_ms)
+        funding_source = "binance_usdm_rest_api"
+        funding_archive_metadata: dict[str, Any] | None = None
+        try:
+            funding = _funding_history(session, symbol, start_ms, end_ms)
+        except RuntimeError as rest_error:
+            try:
+                funding, funding_archive_metadata = _archive_funding_history(
+                    session, symbol, start_ms, end_ms, now=now
+                )
+                funding_source = "binance_public_data_archive_monthly"
+                # Align strategy and benchmark on the same effective dates.
+                # The monthly archive omits the current incomplete month.
+                first_price_ms = int(funding[0]["timestamp"]) + HOUR_MS
+                last_price_ms = int(funding[-1]["timestamp"]) + HOUR_MS
+                spot = {
+                    timestamp: bar for timestamp, bar in spot.items()
+                    if first_price_ms <= timestamp <= last_price_ms
+                }
+                perp = {
+                    timestamp: bar for timestamp, bar in perp.items()
+                    if first_price_ms <= timestamp <= last_price_ms
+                }
+                print(
+                    f"{symbol}: funding REST unavailable; loaded {len(funding)} "
+                    "settlements from completed monthly archive",
+                    flush=True,
+                )
+            except RuntimeError as archive_error:
+                raise RuntimeError(
+                    f"funding history unavailable for {symbol}; "
+                    f"REST failed ({rest_error}); archive fallback failed ({archive_error})"
+                ) from None
         if not spot or not perp or len(funding) < 20:
             raise RuntimeError(f"insufficient synchronized history for {symbol}: "
                                f"spot={len(spot)} perp={len(perp)} funding={len(funding)}")
@@ -285,9 +442,12 @@ def fetch_market_history(symbols: tuple[str, ...], days: int = 180,
             "spot_1h": spot, "perp_1h": perp, "funding": funding,
             "perp_1h_source": perp_source,
             "perp_archive": archive_metadata,
+            "funding_source": funding_source,
+            "funding_archive": funding_archive_metadata,
             "coverage": {
                 "spot_bars": len(spot), "perp_bars": len(perp),
                 "funding_events": len(funding),
+                "funding_source": funding_source,
                 "spot_first": min(spot), "spot_last": max(spot),
                 "perp_first": min(perp), "perp_last": max(perp),
                 "funding_first": int(funding[0]["timestamp"]),
