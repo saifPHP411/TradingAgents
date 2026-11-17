@@ -103,6 +103,8 @@ ROOT_ENV = "TRADINGAGENTS_EXPERIMENT_ROOT"
 HEALTH_PATH = "/healthz"
 
 AUTO_START_PERPETUAL_STUDY_ENV = "TRADINGAGENTS_AUTO_START_PERPETUAL_STUDY"
+AUTO_START_PERPETUAL_LAB_ENV = "TRADINGAGENTS_AUTO_START_PERPETUAL_LAB"
+PERPETUAL_LAB_REPORT_FILE = "perpetual_strategy_lab.json"
 PERPETUAL_ONLY_ENV = "TRADINGAGENTS_PERPETUAL_ONLY"
 PERPETUAL_CHART_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
 PERPETUAL_POSITION_FILE = "perpetual_open_position.json"
@@ -256,17 +258,27 @@ def _ensure_experiment(root: Path, *, crypto_symbols: tuple[str, ...] = ()) -> N
 
 
 def _maybe_auto_start_perpetual_study(dashboard: Any, root: str | Path) -> None:
-    """Optionally start the read-only Bybit study once on a dedicated research service."""
+    """Keep the legacy fixed-EMA runner disabled after its holdout has been inspected."""
     enabled = os.environ.get(AUTO_START_PERPETUAL_STUDY_ENV, "").strip().lower()
+    if enabled in {"1", "true", "yes", "on"}:
+        print(
+            "  legacy perpetual holdout auto-start: disabled; use the development-only strategy lab",
+            flush=True,
+        )
+
+
+def _maybe_auto_start_perpetual_lab(dashboard: Any, root: str | Path) -> None:
+    """Optionally start the development-only candidate tournament once."""
+    enabled = os.environ.get(AUTO_START_PERPETUAL_LAB_ENV, "").strip().lower()
     if enabled not in {"1", "true", "yes", "on"}:
         return
-    report_path = Path(root) / "perpetual_ema_walkforward.json"
+    report_path = Path(root) / PERPETUAL_LAB_REPORT_FILE
     if report_path.is_file():
-        print("  perpetual study auto-start: skipped (saved report already exists)", flush=True)
+        print("  perpetual strategy lab auto-start: skipped (saved report already exists)", flush=True)
         return
-    status = dashboard.start_perpetual_study()
+    status = dashboard.start_perpetual_lab()
     print(
-        f"  perpetual study auto-start: {status.get('status', 'unknown')}",
+        f"  perpetual strategy lab auto-start: {status.get('status', 'unknown')}",
         flush=True,
     )
 
@@ -347,6 +359,9 @@ class Dashboard:
         self._perpetual_study_lock = threading.Lock()
         self._perpetual_study_thread: threading.Thread | None = None
         self._perpetual_study_status: dict[str, Any] = {"status": "idle"}
+        self._perpetual_lab_lock = threading.Lock()
+        self._perpetual_lab_thread: threading.Thread | None = None
+        self._perpetual_lab_status: dict[str, Any] = {"status": "idle"}
 
     def perpetual_study_status(self) -> dict[str, Any]:
         with self._perpetual_study_lock:
@@ -470,6 +485,146 @@ class Dashboard:
             )
             self._perpetual_study_thread.start()
             return dict(self._perpetual_study_status)
+
+    def perpetual_lab_status(self) -> dict[str, Any]:
+        """Recover a development-only perpetual candidate tournament report."""
+        with self._perpetual_lab_lock:
+            status = dict(self._perpetual_lab_status)
+        if status.get("status") != "idle":
+            return status
+        report_path = self.root / PERPETUAL_LAB_REPORT_FILE
+        if not report_path.is_file():
+            return status
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            grouped = []
+            for item in report.get("rankings", []):
+                candidate = item["candidate"]
+                leverage = float(item["leverage"])
+                scenario_rows = {}
+                for scenario in ("realistic_estimate", "conservative", "stress"):
+                    key = f"{candidate}/{leverage:g}x/{scenario}"
+                    row = report["reports"][key]
+                    metrics = row["development_only"]
+                    scenario_rows[scenario] = {
+                        "win_rate_pct": metrics.get("win_rate_pct"),
+                        "return_pct": metrics.get("equal_weight_compounded_return_pct"),
+                        "profit_factor": metrics.get("profit_factor"),
+                        "trades": metrics.get("trades"),
+                        "positive_folds": metrics.get("positive_folds"),
+                        "fold_count": metrics.get("fold_count"),
+                        "positive_symbols": metrics.get("positive_symbols"),
+                        "symbol_count": metrics.get("symbol_count"),
+                        "liquidations": metrics.get("liquidations"),
+                        "passed": row["acceptance_gate"]["passed"],
+                    }
+                grouped.append({**item, "scenarios": scenario_rows})
+        except (OSError, ValueError, KeyError, TypeError):
+            return {"status": "error", "error": "saved perpetual strategy lab report is invalid"}
+        return {
+            "status": "completed",
+            "completed_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(report_path.stat().st_mtime)
+            ),
+            "orders_submitted": False,
+            "demo_ready": False,
+            "final_holdout_evaluated": False,
+            "previously_inspected_holdout_reused": False,
+            "excluded_previous_holdout_start": report.get("excluded_previous_holdout_start"),
+            "best_candidate": report.get("best_candidate"),
+            "results": grouped,
+            "report_file": report_path.name,
+            "rerun_blocked": True,
+        }
+
+    def start_perpetual_lab(self) -> dict[str, Any]:
+        """Run fixed candidates strictly before the previously inspected holdout."""
+        report_path = self.root / PERPETUAL_LAB_REPORT_FILE
+        if report_path.is_file():
+            return {
+                **self.perpetual_lab_status(),
+                "rerun_blocked": True,
+                "reason": (
+                    "This development sample has already been used for candidate selection; "
+                    "reruns would increase selection bias."
+                ),
+            }
+        prior_path = self.root / "perpetual_ema_walkforward.json"
+        try:
+            prior_report = json.loads(prior_path.read_text(encoding="utf-8"))
+            cutoff = prior_report["final_holdout_start"]
+            if not isinstance(cutoff, str) or not cutoff:
+                raise ValueError("missing holdout cutoff")
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return {
+                "status": "error",
+                "error": (
+                    "The saved historical EMA report and final_holdout_start cutoff are required. "
+                    "The lab refuses to guess the consumed holdout boundary."
+                ),
+                "orders_submitted": False,
+                "demo_ready": False,
+            }
+
+        with self._perpetual_lab_lock:
+            if self._perpetual_lab_thread is not None and self._perpetual_lab_thread.is_alive():
+                return dict(self._perpetual_lab_status)
+            started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._perpetual_lab_status = {
+                "status": "running",
+                "started_at": started_at,
+                "orders_submitted": False,
+                "demo_ready": False,
+                "final_holdout_evaluated": False,
+                "excluded_previous_holdout_start": cutoff,
+            }
+
+            def run() -> None:
+                try:
+                    from types import SimpleNamespace
+
+                    from tradingagents.crypto.backtest.perpetual_strategy_lab import run_lab
+
+                    args = SimpleNamespace(
+                        symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"],
+                        days=730,
+                        equity=1_000.0,
+                        leverage=[1.0, 2.0],
+                        warmup_bars=260,
+                        test_bars=200,
+                        exclude_after=cutoff,
+                    )
+                    report = run_lab(args)
+                    report_path.parent.mkdir(parents=True, exist_ok=True)
+                    report_path.write_text(
+                        json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    recovered = self.perpetual_lab_status()
+                    with self._perpetual_lab_lock:
+                        self._perpetual_lab_status = {
+                            **recovered,
+                            "status": "completed",
+                            "started_at": started_at,
+                            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        }
+                except Exception as exc:  # noqa: BLE001 - fail this research run, not the dashboard
+                    with self._perpetual_lab_lock:
+                        self._perpetual_lab_status = {
+                            "status": "error",
+                            "started_at": started_at,
+                            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "orders_submitted": False,
+                            "demo_ready": False,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc)[:500],
+                        }
+
+            self._perpetual_lab_thread = threading.Thread(
+                target=run, name="perpetual-strategy-lab", daemon=True
+            )
+            self._perpetual_lab_thread.start()
+            return dict(self._perpetual_lab_status)
 
     def _perpetual_position_view(self, symbol: str) -> tuple[str, dict[str, Any] | None, str | None]:
         """Read a genuine Bybit Demo linear position, falling back to a validated local snapshot.
@@ -851,7 +1006,8 @@ def make_handler(dashboard: Dashboard):
             if not self._authed():
                 return
             if dashboard.perpetual_only_mode and path.startswith("/api/") and path not in {
-                "/api/perpetual/study/status", "/api/perpetual/chart"
+                "/api/perpetual/study/status", "/api/perpetual/chart",
+                "/api/perpetual/lab/status"
             }:
                 self._send_json(410, {"error": "Spot/equity API is disabled in perpetual-only mode"})
                 return
@@ -954,6 +1110,8 @@ def make_handler(dashboard: Dashboard):
                     self._send_json(200, dashboard.chart(symbol, interval))
                 elif path == "/api/perpetual/study/status":
                     self._send_json(200, dashboard.perpetual_study_status())
+                elif path == "/api/perpetual/lab/status":
+                    self._send_json(200, dashboard.perpetual_lab_status())
                 elif path == "/api/perpetual/chart":
                     if not self._authed():
                         return
@@ -973,6 +1131,14 @@ def make_handler(dashboard: Dashboard):
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib name
             path = urlsplit(self.path).path
+            if path == "/api/perpetual/lab/start":
+                if not self._authed():
+                    return
+                if (self.headers.get("X-Perpetual-Lab-Confirm") or "").lower() != "yes":
+                    self._send_json(403, {"error": "explicit strategy-lab confirmation required"})
+                    return
+                self._send_json(202, dashboard.start_perpetual_lab())
+                return
             if path == "/api/perpetual/study/start":
                 if not self._authed():
                     return
@@ -1541,6 +1707,7 @@ def serve(
         perpetual_only_mode=perpetual_only_mode,
     )
     _maybe_auto_start_perpetual_study(dashboard, root)
+    _maybe_auto_start_perpetual_lab(dashboard, root)
     httpd = ThreadingHTTPServer((host, port), make_handler(dashboard))
     httpd.daemon_threads = True
     print(f"dashboard on http://{host}:{port}  (root: {Path(root).resolve()})")
