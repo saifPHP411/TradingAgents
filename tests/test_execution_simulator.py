@@ -330,6 +330,20 @@ class TestPartialFills:
         assert filled.remaining_quantity == pytest.approx(900.0)
         assert ledger.position_quantity("AAPL") == pytest.approx(100.0)
 
+    def test_partial_fill_slippage_uses_executed_quantity_not_requested_size(self):
+        costs = CostModel(slippage_volume_factor=10.0, max_slippage_bps=500.0)
+        sim, ledger = _sim(
+            cash=1_000_000.0, costs=costs, max_volume_participation=0.1
+        )
+        order = _order(quantity=1_000)
+        filled = sim.submit(order, market=_market(100.0, volume=1_000.0))
+        assert filled.status is OrderStatus.PARTIALLY_FILLED
+        assert filled.filled_quantity == pytest.approx(100.0)
+        # 100 units are 10% of 1,000 ADV: 100 bps impact, not
+        # 500 bps from incorrectly pricing the unfilled 1,000-unit request.
+        assert filled.average_fill_price == pytest.approx(101.0)
+        assert ledger.cash == pytest.approx(1_000_000.0 - 100.0 * 101.0)
+
     def test_a_small_order_still_fills_completely(self):
         sim, _ = _sim(max_volume_participation=0.1)
         filled = sim.submit(_order(quantity=50), market=_market(10.0, volume=1_000))
