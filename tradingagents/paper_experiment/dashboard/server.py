@@ -337,6 +337,7 @@ class Dashboard:
 
                     args = SimpleNamespace(
                         symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"],
+                        data_source="binance-usdm",
                         base_url="https://api-demo.bybit.com",
                         days=730,
                         equity=1_000.0,
@@ -1665,7 +1666,7 @@ INDEX_HTML = """<!doctype html>
         <div class="launch-card leverage">
           <div class="launch-meta">02 / LINEAR PERPETUALS</div>
           <h3>Leveraged strategy lab</h3>
-          <p>Run the Bybit 1x / 2x historical walk-forward backtest with funding, fees, slippage and a reserved final holdout. No exchange orders.</p>
+          <p>Run the 1x / 2x perpetual walk-forward backtest with funding, fees, slippage and a reserved final holdout. Binance USD-M is a cross-venue proxy until Bybit data access is available. No exchange orders.</p>
           <button class="launch-btn" id="launch-leverage" onclick="doPerpetualStudy()">RUN LEVERAGE BACKTEST</button>
         </div>
       </div>
@@ -2217,7 +2218,7 @@ async function refreshPerpetualStudy(){
     button.disabled = s.status === "running";
     button.textContent = s.status === "running" ? "RESEARCH RUNNING…" : "RUN LEVERAGE BACKTEST";
     if(s.status === "running"){
-      box.textContent = "Bybit public history is being fetched and tested across BTC, ETH, SOL and BNB at 1x and 2x. No exchange orders are submitted.";
+      box.textContent = "Binance USD-M perpetual proxy data is being tested across BTC, ETH, SOL and BNB at 1x and 2x. This is not Bybit-specific execution proof; no exchange orders are submitted.";
     }else if(s.status === "error"){
       box.textContent = "Research failed (" + (s.error_type || "error") + "): " + (s.error || "No further detail available.");
     }else if(s.status === "completed"){
