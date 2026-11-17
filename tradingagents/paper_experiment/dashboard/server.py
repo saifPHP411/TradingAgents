@@ -1584,7 +1584,7 @@ INDEX_HTML = """<!doctype html>
   .launch-card.leverage .launch-meta{color:#69e4e6}
   .launch-card h3{font-size:17px;margin:8px 0 5px}
   .launch-card p{font-size:12px;color:#9badd2;min-height:36px;margin:0 0 13px}
-  .launch-btn{width:100%;border:1px solid rgba(157,174,255,.35);border-radius:11px;padding:12px 14px;font:700 12px inherit;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:linear-gradient(110deg,#8291ff,#64cfe8);color:#071026}
+  .launch-btn{width:100%;border:1px solid rgba(157,174,255,.35);border-radius:11px;padding:12px 14px;font:700 12px/1.2 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:linear-gradient(110deg,#8291ff,#64cfe8);color:#071026}
   .launch-card.leverage .launch-btn{background:linear-gradient(110deg,#4adbd4,#77a6ff)}
   .launch-btn:disabled{opacity:.48;cursor:not-allowed}
   .study-status{margin-top:13px;padding:12px 14px;border-radius:13px;border:1px solid rgba(118,150,255,.2);background:rgba(4,10,28,.55);color:#aebfe6;font-size:12px}
