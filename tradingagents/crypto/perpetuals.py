@@ -6,9 +6,9 @@ and hedge mode are intentionally unsupported in this first implementation.
 """
 from __future__ import annotations
 
+import decimal
 import math
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN
 
 
 MAX_RESEARCH_LEVERAGE = 2.0
@@ -134,10 +134,10 @@ def round_quantity_down(quantity: float, quantity_step: float) -> float:
     """Floor to the venue's decimal quantity step without binary-float rounding up."""
     quantity = _finite_positive(quantity, "quantity")
     quantity_step = _finite_positive(quantity_step, "quantity_step")
-    units = (Decimal(str(quantity)) / Decimal(str(quantity_step))).to_integral_value(
-        rounding=ROUND_DOWN
+    units = (decimal.Decimal(str(quantity)) / decimal.Decimal(str(quantity_step))).to_integral_value(
+        rounding=decimal.ROUND_DOWN
     )
-    return float(units * Decimal(str(quantity_step)))
+    return float(units * decimal.Decimal(str(quantity_step)))
 
 
 def size_linear_position(
