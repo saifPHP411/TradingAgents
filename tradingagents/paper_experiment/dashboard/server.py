@@ -104,7 +104,9 @@ HEALTH_PATH = "/healthz"
 
 AUTO_START_PERPETUAL_STUDY_ENV = "TRADINGAGENTS_AUTO_START_PERPETUAL_STUDY"
 AUTO_START_PERPETUAL_LAB_ENV = "TRADINGAGENTS_AUTO_START_PERPETUAL_LAB"
+AUTO_START_PERPETUAL_SHADOW_ENV = "TRADINGAGENTS_AUTO_START_PERPETUAL_SHADOW"
 PERPETUAL_LAB_REPORT_FILE = "perpetual_strategy_lab.json"
+PERPETUAL_SHADOW_POLL_SECONDS = 900
 PERPETUAL_ONLY_ENV = "TRADINGAGENTS_PERPETUAL_ONLY"
 PERPETUAL_CHART_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
 PERPETUAL_POSITION_FILE = "perpetual_open_position.json"
@@ -286,6 +288,18 @@ def _maybe_auto_start_perpetual_lab(dashboard: Any, root: str | Path) -> None:
     )
 
 
+def _maybe_auto_start_perpetual_shadow(dashboard: Any, root: str | Path) -> None:
+    """Start the persistent read-only forward evaluator when explicitly enabled."""
+    enabled = os.environ.get(AUTO_START_PERPETUAL_SHADOW_ENV, "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return
+    status = dashboard.start_perpetual_shadow()
+    print(
+        f"  perpetual shadow forward auto-start: {status.get('status', 'unknown')}",
+        flush=True,
+    )
+
+
 class Dashboard:
     """The dashboard's configuration and shared state, one per server."""
 
@@ -368,6 +382,10 @@ class Dashboard:
         self._perpetual_lab_lock = threading.Lock()
         self._perpetual_lab_thread: threading.Thread | None = None
         self._perpetual_lab_status: dict[str, Any] = {"status": "idle"}
+        self._perpetual_shadow_lock = threading.Lock()
+        self._perpetual_shadow_thread: threading.Thread | None = None
+        self._perpetual_shadow_stop = threading.Event()
+        self._perpetual_shadow_status: dict[str, Any] = {"status": "idle"}
         self._perpetual_account_lock = threading.Lock()
 
     def perpetual_study_status(self) -> dict[str, Any]:
@@ -711,6 +729,89 @@ class Dashboard:
             )
             self._perpetual_lab_thread.start()
             return dict(self._perpetual_lab_status)
+
+    def perpetual_shadow_status(self) -> dict[str, Any]:
+        """Return persisted forward-test results plus any current worker error."""
+        from tradingagents.crypto.backtest.perpetual_shadow_forward import read_shadow_status
+
+        status = read_shadow_status(self.root)
+        with self._perpetual_shadow_lock:
+            worker = dict(self._perpetual_shadow_status)
+        if worker.get("status") in {"starting", "error"}:
+            status["status"] = worker["status"]
+            if worker.get("error"):
+                status["last_error"] = worker["error"]
+            if worker.get("started_at"):
+                status.setdefault("worker_started_at", worker["started_at"])
+        return status
+
+    def start_perpetual_shadow(self) -> dict[str, Any]:
+        """Run the public-data shadow evaluator; this path never constructs a broker."""
+        if not self.perpetual_only_mode:
+            return {
+                "status": "error",
+                "error": "The shadow forward evaluator requires perpetual-only mode.",
+                "orders_submitted": False,
+                "execution_enabled": False,
+                "demo_ready": False,
+            }
+        with self._perpetual_shadow_lock:
+            if (
+                self._perpetual_shadow_thread is not None
+                and self._perpetual_shadow_thread.is_alive()
+            ):
+                return dict(self._perpetual_shadow_status)
+            started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._perpetual_shadow_stop.clear()
+            self._perpetual_shadow_status = {
+                "status": "starting",
+                "started_at": started_at,
+                "orders_submitted": False,
+                "execution_enabled": False,
+                "demo_ready": False,
+            }
+
+            def run() -> None:
+                from tradingagents.crypto.backtest.perpetual_shadow_forward import (
+                    run_shadow_cycle,
+                )
+
+                while not self._perpetual_shadow_stop.is_set():
+                    try:
+                        result = run_shadow_cycle(self.root)
+                        with self._perpetual_shadow_lock:
+                            self._perpetual_shadow_status = dict(result)
+                        print(
+                            "perpetual shadow forward cycle: "
+                            f"status={result.get('status')} "
+                            f"bars={result.get('forward_bars', 0)} "
+                            f"rows={len(result.get('results', []))} "
+                            "orders_submitted=False execution_enabled=False",
+                            flush=True,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - public-data failures do not stop the dashboard
+                        error = f"{type(exc).__name__}: {str(exc)[:240]}"
+                        with self._perpetual_shadow_lock:
+                            self._perpetual_shadow_status = {
+                                "status": "error",
+                                "started_at": started_at,
+                                "error": error,
+                                "orders_submitted": False,
+                                "execution_enabled": False,
+                                "demo_ready": False,
+                            }
+                        print(
+                            "perpetual shadow forward cycle failed: "
+                            f"{type(exc).__name__}; retrying after poll interval",
+                            flush=True,
+                        )
+                    self._perpetual_shadow_stop.wait(PERPETUAL_SHADOW_POLL_SECONDS)
+
+            self._perpetual_shadow_thread = threading.Thread(
+                target=run, name="perpetual-shadow-forward", daemon=True
+            )
+            self._perpetual_shadow_thread.start()
+            return dict(self._perpetual_shadow_status)
 
     def _perpetual_position_view(self, symbol: str) -> tuple[str, dict[str, Any] | None, str | None]:
         """Read a genuine Bybit Demo linear position, falling back to a validated local snapshot.
@@ -1274,7 +1375,8 @@ def make_handler(dashboard: Dashboard):
                 return
             if dashboard.perpetual_only_mode and path.startswith("/api/") and path not in {
                 "/api/perpetual/study/status", "/api/perpetual/chart",
-                "/api/perpetual/lab/status", "/api/perpetual/account"
+                "/api/perpetual/lab/status", "/api/perpetual/account",
+                "/api/perpetual/shadow/status"
             }:
                 self._send_json(410, {"error": "Spot/equity API is disabled in perpetual-only mode"})
                 return
@@ -1381,6 +1483,8 @@ def make_handler(dashboard: Dashboard):
                     self._send_json(200, dashboard.perpetual_lab_status())
                 elif path == "/api/perpetual/account":
                     self._send_json(200, dashboard.perpetual_account())
+                elif path == "/api/perpetual/shadow/status":
+                    self._send_json(200, dashboard.perpetual_shadow_status())
                 elif path == "/api/perpetual/chart":
                     if not self._authed():
                         return
@@ -1992,6 +2096,7 @@ def serve(
     )
     _maybe_auto_start_perpetual_study(dashboard, root)
     _maybe_auto_start_perpetual_lab(dashboard, root)
+    _maybe_auto_start_perpetual_shadow(dashboard, root)
     httpd = ThreadingHTTPServer((host, port), make_handler(dashboard))
     httpd.daemon_threads = True
     print(f"dashboard on http://{host}:{port}  (root: {Path(root).resolve()})")
@@ -3253,6 +3358,7 @@ body{padding:env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 20px)
 <aside class="side">
 <section class="panel pad"><div class="panelhead" style="padding:0 0 12px;border:0"><h2>Market snapshot</h2></div><div class="metrics"><div class="metric"><label>Last close</label><b id="last-price">—</b><small id="last-time">—</small></div><div class="metric"><label>4H candles</label><b id="bars">—</b><small>Completed only</small></div><div class="metric"><label>Instrument</label><b id="instrument">—</b><small>USDT linear</small></div><div class="metric"><label>Data updated</label><b id="updated">—</b><small>Bybit public endpoint</small></div></div></section>
 <section class="panel pad"><div class="position-head"><h2 style="font-size:12px;letter-spacing:.12em;margin:0">Open futures position</h2><span id="position-badge" class="pill">UNKNOWN</span></div><div id="position-body" class="empty-state" style="margin-top:11px">Checking position source…</div></section>
+<section class="panel pad wide"><div class="position-head"><h2 style="font-size:12px;letter-spacing:.12em;margin:0">Shadow Forward Test</h2><span id="shadow-badge" class="pill warn">STARTING</span></div><p id="shadow-status" class="study-status">Monitoring future completed Bybit 4h candles. Five fixed candidates · 1x / 2x · realistic, conservative and stress costs. No orders.</p><div id="shadow-results" class="study-grid" style="margin-top:12px"><div class="empty-state">Waiting for the first untouched forward candles.</div></div><p id="shadow-updated" class="muted small" style="margin-top:10px">The forward boundary is persisted on the research volume.</p></section>
 <section class="panel pad wide"><div class="position-head"><h2 style="font-size:12px;letter-spacing:.12em;margin:0">Strategy tournament</h2><span id="study-badge" class="pill">IDLE</span></div><p id="study-status" class="study-status">Five fixed EMA and Donchian families · 1x / 2x · three cost models · development folds only.</p><button id="run-study" class="action primary" type="button" style="width:100%">Run strategy tournament</button><div id="study-results" class="study-grid" style="margin-top:12px"></div></section>
 </aside></section>
 <div class="footer">Bybit USDT linear perpetuals · authenticated Demo account is read-only · no Spot engine · no orders submitted</div>
@@ -3260,13 +3366,13 @@ body{padding:env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 20px)
 <script>
 (function(){
 "use strict";
-var $=function(id){return document.getElementById(id);},TOKEN=localStorage.getItem("ta_token")||"",DATA=null,ACCOUNT_DATA=null,STUDY_TIMER=null,CHART_TIMER=null,ACCOUNT_TIMER=null;
+var $=function(id){return document.getElementById(id);},TOKEN=localStorage.getItem("ta_token")||"",DATA=null,ACCOUNT_DATA=null,STUDY_TIMER=null,CHART_TIMER=null,ACCOUNT_TIMER=null,SHADOW_TIMER=null;
 function fmt(v,d){if(v===null||v===undefined||!Number.isFinite(Number(v)))return "—";return Number(v).toLocaleString(undefined,{maximumFractionDigits:d===undefined?2:d});}
 function esc(v){return String(v===null||v===undefined?"":v).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
 function showError(s){var el=$("error");el.style.display=s?"block":"none";el.textContent=s||"";}
 async function api(path,opts){opts=opts||{};opts.headers=Object.assign({},opts.headers||{},{Authorization:"Bearer "+TOKEN});var r=await fetch(path,opts),j={};try{j=await r.json();}catch(e){}if(r.status===401)throw new Error("Access token is invalid or missing.");if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j;}
 function connect(){TOKEN=$("token").value.trim();if(!TOKEN){showError("Enter the dashboard token.");return;}localStorage.setItem("ta_token",TOKEN);boot();}
-function boot(){ $("auth").style.display="none";$("main").style.display="grid";showError("");refreshChart();refreshStudy();refreshAccount();if(CHART_TIMER)clearInterval(CHART_TIMER);if(STUDY_TIMER)clearInterval(STUDY_TIMER);if(ACCOUNT_TIMER)clearInterval(ACCOUNT_TIMER);CHART_TIMER=setInterval(refreshChart,60000);STUDY_TIMER=setInterval(refreshStudy,10000);ACCOUNT_TIMER=setInterval(refreshAccount,60000);}
+function boot(){ $("auth").style.display="none";$("main").style.display="grid";showError("");refreshChart();refreshStudy();refreshAccount();refreshShadow();if(CHART_TIMER)clearInterval(CHART_TIMER);if(STUDY_TIMER)clearInterval(STUDY_TIMER);if(ACCOUNT_TIMER)clearInterval(ACCOUNT_TIMER);if(SHADOW_TIMER)clearInterval(SHADOW_TIMER);CHART_TIMER=setInterval(refreshChart,60000);STUDY_TIMER=setInterval(refreshStudy,10000);ACCOUNT_TIMER=setInterval(refreshAccount,60000);SHADOW_TIMER=setInterval(refreshShadow,60000);}
 function drawChart(payload){
  var canvas=$("chart"),r=canvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1,w=Math.max(250,r.width),h=Math.max(260,r.height);canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);var ctx=canvas.getContext("2d");ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);
  var candles=payload.candles||[];if(!candles.length){$("chart-empty").style.display="flex";$("chart-empty").textContent="No completed Bybit candles available.";return;}$("chart-empty").style.display="none";
@@ -3346,6 +3452,8 @@ function renderAccount(d){
  $("closed-trades").innerHTML=recent.length?'<table><thead><tr><th>Closed</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Closed P&L</th><th>Fees</th></tr></thead><tbody>'+recent.map(function(t){var fees=Number(t.open_fee||0)+Number(t.close_fee||0),v=Number(t.closed_pnl);return '<tr><td>'+esc(new Date(t.created_time_ms).toLocaleString())+'</td><td><b>'+esc(t.symbol)+'</b></td><td>'+esc(t.side)+'</td><td>'+fmt(t.quantity,5)+'</td><td>'+fmt(t.entry_price,4)+'</td><td>'+fmt(t.exit_price,4)+'</td><td class="'+(v>0?"positive":v<0?"negative":"")+'">'+(v>0?"+":"")+fmt(v,3)+'</td><td>'+fmt(fees,4)+'</td></tr>';}).join("")+'</tbody></table>':'<div class="empty-state">No closed linear-perpetual records were returned for the recent 7-day window.</div>';
 }
 async function refreshAccount(){try{renderAccount(await api("/api/perpetual/account"));}catch(e){renderAccount({status:"error",detail:e.message});}}
+function renderShadow(s){var b=$("shadow-badge"),st=$("shadow-status"),box=$("shadow-results"),updated=$("shadow-updated");var state=String(s.status||"idle");b.textContent=state.replace(/_/g," ").toUpperCase();b.className="pill "+(state==="running"?"safe":state==="error"?"warn":"");var detail=s.detail||"All five fixed candidates are being tracked in parallel; no candidate is selected.";if(state==="error")detail="Market-data cycle failed; the saved forward boundary is preserved. "+(s.last_error||s.error||"The worker will retry.");if(s.forward_start)detail+=" Forward start: "+s.forward_start+".";if(s.forward_bars!==undefined)detail+=" Future completed 4h bars: "+s.forward_bars+".";if(s.cycles!==undefined)detail+=" Completed scoring cycles: "+s.cycles+".";st.textContent=detail;updated.textContent="Last completed candle: "+(s.last_bar_time||"waiting")+" · Last update: "+(s.last_updated_at||s.last_checked_at||"—")+" · Simulated equity: 1,000 USD per symbol; not account capital.";var rows=s.results||[];if(!rows.length){box.innerHTML='<div class="empty-state">'+esc(s.detail||"Waiting for untouched future candles; no result has been scored yet.")+'</div>';return;}box.innerHTML=rows.map(function(r){var wr=r.win_rate_pct===null?"—":fmt(r.win_rate_pct,1)+"%",pf=r.profit_factor===null?"—":String(r.profit_factor),ret=r.estimated_equal_weight_return_pct===null?"—":fmt(r.estimated_equal_weight_return_pct,3)+"%";return '<div class="study-row"><strong>'+esc(r.candidate)+' · '+fmt(r.leverage,1)+'x · '+esc(r.scenario)+'</strong><p>Closed trades: '+esc(r.closed_trades)+' · WR: '+wr+' · PF: '+esc(pf)+'</p><p>Realized net P&amp;L: '+fmt(r.realized_net_pnl_usd,3)+' USD · estimated open P&amp;L after exit costs: '+fmt(r.estimated_open_pnl_after_exit_costs_usd,3)+' USD</p><p>Mean simulated return: '+ret+' · Max symbol drawdown: '+fmt(r.max_symbol_drawdown_pct,2)+'% · Open positions: '+esc(r.open_positions)+' · Liquidations: '+esc(r.liquidations)+'</p></div>';}).join("");}
+async function refreshShadow(){try{renderShadow(await api("/api/perpetual/shadow/status"));}catch(e){$("shadow-status").textContent="Shadow forward status unavailable: "+e.message;}}
 function renderStudy(s){var b=$("study-badge"),st=$("study-status"),box=$("study-results"),btn=$("run-study");b.textContent=String(s.status||"idle").toUpperCase();b.className="pill "+(s.status==="completed"?"safe":s.status==="error"?"warn":"");btn.disabled=s.status==="running"||s.status==="completed";btn.textContent=s.status==="running"?"TOURNAMENT RUNNING…":s.status==="completed"?"LAB COMPLETE · RERUN LOCKED":"Run strategy tournament";
  if(s.status==="running"){st.textContent="Comparing fixed EMA and Donchian candidates only on time-ordered development folds before the already-inspected holdout. No exchange orders are submitted.";return;}
  if(s.status==="error"){st.textContent="Research failed: "+(s.error||s.error_type||"unknown error");box.innerHTML="";return;}
