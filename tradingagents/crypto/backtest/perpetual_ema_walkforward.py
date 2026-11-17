@@ -155,6 +155,7 @@ def _run_window(
     equity: float,
     leverage: float,
     costs: PerpetualCosts,
+    strategy_overrides: dict | None = None,
 ):
     warm_start = max(0, start - warmup_bars)
     window = traded.iloc[warm_start:end].copy()
@@ -169,6 +170,7 @@ def _run_window(
     strategy = PerpetualEMAStrategy(
         enabled=True,
         risk=PerpetualRiskSettings(leverage=leverage, max_leverage=2.0),
+        **(strategy_overrides or {}),
     )
     return run_backtest(
         window,
