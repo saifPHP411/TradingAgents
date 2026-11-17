@@ -472,7 +472,7 @@ class RiskEngine:
             risk_bound = True
             decision.notes.append(
                 f"size reduced to keep the risk of {signal.symbol} at or under "
-                f"max_risk_per_trade {self.limits.max_risk_per_trade:,.2f}"
+                f"per-trade risk budget (max_risk_per_trade / risk_per_trade_fraction)"
             )
             value = risk_headroom
 
