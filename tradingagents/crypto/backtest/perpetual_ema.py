@@ -193,12 +193,12 @@ def run_backtest(
         raise ValueError("initial_equity must be finite and positive")
     if isinstance(trade_start_index, bool) or not isinstance(trade_start_index, int):
         raise ValueError("trade_start_index must be an integer")
-    if trade_start_index < 1 or trade_start_index >= len(traded):
-        raise ValueError("trade_start_index must be within the candle window")
     if cfg.risk.leverage > instrument.max_leverage or cfg.risk.leverage < instrument.min_leverage:
         raise ValueError("configured leverage is outside current instrument limits")
     trade = _validate(traded, "traded candles")
     marks = _validate(mark, "mark candles")
+    if trade_start_index < 1 or trade_start_index >= len(trade):
+        raise ValueError("trade_start_index must be within the candle window")
     trade.index = trade.index.tz_convert("UTC")
     marks.index = marks.index.tz_convert("UTC")
     if not trade.index.equals(marks.index):
