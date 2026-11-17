@@ -103,6 +103,13 @@ ROOT_ENV = "TRADINGAGENTS_EXPERIMENT_ROOT"
 HEALTH_PATH = "/healthz"
 
 AUTO_START_PERPETUAL_STUDY_ENV = "TRADINGAGENTS_AUTO_START_PERPETUAL_STUDY"
+PERPETUAL_ONLY_ENV = "TRADINGAGENTS_PERPETUAL_ONLY"
+PERPETUAL_CHART_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
+PERPETUAL_POSITION_FILE = "perpetual_open_position.json"
+
+
+def _perpetual_only_enabled() -> bool:
+    return os.environ.get(PERPETUAL_ONLY_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 """The unauthenticated liveness probe.
 
@@ -290,10 +297,14 @@ class Dashboard:
         chart_service: CryptoChartService | None = None,
         refresh_policy=None,
         refresh_fetcher=None,
+        perpetual_client_factory=None,
+        perpetual_only_mode: bool | None = None,
     ) -> None:
         self.root = Path(root)
         self.token = resolve_token(token)
         self.allow_control = allow_control
+        self.perpetual_only_mode = _perpetual_only_enabled() if perpetual_only_mode is None else bool(perpetual_only_mode)
+        self._perpetual_client_factory = perpetual_client_factory
         self.max_sessions_per_call = max_sessions_per_call
         self.stub = stub
         self._lock = threading.Lock()
@@ -303,7 +314,7 @@ class Dashboard:
         self.refresh_fetcher = refresh_fetcher
         self.paper = PaperTradingController(
             self.root,
-            enabled=allow_paper_trading,
+            enabled=allow_paper_trading and not self.perpetual_only_mode,
             order_notional=paper_order_notional,
             stub=stub,
             broker_factory=broker_factory,
@@ -448,6 +459,125 @@ class Dashboard:
             self._perpetual_study_thread.start()
             return dict(self._perpetual_study_status)
 
+    def _perpetual_position_view(self, symbol: str) -> tuple[str, dict[str, Any] | None]:
+        """Read a validated futures-position snapshot written by a perpetual worker.
+
+        No broker is connected in the research deployment. Until a futures worker
+        writes this file, the view is explicitly unavailable rather than flat or
+        inferred from Spot positions.
+        """
+        path = self.root / PERPETUAL_POSITION_FILE
+        if not path.is_file():
+            return "unavailable", None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return "invalid", None
+        if not isinstance(raw, dict):
+            return "invalid", None
+        state = str(raw.get("state", "")).strip().upper()
+        raw_symbol = str(raw.get("symbol", "")).strip().upper()
+        if state == "FLAT":
+            return "flat", None
+        if state != "OPEN" or raw_symbol != symbol:
+            return "invalid", None
+        side = str(raw.get("side", "")).strip().lower()
+        if side not in {"long", "short"}:
+            return "invalid", None
+
+        def positive(name: str, *, optional: bool = False):
+            value = raw.get(name)
+            if optional and value is None:
+                return None
+            if isinstance(value, bool):
+                raise ValueError(name)
+            parsed = float(value)
+            if not math.isfinite(parsed) or parsed <= 0:
+                raise ValueError(name)
+            return parsed
+
+        try:
+            position = {
+                "symbol": symbol,
+                "side": side,
+                "quantity": positive("quantity"),
+                "leverage": positive("leverage"),
+                "entry_price": positive("entry_price"),
+                "mark_price": positive("mark_price", optional=True),
+                "stop_loss": positive("stop_loss", optional=True),
+                "take_profit": positive("take_profit", optional=True),
+                "liquidation_price": positive("liquidation_price", optional=True),
+                "unrealized_pnl": raw.get("unrealized_pnl"),
+                "updated_at": raw.get("updated_at"),
+            }
+            pnl = position["unrealized_pnl"]
+            if pnl is not None:
+                if isinstance(pnl, bool) or not math.isfinite(float(pnl)):
+                    raise ValueError("unrealized_pnl")
+                position["unrealized_pnl"] = float(pnl)
+        except (TypeError, ValueError, OverflowError):
+            return "invalid", None
+        return "open", position
+
+    def perpetual_chart(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
+        """Read completed Bybit linear-perpetual candles and a real worker position.
+
+        Only the four supported USDT linear contracts are exposed. This endpoint is
+        public market data only; it never authenticates or sends an exchange order.
+        """
+        market = str(symbol).strip().upper()
+        if market not in PERPETUAL_CHART_SYMBOLS:
+            raise ValueError("unsupported linear perpetual chart symbol")
+        if self._perpetual_client_factory is None:
+            from tradingagents.crypto.bybit_perpetual import BybitLinearPublicClient
+            client = BybitLinearPublicClient()
+        else:
+            client = self._perpetual_client_factory()
+        instrument = client.instrument_info(market)
+        if (
+            instrument.status != "Trading"
+            or instrument.contract_type != "LinearPerpetual"
+            or instrument.quote_coin != "USDT"
+            or instrument.settle_coin != "USDT"
+        ):
+            raise ValueError("symbol is not an active USDT linear perpetual")
+        end_ms = int(time.time() * 1000)
+        start_ms = end_ms - 160 * 4 * 60 * 60 * 1000
+        frame = client.klines(market, start_ms=start_ms, end_ms=end_ms)
+        if frame is None or frame.empty:
+            raise RuntimeError("Bybit returned no completed 4-hour candles")
+        candles = []
+        for stamp, row in frame.tail(160).iterrows():
+            values = [float(row[name]) for name in ("open", "high", "low", "close")]
+            if not all(math.isfinite(value) and value > 0 for value in values):
+                continue
+            candles.append({
+                "time": stamp.isoformat(),
+                "open": values[0],
+                "high": values[1],
+                "low": values[2],
+                "close": values[3],
+                "volume": max(0.0, float(row.get("volume", 0.0))),
+            })
+        if not candles:
+            raise RuntimeError("Bybit returned no valid completed candles")
+        position_status, position = self._perpetual_position_view(market)
+        return {
+            "status": "ok",
+            "venue": "Bybit V5 public linear perpetual market data",
+            "category": "linear",
+            "symbol": market,
+            "timeframe": "4h",
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "candles": candles,
+            "position_status": position_status,
+            "position": position,
+            "position_source": (
+                PERPETUAL_POSITION_FILE if position_status in {"open", "flat"} else None
+            ),
+            "orders_submitted": False,
+        }
+
     def view(self) -> ExperimentView:
         return ExperimentView(self.root)
 
@@ -478,6 +608,10 @@ class Dashboard:
 
     def positions(self) -> dict[str, Any]:
         """Open positions, broker-sourced, reconciled against the simulation book."""
+        if self.perpetual_only_mode:
+            return {"positions": [], "count": 0, "positions_checked_at": None, "positions_at": None,
+                    "quote_checked_at": None, "quote_refresh_status": "disabled",
+                    "banner": "Perpetual research only — Spot execution is disabled", "live": False}
         from .engine_view import positions_view
 
         status = self.paper.status()
@@ -572,6 +706,8 @@ class Dashboard:
         processed, that would silently burn the session. The provider reads its
         own credential; this method neither reads nor logs one.
         """
+        if self.perpetual_only_mode:
+            raise PermissionError("Spot/equity simulation controls are disabled in perpetual-only mode")
         if not self.allow_control:
             raise PermissionError(
                 "control is disabled; start the dashboard with --allow-control to "
@@ -771,6 +907,16 @@ def make_handler(dashboard: Dashboard):
                     self._send_json(200, dashboard.chart(symbol, interval))
                 elif path == "/api/perpetual/study/status":
                     self._send_json(200, dashboard.perpetual_study_status())
+                elif path == "/api/perpetual/chart":
+                    if not self._authed():
+                        return
+                    symbol = parse_qs(urlsplit(self.path).query).get("symbol", ["BTCUSDT"])[0]
+                    try:
+                        self._send_json(200, dashboard.perpetual_chart(symbol))
+                    except ValueError as exc:
+                        self._send_json(400, {"error": str(exc)})
+                    except Exception as exc:  # noqa: BLE001 - public data errors are surfaced without credentials
+                        self._send_json(502, {"error": f"{type(exc).__name__}: {exc}"})
                 else:
                     self._send_json(404, {"error": "not found"})
             except DashboardStateError as exc:
@@ -793,6 +939,11 @@ def make_handler(dashboard: Dashboard):
                 return
             if path != "/api/run":
                 self._send_json(404, {"error": "not found"})
+                return
+            if not self._authed():
+                return
+            if dashboard.perpetual_only_mode:
+                self._send_json(410, {"error": "Spot/equity simulation controls are disabled in perpetual-only mode"})
                 return
             if not self._authed():
                 return
@@ -838,6 +989,9 @@ def make_handler(dashboard: Dashboard):
             any header — the broker reads its own environment variables.
             """
             if not self._authed():
+                return
+            if dashboard.perpetual_only_mode:
+                self._send_json(410, {"error": "Spot paper execution is disabled in perpetual-only mode"})
                 return
             if (self.headers.get(PAPER_CONFIRM_HEADER) or "").lower() != "yes":
                 self._send_json(
@@ -1311,13 +1465,15 @@ def serve(
     than by an empty engine. It is off by default: with no symbols and no live
     flag the crypto section reports *not started* instead of inventing data.
     """
-    # Ensure crypto experiment exists (idempotent, safe to call on every startup)
-    _ensure_experiment(root, crypto_symbols=crypto_symbols)
+    perpetual_only_mode = _perpetual_only_enabled()
+    # The perpetual-only deployment must not create or refresh the legacy Spot/equity experiment.
+    if not perpetual_only_mode:
+        _ensure_experiment(root, crypto_symbols=crypto_symbols)
 
     resolved = resolve_token(token)
     require_bindable(host, resolved)
     crypto_engine = None
-    if crypto_live and crypto_symbols:
+    if crypto_live and crypto_symbols and not perpetual_only_mode:
         crypto_engine = _build_crypto_engine(crypto_symbols)
     dashboard = Dashboard(
         root,
@@ -1337,6 +1493,7 @@ def serve(
         paper_execution_provider=paper_execution_provider,
         crypto_engine=crypto_engine,
         crypto_symbols=tuple(crypto_symbols),
+        perpetual_only_mode=perpetual_only_mode,
     )
     _maybe_auto_start_perpetual_study(dashboard, root)
     httpd = ThreadingHTTPServer((host, port), make_handler(dashboard))
