@@ -171,6 +171,10 @@ COST_SCENARIOS = {
     "frictionless": TurtleExecutionCosts(0, 0, 0),
     "realistic_estimate": TurtleExecutionCosts(10, 1, 2),
     "conservative_estimate": TurtleExecutionCosts(15, 3, 5),
+    # Deliberately severe sensitivity case, not a quoted Bybit fee schedule.
+    # 45 bps per fill (commission + half-spread + slippage) means roughly
+    # 90 bps per round trip before price-path effects.
+    "high_cost_stress": TurtleExecutionCosts(30, 5, 10),
 }
 
 
