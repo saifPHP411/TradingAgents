@@ -370,12 +370,33 @@ class ExecutionSimulator:
 
     # --- Applying the fill --------------------------------------------------
 
+    @staticmethod
+    def _is_maker_fill(order: Order, market: MarketContext) -> bool:
+        """Classify liquidity conservatively from the supplied bar context.
+
+        Market orders always take liquidity. A buy LIMIT at or above the
+        reference price, or a sell LIMIT at or below it, is marketable and
+        therefore taker. A non-marketable limit that is subsequently reached
+        by the bar range is modelled as maker; OHLCV cannot verify queue priority.
+        """
+        if order.order_type is OrderType.MARKET or order.limit_price is None:
+            return False
+        assert market.price is not None
+        if order.side is OrderSide.BUY:
+            return order.limit_price < market.price
+        return order.limit_price > market.price
+
     def _apply(self, order: Order, market: MarketContext, quantity: float, price: float) -> Order:
         """Move the ledger, then record the outcome on the order."""
         signed = quantity if order.side is OrderSide.BUY else -quantity
-        # A limit order rests in the book (maker); a market order takes (taker).
+        # A LIMIT order is not automatically a maker order. If its limit crosses
+        # the current reference price, it is immediately marketable and removes
+        # liquidity (taker). Only a non-marketable limit that is later reached
+        # inside the bar is modelled as maker. OHLCV cannot establish queue
+        # position, so this is still an estimate, not proof of a maker fill.
+        is_maker = self._is_maker_fill(order, market)
         commission = self.costs.fee_for_fill(
-            quantity=quantity, price=price, is_maker=order.order_type is OrderType.LIMIT
+            quantity=quantity, price=price, is_maker=is_maker
         )
 
         try:
