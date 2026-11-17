@@ -331,3 +331,53 @@ def test_demo_position_reader_treats_zero_optional_levels_as_unavailable():
     assert result["position"]["liquidation_price"] is None
     assert result["position"]["stop_loss"] is None
     assert result["position"]["take_profit"] is None
+
+
+def test_lab_status_does_not_promote_ema_candidate_rejected_by_prior_holdout(tmp_path):
+    candidate = "ema_14_50_adx18"
+    metrics = {
+        "win_rate_pct": 44.5,
+        "equal_weight_compounded_return_pct": 2.0,
+        "profit_factor": 1.7,
+        "trades": 80,
+        "positive_folds": 10,
+        "fold_count": 16,
+        "positive_symbols": 4,
+        "symbol_count": 4,
+        "liquidations": 0,
+    }
+    reports = {}
+    for scenario in ("realistic_estimate", "conservative", "stress"):
+        reports[f"{candidate}/2x/{scenario}"] = {
+            "development_only": metrics,
+            "acceptance_gate": {"passed": True},
+        }
+    saved = {
+        "rankings": [
+            {
+                "candidate": candidate,
+                "leverage": 2.0,
+                "development_gate_passed_all_costs": True,
+                "minimum_scenario_profit_factor": 1.36,
+                "conservative_return_pct": 1.92,
+            }
+        ],
+        "reports": reports,
+        "best_candidate": {
+            "candidate": candidate,
+            "leverage": 2.0,
+        },
+    }
+    (tmp_path / "perpetual_strategy_lab.json").write_text(
+        json.dumps(saved), encoding="utf-8"
+    )
+    dashboard = Dashboard(tmp_path, token="test-token", perpetual_only_mode=True)
+
+    status = dashboard.perpetual_lab_status()
+
+    assert status["status"] == "completed"
+    assert status["best_candidate"] is None
+    assert status["candidate_disqualifications"][0]["candidate"] == candidate
+    assert status["results"][0]["previous_holdout_rejected"] is True
+    assert status["results"][0]["selection_eligible"] is False
+    assert status["results"][0]["development_gate_passed_all_costs"] is True
