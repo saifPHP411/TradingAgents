@@ -272,12 +272,12 @@ jobs:
       - name: Compare predeclared trend-breakout filter variants
         run: |
           mkdir -p artifacts
-          python -m tradingagents.crypto.backtest.turtle_trend \\
-            --symbols BTC/USDT ETH/USDT BNB/USDT SOL/USDT XRP/USDT DOGE/USDT AVAX/USDT LINK/USDT LTC/USDT BCH/USDT \\
-            --cache ./crypto-cache \\
-            --warmup-bars 300 \\
-            --test-bars 180 \\
-            --compare-refinements \\
+          python -m tradingagents.crypto.backtest.turtle_trend \
+            --symbols BTC/USDT ETH/USDT BNB/USDT SOL/USDT XRP/USDT DOGE/USDT AVAX/USDT LINK/USDT LTC/USDT BCH/USDT \
+            --cache ./crypto-cache \
+            --warmup-bars 300 \
+            --test-bars 180 \
+            --compare-refinements \
             --out artifacts/turtle_trend_refinements.json
 
       - name: Upload filter comparison report
