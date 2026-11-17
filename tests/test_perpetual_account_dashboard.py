@@ -220,3 +220,5 @@ def test_perpetual_dashboard_uses_burgundy_theme_and_account_analytics():
     assert "id=\"realized-chart\"" in PERPETUAL_INDEX_HTML
     assert "/api/perpetual/account" in PERPETUAL_INDEX_HTML
     assert "No Spot engine" in PERPETUAL_INDEX_HTML
+    assert "var gridY=top+ph*i/3" in PERPETUAL_INDEX_HTML
+    assert "var y=top+ph*i/3" not in PERPETUAL_INDEX_HTML
