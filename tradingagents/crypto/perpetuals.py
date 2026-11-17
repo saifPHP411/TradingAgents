@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal, ROUND_DOWN
 
 
 MAX_RESEARCH_LEVERAGE = 2.0
@@ -214,7 +214,7 @@ def estimate_isolated_liquidation_price(
     current instrument and risk-tier review before any Demo integration.
     """
     entry_price = _finite_positive(entry_price, "entry_price")
-    if isintance(leverage, bool) or not math.isfinite(leverage) or leverage < 1:
+    if isinstance(leverage, bool) or not math.isfinite(leverage) or leverage < 1:
         raise ValueError("leverage must be finite and >= 1")
     if (
         isinstance(maintenance_margin_rate, bool)

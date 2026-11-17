@@ -8,7 +8,11 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from tradingagents.crypto.backtest.perpetual_ema import PerpetualCosts, PerpetualEMAStrategy, run_backtest
+from tradingagents.crypto.backtest.perpetual_ema import (
+    PerpetualCosts,
+    PerpetualEMAStrategy,
+    run_backtest,
+)
 from tradingagents.crypto.bybit_perpetual import BybitLinearPublicClient
 from tradingagents.crypto.perpetuals import PerpetualRiskSettings
 

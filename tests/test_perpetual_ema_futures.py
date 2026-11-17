@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 
 import pandas as pd
 import pytest
@@ -13,8 +12,8 @@ from tradingagents.crypto.backtest.perpetual_ema import (
 )
 from tradingagents.crypto.bybit_perpetual import BybitLinearPublicClient
 from tradingagents.crypto.perpetuals import (
-    LinearPerpetualInstrument,
     MAX_RESEARCH_LEVERAGE,
+    LinearPerpetualInstrument,
     PerpetualRiskSettings,
     estimate_isolated_liquidation_price,
     linear_funding_cashflow,
@@ -23,13 +22,13 @@ from tradingagents.crypto.perpetuals import (
 
 
 def instrument(**overrides):
-    values = dict(
+    values = {
         symbol="BTCUSDT", base_coin="BTC", quote_coin="USDT", settle_coin="USDT",
         status="Trading", contract_type="LinearPerpetual", min_quantity=0.001,
         max_market_quantity=100.0, quantity_step=0.001, min_notional=5.0,
         tick_size=0.1, min_leverage=1.0, max_leverage=50.0, leverage_step=0.01,
         funding_interval_minutes=480,
-    )
+    }
     values.update(overrides)
     return LinearPerpetualInstrument(**values)
 
