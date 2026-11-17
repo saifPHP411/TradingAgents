@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from tradingagents.crypto.backtest.turtle_trend import (
+    COST_SCENARIOS,
     TurtleExecutionCosts,
     TurtlePortfolioSettings,
     TurtleTrendSettings,
@@ -368,3 +369,21 @@ def test_new_dmi_switches_require_real_booleans():
         TurtleTrendSettings(require_positive_di=1)
     with pytest.raises(ValueError, match="require_adx_rising"):
         TurtleTrendSettings(require_adx_rising="yes")
+
+
+
+def test_high_cost_stress_scenario_is_severe_and_explicitly_not_venue_quote():
+    stress = COST_SCENARIOS["high_cost_stress"]
+
+    assert stress.commission_bps == 30
+    assert stress.half_spread_bps == 5
+    assert stress.slippage_bps == 10
+    assert (
+        stress.commission_bps + stress.half_spread_bps + stress.slippage_bps
+    ) == 45
+    assert set(COST_SCENARIOS) == {
+        "frictionless",
+        "realistic_estimate",
+        "conservative_estimate",
+        "high_cost_stress",
+    }
