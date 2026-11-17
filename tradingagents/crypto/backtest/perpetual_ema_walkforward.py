@@ -7,11 +7,11 @@ holdout is reserved and evaluated once. It never places exchange orders.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 import json
 import math
 import time
 from collections import defaultdict
+from dataclasses import asdict
 from pathlib import Path
 
 import pandas as pd
