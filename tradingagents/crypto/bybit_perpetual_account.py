@@ -173,6 +173,10 @@ class BybitLinearDemoPositionClient:
                 "multiple open position legs found; one-way position is required for this chart"
             )
         row, quantity = open_rows[0]
+        if row.get("positionIdx") not in (0, "0", None):
+            raise BybitPerpetualAccountError(
+                "Bybit Demo hedge-mode position index is unsupported; one-way position is required"
+            )
         side_raw = str(row.get("side") or "").lower()
         if side_raw not in {"buy", "sell"}:
             raise BybitPerpetualAccountError("Bybit Demo position direction is unknown")
