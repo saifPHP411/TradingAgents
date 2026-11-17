@@ -108,6 +108,9 @@ PERPETUAL_LAB_REPORT_FILE = "perpetual_strategy_lab.json"
 PERPETUAL_ONLY_ENV = "TRADINGAGENTS_PERPETUAL_ONLY"
 PERPETUAL_CHART_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
 PERPETUAL_POSITION_FILE = "perpetual_open_position.json"
+PERPETUAL_ACCOUNT_BASELINE_ENV = "TRADINGAGENTS_INITIAL_CAPITAL_USDT"
+PERPETUAL_ACCOUNT_BASELINE_FILE = "perpetual_account_baseline.json"
+PERPETUAL_ACCOUNT_HISTORY_FILE = "perpetual_account_history.json"
 
 
 def _perpetual_only_enabled() -> bool:
@@ -365,6 +368,7 @@ class Dashboard:
         self._perpetual_lab_lock = threading.Lock()
         self._perpetual_lab_thread: threading.Thread | None = None
         self._perpetual_lab_status: dict[str, Any] = {"status": "idle"}
+        self._perpetual_account_lock = threading.Lock()
 
     def perpetual_study_status(self) -> dict[str, Any]:
         with self._perpetual_study_lock:
@@ -857,6 +861,170 @@ class Dashboard:
             "orders_submitted": False,
         }
 
+    def perpetual_account(self) -> dict[str, Any]:
+        """Return verified Bybit Demo wallet, recent closed PnL and tracked equity.
+
+        All exchange reads are signed GET requests. The baseline is either an
+        explicit operator-supplied initial capital or the first verified equity
+        snapshot. External deposits/withdrawals are not silently treated as PnL.
+        """
+        if not self.perpetual_only_mode:
+            return {
+                "status": "disabled",
+                "detail": "The futures account view is available only in perpetual-only mode.",
+                "orders_submitted": False,
+            }
+        from tradingagents.crypto.bybit_perpetual_account import (
+            BybitLinearDemoPositionClient,
+            BybitPerpetualAccountNotConfigured,
+        )
+        with self._perpetual_account_lock:
+            try:
+                client = (
+                    self._perpetual_account_client_factory()
+                    if self._perpetual_account_client_factory is not None
+                    else BybitLinearDemoPositionClient()
+                )
+                wallet = client.get_wallet_balance()
+                closed = client.get_closed_pnl(limit=100)
+                if wallet.get("status") != "ok" or closed.get("status") != "ok":
+                    raise ValueError("Bybit account payload did not pass validation")
+                equity = float(wallet["total_equity_usd"])
+                if not math.isfinite(equity) or equity < 0:
+                    raise ValueError("Bybit returned an invalid account equity")
+            except BybitPerpetualAccountNotConfigured:
+                return {
+                    "status": "not_configured",
+                    "detail": "Read-only Bybit Demo wallet credentials are not configured.",
+                    "orders_submitted": False,
+                }
+            except Exception as exc:  # noqa: BLE001 - never expose credentials or response bodies
+                return {
+                    "status": "error",
+                    "error_type": type(exc).__name__,
+                    "detail": "Bybit Demo account data is unavailable or failed validation; balances are hidden.",
+                    "orders_submitted": False,
+                }
+
+            baseline_env = os.environ.get(PERPETUAL_ACCOUNT_BASELINE_ENV, "").strip()
+            baseline_source = "first_verified_snapshot"
+            baseline: float | None = None
+            baseline_at: str | None = None
+            if baseline_env:
+                try:
+                    baseline = float(baseline_env)
+                except ValueError:
+                    return {
+                        "status": "error",
+                        "error_type": "InvalidInitialCapital",
+                        "detail": f"{PERPETUAL_ACCOUNT_BASELINE_ENV} must be a positive USDT amount.",
+                        "orders_submitted": False,
+                    }
+                if not math.isfinite(baseline) or baseline <= 0:
+                    return {
+                        "status": "error",
+                        "error_type": "InvalidInitialCapital",
+                        "detail": f"{PERPETUAL_ACCOUNT_BASELINE_ENV} must be a positive USDT amount.",
+                        "orders_submitted": False,
+                    }
+                baseline_source = "configured_initial_capital"
+                baseline_at = "operator-configured"
+            else:
+                baseline_path = self.root / PERPETUAL_ACCOUNT_BASELINE_FILE
+                if baseline_path.is_file():
+                    try:
+                        saved = json.loads(baseline_path.read_text(encoding="utf-8"))
+                        baseline = float(saved["initial_capital_usd"])
+                        baseline_at = str(saved["baseline_at"])
+                        if not math.isfinite(baseline) or baseline <= 0:
+                            raise ValueError("invalid saved initial capital")
+                    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                        return {
+                            "status": "error",
+                            "error_type": "InvalidBaseline",
+                            "detail": "Saved initial-capital baseline is invalid; it was not overwritten.",
+                            "orders_submitted": False,
+                        }
+                else:
+                    baseline = equity
+                    baseline_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = baseline_path.with_suffix(".tmp")
+                    temporary.write_text(
+                        json.dumps({
+                            "initial_capital_usd": baseline,
+                            "baseline_at": baseline_at,
+                            "source": baseline_source,
+                        }, sort_keys=True, allow_nan=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    os.replace(temporary, baseline_path)
+
+            assert baseline is not None
+            now_ms = int(time.time() * 1000)
+            pnl = equity - baseline
+            return_pct = pnl / baseline * 100.0
+            history_path = self.root / PERPETUAL_ACCOUNT_HISTORY_FILE
+            history_error = None
+            try:
+                history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else []
+                if not isinstance(history, list):
+                    raise ValueError("history is not a list")
+                if not history or now_ms - int(history[-1].get("timestamp_ms", 0)) >= 60_000:
+                    history.append({
+                        "timestamp_ms": now_ms,
+                        "equity_usd": equity,
+                        "wallet_balance_usd": wallet.get("total_wallet_balance_usd"),
+                        "perpetual_unrealized_pnl_usd": wallet.get("total_perpetual_unrealized_pnl_usd"),
+                    })
+                    history = history[-1000:]
+                    temporary = history_path.with_suffix(".tmp")
+                    temporary.write_text(
+                        json.dumps(history, sort_keys=True, allow_nan=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    os.replace(temporary, history_path)
+            except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError):
+                history = []
+                history_error = "Equity history could not be read or persisted."
+
+            records = closed.get("records", [])
+            cumulative = 0.0
+            closed_curve = []
+            for record in records:
+                cumulative += float(record["closed_pnl"])
+                closed_curve.append({
+                    "timestamp_ms": record["created_time_ms"],
+                    "cumulative_closed_pnl": cumulative,
+                    "trade_pnl": record["closed_pnl"],
+                    "symbol": record["symbol"],
+                })
+            return {
+                "status": "ok",
+                "account": wallet,
+                "initial_capital_usd": baseline,
+                "initial_capital_source": baseline_source,
+                "initial_capital_at": baseline_at,
+                "net_pnl_since_initial_capital_usd": pnl,
+                "return_since_initial_capital_pct": return_pct,
+                "equity_history": history,
+                "closed_pnl_curve": closed_curve,
+                "closed_trades": records,
+                "closed_pnl_window": closed.get("window"),
+                "closed_pnl_next_page_available": bool(closed.get("next_page_available")),
+                "equity_history_note": history_error,
+                "capital_flow_adjusted": False,
+                "capital_flow_note": (
+                    "Return is equity versus the configured or first-observed baseline. "
+                    "Deposits and withdrawals are not yet reconciled; configure the original "
+                    "capital explicitly and exclude external transfers before treating this "
+                    "percentage as an investment return."
+                ),
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "source": "Bybit Demo read-only wallet and linear closed-PnL endpoints",
+                "orders_submitted": False,
+            }
+
     def view(self) -> ExperimentView:
         return ExperimentView(self.root)
 
@@ -1089,7 +1257,7 @@ def make_handler(dashboard: Dashboard):
                 return
             if dashboard.perpetual_only_mode and path.startswith("/api/") and path not in {
                 "/api/perpetual/study/status", "/api/perpetual/chart",
-                "/api/perpetual/lab/status"
+                "/api/perpetual/lab/status", "/api/perpetual/account"
             }:
                 self._send_json(410, {"error": "Spot/equity API is disabled in perpetual-only mode"})
                 return
@@ -1194,6 +1362,8 @@ def make_handler(dashboard: Dashboard):
                     self._send_json(200, dashboard.perpetual_study_status())
                 elif path == "/api/perpetual/lab/status":
                     self._send_json(200, dashboard.perpetual_lab_status())
+                elif path == "/api/perpetual/account":
+                    self._send_json(200, dashboard.perpetual_account())
                 elif path == "/api/perpetual/chart":
                     if not self._authed():
                         return
