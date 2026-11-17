@@ -127,3 +127,95 @@ def test_bybit_klines_exclude_the_still_forming_bar():
     assert len(data) == 1
     assert data.iloc[0]["close"] == 101
     assert isinstance(data.index, pd.DatetimeIndex)
+
+
+def _synthetic_perpetual_window():
+    index = pd.date_range("2024-01-01 04:00", periods=230, freq="4h", tz="UTC")
+    bars = pd.DataFrame(
+        {
+            "open": [100.0] * len(index),
+            "high": [101.0] * len(index),
+            "low": [99.0] * len(index),
+            "close": [100.0] * len(index),
+        },
+        index=index,
+    )
+    # Draw down enough to trip the daily loss guard, but stay above the ATR stop.
+    bars.loc[index[202], ["high", "low", "close"]] = [100.5, 97.7, 97.8]
+    bars.loc[index[203], ["open", "high", "low", "close"]] = [97.8, 98.2, 97.6, 98.0]
+    mark = bars.copy()
+    funding = pd.Series(0.0, index=index[::2], name="funding_rate")
+    return bars, mark, funding, index
+
+
+def test_daily_risk_exit_is_cleared_before_a_later_position(monkeypatch):
+    import tradingagents.crypto.backtest.perpetual_ema as engine
+
+    traded, mark, funding, index = _synthetic_perpetual_window()
+    signals = pd.Series(0, index=index, dtype=int)
+    signals.loc[index[200]] = 1
+    signals.loc[index[203]] = 1
+
+    def forced_features(data, cfg):
+        return pd.DataFrame(
+            {"atr": pd.Series(1.0, index=data.index), "signal": signals},
+            index=data.index,
+        )
+
+    monkeypatch.setattr(engine, "_features", forced_features)
+    result = engine.run_backtest(
+        traded,
+        mark,
+        funding,
+        instrument(),
+        strategy=PerpetualEMAStrategy(
+            enabled=True,
+            risk=PerpetualRiskSettings(
+                leverage=2.0,
+                max_daily_loss_fraction=0.003,
+                max_drawdown_fraction=0.10,
+            ),
+        ),
+    )
+
+    assert len(result.trades) == 2
+    assert result.trades[0].exit_reason == "daily_loss_limit"
+    assert result.trades[1].exit_reason == "end_of_window"
+
+
+def test_entry_is_rejected_when_liquidation_is_too_close_to_atr_stop(monkeypatch):
+    import tradingagents.crypto.backtest.perpetual_ema as engine
+
+    traded, mark, funding, index = _synthetic_perpetual_window()
+    signals = pd.Series(0, index=index, dtype=int)
+    signals.loc[index[200]] = 1
+
+    def forced_features(data, cfg):
+        return pd.DataFrame(
+            {"atr": pd.Series(1.0, index=data.index), "signal": signals},
+            index=data.index,
+        )
+
+    monkeypatch.setattr(engine, "_features", forced_features)
+    monkeypatch.setattr(engine, "estimate_isolated_liquidation_price", lambda **_: 98.0)
+    result = engine.run_backtest(
+        traded,
+        mark,
+        funding,
+        instrument(),
+        strategy=PerpetualEMAStrategy(
+            enabled=True,
+            risk=PerpetualRiskSettings(leverage=2.0),
+        ),
+    )
+
+    assert result.trades == []
+    assert result.rejections["liquidation_too_close_to_atr_stop"] == 1
+
+
+def test_liquidation_buffer_is_validated_and_conservative_by_default():
+    assert PerpetualRiskSettings().liquidation_buffer_fraction == pytest.approx(0.02)
+    with pytest.raises(ValueError, match="liquidation_buffer_fraction"):
+        PerpetualRiskSettings(liquidation_buffer_fraction=0.0)
+    with pytest.raises(ValueError, match="liquidation_buffer_fraction"):
+        PerpetualRiskSettings(liquidation_buffer_fraction=0.11)
