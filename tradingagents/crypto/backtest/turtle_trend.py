@@ -32,8 +32,17 @@ class TurtleTrendSettings:
     min_relative_volume: float | None = None
     benchmark_momentum_bars: int = 20
     require_benchmark_momentum_positive: bool = False
+    require_positive_di: bool = False
+    require_adx_rising: bool = False
 
     def __post_init__(self) -> None:
+        for name in (
+            "require_benchmark_momentum_positive",
+            "require_positive_di",
+            "require_adx_rising",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a boolean")
         for name in (
             "entry_lookback", "exit_lookback", "atr_period",
             "ema_period", "ema_slope_bars", "max_holding_bars",
@@ -270,9 +279,12 @@ def _features(
     ).mean() / smoothed_tr.replace(0, math.nan)
     directional_sum = (plus_di + minus_di).replace(0, math.nan)
     dx = 100.0 * (plus_di - minus_di).abs() / directional_sum
+    features["plus_di"] = plus_di
+    features["minus_di"] = minus_di
     features["adx"] = dx.ewm(
         alpha=alpha, adjust=False, min_periods=settings.adx_period
     ).mean()
+    features["adx_rising"] = features["adx"] > features["adx"].shift(1)
     prior_volume_mean = data.volume.rolling(
         settings.volume_period, min_periods=settings.volume_period
     ).mean().shift(1)
@@ -294,6 +306,14 @@ def _features(
         & (
             features.relative_volume >= settings.min_relative_volume
             if settings.min_relative_volume is not None else True
+        )
+        & (
+            features.plus_di > features.minus_di
+            if settings.require_positive_di else True
+        )
+        & (
+            features.adx_rising
+            if settings.require_adx_rising else True
         )
     )
     return features
@@ -649,6 +669,12 @@ def run_refinement_comparison(
         ),
         "adx_20_and_btc_20bar_momentum": TurtleTrendSettings(
             min_adx=20.0, require_benchmark_momentum_positive=True
+        ),
+        "adx_20_and_positive_di": TurtleTrendSettings(
+            min_adx=20.0, require_positive_di=True
+        ),
+        "adx_20_and_positive_di_and_rising_adx": TurtleTrendSettings(
+            min_adx=20.0, require_positive_di=True, require_adx_rising=True
         ),
     }
     reports = {}
