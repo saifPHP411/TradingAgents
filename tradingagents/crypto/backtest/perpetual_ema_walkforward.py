@@ -7,6 +7,7 @@ holdout is reserved and evaluated once. It never places exchange orders.
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 import math
 import time
@@ -265,7 +266,7 @@ def run_study(args: argparse.Namespace) -> dict:
 
     # Intersect exact timestamps: never forward-fill or synthesize missing candles.
     common = None
-    for _, traded, mark, _ in history.values():
+    for _, traded, _mark, _ in history.values():
         common = traded.index if common is None else common.intersection(traded.index)
     if common is None or len(common) < args.warmup_bars + args.test_bars * 3:
         raise ValueError("insufficient common aligned history for walk-forward folds")
