@@ -193,7 +193,7 @@ def test_optional_adx_and_relative_volume_filters_gate_only_when_configured():
         baseline.long_entry
         & baseline.adx.ge(20.0)
         & baseline.relative_volume.ge(1.2)
-    )
+    ).rename("long_entry")
 
     pd.testing.assert_series_equal(filtered.long_entry, expected)
     assert baseline.long_entry.iloc[-1]
