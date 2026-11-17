@@ -414,7 +414,7 @@ def run_backtest(
         equity_curve=curve, rejections=rejected,
         assumptions={"instrument": instrument.symbol, "contract": "linear USDT perpetual", "margin_mode": "isolated",
             "position_mode": "one-way", "leverage": cfg.risk.leverage, "research_leverage_ceiling": 2.0,
-            "strategy": (f"EMA14/EMA50 cross + EMA200 trend + ADX, ATR trailing stop" if cfg.signal_mode == "ema_cross" else f"Donchian {cfg.breakout_period} breakout + EMA{cfg.trend} regime + ADX, ATR trailing stop"),
+            "strategy": ("EMA14/EMA50 cross + EMA200 trend + ADX, ATR trailing stop" if cfg.signal_mode == "ema_cross" else f"Donchian {cfg.breakout_period} breakout + EMA{cfg.trend} regime + ADX, ATR trailing stop"),
             "signal_timing": "completed 4h candle, next candle open", "funding_series_required": True,
             "mark_price_liquidation": True, "liquidation_estimate": "approximate, not Bybit tier formula",
             "liquidation_buffer_fraction": cfg.risk.liquidation_buffer_fraction,
