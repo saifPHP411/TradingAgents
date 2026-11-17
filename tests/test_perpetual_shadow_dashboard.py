@@ -18,7 +18,7 @@ def test_shadow_forward_is_research_only_and_refuses_non_perpetual_dashboard():
     assert result["orders_submitted"] is False
     assert result["execution_enabled"] is False
     assert result["demo_ready"] is False
-    assert dashboard._perpetual_shadow_thread is None
+    assert not hasattr(dashboard, "_perpetual_shadow_thread")
 
 
 def test_shadow_forward_panel_polls_authenticated_read_only_status():
