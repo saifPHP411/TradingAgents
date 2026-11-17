@@ -202,6 +202,49 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  turtle-trend-study:
+    name: 4h Donchian trend-following chronological OOS study
+    needs: fetch-history
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install research dependencies
+        run: python -m pip install --upgrade pip pandas numpy requests python-dotenv pydantic
+
+      - name: Download the exact shared two-year hourly cache
+        uses: actions/download-artifact@v4
+        with:
+          name: crypto-history-cache
+          path: crypto-cache/
+
+      - name: Run fixed-rule 4h Donchian trend-following OOS study
+        run: |
+          mkdir -p artifacts
+          python -m tradingagents.crypto.backtest.turtle_trend \
+            --symbols BTC/USDT ETH/USDT BNB/USDT SOL/USDT XRP/USDT DOGE/USDT AVAX/USDT LINK/USDT LTC/USDT BCH/USDT \
+            --cache ./crypto-cache \
+            --warmup-bars 300 \
+            --test-bars 180 \
+            --out artifacts/turtle_trend_oos.json
+
+      - name: Upload 4h trend-following report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turtle-trend-4h-oos-study
+          path: artifacts/turtle_trend_oos.json
+          if-no-files-found: warn
+          retention-days: 30
+
   ema-vwap-3m-study:
     name: 3-minute EMA9 and session VWAP crossover screen
     needs: fetch-history
