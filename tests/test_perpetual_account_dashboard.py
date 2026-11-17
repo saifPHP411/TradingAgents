@@ -8,7 +8,7 @@ from tradingagents.crypto.bybit_perpetual_account import (
     BybitLinearDemoPositionClient,
     BybitPerpetualAccountError,
 )
-from tradingagents.paper_experiment.dashboard.server import Dashboard, PERPETUAL_INDEX_HTML
+from tradingagents.paper_experiment.dashboard.server import PERPETUAL_INDEX_HTML, Dashboard
 
 
 class Response:
