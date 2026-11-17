@@ -8,6 +8,7 @@ from tradingagents.crypto.backtest.turtle_trend import (
     TurtleExecutionCosts,
     TurtlePortfolioSettings,
     TurtleTrendSettings,
+    _features,
     resample_hourly_to_4h,
     run_backtest,
 )
@@ -146,3 +147,66 @@ def test_cost_assumptions_are_validated():
         TurtlePortfolioSettings(risk_fraction=0.5)
     with pytest.raises(ValueError, match="smaller than entry"):
         TurtleTrendSettings(entry_lookback=20, exit_lookback=20)
+
+
+def test_optional_adx_and_relative_volume_filters_gate_only_when_configured():
+    size = 80
+    steps = np.arange(size, dtype=float)
+    close = 100.0 + steps * 0.15 + 0.8 * np.sin(steps * 1.2)
+    close[-1] = float(np.max(close[-11:-1]) + 0.6)
+    open_price = close - 0.05
+    frame = pd.DataFrame(
+        {
+            "open": open_price,
+            "high": np.maximum(open_price, close) + 0.2,
+            "low": np.minimum(open_price, close) - 0.2,
+            "close": close,
+            "volume": np.full(size, 1000.0),
+        },
+        index=pd.date_range("2026-01-01T00:00:00Z", periods=size, freq="4h"),
+    )
+    benchmark = frame.close.copy()
+    settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=10,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+    )
+
+    baseline = _features(frame, benchmark, settings)
+    filtered_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=10,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+        min_adx=20.0,
+        min_relative_volume=1.2,
+    )
+    filtered = _features(frame, benchmark, filtered_settings)
+    expected = (
+        baseline.long_entry
+        & baseline.adx.ge(20.0)
+        & baseline.relative_volume.ge(1.2)
+    )
+
+    pd.testing.assert_series_equal(filtered.long_entry, expected)
+    assert baseline.long_entry.iloc[-1]
+    assert baseline.relative_volume.iloc[-1] == pytest.approx(1.0)
+    assert not filtered.long_entry.iloc[-1]
+
+
+def test_optional_filter_thresholds_are_validated():
+    with pytest.raises(ValueError, match="min_adx"):
+        TurtleTrendSettings(min_adx=-0.1)
+    with pytest.raises(ValueError, match="min_adx"):
+        TurtleTrendSettings(min_adx=100.1)
+    with pytest.raises(ValueError, match="min_relative_volume"):
+        TurtleTrendSettings(min_relative_volume=0.0)
+    with pytest.raises(ValueError, match="min_relative_volume"):
+        TurtleTrendSettings(min_relative_volume=float("nan"))
