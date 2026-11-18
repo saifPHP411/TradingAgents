@@ -6,6 +6,9 @@ on:
       - high-winrate-selective-mr
     paths:
       - "tradingagents/crypto/backtest/perpetual_bollinger_forward.py"
+      - "tradingagents/crypto/binance_vision.py"
+      - "tests/test_binance_vision.py"
+      - "tests/test_perpetual_bollinger_forward.py"
       - ".github/workflows/perpetual-bollinger-forward.yml"
   workflow_dispatch:
     inputs:
@@ -29,7 +32,7 @@ concurrency:
 
 jobs:
   forward-validation:
-    name: Frozen Bollinger RSI prospective forward test
+    name: Frozen Bollinger RSI price-action forward test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -47,7 +50,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pandas requests python-dotenv pydantic
 
-      - name: Validate forward window and run frozen-candidate test
+      - name: Validate forward window and run frozen candidates with funding assumptions
         env:
           FORWARD_START: ${{ inputs.forward_start || '2026-11-01T00:00:00+00:00' }}
           INITIAL_EQUITY: ${{ inputs.initial_equity || '50' }}
