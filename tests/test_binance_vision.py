@@ -94,6 +94,7 @@ def test_binance_vision_funding_keeps_negative_and_positive_rates():
     assert rates.iloc[0] == pytest.approx(-0.0001)
     assert rates.iloc[1] == pytest.approx(0.0002)
     assert str(rates.index.tz) == "UTC"
+    assert list(rates.attrs["funding_interval_minutes"]) == [480, 480]
 
 
 def test_binance_vision_rejects_invalid_host_and_missing_archives():
