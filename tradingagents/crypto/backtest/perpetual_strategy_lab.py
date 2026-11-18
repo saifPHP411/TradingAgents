@@ -21,8 +21,9 @@ from tradingagents.crypto.backtest.perpetual_ema_walkforward import (
     _run_window,
     _summarize_development,
 )
-from tradingagents.crypto.bybit_perpetual import BybitLinearPublicClient
 from tradingagents.crypto.binance_perpetual import BinanceUSDMPublicClient
+from tradingagents.crypto.binance_vision import BinanceVisionPublicClient
+from tradingagents.crypto.bybit_perpetual import BybitLinearPublicClient
 
 # Fixed before this tournament; this is a small family comparison, not a
 # parameter sweep over the historical holdout.
@@ -104,7 +105,7 @@ CANDIDATES: dict[str, dict] = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbols", nargs="+", default=list(DEFAULT_SYMBOLS))
-    parser.add_argument("--data-source", choices=("binance-usdm", "bybit"), default="binance-usdm")
+    parser.add_argument("--data-source", choices=("binance-usdm", "binance-vision", "bybit"), default="binance-vision")
     parser.add_argument("--days", type=int, default=730)
     parser.add_argument("--equity", type=float, default=1_000.0)
     parser.add_argument("--leverage", nargs="+", type=float, default=[1.0, 2.0])
@@ -187,9 +188,20 @@ def _validate(args: argparse.Namespace) -> pd.Timestamp | None:
 def run_lab(args: argparse.Namespace) -> dict:
     """Run an exploratory historical screen; optionally exclude a previously inspected holdout."""
     cutoff = _validate(args)
-    end_ms = int(time.time() * 1000)
+    if args.data_source == "binance-vision":
+        # The archive publishes complete monthly files; stop at the current UTC
+        # month boundary so every candle and funding record is from a closed month.
+        month_start = pd.Timestamp.now(tz="UTC").normalize().replace(day=1)
+        end_ms = int(month_start.timestamp() * 1000)
+        client = BinanceVisionPublicClient()
+    else:
+        end_ms = int(time.time() * 1000)
+        client = (
+            BinanceUSDMPublicClient()
+            if args.data_source == "binance-usdm"
+            else BybitLinearPublicClient()
+        )
     start_ms = end_ms - args.days * 86_400_000
-    client = BinanceUSDMPublicClient() if args.data_source == "binance-usdm" else BybitLinearPublicClient()
     history = {
         symbol: _fetch_history(client, symbol, start_ms, end_ms)
         for symbol in args.symbols
@@ -199,12 +211,12 @@ def run_lab(args: argparse.Namespace) -> dict:
     for _, traded, _mark, _funding in history.values():
         common = traded.index if common is None else common.intersection(traded.index)
     if common is None:
-        raise ValueError("no common Bybit history")
+        raise ValueError("no common perpetual history")
     common = common.sort_values()
     if not common.is_unique or not common.is_monotonic_increasing:
         raise ValueError("common timestamps are not unique and ordered")
     if not (common.to_series().diff().dropna() == pd.Timedelta(hours=4)).all():
-        raise ValueError("common Bybit history contains missing 4-hour intervals")
+        raise ValueError("common perpetual history contains missing 4-hour intervals")
 
     # When no cutoff is supplied, use all available candles and clearly label the result exploratory.
     development_index = common if cutoff is None else common[common < cutoff]
@@ -304,7 +316,7 @@ def run_lab(args: argparse.Namespace) -> dict:
         "research_only": True,
         "orders_submitted": False,
         "demo_ready": False,
-        "venue": ("Binance USD-M public USDT perpetual data (cross-venue proxy)" if args.data_source == "binance-usdm" else "Bybit V5 public linear USDT perpetual market data"),
+        "venue": ("Binance USD-M official historical public archive (Binance Vision)" if args.data_source == "binance-vision" else ("Binance USD-M public USDT perpetual data" if args.data_source == "binance-usdm" else "Bybit V5 public linear USDT perpetual market data")),
         "data_source": args.data_source,
         "timeframe": "4h",
         "symbols": list(aligned),
@@ -333,7 +345,8 @@ def run_lab(args: argparse.Namespace) -> dict:
         "limitations": [
             "This is a development-only candidate screen, not independent final validation.",
             ("The previously inspected holdout and every bar after its start are excluded from strategy scoring." if cutoff is not None else "All available historical bars are used; this is exploratory and is not an untouched holdout validation."),
-            "Fees, spread and slippage are estimates, not account-specific measured Bybit fills.",
+            "Fees, spread and slippage are estimates, not account-specific measured exchange fills.",
+            ("The Binance Vision archive does not include current exchangeInfo lot-size, tick-size or leverage-bracket filters; permissive quantity placeholders are used for this research-only screen." if args.data_source == "binance-vision" else "Current venue filters do not establish account-specific leverage availability."),
             "Liquidation prices remain approximations, not Bybit risk-tier calculations.",
             "No authenticated account, leverage-setting or order API is used.",
         ],
