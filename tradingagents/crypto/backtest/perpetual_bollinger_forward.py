@@ -18,6 +18,7 @@ import pandas as pd
 
 from tradingagents.crypto.backtest.perpetual_ema import (
     PerpetualEMAStrategy,
+    _features,
     run_backtest,
 )
 from tradingagents.crypto.backtest.perpetual_ema_walkforward import COST_SCENARIOS
@@ -101,6 +102,29 @@ def _validate_args(args: argparse.Namespace) -> pd.Timestamp:
     ):
         raise ValueError("only 1x and 2x research leverage are permitted")
     return _parse_forward_start(args.forward_start)
+
+
+def _count_forward_signals(
+    features: pd.DataFrame,
+    trade_start_index: int,
+) -> dict[str, int]:
+    """Count actionable forward-window signals, excluding the final unfillable bar."""
+    if "signal" not in features.columns:
+        raise ValueError("feature frame must contain a signal column")
+    if (
+        isinstance(trade_start_index, bool)
+        or not isinstance(trade_start_index, int)
+        or not 0 <= trade_start_index <= len(features)
+    ):
+        raise ValueError("trade_start_index must be within the feature frame")
+    signals = features["signal"].iloc[trade_start_index:-1]
+    long_count = int((signals == 1).sum())
+    short_count = int((signals == -1).sum())
+    return {
+        "long_entry_signals": long_count,
+        "short_entry_signals": short_count,
+        "total_entry_signals": long_count + short_count,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -291,6 +315,10 @@ def run_forward_study(args: argparse.Namespace) -> dict:
                             ),
                             **overrides,
                         )
+                        forward_signals = _count_forward_signals(
+                            _features(traded, strategy),
+                            trade_start_index,
+                        )
                         result = run_backtest(
                             traded,
                             mark,
@@ -303,6 +331,7 @@ def run_forward_study(args: argparse.Namespace) -> dict:
                         )
                         symbol_results[symbol] = {
                             **result.metrics(),
+                            "forward_signal_diagnostics": forward_signals,
                             "rejections": dict(result.rejections),
                             "trades_ledger": [
                                 trade.to_dict() for trade in result.trades
