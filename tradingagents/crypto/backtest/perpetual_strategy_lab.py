@@ -170,6 +170,38 @@ CANDIDATES: dict[str, dict] = {
         "mean_reversion_rsi_short": 65.0, "mean_reversion_max_adx": 25.0,
         "atr_multiple": 2.0, "max_holding_bars": 72,
     },
+    "bollinger_rsi_exit_hysteresis": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 2.0,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 32.0,
+        "mean_reversion_rsi_short": 68.0, "mean_reversion_max_adx": 18.0,
+        "mean_reversion_exit_adx": 26.0,
+        "mean_reversion_exit_confirmation_bars": 2,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
+    "bollinger_rsi_hysteresis_reward_filter": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 2.0,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 32.0,
+        "mean_reversion_rsi_short": 68.0, "mean_reversion_max_adx": 18.0,
+        "mean_reversion_exit_adx": 26.0,
+        "mean_reversion_exit_confirmation_bars": 2,
+        "mean_reversion_min_reward_risk": 0.65,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
+    "bollinger_rsi_strong_recovery": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 2.0,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 32.0,
+        "mean_reversion_rsi_short": 68.0, "mean_reversion_max_adx": 18.0,
+        "mean_reversion_exit_adx": 26.0,
+        "mean_reversion_exit_confirmation_bars": 2,
+        "mean_reversion_min_rsi_recovery": 2.5,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
 }
 
 
@@ -489,6 +521,37 @@ def main() -> int:
         "demo_ready": False,
     }
     print(json.dumps(compact, indent=2, allow_nan=False))
+    for key in (
+        "selective_bollinger_rsi_range/2x/realistic_estimate",
+        "selective_bollinger_rsi_range/2x/conservative",
+        "selective_bollinger_rsi_range/2x/stress",
+    ):
+        report_row = report["reports"].get(key, {})
+        print(
+            "TRADE_LEDGER_DIAGNOSTICS="
+            + json.dumps(
+                {
+                    "scenario": key,
+                    "metrics": report_row.get("development_only", {}),
+                    "trades": [
+                        {
+                            "symbol": trade.get("symbol"),
+                            "side": trade.get("side"),
+                            "entry_time": trade.get("entry_time"),
+                            "exit_time": trade.get("exit_time"),
+                            "exit_reason": trade.get("exit_reason"),
+                            "net_pnl": trade.get("net_pnl"),
+                            "fees": trade.get("fees"),
+                            "funding": trade.get("funding"),
+                            "entry_features": trade.get("entry_features"),
+                        }
+                        for trade in report_row.get("trade_ledger", [])
+                    ],
+                },
+                sort_keys=True,
+                allow_nan=False,
+            )
+        )
     return 0
 
 
