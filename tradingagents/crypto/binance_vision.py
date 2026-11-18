@@ -138,6 +138,67 @@ class BinanceVisionPublicClient:
             f"{interval}/{filename}"
         )
 
+    @staticmethod
+    def _parse_candle_csv(
+        csv_data: bytes,
+        market: str,
+        dataset: str,
+        *,
+        include_volume: bool,
+    ) -> pd.DataFrame:
+        """Parse both headered and legacy headerless Binance candle CSV files."""
+        raw = pd.read_csv(io.BytesIO(csv_data))
+        names = {
+            str(column).strip().lower().lstrip("\\ufeff"): column
+            for column in raw.columns
+        }
+        if {"open_time", "open", "high", "low", "close"}.issubset(names):
+            selected = pd.DataFrame(
+                {
+                    "timestamp": raw[names["open_time"]],
+                    "open": raw[names["open"]],
+                    "high": raw[names["high"]],
+                    "low": raw[names["low"]],
+                    "close": raw[names["close"]],
+                }
+            )
+            if "close_time" in names:
+                selected["close_time"] = raw[names["close_time"]]
+            else:
+                selected["close_time"] = (
+                    pd.to_numeric(selected["timestamp"], errors="raise")
+                    + INTERVAL_MS - 1
+                )
+            if include_volume and "volume" in names:
+                selected["volume"] = raw[names["volume"]]
+            elif include_volume:
+                raise BinanceVisionDataError(
+                    f"{market} traded kline CSV omitted volume"
+                )
+        else:
+            raw = pd.read_csv(io.BytesIO(csv_data), header=None)
+            if raw.shape[1] < 7:
+                raise BinanceVisionDataError(
+                    f"{market} {dataset} CSV has too few columns"
+                )
+            selected = raw.iloc[:, [0, 1, 2, 3, 4, 5, 6]].copy()
+            selected.columns = [
+                "timestamp", "open", "high", "low", "close", "volume",
+                "close_time",
+            ]
+            if not include_volume:
+                selected = selected.drop(columns=["volume"])
+        for column in selected.columns:
+            selected[column] = pd.to_numeric(selected[column], errors="raise")
+        return selected
+
+    def _daily_path(self, dataset: str, symbol: str, day: str) -> str:
+        filename = f"{symbol}-{INTERVAL}-{day}.zip"
+        return (
+            f"data/futures/um/daily/{dataset}/{symbol}/"
+            f"{INTERVAL}/{filename}"
+        )
+
     def instrument_info(self, symbol: str) -> LinearPerpetualInstrument:
         market = self._symbol(symbol)
         # Historical archive files do not contain the exchange's live lot-size,
@@ -175,50 +236,12 @@ class BinanceVisionPublicClient:
         frames = []
         for month in self._months(start_ms, end_ms):
             path = self._monthly_path(dataset, market, month, INTERVAL)
-            csv_data = self._csv_bytes(path)
-            raw = pd.read_csv(io.BytesIO(csv_data))
-            names = {
-                str(column).strip().lower().lstrip("\ufeff"): column
-                for column in raw.columns
-            }
-            if {"open_time", "open", "high", "low", "close"}.issubset(names):
-                selected = pd.DataFrame(
-                    {
-                        "timestamp": raw[names["open_time"]],
-                        "open": raw[names["open"]],
-                        "high": raw[names["high"]],
-                        "low": raw[names["low"]],
-                        "close": raw[names["close"]],
-                    }
-                )
-                if "close_time" in names:
-                    selected["close_time"] = raw[names["close_time"]]
-                else:
-                    selected["close_time"] = (
-                        pd.to_numeric(selected["timestamp"], errors="raise")
-                        + INTERVAL_MS - 1
-                    )
-                if include_volume and "volume" in names:
-                    selected["volume"] = raw[names["volume"]]
-                elif include_volume:
-                    raise BinanceVisionDataError(
-                        f"{market} traded kline CSV omitted volume"
-                    )
-            else:
-                raw = pd.read_csv(io.BytesIO(csv_data), header=None)
-                if raw.shape[1] < 7:
-                    raise BinanceVisionDataError(
-                        f"{market} {dataset} CSV has too few columns"
-                    )
-                selected = raw.iloc[:, [0, 1, 2, 3, 4, 5, 6]].copy()
-                selected.columns = [
-                    "timestamp", "open", "high", "low", "close", "volume",
-                    "close_time",
-                ]
-                if not include_volume:
-                    selected = selected.drop(columns=["volume"])
-            for column in selected.columns:
-                selected[column] = pd.to_numeric(selected[column], errors="raise")
+            selected = self._parse_candle_csv(
+                self._csv_bytes(path),
+                market,
+                dataset,
+                include_volume=include_volume,
+            )
             selected = selected[
                 (selected["timestamp"] >= start_ms)
                 & (selected["timestamp"] < end_ms)
@@ -234,6 +257,47 @@ class BinanceVisionPublicClient:
                 f"no {dataset} archive candles returned for {market}"
             )
         frame = pd.concat(frames, ignore_index=True).sort_values("timestamp")
+        expected = pd.date_range(
+            start=pd.to_datetime(start_ms, unit="ms", utc=True),
+            end=pd.to_datetime(end_ms, unit="ms", utc=True),
+            freq="4h",
+            inclusive="left",
+        )
+        present = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
+        missing = expected.difference(present)
+        if not missing.empty:
+            # Binance occasionally publishes a monthly mark-price file with
+            # isolated missing sessions. Recover only those missing dates from
+            # the corresponding official daily archives; never synthesize prices.
+            recovered = []
+            for day in sorted({stamp.strftime("%Y-%m-%d") for stamp in missing}):
+                daily_path = self._daily_path(dataset, market, day)
+                try:
+                    daily = self._parse_candle_csv(
+                        self._csv_bytes(daily_path),
+                        market,
+                        dataset,
+                        include_volume=include_volume,
+                    )
+                except BinanceVisionDataError:
+                    continue
+                daily = daily[
+                    daily["timestamp"].isin(
+                        [stamp.value // 1_000_000 for stamp in missing]
+                    )
+                ]
+                if not daily.empty:
+                    recovered.append(daily)
+            if recovered:
+                frame = pd.concat([frame, *recovered], ignore_index=True)
+                frame = frame.sort_values("timestamp")
+            present = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
+            missing = expected.difference(present)
+            if not missing.empty:
+                raise BinanceVisionDataError(
+                    f"{market} {dataset} archive is missing completed 4-hour bars "
+                    f"after monthly and daily recovery: {list(missing[:6])}"
+                )
         if frame["timestamp"].duplicated().any():
             raise BinanceVisionDataError(f"duplicate {dataset} timestamps for {market}")
         if (frame[["open", "high", "low", "close"]] <= 0).any().any():
