@@ -15,6 +15,8 @@ from tradingagents.crypto.backtest.perpetual_strategy_lab import (
 def _development_summary(**overrides):
     result = {
         "trades": 100,
+        "win_rate_pct": 80.0,
+        "expectancy_per_trade": 0.25,
         "profit_factor": 1.35,
         "equal_weight_compounded_return_pct": 2.4,
         "positive_folds": 7,
@@ -29,11 +31,13 @@ def _development_summary(**overrides):
 
 
 @pytest.mark.unit
-def test_development_gate_requires_profit_factor_and_fold_breadth_not_win_rate_alone():
+def test_development_gate_requires_win_rate_profit_factor_and_fold_breadth():
     summary = _development_summary(profit_factor=0.99)
     gate = acceptance_gate(summary, "realistic_estimate")
 
     assert gate["minimum_trade_count"] is True
+    assert gate["target_win_rate"] is True
+    assert gate["positive_expectancy"] is True
     assert gate["positive_compounded_return"] is True
     assert gate["positive_fold_ratio"] is True
     assert gate["positive_symbol_breadth"] is True
@@ -61,14 +65,24 @@ def test_candidate_gate_uses_distinct_predeclared_cost_thresholds(
 
 
 @pytest.mark.unit
-def test_development_gate_rejects_low_fold_consistency_or_liquidations():
+def test_development_gate_rejects_target_miss_low_expectancy_or_risk_failures():
     weak_folds = acceptance_gate(
         _development_summary(positive_folds=5), "realistic_estimate"
     )
     liquidation = acceptance_gate(
         _development_summary(liquidations=1), "realistic_estimate"
     )
+    low_win_rate = acceptance_gate(
+        _development_summary(win_rate_pct=78.99), "realistic_estimate"
+    )
+    negative_expectancy = acceptance_gate(
+        _development_summary(expectancy_per_trade=-0.01), "realistic_estimate"
+    )
 
+    assert low_win_rate["target_win_rate"] is False
+    assert low_win_rate["passed"] is False
+    assert negative_expectancy["positive_expectancy"] is False
+    assert negative_expectancy["passed"] is False
     assert weak_folds["positive_fold_ratio"] is False
     assert weak_folds["passed"] is False
     assert liquidation["no_liquidations"] is False
@@ -76,9 +90,9 @@ def test_development_gate_rejects_low_fold_consistency_or_liquidations():
 
 
 @pytest.mark.unit
-def test_tournament_candidates_are_fixed_and_include_ema_and_donchian_families():
-    assert len(CANDIDATES) == 5
-    assert {"ema_cross", "donchian_breakout"} == {
+def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_families():
+    assert len(CANDIDATES) == 6
+    assert {"ema_cross", "donchian_breakout", "bollinger_reversion"} == {
         candidate["signal_mode"] for candidate in CANDIDATES.values()
     }
     assert all(candidate["trend"] == 200 for candidate in CANDIDATES.values())
