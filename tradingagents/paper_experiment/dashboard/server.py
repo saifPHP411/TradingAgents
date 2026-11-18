@@ -512,7 +512,7 @@ class Dashboard:
             return dict(self._perpetual_study_status)
 
     def perpetual_lab_status(self) -> dict[str, Any]:
-        """Recover a development-only perpetual candidate tournament report."""
+        """Recover the saved development report using the current acceptance rules."""
         with self._perpetual_lab_lock:
             status = dict(self._perpetual_lab_status)
         if status.get("status") != "idle":
@@ -523,6 +523,8 @@ class Dashboard:
         try:
             from tradingagents.crypto.backtest.perpetual_strategy_lab import (
                 PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES,
+                TARGET_WIN_RATE_PCT,
+                acceptance_gate,
             )
 
             report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -532,13 +534,20 @@ class Dashboard:
                 candidate = item["candidate"]
                 leverage = float(item["leverage"])
                 scenario_rows = {}
+                current_scenario_passes = []
                 for scenario in ("realistic_estimate", "conservative", "stress"):
                     key = f"{candidate}/{leverage:g}x/{scenario}"
                     row = report["reports"][key]
                     metrics = row["development_only"]
+                    # Saved reports may have been generated under an older gate.
+                    # Recalculate from the immutable metrics, never trust stale
+                    # pass/fail flags when displaying current eligibility.
+                    current_gate = acceptance_gate(metrics, scenario)
+                    current_scenario_passes.append(current_gate["passed"])
                     scenario_rows[scenario] = {
                         "win_rate_pct": metrics.get("win_rate_pct"),
                         "return_pct": metrics.get("equal_weight_compounded_return_pct"),
+                        "expectancy_per_trade": metrics.get("expectancy_per_trade"),
                         "profit_factor": metrics.get("profit_factor"),
                         "trades": metrics.get("trades"),
                         "positive_folds": metrics.get("positive_folds"),
@@ -546,18 +555,18 @@ class Dashboard:
                         "positive_symbols": metrics.get("positive_symbols"),
                         "symbol_count": metrics.get("symbol_count"),
                         "liquidations": metrics.get("liquidations"),
-                        "passed": row["acceptance_gate"]["passed"],
+                        "passed": current_gate["passed"],
+                        "acceptance_gate": current_gate,
                     }
                 rejection = exclusions.get(candidate)
+                all_current_gates_pass = all(current_scenario_passes)
                 grouped.append({
                     **item,
-                    "scenarios": scenario_rows,
+                    "development_gate_passed_all_costs": all_current_gates_pass,
                     "previous_holdout_rejected": rejection is not None,
                     "previous_holdout_rejection_reason": rejection,
-                    "selection_eligible": (
-                        bool(item.get("development_gate_passed_all_costs"))
-                        and rejection is None
-                    ),
+                    "selection_eligible": all_current_gates_pass and rejection is None,
+                    "scenarios": scenario_rows,
                 })
             eligible = [row for row in grouped if row["selection_eligible"]]
             eligible.sort(
@@ -580,15 +589,18 @@ class Dashboard:
             "final_holdout_evaluated": False,
             "previously_inspected_holdout_reused": False,
             "excluded_previous_holdout_start": report.get("excluded_previous_holdout_start"),
+            "target_win_rate_pct": TARGET_WIN_RATE_PCT,
             "best_candidate": best_candidate,
             "candidate_disqualifications": [
                 {"candidate": candidate, "reason": reason}
                 for candidate, reason in exclusions.items()
             ],
             "selection_rule": (
-                "A development candidate is eligible only when all three modeled cost gates "
-                "pass and no previously inspected independent holdout has rejected that "
-                "same fixed strategy. No eligible candidate means no selection."
+                f"A development candidate is eligible only when all three modeled cost gates "
+                f"pass the {TARGET_WIN_RATE_PCT:g}% net-of-cost win-rate target and all other "
+                "risk/robustness requirements, and no previously inspected independent "
+                "holdout has rejected that same fixed strategy. No eligible candidate means "
+                "no selection."
             ),
             "results": grouped,
             "report_file": report_path.name,
