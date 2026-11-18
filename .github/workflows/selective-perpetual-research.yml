@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   research:
-    name: Bybit 4h selective Bollinger RSI research
+    name: Binance USD-M 4h selective Bollinger RSI research
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -51,6 +51,7 @@ jobs:
               raise SystemExit("days must be between 180 and 3650")
           PY
           python -m tradingagents.crypto.backtest.perpetual_strategy_lab \
+            --data-source binance-usdm \
             --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT \
             --days "$DAYS" \
             --warmup-bars 260 \
