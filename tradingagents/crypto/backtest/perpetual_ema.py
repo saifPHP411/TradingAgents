@@ -42,6 +42,8 @@ class PerpetualEMAStrategy:
     mean_reversion_exit_confirmation_bars: int = 1
     mean_reversion_min_reward_risk: float = 0.0
     mean_reversion_min_rsi_recovery: float = 0.0
+    mean_reversion_require_directional_confirmation: bool = False
+    mean_reversion_exit_requires_adverse_di: bool = False
     interval_minutes: int = 240
     risk: PerpetualRiskSettings = field(default_factory=PerpetualRiskSettings)
 
@@ -102,6 +104,10 @@ class PerpetualEMAStrategy:
             or not 0 <= self.mean_reversion_min_rsi_recovery <= 30
         ):
             raise ValueError("mean_reversion_min_rsi_recovery must be in [0, 30]")
+        if not isinstance(self.mean_reversion_require_directional_confirmation, bool):
+            raise ValueError("mean_reversion_require_directional_confirmation must be boolean")
+        if not isinstance(self.mean_reversion_exit_requires_adverse_di, bool):
+            raise ValueError("mean_reversion_exit_requires_adverse_di must be boolean")
         if (
             isinstance(self.breakout_period, bool)
             or not isinstance(self.breakout_period, int)
@@ -223,6 +229,8 @@ def _features(data: pd.DataFrame, cfg: PerpetualEMAStrategy) -> pd.DataFrame:
     smooth_tr = tr.ewm(alpha=alpha, adjust=False, min_periods=cfg.atr_period).mean().replace(0, math.nan)
     pdi = 100 * plus.ewm(alpha=alpha, adjust=False, min_periods=cfg.atr_period).mean() / smooth_tr
     mdi = 100 * minus.ewm(alpha=alpha, adjust=False, min_periods=cfg.atr_period).mean() / smooth_tr
+    x["plus_di"] = pdi
+    x["minus_di"] = mdi
     dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, math.nan)
     x["adx"] = dx.ewm(alpha=alpha, adjust=False, min_periods=cfg.atr_period).mean()
     adx_ok = x.adx >= cfg.min_adx if cfg.min_adx is not None else True
@@ -302,6 +310,9 @@ def _features(data: pd.DataFrame, cfg: PerpetualEMAStrategy) -> pd.DataFrame:
             & ((x.rsi.shift(1) - x.rsi) >= cfg.mean_reversion_min_rsi_recovery)
             & range_ok
         )
+        if cfg.mean_reversion_require_directional_confirmation:
+            long_reentry &= x.plus_di >= x.minus_di
+            short_reentry &= x.minus_di >= x.plus_di
         x.loc[long_reentry, "signal"] = 1
         x.loc[short_reentry, "signal"] = -1
     return x
@@ -575,7 +586,23 @@ def run_backtest(
                     if cfg.mean_reversion_exit_adx is not None
                     else cfg.mean_reversion_max_adx
                 )
-                if pd.notna(features.iloc[i].adx) and float(features.iloc[i].adx) > exit_adx:
+                adx_is_high = (
+                    pd.notna(features.iloc[i].adx)
+                    and float(features.iloc[i].adx) > exit_adx
+                )
+                adverse_di = True
+                if cfg.mean_reversion_exit_requires_adverse_di:
+                    plus_di = features.iloc[i].get("plus_di", math.nan)
+                    minus_di = features.iloc[i].get("minus_di", math.nan)
+                    adverse_di = (
+                        pd.notna(plus_di)
+                        and pd.notna(minus_di)
+                        and (
+                            (d > 0 and float(minus_di) > float(plus_di))
+                            or (d < 0 and float(plus_di) > float(minus_di))
+                        )
+                    )
+                if adx_is_high and adverse_di:
                     position["trend_exit_bars"] += 1
                 else:
                     position["trend_exit_bars"] = 0
