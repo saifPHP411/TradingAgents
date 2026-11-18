@@ -113,7 +113,7 @@ def test_development_gate_rejects_target_miss_low_expectancy_or_risk_failures():
 
 @pytest.mark.unit
 def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_families():
-    assert len(CANDIDATES) == 14
+    assert len(CANDIDATES) == 16
     assert {
         "ema_14_50_adx18",
         "ema_9_30_adx22",
@@ -129,6 +129,8 @@ def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_fa
         "bollinger_rsi_strong_recovery",
         "bollinger_rsi_adverse_di_exit",
         "bollinger_rsi_di_confirmed_recovery",
+        "selective_bollinger_rsi_range_freq20",
+        "bollinger_rsi_adverse_di_exit_freq20",
     } == set(CANDIDATES)
     assert {"ema_cross", "donchian_breakout", "bollinger_reversion"} == {
         candidate["signal_mode"] for candidate in CANDIDATES.values()
@@ -146,6 +148,8 @@ def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_fa
             "bollinger_rsi_strong_recovery",
             "bollinger_rsi_adverse_di_exit",
             "bollinger_rsi_di_confirmed_recovery",
+            "selective_bollinger_rsi_range_freq20",
+            "bollinger_rsi_adverse_di_exit_freq20",
         )
     )
 
@@ -251,3 +255,19 @@ def test_a_non_rejected_all_cost_candidate_can_still_be_shortlisted():
     assert len(eligible) == 1
     assert eligible[0]["candidate"] == "donchian_20_adx18"
     assert not rankings[0]["selection_eligible"] or rankings[0]["candidate"] != "ema_14_50_adx18"
+
+
+@pytest.mark.unit
+def test_frequency_variants_keep_original_benchmarks_and_use_moderate_thresholds():
+    baseline = CANDIDATES["selective_bollinger_rsi_range"]
+    frequent = CANDIDATES["selective_bollinger_rsi_range_freq20"]
+    adverse = CANDIDATES["bollinger_rsi_adverse_di_exit_freq20"]
+
+    assert baseline["mean_reversion_std"] == 2.0
+    assert frequent["mean_reversion_std"] == 1.9
+    assert frequent["mean_reversion_rsi_long"] == 35.0
+    assert frequent["mean_reversion_rsi_short"] == 65.0
+    assert frequent["mean_reversion_max_adx"] == 20.0
+    assert adverse["mean_reversion_exit_requires_adverse_di"] is True
+    assert adverse["mean_reversion_exit_adx"] == 24.0
+    assert adverse["mean_reversion_exit_confirmation_bars"] == 2
