@@ -175,13 +175,48 @@ class BinanceVisionPublicClient:
         frames = []
         for month in self._months(start_ms, end_ms):
             path = self._monthly_path(dataset, market, month, INTERVAL)
-            raw = pd.read_csv(io.BytesIO(self._csv_bytes(path)), header=None)
-            if raw.shape[1] < 7:
-                raise BinanceVisionDataError(f"{market} {dataset} CSV has too few columns")
-            selected = raw.iloc[:, [0, 1, 2, 3, 4, 5, 6]].copy()
-            selected.columns = [
-                "timestamp", "open", "high", "low", "close", "volume", "close_time"
-            ]
+            csv_data = self._csv_bytes(path)
+            raw = pd.read_csv(io.BytesIO(csv_data))
+            names = {
+                str(column).strip().lower().lstrip("\\ufeff"): column
+                for column in raw.columns
+            }
+            if {"open_time", "open", "high", "low", "close"}.issubset(names):
+                selected = pd.DataFrame(
+                    {
+                        "timestamp": raw[names["open_time"]],
+                        "open": raw[names["open"]],
+                        "high": raw[names["high"]],
+                        "low": raw[names["low"]],
+                        "close": raw[names["close"]],
+                    }
+                )
+                if "close_time" in names:
+                    selected["close_time"] = raw[names["close_time"]]
+                else:
+                    selected["close_time"] = (
+                        pd.to_numeric(selected["timestamp"], errors="raise")
+                        + INTERVAL_MS - 1
+                    )
+                if include_volume and "volume" in names:
+                    selected["volume"] = raw[names["volume"]]
+                elif include_volume:
+                    raise BinanceVisionDataError(
+                        f"{market} traded kline CSV omitted volume"
+                    )
+            else:
+                raw = pd.read_csv(io.BytesIO(csv_data), header=None)
+                if raw.shape[1] < 7:
+                    raise BinanceVisionDataError(
+                        f"{market} {dataset} CSV has too few columns"
+                    )
+                selected = raw.iloc[:, [0, 1, 2, 3, 4, 5, 6]].copy()
+                selected.columns = [
+                    "timestamp", "open", "high", "low", "close", "volume",
+                    "close_time",
+                ]
+                if not include_volume:
+                    selected = selected.drop(columns=["volume"])
             for column in selected.columns:
                 selected[column] = pd.to_numeric(selected[column], errors="raise")
             selected = selected[
