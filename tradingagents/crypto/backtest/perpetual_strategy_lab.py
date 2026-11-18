@@ -22,6 +22,7 @@ from tradingagents.crypto.backtest.perpetual_ema_walkforward import (
     _summarize_development,
 )
 from tradingagents.crypto.bybit_perpetual import BybitLinearPublicClient
+from tradingagents.crypto.binance_perpetual import BinanceUSDMPublicClient
 
 # Fixed before this tournament; this is a small family comparison, not a
 # parameter sweep over the historical holdout.
@@ -103,6 +104,7 @@ CANDIDATES: dict[str, dict] = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbols", nargs="+", default=list(DEFAULT_SYMBOLS))
+    parser.add_argument("--data-source", choices=("binance-usdm", "bybit"), default="binance-usdm")
     parser.add_argument("--days", type=int, default=730)
     parser.add_argument("--equity", type=float, default=1_000.0)
     parser.add_argument("--leverage", nargs="+", type=float, default=[1.0, 2.0])
@@ -187,7 +189,7 @@ def run_lab(args: argparse.Namespace) -> dict:
     cutoff = _validate(args)
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - args.days * 86_400_000
-    client = BybitLinearPublicClient()
+    client = BinanceUSDMPublicClient() if args.data_source == "binance-usdm" else BybitLinearPublicClient()
     history = {
         symbol: _fetch_history(client, symbol, start_ms, end_ms)
         for symbol in args.symbols
@@ -302,7 +304,8 @@ def run_lab(args: argparse.Namespace) -> dict:
         "research_only": True,
         "orders_submitted": False,
         "demo_ready": False,
-        "venue": "Bybit V5 public linear USDT perpetual market data",
+        "venue": ("Binance USD-M public USDT perpetual data (cross-venue proxy)" if args.data_source == "binance-usdm" else "Bybit V5 public linear USDT perpetual market data"),
+        "data_source": args.data_source,
         "timeframe": "4h",
         "symbols": list(aligned),
         "history_start": development_index[0].isoformat(),
