@@ -625,6 +625,9 @@ def main() -> int:
         "bollinger_rsi_adverse_di_exit_quality20/2x/realistic_estimate",
         "bollinger_rsi_adverse_di_exit_quality20/2x/conservative",
         "bollinger_rsi_adverse_di_exit_quality20/2x/stress",
+        "bollinger_rsi_adverse_di_exit_quality20_early_exit/2x/realistic_estimate",
+        "bollinger_rsi_adverse_di_exit_quality20_early_exit/2x/conservative",
+        "bollinger_rsi_adverse_di_exit_quality20_early_exit/2x/stress",
     ):
         report_row = report["reports"].get(key, {})
         print(
