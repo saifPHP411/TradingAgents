@@ -109,3 +109,43 @@ def test_binance_vision_rejects_invalid_host_and_missing_archives():
             start_ms=1_735_689_600_000,
             end_ms=1_735_689_600_000 + 4 * 60 * 60 * 1000,
         )
+
+
+def test_binance_vision_recovers_missing_mark_candle_from_daily_archive():
+    start = 1_735_689_600_000
+    interval = 4 * 60 * 60 * 1000
+    end = start + 3 * interval
+    monthly_rows = "\\n".join(
+        [
+            "open_time,open,high,low,close,volume,close_time",
+            f"{start},100,102,99,101,0,{start + interval - 1}",
+            f"{start + 2 * interval},102,104,101,103,0,{start + 3 * interval - 1}",
+        ]
+    )
+    daily_rows = "\\n".join(
+        [
+            "open_time,open,high,low,close,volume,close_time",
+            f"{start + interval},101,103,100,102,0,{start + 2 * interval - 1}",
+        ]
+    )
+    monthly_suffix = (
+        "/markPriceKlines/BTCUSDT/4h/BTCUSDT-4h-2025-01.zip"
+    )
+    daily_suffix = (
+        "/markPriceKlines/BTCUSDT/4h/BTCUSDT-4h-2025-01-01.zip"
+    )
+    client = _client(
+        {
+            monthly_suffix: _zip_csv("monthly.csv", monthly_rows),
+            daily_suffix: _zip_csv("daily.csv", daily_rows),
+        }
+    )
+
+    marks = client.mark_price_klines(
+        "BTCUSDT",
+        start_ms=start,
+        end_ms=end,
+    )
+
+    assert len(marks) == 3
+    assert str(marks.index[1]) == "2025-01-01 04:00:00+00:00"
