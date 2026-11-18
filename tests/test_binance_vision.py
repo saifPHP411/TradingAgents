@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import zipfile
 
+import pandas as pd
 import pytest
 
 from tradingagents.crypto.binance_vision import (
