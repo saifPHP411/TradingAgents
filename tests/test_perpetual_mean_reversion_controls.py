@@ -6,6 +6,7 @@ import pytest
 
 from tradingagents.crypto.backtest.perpetual_ema import (
     PerpetualEMAStrategy,
+    _apply_adverse_di_spread_filter,
     run_backtest,
 )
 from tradingagents.crypto.perpetuals import (
@@ -71,6 +72,9 @@ def _forced_features(index, *, target=105.0, adx=None, plus_di=None, minus_di=No
         ({"mean_reversion_min_reward_risk": -0.1}, "min_reward_risk"),
         ({"mean_reversion_min_reward_risk": 5.1}, "min_reward_risk"),
         ({"mean_reversion_min_rsi_recovery": -1.0}, "min_rsi_recovery"),
+        ({"mean_reversion_max_adverse_di_spread": -0.1}, "max_adverse_di_spread"),
+        ({"mean_reversion_max_adverse_di_spread": 100.1}, "max_adverse_di_spread"),
+        ({"mean_reversion_max_adverse_di_spread": True}, "max_adverse_di_spread"),
         ({"mean_reversion_require_directional_confirmation": 1}, "directional_confirmation"),
         ({"mean_reversion_exit_requires_adverse_di": "yes"}, "adverse_di"),
     ],
@@ -207,3 +211,18 @@ def test_features_expose_directional_indicators_for_regime_diagnostics():
     assert {"plus_di", "minus_di"}.issubset(features.columns)
     assert features["plus_di"].notna().any()
     assert features["minus_di"].notna().any()
+
+@pytest.mark.unit
+def test_adverse_di_spread_filter_rejects_strong_countertrend_and_missing_di():
+    index = pd.RangeIndex(4)
+    long_entry = pd.Series(True, index=index)
+    short_entry = pd.Series(True, index=index)
+    plus_di = pd.Series([10.0, 20.0, 20.0, float("nan")], index=index)
+    minus_di = pd.Series([30.0, 10.0, 4.0, 15.0], index=index)
+
+    filtered_long, filtered_short = _apply_adverse_di_spread_filter(
+        long_entry, short_entry, plus_di, minus_di, 16.0
+    )
+
+    assert filtered_long.tolist() == [False, True, True, False]
+    assert filtered_short.tolist() == [True, True, True, False]
