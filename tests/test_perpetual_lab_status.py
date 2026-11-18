@@ -13,7 +13,7 @@ from tradingagents.paper_experiment.dashboard.server import Dashboard
     ("metric", "value", "expected_gate"),
     [
         ("trades", 12, "minimum_trade_count"),
-        ("win_rate_pct", 74.99, "target_win_rate"),
+        ("win_rate_pct", 69.99, "target_win_rate"),
     ],
 )
 def test_saved_lab_report_recomputes_current_gate_instead_of_trusting_stale_pass_flags(
@@ -73,8 +73,8 @@ def test_saved_lab_report_recomputes_current_gate_instead_of_trusting_stale_pass
     result = Dashboard.perpetual_lab_status(dashboard)
 
     assert result["status"] == "completed"
-    assert result["target_win_rate_pct"] == 75.0
-    assert "75% net-of-cost win-rate target" in result["selection_rule"]
+    assert result["target_win_rate_pct"] == 70.0
+    assert "70% net-of-cost win-rate target" in result["selection_rule"]
     candidate_result = result["results"][0]
     assert candidate_result["development_gate_passed_all_costs"] is False
     assert candidate_result["selection_eligible"] is False
