@@ -11,6 +11,11 @@ on:
         required: true
         default: "730"
         type: string
+      initial_equity:
+        description: "Starting account equity in USDT for the sizing feasibility test"
+        required: true
+        default: "50"
+        type: string
       data_source:
         description: "Public historical market-data source"
         required: true
@@ -52,6 +57,7 @@ jobs:
         env:
           DAYS: ${{ inputs.days || '730' }}
           DATA_SOURCE: ${{ inputs.data_source || 'binance-vision' }}
+          INITIAL_EQUITY: ${{ inputs.initial_equity || '50' }}
         run: |
           mkdir -p artifacts
           python - <<'PY'
@@ -61,11 +67,15 @@ jobs:
               raise SystemExit("days must be between 180 and 3650")
           if os.environ["DATA_SOURCE"] not in {"bybit", "binance-vision", "binance-usdm"}:
               raise SystemExit("unsupported public data source")
+          equity = float(os.environ["INITIAL_EQUITY"])
+          if not 1.0 <= equity <= 1_000_000 or not __import__("math").isfinite(equity):
+              raise SystemExit("initial equity must be finite and between 1 and 1000000 USDT")
           PY
           python -m tradingagents.crypto.backtest.perpetual_strategy_lab \
             --data-source "$DATA_SOURCE" \
             --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT \
             --days "$DAYS" \
+            --equity "$INITIAL_EQUITY" \
             --warmup-bars 260 \
             --test-bars 200 \
             --leverage 1 2 \
