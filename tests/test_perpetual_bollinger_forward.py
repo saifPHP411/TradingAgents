@@ -152,14 +152,8 @@ def test_forward_funding_assumptions_are_explicit_and_do_not_rewrite_history():
 
 @pytest.mark.unit
 def test_forward_report_does_not_claim_real_exchange_filters():
-    from tradingagents.crypto.backtest.perpetual_bollinger_forward import (
-        _load_symbol_window,
-    )
-
     # The loader contract is tested separately with a fake Vision client;
     # this assertion guards against reintroducing exchangeInfo claims.
-    import inspect
-
     source = inspect.getsource(_load_symbol_window)
     assert "Binance Vision research placeholders" in source
     assert "executable_filters_verified" in source
