@@ -145,6 +145,30 @@ CANDIDATES: dict[str, dict] = {
         "mean_reversion_rsi_short": 68.0, "mean_reversion_max_adx": 18.0,
         "atr_multiple": 2.0, "max_holding_bars": 72,
     },
+    "bollinger_rsi_balanced": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 1.8,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 38.0,
+        "mean_reversion_rsi_short": 62.0, "mean_reversion_max_adx": 22.0,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
+    "bollinger_rsi_higher_frequency": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 1.5,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 40.0,
+        "mean_reversion_rsi_short": 60.0, "mean_reversion_max_adx": 25.0,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
+    "bollinger_rsi_wide_regime": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 2.0,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 35.0,
+        "mean_reversion_rsi_short": 65.0, "mean_reversion_max_adx": 25.0,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
 }
 
 
