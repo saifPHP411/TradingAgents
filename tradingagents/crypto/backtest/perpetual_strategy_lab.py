@@ -119,6 +119,9 @@ def _profit_factor_pass(value, minimum: float) -> bool:
     )
 
 
+TARGET_WIN_RATE_PCT = 79.0
+
+
 def acceptance_gate(development: dict, scenario: str) -> dict:
     """A conservative development-screen gate; not final OOS approval."""
     thresholds = {
@@ -133,9 +136,18 @@ def acceptance_gate(development: dict, scenario: str) -> dict:
     positive_symbols = int(development.get("positive_symbols") or 0)
     trades = int(development.get("trades") or 0)
     ret = development.get("equal_weight_compounded_return_pct")
+    win_rate = development.get("win_rate_pct")
+    expectancy = development.get("expectancy_per_trade")
     gate = {
         "minimum_trade_count": trades >= 30,
+        "target_win_rate": (
+            isinstance(win_rate, (int, float))
+            and win_rate >= TARGET_WIN_RATE_PCT
+        ),
         "profit_factor": _profit_factor_pass(development.get("profit_factor"), pf_min),
+        "positive_expectancy": (
+            isinstance(expectancy, (int, float)) and expectancy > 0
+        ),
         "positive_compounded_return": isinstance(ret, (int, float)) and ret > 0,
         "positive_fold_ratio": folds > 0 and positive_folds / folds >= 0.60,
         "positive_symbol_breadth": symbols > 0 and positive_symbols / symbols >= 0.75,
@@ -301,9 +313,11 @@ def run_lab(args: argparse.Namespace) -> dict:
         "previously_inspected_holdout_reused": False,
         "final_holdout_evaluated": False,
         "candidate_definitions_fixed_before_run": True,
+        "target_win_rate_pct": TARGET_WIN_RATE_PCT,
         "selection_rule": (
-            "A candidate is only shortlisted when every realistic, conservative and "
-            "stress development gate passes and it has not already failed a previously "
+            "A candidate is only shortlisted when it reaches the 79% net-of-cost win-rate "
+            "target, has positive expectancy and compounded return, passes every realistic, "
+            "conservative and stress development gate, and has not already failed a previously "
             "inspected independent final holdout. No eligible candidate means no selection."
         ),
         "previous_holdout_disqualifications": PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES,
