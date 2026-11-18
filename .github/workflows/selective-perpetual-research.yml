@@ -11,6 +11,15 @@ on:
         required: true
         default: "730"
         type: string
+      data_source:
+        description: "Public historical market-data source"
+        required: true
+        default: "bybit"
+        type: choice
+        options:
+          - bybit
+          - binance-vision
+          - binance-usdm
 
 permissions:
   contents: read
@@ -21,7 +30,7 @@ concurrency:
 
 jobs:
   research:
-    name: Binance USD-M archive 4h selective Bollinger RSI research
+    name: 4h selective Bollinger RSI perpetual research
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -39,34 +48,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pandas requests python-dotenv pydantic
 
-      - name: Verify Binance Vision historical archive access
-        run: |
-          python - <<'PY'
-          import requests
-          base = "https://data.binance.vision/data/futures/um/monthly"
-          samples = [
-              f"{base}/klines/BTCUSDT/4h/BTCUSDT-4h-2026-10.zip",
-              f"{base}/markPriceKlines/BTCUSDT/4h/BTCUSDT-4h-2026-10.zip",
-              f"{base}/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2026-10.zip",
-              "https://data.binance.vision/data/futures/um/daily/markPriceKlines/BTCUSDT/4h/BTCUSDT-4h-2026-06-30.zip",
-          ]
-          for url in samples:
-              response = requests.get(
-                  url, headers={"Range": "bytes=0-0"}, stream=True, timeout=20
-              )
-              print(response.status_code, url)
-              if response.status_code not in (200, 206):
-                  raise SystemExit(
-                      f"Binance Vision archive is unavailable: HTTP {response.status_code}"
-                  )
-              response.close()
-          print("All three historical archive types are reachable.")
-          PY
-
-
       - name: Validate lookback and run full-history exploratory tournament
         env:
           DAYS: ${{ inputs.days || '730' }}
+          DATA_SOURCE: ${{ inputs.data_source || 'bybit' }}
         run: |
           mkdir -p artifacts
           python - <<'PY'
@@ -74,9 +59,11 @@ jobs:
           days = int(os.environ["DAYS"])
           if not 180 <= days <= 3650:
               raise SystemExit("days must be between 180 and 3650")
+          if os.environ["DATA_SOURCE"] not in {"bybit", "binance-vision", "binance-usdm"}:
+              raise SystemExit("unsupported public data source")
           PY
           python -m tradingagents.crypto.backtest.perpetual_strategy_lab \
-            --data-source binance-vision \
+            --data-source "$DATA_SOURCE" \
             --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT \
             --days "$DAYS" \
             --warmup-bars 260 \
