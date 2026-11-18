@@ -65,6 +65,14 @@ def test_candidate_gate_uses_distinct_predeclared_cost_thresholds(
 
 
 @pytest.mark.unit
+def test_75_percent_win_rate_meets_the_revised_target():
+    accepted = acceptance_gate(_development_summary(win_rate_pct=75.0), "realistic_estimate")
+    rejected = acceptance_gate(_development_summary(win_rate_pct=74.99), "realistic_estimate")
+
+    assert accepted["target_win_rate"] is True
+    assert rejected["target_win_rate"] is False
+
+
 def test_development_gate_rejects_target_miss_low_expectancy_or_risk_failures():
     weak_folds = acceptance_gate(
         _development_summary(positive_folds=5), "realistic_estimate"
@@ -73,7 +81,7 @@ def test_development_gate_rejects_target_miss_low_expectancy_or_risk_failures():
         _development_summary(liquidations=1), "realistic_estimate"
     )
     low_win_rate = acceptance_gate(
-        _development_summary(win_rate_pct=78.99), "realistic_estimate"
+        _development_summary(win_rate_pct=74.99), "realistic_estimate"
     )
     negative_expectancy = acceptance_gate(
         _development_summary(expectancy_per_trade=-0.01), "realistic_estimate"
