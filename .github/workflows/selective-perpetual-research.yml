@@ -36,22 +36,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pandas requests python-dotenv pydantic
 
-      - name: Validate holdout cutoff and run fixed research tournament
+      - name: Validate lookback and run full-history exploratory tournament
         env:
-          EXCLUDE_AFTER: ${{ inputs.exclude_after }}
           DAYS: ${{ inputs.days }}
         run: |
           mkdir -p artifacts
           python - <<'PY'
           import os
-          import pandas as pd
-          cutoff = pd.Timestamp(os.environ["EXCLUDE_AFTER"])
-          if cutoff.tzinfo is None:
-              raise SystemExit("exclude_after must include an explicit timezone")
           days = int(os.environ["DAYS"])
           if not 180 <= days <= 3650:
               raise SystemExit("days must be between 180 and 3650")
-          print(f"Using previously inspected holdout cutoff: {cutoff.tz_convert('UTC').isoformat()}")
           PY
           python -m tradingagents.crypto.backtest.perpetual_strategy_lab \
             --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT \
@@ -59,7 +53,6 @@ jobs:
             --warmup-bars 260 \
             --test-bars 200 \
             --leverage 1 2 \
-            --exclude-after "$EXCLUDE_AFTER" \
             --output artifacts/perpetual_strategy_lab.json
 
       - name: Upload research report
