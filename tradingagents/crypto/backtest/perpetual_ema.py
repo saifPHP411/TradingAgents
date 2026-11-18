@@ -514,8 +514,14 @@ def run_backtest(
             ):
                 target_exit_fill = target * (1 - direction * fees.impact_rate)
                 stop_exit_fill = stop * (1 - direction * fees.impact_rate)
-                net_reward = direction * (target_exit_fill - fill)
-                net_risk = abs(stop_exit_fill - fill)
+                net_reward = (
+                    direction * (target_exit_fill - fill)
+                    - (fill + target_exit_fill) * fees.fee_rate
+                )
+                net_risk = (
+                    abs(stop_exit_fill - fill)
+                    + (fill + stop_exit_fill) * fees.fee_rate
+                )
                 reward_risk = net_reward / net_risk if net_risk > 0 else 0.0
                 if reward_risk < cfg.mean_reversion_min_reward_risk:
                     entry_rejection_reason = "target_reward_risk_below_minimum"
