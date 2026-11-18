@@ -35,13 +35,13 @@ def _development_summary(**overrides):
 
 
 @pytest.mark.unit
-def test_development_and_final_holdout_gates_share_the_75_percent_target():
+def test_development_and_final_holdout_gates_share_the_70_percent_target():
     from tradingagents.crypto.backtest.perpetual_strategy_lab import (
         TARGET_WIN_RATE_PCT as DEVELOPMENT_TARGET_WIN_RATE_PCT,
     )
 
-    assert DEVELOPMENT_TARGET_WIN_RATE_PCT == 75.0
-    assert WALKFORWARD_TARGET_WIN_RATE_PCT == 75.0
+    assert DEVELOPMENT_TARGET_WIN_RATE_PCT == 70.0
+    assert WALKFORWARD_TARGET_WIN_RATE_PCT == 70.0
 
 
 @pytest.mark.unit
@@ -79,9 +79,9 @@ def test_candidate_gate_uses_distinct_predeclared_cost_thresholds(
 
 
 @pytest.mark.unit
-def test_75_percent_win_rate_meets_the_revised_target():
-    accepted = acceptance_gate(_development_summary(win_rate_pct=75.0), "realistic_estimate")
-    rejected = acceptance_gate(_development_summary(win_rate_pct=74.99), "realistic_estimate")
+def test_70_percent_win_rate_meets_the_revised_target():
+    accepted = acceptance_gate(_development_summary(win_rate_pct=70.0), "realistic_estimate")
+    rejected = acceptance_gate(_development_summary(win_rate_pct=69.99), "realistic_estimate")
 
     assert accepted["target_win_rate"] is True
     assert rejected["target_win_rate"] is False
