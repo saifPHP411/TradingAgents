@@ -114,7 +114,7 @@ def test_development_gate_rejects_target_miss_low_expectancy_or_risk_failures():
 
 @pytest.mark.unit
 def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_families():
-    assert len(CANDIDATES) == 26
+    assert len(CANDIDATES) == 31
     assert {
         "ema_14_50_adx18",
         "ema_9_30_adx22",
@@ -142,6 +142,11 @@ def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_fa
         "bollinger_rsi_quality20_atr17",
         "bollinger_rsi_quality20_atr19",
         "bollinger_rsi_quality20_adx16",
+        "bollinger_rsi_quality20_atr16_recovery45",
+        "bollinger_rsi_quality20_atr16_std18",
+        "bollinger_rsi_quality20_atr16_adx20",
+        "bollinger_rsi_quality20_atr16_di16",
+        "bollinger_rsi_quality20_atr16_di20",
     } == set(CANDIDATES)
     assert {"ema_cross", "donchian_breakout", "bollinger_reversion"} == {
         candidate["signal_mode"] for candidate in CANDIDATES.values()
@@ -171,6 +176,11 @@ def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_fa
             "bollinger_rsi_quality20_atr17",
             "bollinger_rsi_quality20_atr19",
             "bollinger_rsi_quality20_adx16",
+            "bollinger_rsi_quality20_atr16_recovery45",
+            "bollinger_rsi_quality20_atr16_std18",
+            "bollinger_rsi_quality20_atr16_adx20",
+            "bollinger_rsi_quality20_atr16_di16",
+            "bollinger_rsi_quality20_atr16_di20",
         )
     )
 
@@ -416,3 +426,52 @@ def test_development_summary_exposes_small_account_rejections_by_symbol():
         "below_minimum_notional": 2,
         "liquidation_too_close_to_atr_stop": 1,
     }
+
+@pytest.mark.unit
+def test_frequency_experiments_change_one_entry_threshold_at_a_time():
+    baseline = CANDIDATES["bollinger_rsi_quality20_atr16"]
+    recovery = CANDIDATES["bollinger_rsi_quality20_atr16_recovery45"]
+    std = CANDIDATES["bollinger_rsi_quality20_atr16_std18"]
+    adx = CANDIDATES["bollinger_rsi_quality20_atr16_adx20"]
+
+    assert recovery["mean_reversion_min_rsi_recovery"] == 4.5
+    assert std["mean_reversion_std"] == 1.8
+    assert adx["mean_reversion_max_adx"] == 20.0
+    for candidate in (recovery, std, adx):
+        for key in (
+            "mean_reversion_std",
+            "mean_reversion_rsi_long",
+            "mean_reversion_rsi_short",
+            "mean_reversion_max_adx",
+            "mean_reversion_min_rsi_recovery",
+            "atr_multiple",
+        ):
+            if candidate is std and key == "mean_reversion_std":
+                continue
+            if candidate is adx and key == "mean_reversion_max_adx":
+                continue
+            if candidate is recovery and key == "mean_reversion_min_rsi_recovery":
+                continue
+            assert candidate[key] == baseline[key]
+
+
+@pytest.mark.unit
+def test_adverse_di_experiments_keep_quality16_entry_and_exit_baseline():
+    baseline = CANDIDATES["bollinger_rsi_quality20_atr16"]
+    for name, spread in (
+        ("bollinger_rsi_quality20_atr16_di16", 16.0),
+        ("bollinger_rsi_quality20_atr16_di20", 20.0),
+    ):
+        candidate = CANDIDATES[name]
+        assert candidate["mean_reversion_max_adverse_di_spread"] == spread
+        for key in (
+            "mean_reversion_std",
+            "mean_reversion_rsi_long",
+            "mean_reversion_rsi_short",
+            "mean_reversion_max_adx",
+            "mean_reversion_min_rsi_recovery",
+            "mean_reversion_exit_adx",
+            "mean_reversion_exit_confirmation_bars",
+            "atr_multiple",
+        ):
+            assert candidate[key] == baseline[key]
