@@ -113,7 +113,7 @@ def test_development_gate_rejects_target_miss_low_expectancy_or_risk_failures():
 
 @pytest.mark.unit
 def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_families():
-    assert len(CANDIDATES) == 9
+    assert len(CANDIDATES) == 12
     assert {
         "ema_14_50_adx18",
         "ema_9_30_adx22",
@@ -124,6 +124,9 @@ def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_fa
         "bollinger_rsi_balanced",
         "bollinger_rsi_higher_frequency",
         "bollinger_rsi_wide_regime",
+        "bollinger_rsi_exit_hysteresis",
+        "bollinger_rsi_hysteresis_reward_filter",
+        "bollinger_rsi_strong_recovery",
     } == set(CANDIDATES)
     assert {"ema_cross", "donchian_breakout", "bollinger_reversion"} == {
         candidate["signal_mode"] for candidate in CANDIDATES.values()
@@ -136,6 +139,9 @@ def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_fa
             "bollinger_rsi_balanced",
             "bollinger_rsi_higher_frequency",
             "bollinger_rsi_wide_regime",
+            "bollinger_rsi_exit_hysteresis",
+            "bollinger_rsi_hysteresis_reward_filter",
+            "bollinger_rsi_strong_recovery",
         )
     )
 
