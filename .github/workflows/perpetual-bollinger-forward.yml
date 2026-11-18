@@ -1,0 +1,77 @@
+name: Prospective Bollinger RSI forward validation
+
+on:
+  push:
+    branches:
+      - high-winrate-selective-mr
+    paths:
+      - "tradingagents/crypto/backtest/perpetual_bollinger_forward.py"
+      - ".github/workflows/perpetual-bollinger-forward.yml"
+  workflow_dispatch:
+    inputs:
+      forward_start:
+        description: "First 4-hour candle included in the prospective test"
+        required: true
+        default: "2026-11-01T00:00:00+00:00"
+        type: string
+      initial_equity:
+        description: "Starting equity for each independent per-symbol simulation"
+        required: true
+        default: "50"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perpetual-bollinger-forward-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  forward-validation:
+    name: Frozen Bollinger RSI prospective forward test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out research branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install research dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pandas requests python-dotenv pydantic
+
+      - name: Validate forward window and run frozen-candidate test
+        env:
+          FORWARD_START: ${{ inputs.forward_start || '2026-11-01T00:00:00+00:00' }}
+          INITIAL_EQUITY: ${{ inputs.initial_equity || '50' }}
+        run: |
+          mkdir -p artifacts
+          python - <<'PY'
+          import math
+          import os
+          import pandas as pd
+
+          start = pd.Timestamp(os.environ["FORWARD_START"])
+          if start.tzinfo is None or start != start.tz_convert("UTC").floor("4h"):
+              raise SystemExit("forward_start must be timezone-aware and aligned to a 4-hour UTC boundary")
+          equity = float(os.environ["INITIAL_EQUITY"])
+          if not math.isfinite(equity) or not 1.0 <= equity <= 1_000_000:
+              raise SystemExit("initial equity must be finite and between 1 and 1000000 USDT")
+          PY
+          python -m tradingagents.crypto.backtest.perpetual_bollinger_forward             --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT             --forward-start "$FORWARD_START"             --equity "$INITIAL_EQUITY"             --leverage 1 2             --warmup-bars 260             --output artifacts/perpetual_bollinger_forward.json
+
+      - name: Upload forward-validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perpetual-bollinger-forward-validation
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
