@@ -400,7 +400,23 @@ class BinanceVisionPublicClient:
             raise BinanceVisionDataError(f"duplicate funding timestamps for {market}")
         if not frame["funding_rate"].map(math.isfinite).all():
             raise BinanceVisionDataError(f"non-finite funding rate for {market}")
-        index = pd.to_datetime(frame["timestamp"].astype("int64"), unit="ms", utc=True)
+        raw_index = pd.to_datetime(
+            frame["timestamp"].astype("int64"), unit="ms", utc=True
+        )
+        # Funding settlement timestamps can contain a few milliseconds of
+        # clock jitter. The 4h simulator can apply a payment only at a bar open,
+        # so normalize sub-second differences and reject larger deviations.
+        index = raw_index.round("4h")
+        jitter = (raw_index - index).to_series().abs()
+        if (jitter > pd.Timedelta(seconds=1)).any():
+            raise BinanceVisionDataError(
+                f"funding settlement for {market} does not align to the 4h "
+                "candle grid within one second"
+            )
+        if index.has_duplicates:
+            raise BinanceVisionDataError(
+                f"multiple funding settlements map to one 4h candle for {market}"
+            )
         rates = pd.Series(
             frame["funding_rate"].astype(float).to_numpy(),
             index=index,
