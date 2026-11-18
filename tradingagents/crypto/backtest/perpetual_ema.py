@@ -38,6 +38,10 @@ class PerpetualEMAStrategy:
     mean_reversion_rsi_long: float = 32.0
     mean_reversion_rsi_short: float = 68.0
     mean_reversion_max_adx: float = 18.0
+    mean_reversion_exit_adx: float | None = None
+    mean_reversion_exit_confirmation_bars: int = 1
+    mean_reversion_min_reward_risk: float = 0.0
+    mean_reversion_min_rsi_recovery: float = 0.0
     interval_minutes: int = 240
     risk: PerpetualRiskSettings = field(default_factory=PerpetualRiskSettings)
 
@@ -77,6 +81,27 @@ class PerpetualEMAStrategy:
             raise ValueError("mean-reversion RSI thresholds must straddle 50")
         if not math.isfinite(self.mean_reversion_max_adx) or not 0 <= self.mean_reversion_max_adx <= 100:
             raise ValueError("mean_reversion_max_adx must be in [0, 100]")
+        if self.mean_reversion_exit_adx is not None and (
+            not math.isfinite(self.mean_reversion_exit_adx)
+            or not self.mean_reversion_max_adx <= self.mean_reversion_exit_adx <= 100
+        ):
+            raise ValueError("mean_reversion_exit_adx must be None or between entry ADX ceiling and 100")
+        if (
+            isinstance(self.mean_reversion_exit_confirmation_bars, bool)
+            or not isinstance(self.mean_reversion_exit_confirmation_bars, int)
+            or not 1 <= self.mean_reversion_exit_confirmation_bars <= 12
+        ):
+            raise ValueError("mean_reversion_exit_confirmation_bars must be an integer in [1, 12]")
+        if (
+            not math.isfinite(self.mean_reversion_min_reward_risk)
+            or not 0 <= self.mean_reversion_min_reward_risk <= 5
+        ):
+            raise ValueError("mean_reversion_min_reward_risk must be in [0, 5]")
+        if (
+            not math.isfinite(self.mean_reversion_min_rsi_recovery)
+            or not 0 <= self.mean_reversion_min_rsi_recovery <= 30
+        ):
+            raise ValueError("mean_reversion_min_rsi_recovery must be in [0, 30]")
         if (
             isinstance(self.breakout_period, bool)
             or not isinstance(self.breakout_period, int)
@@ -267,14 +292,14 @@ def _features(data: pd.DataFrame, cfg: PerpetualEMAStrategy) -> pd.DataFrame:
             (x.close.shift(1) <= x.mean_lower.shift(1))
             & (x.close > x.mean_lower)
             & (x.rsi.shift(1) <= cfg.mean_reversion_rsi_long)
-            & (x.rsi > x.rsi.shift(1))
+            & ((x.rsi - x.rsi.shift(1)) >= cfg.mean_reversion_min_rsi_recovery)
             & range_ok
         )
         short_reentry = (
             (x.close.shift(1) >= x.mean_upper.shift(1))
             & (x.close < x.mean_upper)
             & (x.rsi.shift(1) >= cfg.mean_reversion_rsi_short)
-            & (x.rsi < x.rsi.shift(1))
+            & ((x.rsi.shift(1) - x.rsi) >= cfg.mean_reversion_min_rsi_recovery)
             & range_ok
         )
         x.loc[long_reentry, "signal"] = 1
@@ -480,8 +505,22 @@ def run_backtest(
                     and ((direction > 0 and target > fill) or (direction < 0 and target < fill))
                 )
             )
+            entry_rejection_reason = None
             if not target_is_valid:
-                reject("target_not_favorable_after_gap")
+                entry_rejection_reason = "target_not_favorable_after_gap"
+            elif (
+                cfg.signal_mode == "bollinger_reversion"
+                and cfg.mean_reversion_min_reward_risk > 0
+            ):
+                target_exit_fill = target * (1 - direction * fees.impact_rate)
+                stop_exit_fill = stop * (1 - direction * fees.impact_rate)
+                net_reward = direction * (target_exit_fill - fill)
+                net_risk = abs(stop_exit_fill - fill)
+                reward_risk = net_reward / net_risk if net_risk > 0 else 0.0
+                if reward_risk < cfg.mean_reversion_min_reward_risk:
+                    entry_rejection_reason = "target_reward_risk_below_minimum"
+            if entry_rejection_reason:
+                reject(entry_rejection_reason)
             else:
                 sizing = size_linear_position(
                     equity=max(cash, 1e-9), entry_price=fill, stop_price=stop,
@@ -514,7 +553,7 @@ def run_backtest(
                             position = {"direction": direction, "qty": sizing.quantity, "entry": fill,
                                 "time": stamp.isoformat(), "index": i, "entry_fee": entry_fee,
                                 "margin": sizing.initial_margin, "stop": stop, "liq": liq,
-                                "target": target, "funding": 0.0}
+                                "target": target, "funding": 0.0, "trend_exit_bars": 0}
             pending_signal, pending_atr, pending_target = 0, math.nan, math.nan
 
         if position is not None:
@@ -524,13 +563,21 @@ def run_backtest(
             if cfg.signal_mode != "bollinger_reversion" and pd.notna(atr_now) and atr_now > 0:
                 candidate = float(row.close) - d * cfg.atr_multiple * float(atr_now)
                 position["stop"] = max(position["stop"], candidate) if d > 0 else min(position["stop"], candidate)
-            if (
-                cfg.signal_mode == "bollinger_reversion"
-                and pending_exit is None
-                and pd.notna(features.iloc[i].adx)
-                and float(features.iloc[i].adx) > cfg.mean_reversion_max_adx
-            ):
-                pending_exit = "trend_regime_exit"
+            if cfg.signal_mode == "bollinger_reversion":
+                exit_adx = (
+                    cfg.mean_reversion_exit_adx
+                    if cfg.mean_reversion_exit_adx is not None
+                    else cfg.mean_reversion_max_adx
+                )
+                if pd.notna(features.iloc[i].adx) and float(features.iloc[i].adx) > exit_adx:
+                    position["trend_exit_bars"] += 1
+                else:
+                    position["trend_exit_bars"] = 0
+                if (
+                    pending_exit is None
+                    and position["trend_exit_bars"] >= cfg.mean_reversion_exit_confirmation_bars
+                ):
+                    pending_exit = "trend_regime_exit"
         else:
             mtm = cash
         if not math.isfinite(mtm) or mtm <= 0:
