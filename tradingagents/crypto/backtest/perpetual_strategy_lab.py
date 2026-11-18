@@ -269,6 +269,21 @@ CANDIDATES: dict[str, dict] = {
         "mean_reversion_exit_requires_adverse_di": True,
         "atr_multiple": 2.0, "max_holding_bars": 72,
     },
+    # Diagnostic follow-up: modestly earlier trend-break exit and a small
+    # RSI-recovery relaxation to test whether the five ATR-stop losses can be
+    # reduced without collapsing the already-small trade sample.
+    "bollinger_rsi_adverse_di_exit_quality20_early_exit": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 1.9,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 35.0,
+        "mean_reversion_rsi_short": 65.0, "mean_reversion_max_adx": 18.5,
+        "mean_reversion_min_rsi_recovery": 4.5,
+        "mean_reversion_exit_adx": 20.0,
+        "mean_reversion_exit_confirmation_bars": 1,
+        "mean_reversion_exit_requires_adverse_di": True,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
 }
 
 
