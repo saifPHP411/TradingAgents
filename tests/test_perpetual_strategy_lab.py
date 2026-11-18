@@ -113,7 +113,7 @@ def test_development_gate_rejects_target_miss_low_expectancy_or_risk_failures():
 
 @pytest.mark.unit
 def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_families():
-    assert len(CANDIDATES) == 18
+    assert len(CANDIDATES) == 19
     assert {
         "ema_14_50_adx18",
         "ema_9_30_adx22",
@@ -133,6 +133,7 @@ def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_fa
         "bollinger_rsi_adverse_di_exit_freq20",
         "selective_bollinger_rsi_range_quality20",
         "bollinger_rsi_adverse_di_exit_quality20",
+        "bollinger_rsi_adverse_di_exit_quality20_early_exit",
     } == set(CANDIDATES)
     assert {"ema_cross", "donchian_breakout", "bollinger_reversion"} == {
         candidate["signal_mode"] for candidate in CANDIDATES.values()
@@ -154,6 +155,7 @@ def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_fa
             "bollinger_rsi_adverse_di_exit_freq20",
             "selective_bollinger_rsi_range_quality20",
             "bollinger_rsi_adverse_di_exit_quality20",
+            "bollinger_rsi_adverse_di_exit_quality20_early_exit",
         )
     )
 
@@ -292,3 +294,19 @@ def test_quality_variants_use_observed_rsi_recovery_and_adx_filters():
     assert "mean_reversion_exit_requires_adverse_di" not in first
     assert second["mean_reversion_exit_requires_adverse_di"] is True
     assert second["mean_reversion_exit_adx"] == 24.0
+
+
+
+@pytest.mark.unit
+def test_early_exit_quality_candidate_is_a_small_controlled_follow_up():
+    candidate = CANDIDATES["bollinger_rsi_adverse_di_exit_quality20_early_exit"]
+    control = CANDIDATES["bollinger_rsi_adverse_di_exit_quality20"]
+
+    assert candidate["mean_reversion_std"] == control["mean_reversion_std"] == 1.9
+    assert candidate["mean_reversion_max_adx"] == control["mean_reversion_max_adx"] == 18.5
+    assert candidate["mean_reversion_min_rsi_recovery"] == 4.5
+    assert candidate["mean_reversion_exit_adx"] == 20.0
+    assert candidate["mean_reversion_exit_confirmation_bars"] == 1
+    assert candidate["mean_reversion_exit_requires_adverse_di"] is True
+    assert control["mean_reversion_exit_adx"] == 24.0
+    assert control["mean_reversion_exit_confirmation_bars"] == 2
