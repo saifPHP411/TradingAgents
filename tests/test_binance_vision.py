@@ -179,7 +179,7 @@ def test_binance_vision_uses_daily_archives_when_current_month_file_is_unavailab
             suffix = (
                 f"/{dataset}/BTCUSDT/4h/BTCUSDT-4h-{day}.zip"
             )
-            archives[suffix] = _zip_csv(f"{dataset}-{day}.csv", "\\n".join(rows))
+            archives[suffix] = _zip_csv(f"{dataset}-{day}.csv", "\n".join(rows))
 
     client = _client(archives)
     traded = client.klines("BTCUSDT", start_ms=start_ms, end_ms=end_ms)
