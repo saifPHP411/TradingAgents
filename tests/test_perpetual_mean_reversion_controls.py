@@ -36,7 +36,7 @@ def _history():
     return traded, traded.copy(), pd.Series(0.0, index=index[::2]), index
 
 
-def _forced_features(index, *, target=105.0, adx=None):
+def _forced_features(index, *, target=105.0, adx=None, plus_di=None, minus_di=None):
     signal = pd.Series(0, index=index, dtype=int)
     signal.iloc[270] = 1
     adx_values = pd.Series(10.0, index=index)
@@ -48,6 +48,8 @@ def _forced_features(index, *, target=105.0, adx=None):
             "atr": 1.0,
             "signal": signal,
             "adx": adx_values,
+            "plus_di": pd.Series(plus_di or {}, index=index).fillna(20.0),
+            "minus_di": pd.Series(minus_di or {}, index=index).fillna(10.0),
             "mean_target": target,
         },
         index=index,
@@ -63,6 +65,8 @@ def _forced_features(index, *, target=105.0, adx=None):
         ({"mean_reversion_min_reward_risk": -0.1}, "min_reward_risk"),
         ({"mean_reversion_min_reward_risk": 5.1}, "min_reward_risk"),
         ({"mean_reversion_min_rsi_recovery": -1.0}, "min_rsi_recovery"),
+        ({"mean_reversion_require_directional_confirmation": 1}, "directional_confirmation"),
+        ({"mean_reversion_exit_requires_adverse_di": "yes"}, "adverse_di"),
     ],
 )
 def test_mean_reversion_controls_validate_fail_closed(kwargs, message):
@@ -145,3 +149,55 @@ def test_minimum_reward_risk_filter_rejects_weak_mid_band_target(monkeypatch):
 
     assert result.trades == []
     assert result.rejections["target_reward_risk_below_minimum"] == 1
+
+
+def test_adverse_di_exit_only_triggers_when_directional_movement_opposes_position(monkeypatch):
+    import tradingagents.crypto.backtest.perpetual_ema as engine
+
+    traded, mark, funding, index = _history()
+    adverse = _forced_features(
+        index,
+        adx={272: 27.0, 273: 28.0},
+        plus_di={272: 8.0, 273: 7.0},
+        minus_di={272: 20.0, 273: 21.0},
+    )
+    favorable = _forced_features(
+        index,
+        adx={272: 27.0, 273: 28.0},
+        plus_di={272: 20.0, 273: 21.0},
+        minus_di={272: 8.0, 273: 7.0},
+    )
+
+    cfg = PerpetualEMAStrategy(
+        enabled=True,
+        signal_mode="bollinger_reversion",
+        mean_reversion_max_adx=18.0,
+        mean_reversion_exit_adx=26.0,
+        mean_reversion_exit_confirmation_bars=2,
+        mean_reversion_exit_requires_adverse_di=True,
+        risk=PerpetualRiskSettings(leverage=1.0),
+    )
+
+    monkeypatch.setattr(engine, "_features", lambda data, strategy: adverse.loc[data.index])
+    adverse_result = run_backtest(traded, mark, funding, _instrument(), strategy=cfg)
+    assert len(adverse_result.trades) == 1
+    assert adverse_result.trades[0].exit_reason == "trend_regime_exit"
+    assert adverse_result.trades[0].exit_time == index[274].isoformat()
+
+    monkeypatch.setattr(engine, "_features", lambda data, strategy: favorable.loc[data.index])
+    favorable_result = run_backtest(traded, mark, funding, _instrument(), strategy=cfg)
+    assert len(favorable_result.trades) == 1
+    assert favorable_result.trades[0].exit_reason == "end_of_window"
+
+
+def test_features_expose_directional_indicators_for_regime_diagnostics():
+    from tradingagents.crypto.backtest.perpetual_ema import _features
+
+    traded, _, _, _ = _history()
+    features = _features(
+        traded,
+        PerpetualEMAStrategy(enabled=True, signal_mode="bollinger_reversion"),
+    )
+    assert {"plus_di", "minus_di"}.issubset(features.columns)
+    assert features["plus_di"].notna().any()
+    assert features["minus_di"].notna().any()
