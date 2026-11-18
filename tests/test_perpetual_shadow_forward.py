@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from tradingagents.crypto.backtest.perpetual_strategy_lab import CANDIDATES
 from tradingagents.crypto.backtest.perpetual_shadow_forward import (
     BAR_MS,
     DEFAULT_SYMBOLS,
@@ -19,6 +18,7 @@ from tradingagents.crypto.backtest.perpetual_shadow_forward import (
     read_shadow_status,
     run_shadow_cycle,
 )
+from tradingagents.crypto.backtest.perpetual_strategy_lab import CANDIDATES
 
 
 @dataclass
