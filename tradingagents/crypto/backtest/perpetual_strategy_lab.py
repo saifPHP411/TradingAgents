@@ -323,6 +323,58 @@ CANDIDATES: dict[str, dict] = {
         "mean_reversion_min_reward_risk": 0.5,
         "atr_multiple": 2.0, "max_holding_bars": 72,
     },
+    # Predeclared local sensitivity around the ATR=1.8 candidate.
+    # This remains exploratory: the historical data has already informed this range.
+    "bollinger_rsi_quality20_atr16": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 1.9,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 35.0,
+        "mean_reversion_rsi_short": 65.0, "mean_reversion_max_adx": 18.5,
+        "mean_reversion_min_rsi_recovery": 5.0,
+        "mean_reversion_exit_adx": 24.0,
+        "mean_reversion_exit_confirmation_bars": 2,
+        "mean_reversion_exit_requires_adverse_di": True,
+        "atr_multiple": 1.6, "max_holding_bars": 72,
+    },
+    "bollinger_rsi_quality20_atr17": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 1.9,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 35.0,
+        "mean_reversion_rsi_short": 65.0, "mean_reversion_max_adx": 18.5,
+        "mean_reversion_min_rsi_recovery": 5.0,
+        "mean_reversion_exit_adx": 24.0,
+        "mean_reversion_exit_confirmation_bars": 2,
+        "mean_reversion_exit_requires_adverse_di": True,
+        "atr_multiple": 1.7, "max_holding_bars": 72,
+    },
+    "bollinger_rsi_quality20_atr19": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 1.9,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 35.0,
+        "mean_reversion_rsi_short": 65.0, "mean_reversion_max_adx": 18.5,
+        "mean_reversion_min_rsi_recovery": 5.0,
+        "mean_reversion_exit_adx": 24.0,
+        "mean_reversion_exit_confirmation_bars": 2,
+        "mean_reversion_exit_requires_adverse_di": True,
+        "atr_multiple": 1.9, "max_holding_bars": 72,
+    },
+    # Shared ADX=16 diagnostic to test whether BNB loss signals cluster
+    # near the previous 18.5 ceiling; it is not a coin-specific rule.
+    "bollinger_rsi_quality20_adx16": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 1.9,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 35.0,
+        "mean_reversion_rsi_short": 65.0, "mean_reversion_max_adx": 16.0,
+        "mean_reversion_min_rsi_recovery": 5.0,
+        "mean_reversion_exit_adx": 24.0,
+        "mean_reversion_exit_confirmation_bars": 2,
+        "mean_reversion_exit_requires_adverse_di": True,
+        "atr_multiple": 1.8, "max_holding_bars": 72,
+    },
 }
 
 
@@ -676,6 +728,18 @@ def main() -> int:
         "bollinger_rsi_quality20_reward_risk05/2x/realistic_estimate",
         "bollinger_rsi_quality20_reward_risk05/2x/conservative",
         "bollinger_rsi_quality20_reward_risk05/2x/stress",
+        "bollinger_rsi_quality20_atr16/2x/realistic_estimate",
+        "bollinger_rsi_quality20_atr16/2x/conservative",
+        "bollinger_rsi_quality20_atr16/2x/stress",
+        "bollinger_rsi_quality20_atr17/2x/realistic_estimate",
+        "bollinger_rsi_quality20_atr17/2x/conservative",
+        "bollinger_rsi_quality20_atr17/2x/stress",
+        "bollinger_rsi_quality20_atr19/2x/realistic_estimate",
+        "bollinger_rsi_quality20_atr19/2x/conservative",
+        "bollinger_rsi_quality20_atr19/2x/stress",
+        "bollinger_rsi_quality20_adx16/2x/realistic_estimate",
+        "bollinger_rsi_quality20_adx16/2x/conservative",
+        "bollinger_rsi_quality20_adx16/2x/stress",
     ):
         report_row = report["reports"].get(key, {})
         print(
