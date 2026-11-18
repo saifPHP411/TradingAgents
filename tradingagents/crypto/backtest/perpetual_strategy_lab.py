@@ -284,6 +284,45 @@ CANDIDATES: dict[str, dict] = {
         "mean_reversion_exit_requires_adverse_di": True,
         "atr_multiple": 2.0, "max_holding_bars": 72,
     },
+    # Controlled exit experiments around the quality20 baseline. Each changes
+    # one risk-control dimension to keep comparisons interpretable.
+    "bollinger_rsi_quality20_tighter_atr18": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 1.9,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 35.0,
+        "mean_reversion_rsi_short": 65.0, "mean_reversion_max_adx": 18.5,
+        "mean_reversion_min_rsi_recovery": 5.0,
+        "mean_reversion_exit_adx": 24.0,
+        "mean_reversion_exit_confirmation_bars": 2,
+        "mean_reversion_exit_requires_adverse_di": True,
+        "atr_multiple": 1.8, "max_holding_bars": 72,
+    },
+    "bollinger_rsi_quality20_fast_trend_exit": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 1.9,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 35.0,
+        "mean_reversion_rsi_short": 65.0, "mean_reversion_max_adx": 18.5,
+        "mean_reversion_min_rsi_recovery": 5.0,
+        "mean_reversion_exit_adx": 20.0,
+        "mean_reversion_exit_confirmation_bars": 1,
+        "mean_reversion_exit_requires_adverse_di": True,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
+    "bollinger_rsi_quality20_reward_risk05": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 1.9,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 35.0,
+        "mean_reversion_rsi_short": 65.0, "mean_reversion_max_adx": 18.5,
+        "mean_reversion_min_rsi_recovery": 5.0,
+        "mean_reversion_exit_adx": 24.0,
+        "mean_reversion_exit_confirmation_bars": 2,
+        "mean_reversion_exit_requires_adverse_di": True,
+        "mean_reversion_min_reward_risk": 0.5,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
 }
 
 
@@ -628,6 +667,15 @@ def main() -> int:
         "bollinger_rsi_adverse_di_exit_quality20_early_exit/2x/realistic_estimate",
         "bollinger_rsi_adverse_di_exit_quality20_early_exit/2x/conservative",
         "bollinger_rsi_adverse_di_exit_quality20_early_exit/2x/stress",
+        "bollinger_rsi_quality20_tighter_atr18/2x/realistic_estimate",
+        "bollinger_rsi_quality20_tighter_atr18/2x/conservative",
+        "bollinger_rsi_quality20_tighter_atr18/2x/stress",
+        "bollinger_rsi_quality20_fast_trend_exit/2x/realistic_estimate",
+        "bollinger_rsi_quality20_fast_trend_exit/2x/conservative",
+        "bollinger_rsi_quality20_fast_trend_exit/2x/stress",
+        "bollinger_rsi_quality20_reward_risk05/2x/realistic_estimate",
+        "bollinger_rsi_quality20_reward_risk05/2x/conservative",
+        "bollinger_rsi_quality20_reward_risk05/2x/stress",
     ):
         report_row = report["reports"].get(key, {})
         print(
