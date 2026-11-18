@@ -510,7 +510,9 @@ def run_backtest(
                 pending_exit = "max_drawdown_limit"
         if i >= trade_start_index and not global_halt and not daily_halt:
             sig = int(features.iloc[i].signal)
-            if sig:
+            if sig and (
+                cfg.signal_mode != "bollinger_reversion" or position is None
+            ):
                 pending_signal, pending_atr = sig, float(features.iloc[i].atr)
                 if cfg.signal_mode == "bollinger_reversion":
                     pending_target = float(features.iloc[i].mean_target)
