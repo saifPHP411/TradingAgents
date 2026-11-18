@@ -151,3 +151,41 @@ def test_binance_vision_recovers_missing_mark_candle_from_daily_archive():
 
     assert len(marks) == 3
     assert str(marks.index[1]) == "2025-01-01 04:00:00+00:00"
+
+
+def test_binance_vision_uses_daily_archives_when_current_month_file_is_unavailable():
+    start = pd.Timestamp("2026-11-01T00:00:00Z")
+    end = pd.Timestamp("2026-11-03T00:00:00Z")
+    interval = 4 * 60 * 60 * 1000
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = int(end.timestamp() * 1000)
+    archives = {}
+
+    for dataset in ("klines", "markPriceKlines"):
+        for day_offset in range(2):
+            day_start = start_ms + day_offset * 24 * 60 * 60 * 1000
+            rows = [
+                "open_time,open,high,low,close,volume,close_time"
+            ]
+            for bar in range(6):
+                stamp = day_start + bar * interval
+                close = 100.0 + day_offset + bar
+                rows.append(
+                    f"{stamp},{close},{close + 1},{close - 1},{close},"
+                    f"10,{stamp + interval - 1}"
+                )
+            day = (start + pd.Timedelta(days=day_offset)).strftime("%Y-%m-%d")
+            suffix = (
+                f"/{dataset}/BTCUSDT/4h/BTCUSDT-4h-{day}.zip"
+            )
+            archives[suffix] = _zip_csv(f"{dataset}-{day}.csv", "\\n".join(rows))
+
+    client = _client(archives)
+    traded = client.klines("BTCUSDT", start_ms=start_ms, end_ms=end_ms)
+    mark = client.mark_price_klines("BTCUSDT", start_ms=start_ms, end_ms=end_ms)
+
+    assert len(traded) == 12
+    assert len(mark) == 12
+    assert traded.index.equals(mark.index)
+    assert traded.index[0] == start
+    assert traded.index[-1] == end - pd.Timedelta(hours=4)
