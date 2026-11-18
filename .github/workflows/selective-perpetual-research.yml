@@ -41,7 +41,7 @@ jobs:
 
       - name: Validate lookback and run full-history exploratory tournament
         env:
-          DAYS: ${{ inputs.days }}
+          DAYS: ${{ inputs.days || '730' }}
         run: |
           mkdir -p artifacts
           python - <<'PY'
