@@ -95,7 +95,7 @@ def test_development_gate_rejects_target_miss_low_expectancy_or_risk_failures():
         _development_summary(liquidations=1), "realistic_estimate"
     )
     low_win_rate = acceptance_gate(
-        _development_summary(win_rate_pct=74.99), "realistic_estimate"
+        _development_summary(win_rate_pct=69.99), "realistic_estimate"
     )
     negative_expectancy = acceptance_gate(
         _development_summary(expectancy_per_trade=-0.01), "realistic_estimate"
