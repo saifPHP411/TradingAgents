@@ -236,8 +236,49 @@ class BinanceVisionPublicClient:
         frames = []
         for month in self._months(start_ms, end_ms):
             path = self._monthly_path(dataset, market, month, INTERVAL)
+            try:
+                monthly_bytes = self._csv_bytes(path)
+            except BinanceVisionDataError:
+                # The current month is often unavailable as a monthly archive
+                # until it closes. Fall back to official daily files for that
+                # month; never synthesize or forward-fill OHLC candles.
+                month_start = pd.Period(month, freq="M").start_time.tz_localize("UTC")
+                next_month = month_start + pd.offsets.MonthBegin(1)
+                first_day = max(
+                    pd.Timestamp(start_ms, unit="ms", tz="UTC").normalize(),
+                    month_start,
+                )
+                last_day = min(
+                    pd.Timestamp(end_ms - 1, unit="ms", tz="UTC").normalize(),
+                    next_month - pd.Timedelta(days=1),
+                )
+                daily_frames = []
+                if first_day <= last_day:
+                    for day_stamp in pd.date_range(first_day, last_day, freq="D"):
+                        day = day_stamp.strftime("%Y-%m-%d")
+                        try:
+                            daily = self._parse_candle_csv(
+                                self._csv_bytes(self._daily_path(dataset, market, day)),
+                                market,
+                                dataset,
+                                include_volume=include_volume,
+                            )
+                        except BinanceVisionDataError:
+                            continue
+                        daily = daily[
+                            (daily["timestamp"] >= start_ms)
+                            & (daily["timestamp"] < end_ms)
+                            & (daily["close_time"] < end_ms)
+                        ]
+                        if not daily.empty:
+                            daily["timestamp"] = daily["timestamp"].astype("int64")
+                            daily_frames.append(daily)
+                if daily_frames:
+                    frames.extend(daily_frames)
+                continue
+
             selected = self._parse_candle_csv(
-                self._csv_bytes(path),
+                monthly_bytes,
                 market,
                 dataset,
                 include_volume=include_volume,
