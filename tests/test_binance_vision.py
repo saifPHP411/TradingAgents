@@ -181,7 +181,13 @@ def test_binance_vision_uses_daily_archives_when_current_month_file_is_unavailab
             )
             archives[suffix] = _zip_csv(f"{dataset}-{day}.csv", "\n".join(rows))
 
-    client = _client(archives)
+    def transport(*, url: str, timeout: float) -> bytes:
+        for suffix, payload in archives.items():
+            if url.endswith(suffix):
+                return payload
+        raise BinanceVisionDataError("Binance Vision archive returned HTTP 404")
+
+    client = BinanceVisionPublicClient(transport=transport)
     traded = client.klines("BTCUSDT", start_ms=start_ms, end_ms=end_ms)
     mark = client.mark_price_klines("BTCUSDT", start_ms=start_ms, end_ms=end_ms)
 
