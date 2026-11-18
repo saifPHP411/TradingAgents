@@ -17,7 +17,7 @@ import pandas as pd
 from tradingagents.crypto.backtest.perpetual_ema_walkforward import (
     COST_SCENARIOS,
     DEFAULT_SYMBOLS,
-    _fetch_history,
+    _fetch_history as _fetch_base_history,
     _run_window,
     _summarize_development,
 )
@@ -37,6 +37,53 @@ PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES = {
         "independent final holdout at both 1x and 2x across all three cost models."
     )
 }
+
+
+
+def _fetch_symbol_history(client, symbol: str, start_ms: int, end_ms: int):
+    """Fetch one venue symbol and align traded/mark bars on exact UTC opens."""
+    instrument = client.instrument_info(symbol)
+    if (
+        instrument.status != "Trading"
+        or instrument.contract_type != "LinearPerpetual"
+        or instrument.quote_coin != "USDT"
+        or instrument.settle_coin != "USDT"
+    ):
+        raise ValueError(f"{symbol} is not an active USDT-settled linear perpetual")
+    traded = client.klines(instrument.symbol, start_ms=start_ms, end_ms=end_ms)
+    mark = client.mark_price_klines(
+        instrument.symbol, start_ms=start_ms, end_ms=end_ms
+    )
+    funding = client.funding_rates(
+        instrument.symbol,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        interval_minutes=instrument.funding_interval_minutes,
+    )
+    common = traded.index.intersection(mark.index).sort_values()
+    if common.empty:
+        raise ValueError(
+            f"{symbol} has no exact timestamp overlap between traded and mark candles; "
+            f"traded={len(traded)} first={list(traded.index[:3])}; "
+            f"mark={len(mark)} first={list(mark.index[:3])}"
+        )
+    if len(common) != len(traded) or len(common) != len(mark):
+        print(
+            f"{symbol}: aligning traded/mark candles on {len(common)} exact UTC opens "
+            f"(traded={len(traded)}, mark={len(mark)}, "
+            f"dropped_traded={len(traded) - len(common)}, "
+            f"dropped_mark={len(mark) - len(common)})"
+        )
+    traded = traded.loc[common].copy()
+    mark = mark.loc[common].copy()
+    gaps = common.to_series().diff().dropna()
+    if not gaps.empty and (gaps != pd.Timedelta(hours=4)).any():
+        bad = gaps[gaps != pd.Timedelta(hours=4)].head(3)
+        raise ValueError(
+            f"{symbol} traded/mark overlap has missing 4-hour intervals: "
+            f"{[(str(index), str(value)) for index, value in bad.items()]}"
+        )
+    return instrument, traded, mark, funding
 
 
 def _rank_candidates(rankings: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -203,7 +250,7 @@ def run_lab(args: argparse.Namespace) -> dict:
         )
     start_ms = end_ms - args.days * 86_400_000
     history = {
-        symbol: _fetch_history(client, symbol, start_ms, end_ms)
+        symbol: _fetch_symbol_history(client, symbol, start_ms, end_ms)
         for symbol in args.symbols
     }
 
