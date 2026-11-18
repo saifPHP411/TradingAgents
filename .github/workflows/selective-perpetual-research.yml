@@ -14,7 +14,7 @@ on:
       data_source:
         description: "Public historical market-data source"
         required: true
-        default: "bybit"
+        default: "binance-vision"
         type: choice
         options:
           - bybit
@@ -51,7 +51,7 @@ jobs:
       - name: Validate lookback and run full-history exploratory tournament
         env:
           DAYS: ${{ inputs.days || '730' }}
-          DATA_SOURCE: ${{ inputs.data_source || 'bybit' }}
+          DATA_SOURCE: ${{ inputs.data_source || 'binance-vision' }}
         run: |
           mkdir -p artifacts
           python - <<'PY'
