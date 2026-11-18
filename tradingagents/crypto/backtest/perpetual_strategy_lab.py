@@ -108,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--leverage", nargs="+", type=float, default=[1.0, 2.0])
     parser.add_argument("--warmup-bars", type=int, default=260)
     parser.add_argument("--test-bars", type=int, default=200)
-    parser.add_argument("--exclude-after", required=True, help="ISO timestamp: first bar of the previously inspected holdout")
+    parser.add_argument("--exclude-after", default=None, help="Optional ISO timestamp: first bar to exclude; omit to evaluate the full available history as exploratory development data")
     parser.add_argument("--output", type=Path, default=Path("results/perpetual_strategy_lab.json"))
     return parser
 
@@ -158,7 +158,7 @@ def acceptance_gate(development: dict, scenario: str) -> dict:
     return gate
 
 
-def _validate(args: argparse.Namespace) -> pd.Timestamp:
+def _validate(args: argparse.Namespace) -> pd.Timestamp | None:
     if isinstance(args.days, bool) or not isinstance(args.days, int) or not 180 <= args.days <= 3_650:
         raise ValueError("days must be an integer in [180, 3650]")
     if not math.isfinite(args.equity) or args.equity <= 0:
@@ -174,6 +174,8 @@ def _validate(args: argparse.Namespace) -> pd.Timestamp:
         for v in args.leverage
     ):
         raise ValueError("only 1x and 2x research leverage are permitted")
+    if args.exclude_after is None:
+        return None
     cutoff = pd.Timestamp(args.exclude_after)
     if cutoff.tzinfo is None:
         raise ValueError("exclude-after must include a timezone")
@@ -181,7 +183,7 @@ def _validate(args: argparse.Namespace) -> pd.Timestamp:
 
 
 def run_lab(args: argparse.Namespace) -> dict:
-    """Run only on development history strictly before the consumed holdout."""
+    """Run an exploratory historical screen; optionally exclude a previously inspected holdout."""
     cutoff = _validate(args)
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - args.days * 86_400_000
@@ -202,10 +204,10 @@ def run_lab(args: argparse.Namespace) -> dict:
     if not (common.to_series().diff().dropna() == pd.Timedelta(hours=4)).all():
         raise ValueError("common Bybit history contains missing 4-hour intervals")
 
-    # Strictly exclude the already-inspected holdout and all later bars.
-    development_index = common[common < cutoff]
+    # When no cutoff is supplied, use all available candles and clearly label the result exploratory.
+    development_index = common if cutoff is None else common[common < cutoff]
     if len(development_index) < args.warmup_bars + 2 * args.test_bars:
-        raise ValueError("insufficient history strictly before the previously inspected holdout")
+        raise ValueError("insufficient history for at least two disjoint development folds")
 
     aligned = {}
     for symbol, (instrument, traded, mark, funding) in history.items():
@@ -304,13 +306,14 @@ def run_lab(args: argparse.Namespace) -> dict:
         "timeframe": "4h",
         "symbols": list(aligned),
         "history_start": development_index[0].isoformat(),
-        "development_end_exclusive": cutoff.isoformat(),
+        "development_end_exclusive": (cutoff.isoformat() if cutoff is not None else (development_index[-1] + pd.Timedelta(hours=4)).isoformat()),
         "development_candles": len(development_index),
         "development_folds": len(folds),
         "warmup_bars": args.warmup_bars,
         "test_bars": args.test_bars,
-        "excluded_previous_holdout_start": cutoff.isoformat(),
-        "previously_inspected_holdout_reused": False,
+        "excluded_previous_holdout_start": cutoff.isoformat() if cutoff is not None else None,
+        "previously_inspected_holdout_reused": None if cutoff is None else False,
+        "evaluation_mode": "cutoff_excluded_development" if cutoff is not None else "full_history_exploratory",
         "final_holdout_evaluated": False,
         "candidate_definitions_fixed_before_run": True,
         "target_win_rate_pct": TARGET_WIN_RATE_PCT,
@@ -326,7 +329,7 @@ def run_lab(args: argparse.Namespace) -> dict:
         "reports": reports,
         "limitations": [
             "This is a development-only candidate screen, not independent final validation.",
-            "The previously inspected holdout and every bar after its start are excluded from strategy scoring.",
+            ("The previously inspected holdout and every bar after its start are excluded from strategy scoring." if cutoff is not None else "All available historical bars are used; this is exploratory and is not an untouched holdout validation."),
             "Fees, spread and slippage are estimates, not account-specific measured Bybit fills.",
             "Liquidation prices remain approximations, not Bybit risk-tier calculations.",
             "No authenticated account, leverage-setting or order API is used.",
@@ -344,6 +347,7 @@ def main() -> int:
     )
     compact = {
         "development_folds": report["development_folds"],
+        "evaluation_mode": report["evaluation_mode"],
         "development_end_exclusive": report["development_end_exclusive"],
         "best_candidate": report["best_candidate"],
         "rankings": report["rankings"],
