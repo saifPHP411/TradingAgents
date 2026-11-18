@@ -17,7 +17,6 @@ import pandas as pd
 from tradingagents.crypto.backtest.perpetual_ema_walkforward import (
     COST_SCENARIOS,
     DEFAULT_SYMBOLS,
-    _fetch_history as _fetch_base_history,
     _run_window,
     _summarize_development,
 )
