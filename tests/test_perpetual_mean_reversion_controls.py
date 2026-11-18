@@ -43,13 +43,19 @@ def _forced_features(index, *, target=105.0, adx=None, plus_di=None, minus_di=No
     if adx:
         for position, value in adx.items():
             adx_values.iloc[position] = value
+    plus_values = pd.Series(20.0, index=index)
+    minus_values = pd.Series(10.0, index=index)
+    for position, value in (plus_di or {}).items():
+        plus_values.iloc[position] = value
+    for position, value in (minus_di or {}).items():
+        minus_values.iloc[position] = value
     return pd.DataFrame(
         {
             "atr": 1.0,
             "signal": signal,
             "adx": adx_values,
-            "plus_di": pd.Series(plus_di or {}, index=index).fillna(20.0),
-            "minus_di": pd.Series(minus_di or {}, index=index).fillna(10.0),
+            "plus_di": plus_values,
+            "minus_di": minus_values,
             "mean_target": target,
         },
         index=index,
