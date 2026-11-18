@@ -6,6 +6,7 @@ import pytest
 from tradingagents.crypto.backtest.perpetual_ema import PerpetualEMAStrategy, _features
 from tradingagents.crypto.backtest.perpetual_ema_walkforward import (
     TARGET_WIN_RATE_PCT as WALKFORWARD_TARGET_WIN_RATE_PCT,
+    _summarize_development,
 )
 from tradingagents.crypto.backtest.perpetual_strategy_lab import (
     CANDIDATES,
@@ -113,7 +114,7 @@ def test_development_gate_rejects_target_miss_low_expectancy_or_risk_failures():
 
 @pytest.mark.unit
 def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_families():
-    assert len(CANDIDATES) == 22
+    assert len(CANDIDATES) == 26
     assert {
         "ema_14_50_adx18",
         "ema_9_30_adx22",
@@ -137,6 +138,10 @@ def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_fa
         "bollinger_rsi_quality20_tighter_atr18",
         "bollinger_rsi_quality20_fast_trend_exit",
         "bollinger_rsi_quality20_reward_risk05",
+        "bollinger_rsi_quality20_atr16",
+        "bollinger_rsi_quality20_atr17",
+        "bollinger_rsi_quality20_atr19",
+        "bollinger_rsi_quality20_adx16",
     } == set(CANDIDATES)
     assert {"ema_cross", "donchian_breakout", "bollinger_reversion"} == {
         candidate["signal_mode"] for candidate in CANDIDATES.values()
@@ -162,6 +167,10 @@ def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_fa
             "bollinger_rsi_quality20_tighter_atr18",
             "bollinger_rsi_quality20_fast_trend_exit",
             "bollinger_rsi_quality20_reward_risk05",
+            "bollinger_rsi_quality20_atr16",
+            "bollinger_rsi_quality20_atr17",
+            "bollinger_rsi_quality20_atr19",
+            "bollinger_rsi_quality20_adx16",
         )
     )
 
@@ -337,3 +346,73 @@ def test_quality20_exit_experiments_change_one_risk_control_at_a_time():
             "mean_reversion_min_rsi_recovery",
         ):
             assert candidate[key] == baseline[key]
+
+@pytest.mark.unit
+def test_quality20_atr_sensitivity_and_adx_diagnostic_keep_entry_rules_fixed():
+    baseline = CANDIDATES["bollinger_rsi_quality20_tighter_atr18"]
+    expected_atr = {
+        "bollinger_rsi_quality20_atr16": 1.6,
+        "bollinger_rsi_quality20_atr17": 1.7,
+        "bollinger_rsi_quality20_atr19": 1.9,
+    }
+    shared = (
+        "mean_reversion_std",
+        "mean_reversion_rsi_period",
+        "mean_reversion_rsi_long",
+        "mean_reversion_rsi_short",
+        "mean_reversion_max_adx",
+        "mean_reversion_min_rsi_recovery",
+        "mean_reversion_exit_adx",
+        "mean_reversion_exit_confirmation_bars",
+        "mean_reversion_exit_requires_adverse_di",
+    )
+    for name, atr in expected_atr.items():
+        candidate = CANDIDATES[name]
+        assert candidate["atr_multiple"] == atr
+        assert all(candidate[key] == baseline[key] for key in shared)
+
+    adx16 = CANDIDATES["bollinger_rsi_quality20_adx16"]
+    assert adx16["mean_reversion_max_adx"] == 16.0
+    assert adx16["atr_multiple"] == 1.8
+    assert all(adx16[key] == baseline[key] for key in shared if key != "mean_reversion_max_adx")
+
+
+@pytest.mark.unit
+def test_development_summary_exposes_small_account_rejections_by_symbol():
+    from types import SimpleNamespace
+
+    rows = [
+        {
+            "symbol": "BTCUSDT",
+            "fold": 0,
+            "result": SimpleNamespace(
+                initial_equity=50.0,
+                final_equity=50.0,
+                trades=[],
+                rejections={"below_minimum_notional": 3},
+                metrics=lambda: {"max_drawdown_pct": 0.0},
+            ),
+        },
+        {
+            "symbol": "BNBUSDT",
+            "fold": 0,
+            "result": SimpleNamespace(
+                initial_equity=50.0,
+                final_equity=50.0,
+                trades=[],
+                rejections={"below_minimum_notional": 2, "liquidation_too_close_to_atr_stop": 1},
+                metrics=lambda: {"max_drawdown_pct": 0.0},
+            ),
+        },
+    ]
+    summary = _summarize_development(rows, ["BTCUSDT", "BNBUSDT"])
+
+    assert summary["rejections"] == {
+        "below_minimum_notional": 5,
+        "liquidation_too_close_to_atr_stop": 1,
+    }
+    assert summary["rejections_by_symbol"]["BTCUSDT"] == {"below_minimum_notional": 3}
+    assert summary["rejections_by_symbol"]["BNBUSDT"] == {
+        "below_minimum_notional": 2,
+        "liquidation_too_close_to_atr_stop": 1,
+    }
