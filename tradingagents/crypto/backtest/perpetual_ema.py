@@ -244,7 +244,7 @@ def _features(data: pd.DataFrame, cfg: PerpetualEMAStrategy) -> pd.DataFrame:
             & adx_ok,
             "signal",
         ] = -1
-    else:
+    elif cfg.signal_mode == "donchian_breakout":
         # Previous-window channels are shifted before comparing the current
         # completed close, preventing the current candle from entering its own
         # breakout threshold.
@@ -405,7 +405,7 @@ def run_backtest(
                 close(float(row.open), stamp, "ema_reversal")
             elif i - position["index"] >= cfg.max_holding_bars:
                 close(float(row.open), stamp, "max_holding_bars")
-                pending_signal, pending_atr = 0, math.nan
+                pending_signal, pending_atr, pending_target = 0, math.nan, math.nan
             elif (d > 0 and mr.low <= liq) or (d < 0 and mr.high >= liq):
                 close(liq, stamp, "liquidation")
                 closed_intrabar = True
@@ -422,9 +422,9 @@ def run_backtest(
                 close(raw, stamp, "mean_reversion_target")
                 closed_intrabar = True
         if closed_intrabar:
-            # A stop/liquidation within this candle cannot be followed by a
-            # re-entry priced at the same candle's open. Wait for a fresh signal.
-            pending_signal, pending_atr = 0, math.nan
+            # An intrabar exit cannot be followed by a re-entry at this candle's
+            # open. Wait for a fresh completed signal on a later candle.
+            pending_signal, pending_atr, pending_target = 0, math.nan, math.nan
 
         if position is None and pending_signal and not daily_halt and not global_halt:
             raw_entry = float(row.open)
@@ -501,11 +501,11 @@ def run_backtest(
         curve.append(mtm)
         peak = max(peak, mtm)
         if mtm <= day_start * (1 - cfg.risk.max_daily_loss_fraction):
-            daily_halt, pending_signal, pending_atr = True, 0, math.nan
+            daily_halt, pending_signal, pending_atr, pending_target = True, 0, math.nan, math.nan
             if position is not None:
                 pending_exit = "daily_loss_limit"
         if mtm <= peak * (1 - cfg.risk.max_drawdown_fraction):
-            global_halt, pending_signal, pending_atr = True, 0, math.nan
+            global_halt, pending_signal, pending_atr, pending_target = True, 0, math.nan, math.nan
             if position is not None:
                 pending_exit = "max_drawdown_limit"
         if i >= trade_start_index and not global_halt and not daily_halt:
