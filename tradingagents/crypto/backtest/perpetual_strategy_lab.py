@@ -14,13 +14,13 @@ from pathlib import Path
 
 import pandas as pd
 
+from tradingagents.crypto.backtest.perpetual_ema import PerpetualEMAStrategy, _features
 from tradingagents.crypto.backtest.perpetual_ema_walkforward import (
     COST_SCENARIOS,
     DEFAULT_SYMBOLS,
     _run_window,
     _summarize_development,
 )
-from tradingagents.crypto.backtest.perpetual_ema import PerpetualEMAStrategy, _features
 from tradingagents.crypto.binance_perpetual import BinanceUSDMPublicClient
 from tradingagents.crypto.binance_vision import BinanceVisionPublicClient
 from tradingagents.crypto.bybit_perpetual import BybitLinearPublicClient
