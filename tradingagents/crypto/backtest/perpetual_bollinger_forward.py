@@ -24,7 +24,6 @@ from tradingagents.crypto.backtest.perpetual_ema_walkforward import COST_SCENARI
 from tradingagents.crypto.binance_vision import BinanceVisionPublicClient
 from tradingagents.crypto.perpetuals import PerpetualRiskSettings
 
-
 DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
 DEFAULT_FORWARD_START = "2026-11-01T00:00:00+00:00"
 FUNDING_SCENARIOS = {
