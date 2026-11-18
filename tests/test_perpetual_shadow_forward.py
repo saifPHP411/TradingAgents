@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from tradingagents.crypto.backtest.perpetual_strategy_lab import CANDIDATES
 from tradingagents.crypto.backtest.perpetual_shadow_forward import (
     BAR_MS,
     DEFAULT_SYMBOLS,
@@ -172,13 +173,13 @@ def test_shadow_cycle_scores_only_future_bars_for_all_frozen_candidates(tmp_path
     )
 
     assert history_calls == list(DEFAULT_SYMBOLS)
-    assert len(backtest_calls) == 5 * 2 * 3 * len(DEFAULT_SYMBOLS)
+    assert len(backtest_calls) == len(CANDIDATES) * 2 * 3 * len(DEFAULT_SYMBOLS)
     assert {call["trade_start_index"] for call in backtest_calls} == {260}
     assert {call["leverage"] for call in backtest_calls} == {1.0, 2.0}
     assert result["status"] == "running"
     assert result["forward_start_ms"] == forward_start
     assert result["forward_bars"] == 2
-    assert len(result["results"]) == 5 * 2 * 3
+    assert len(result["results"]) == len(CANDIDATES) * 2 * 3
     assert all(row["closed_trades"] == 4 for row in result["results"])
     assert all(row["open_positions"] == 4 for row in result["results"])
     assert all(row["orders_submitted"] is False for row in result["results"])
