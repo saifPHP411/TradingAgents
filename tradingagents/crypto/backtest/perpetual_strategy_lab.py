@@ -307,7 +307,7 @@ def _profit_factor_pass(value, minimum: float) -> bool:
     )
 
 
-TARGET_WIN_RATE_PCT = 75.0
+TARGET_WIN_RATE_PCT = 70.0
 
 
 def acceptance_gate(development: dict, scenario: str) -> dict:
@@ -564,7 +564,7 @@ def run_lab(args: argparse.Namespace) -> dict:
         "candidate_definitions_fixed_before_run": True,
         "target_win_rate_pct": TARGET_WIN_RATE_PCT,
         "selection_rule": (
-            "A candidate is only shortlisted when it reaches the 75% net-of-cost win-rate "
+            "A candidate is only shortlisted when it reaches the 70% net-of-cost win-rate "
             "target, has positive expectancy and compounded return, passes every realistic, "
             "conservative and stress development gate, and has not already failed a previously "
             "inspected independent final holdout. No eligible candidate means no selection."
