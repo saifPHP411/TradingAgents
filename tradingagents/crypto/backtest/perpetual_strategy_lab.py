@@ -246,6 +246,29 @@ CANDIDATES: dict[str, dict] = {
         "mean_reversion_exit_requires_adverse_di": True,
         "atr_multiple": 2.0, "max_holding_bars": 72,
     },
+    # Quality-filtered frequency variants: reject weaker RSI turns and avoid
+    # the upper end of the observed ADX range where stopped trades clustered.
+    "selective_bollinger_rsi_range_quality20": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 1.9,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 35.0,
+        "mean_reversion_rsi_short": 65.0, "mean_reversion_max_adx": 18.5,
+        "mean_reversion_min_rsi_recovery": 5.0,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
+    "bollinger_rsi_adverse_di_exit_quality20": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 1.9,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 35.0,
+        "mean_reversion_rsi_short": 65.0, "mean_reversion_max_adx": 18.5,
+        "mean_reversion_min_rsi_recovery": 5.0,
+        "mean_reversion_exit_adx": 24.0,
+        "mean_reversion_exit_confirmation_bars": 2,
+        "mean_reversion_exit_requires_adverse_di": True,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
 }
 
 
@@ -581,6 +604,12 @@ def main() -> int:
         "bollinger_rsi_adverse_di_exit_freq20/2x/realistic_estimate",
         "bollinger_rsi_adverse_di_exit_freq20/2x/conservative",
         "bollinger_rsi_adverse_di_exit_freq20/2x/stress",
+        "selective_bollinger_rsi_range_quality20/2x/realistic_estimate",
+        "selective_bollinger_rsi_range_quality20/2x/conservative",
+        "selective_bollinger_rsi_range_quality20/2x/stress",
+        "bollinger_rsi_adverse_di_exit_quality20/2x/realistic_estimate",
+        "bollinger_rsi_adverse_di_exit_quality20/2x/conservative",
+        "bollinger_rsi_adverse_di_exit_quality20/2x/stress",
     ):
         report_row = report["reports"].get(key, {})
         print(
