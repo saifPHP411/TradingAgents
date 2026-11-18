@@ -222,6 +222,22 @@ def _validate(frame: pd.DataFrame, name: str) -> pd.DataFrame:
     return data
 
 
+def _apply_adverse_di_spread_filter(
+    long_reentry: pd.Series,
+    short_reentry: pd.Series,
+    plus_di: pd.Series,
+    minus_di: pd.Series,
+    maximum_spread: float,
+) -> tuple[pd.Series, pd.Series]:
+    """Filter mean-reversion entries with excessive DI dominance against them."""
+    long_adverse_spread = (minus_di - plus_di).clip(lower=0.0)
+    short_adverse_spread = (plus_di - minus_di).clip(lower=0.0)
+    return (
+        long_reentry & long_adverse_spread.notna() & (long_adverse_spread <= maximum_spread),
+        short_reentry & short_adverse_spread.notna() & (short_adverse_spread <= maximum_spread),
+    )
+
+
 def _features(data: pd.DataFrame, cfg: PerpetualEMAStrategy) -> pd.DataFrame:
     x = data.copy()
     prev = x.close.shift(1)
@@ -321,17 +337,12 @@ def _features(data: pd.DataFrame, cfg: PerpetualEMAStrategy) -> pd.DataFrame:
             long_reentry &= x.plus_di >= x.minus_di
             short_reentry &= x.minus_di >= x.plus_di
         if cfg.mean_reversion_max_adverse_di_spread is not None:
-            # Reject entries only when DI dominance against the mean-reversion
-            # position exceeds the configured spread. Missing DI fails closed.
-            long_adverse_spread = (x.minus_di - x.plus_di).clip(lower=0.0)
-            short_adverse_spread = (x.plus_di - x.minus_di).clip(lower=0.0)
-            long_reentry &= (
-                long_adverse_spread.notna()
-                & (long_adverse_spread <= cfg.mean_reversion_max_adverse_di_spread)
-            )
-            short_reentry &= (
-                short_adverse_spread.notna()
-                & (short_adverse_spread <= cfg.mean_reversion_max_adverse_di_spread)
+            long_reentry, short_reentry = _apply_adverse_di_spread_filter(
+                long_reentry,
+                short_reentry,
+                x.plus_di,
+                x.minus_di,
+                cfg.mean_reversion_max_adverse_di_spread,
             )
         x.loc[long_reentry, "signal"] = 1
         x.loc[short_reentry, "signal"] = -1
