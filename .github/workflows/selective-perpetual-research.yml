@@ -1,6 +1,9 @@
 name: Manual selective perpetual strategy research
 
 on:
+  push:
+    branches:
+      - high-winrate-selective-mr
   workflow_dispatch:
     inputs:
       days:
