@@ -42,6 +42,7 @@ class PerpetualEMAStrategy:
     mean_reversion_exit_confirmation_bars: int = 1
     mean_reversion_min_reward_risk: float = 0.0
     mean_reversion_min_rsi_recovery: float = 0.0
+    mean_reversion_max_adverse_di_spread: float | None = None
     mean_reversion_require_directional_confirmation: bool = False
     mean_reversion_exit_requires_adverse_di: bool = False
     interval_minutes: int = 240
@@ -104,6 +105,12 @@ class PerpetualEMAStrategy:
             or not 0 <= self.mean_reversion_min_rsi_recovery <= 30
         ):
             raise ValueError("mean_reversion_min_rsi_recovery must be in [0, 30]")
+        if self.mean_reversion_max_adverse_di_spread is not None and (
+            isinstance(self.mean_reversion_max_adverse_di_spread, bool)
+            or not math.isfinite(self.mean_reversion_max_adverse_di_spread)
+            or not 0 <= self.mean_reversion_max_adverse_di_spread <= 100
+        ):
+            raise ValueError("mean_reversion_max_adverse_di_spread must be None or in [0, 100]")
         if not isinstance(self.mean_reversion_require_directional_confirmation, bool):
             raise ValueError("mean_reversion_require_directional_confirmation must be boolean")
         if not isinstance(self.mean_reversion_exit_requires_adverse_di, bool):
@@ -313,6 +320,19 @@ def _features(data: pd.DataFrame, cfg: PerpetualEMAStrategy) -> pd.DataFrame:
         if cfg.mean_reversion_require_directional_confirmation:
             long_reentry &= x.plus_di >= x.minus_di
             short_reentry &= x.minus_di >= x.plus_di
+        if cfg.mean_reversion_max_adverse_di_spread is not None:
+            # Reject entries only when DI dominance against the mean-reversion
+            # position exceeds the configured spread. Missing DI fails closed.
+            long_adverse_spread = (x.minus_di - x.plus_di).clip(lower=0.0)
+            short_adverse_spread = (x.plus_di - x.minus_di).clip(lower=0.0)
+            long_reentry &= (
+                long_adverse_spread.notna()
+                & (long_adverse_spread <= cfg.mean_reversion_max_adverse_di_spread)
+            )
+            short_reentry &= (
+                short_adverse_spread.notna()
+                & (short_adverse_spread <= cfg.mean_reversion_max_adverse_di_spread)
+            )
         x.loc[long_reentry, "signal"] = 1
         x.loc[short_reentry, "signal"] = -1
     return x
