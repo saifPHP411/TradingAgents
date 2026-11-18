@@ -202,6 +202,12 @@ def _summarize_development(records: list[dict], symbols: list[str]) -> dict:
     ordered_folds = [sum(fold_returns[key]) / len(fold_returns[key]) for key in sorted(fold_returns)]
     portfolio_return = _compound(ordered_folds)
     positive_symbols = sum(value > 0 for value in symbol_compounded.values())
+    rejection_totals: dict[str, int] = defaultdict(int)
+    rejection_by_symbol: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for row in records:
+        for reason, count in row["result"].rejections.items():
+            rejection_totals[reason] += int(count)
+            rejection_by_symbol[row["symbol"]][reason] += int(count)
     return {
         **pooled,
         "equal_weight_compounded_return_pct": portfolio_return,
@@ -217,6 +223,11 @@ def _summarize_development(records: list[dict], symbols: list[str]) -> dict:
             (row["result"].metrics()["max_drawdown_pct"] for row in records),
             default=0.0,
         ),
+        "rejections": dict(sorted(rejection_totals.items())),
+        "rejections_by_symbol": {
+            symbol: dict(sorted(reasons.items()))
+            for symbol, reasons in sorted(rejection_by_symbol.items())
+        },
     }
 
 
