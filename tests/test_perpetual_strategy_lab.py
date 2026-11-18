@@ -4,6 +4,9 @@ import pandas as pd
 import pytest
 
 from tradingagents.crypto.backtest.perpetual_ema import PerpetualEMAStrategy, _features
+from tradingagents.crypto.backtest.perpetual_ema_walkforward import (
+    TARGET_WIN_RATE_PCT as WALKFORWARD_TARGET_WIN_RATE_PCT,
+)
 from tradingagents.crypto.backtest.perpetual_strategy_lab import (
     CANDIDATES,
     PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES,
@@ -28,6 +31,17 @@ def _development_summary(**overrides):
     }
     result.update(overrides)
     return result
+
+
+
+@pytest.mark.unit
+def test_development_and_final_holdout_gates_share_the_75_percent_target():
+    from tradingagents.crypto.backtest.perpetual_strategy_lab import (
+        TARGET_WIN_RATE_PCT as DEVELOPMENT_TARGET_WIN_RATE_PCT,
+    )
+
+    assert DEVELOPMENT_TARGET_WIN_RATE_PCT == 75.0
+    assert WALKFORWARD_TARGET_WIN_RATE_PCT == 75.0
 
 
 @pytest.mark.unit
