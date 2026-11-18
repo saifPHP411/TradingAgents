@@ -89,6 +89,14 @@ CANDIDATES: dict[str, dict] = {
         "signal_mode": "donchian_breakout", "breakout_period": 55, "trend": 200,
         "min_adx": 18.0, "atr_multiple": 3.0, "max_holding_bars": 240,
     },
+    "selective_bollinger_rsi_range": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 2.0,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 32.0,
+        "mean_reversion_rsi_short": 68.0, "mean_reversion_max_adx": 18.0,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
 }
 
 
