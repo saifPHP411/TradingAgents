@@ -8,6 +8,7 @@ import pytest
 
 from tradingagents.crypto.backtest.perpetual_bollinger_forward import (
     FORWARD_CANDIDATES,
+    _count_forward_signals,
     _load_symbol_window,
     _parse_forward_start,
 )
@@ -158,3 +159,18 @@ def test_forward_report_does_not_claim_real_exchange_filters():
     source = inspect.getsource(_load_symbol_window)
     assert "Binance Vision research placeholders" in source
     assert "executable_filters_verified" in source
+
+@pytest.mark.unit
+def test_forward_signal_diagnostics_count_only_fillable_forward_bars():
+    features = pd.DataFrame(
+        {"signal": [0, 1, -1, -1, 1, 1]},
+        index=pd.date_range("2026-11-01", periods=6, freq="4h", tz="UTC"),
+    )
+
+    counts = _count_forward_signals(features, trade_start_index=1)
+
+    assert counts == {
+        "long_entry_signals": 2,
+        "short_entry_signals": 2,
+        "total_entry_signals": 4,
+    }
