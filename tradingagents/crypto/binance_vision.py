@@ -149,7 +149,7 @@ class BinanceVisionPublicClient:
         """Parse both headered and legacy headerless Binance candle CSV files."""
         raw = pd.read_csv(io.BytesIO(csv_data))
         names = {
-            str(column).strip().lower().lstrip("\\ufeff"): column
+            str(column).strip().lower().lstrip(chr(65279)): column
             for column in raw.columns
         }
         if {"open_time", "open", "high", "low", "close"}.issubset(names):
@@ -358,10 +358,35 @@ class BinanceVisionPublicClient:
                 columns = {str(column).strip().lower(): column for column in raw.columns}
             if "calc_time" not in columns or "last_funding_rate" not in columns:
                 raise BinanceVisionDataError(f"{market} funding CSV schema is invalid")
-            part = raw[[columns["calc_time"], columns["last_funding_rate"]]].copy()
-            part.columns = ["timestamp", "funding_rate"]
+            if "funding_interval_hours" in columns:
+                part = raw[
+                    [
+                        columns["calc_time"],
+                        columns["funding_interval_hours"],
+                        columns["last_funding_rate"],
+                    ]
+                ].copy()
+            else:
+                part = raw[
+                    [columns["calc_time"], columns["last_funding_rate"]]
+                ].copy()
+                part["funding_interval_hours"] = interval_minutes / 60
+            part.columns = [
+                "timestamp", "funding_interval_hours", "funding_rate"
+            ]
             part["timestamp"] = pd.to_numeric(part["timestamp"], errors="raise")
+            part["funding_interval_hours"] = pd.to_numeric(
+                part["funding_interval_hours"], errors="raise"
+            )
             part["funding_rate"] = pd.to_numeric(part["funding_rate"], errors="raise")
+            if (
+                not part["funding_interval_hours"].map(math.isfinite).all()
+                or (part["funding_interval_hours"] <= 0).any()
+                or (part["funding_interval_hours"] > 8).any()
+            ):
+                raise BinanceVisionDataError(
+                    f"invalid historical funding interval for {market}"
+                )
             part = part[
                 (part["timestamp"] >= start_ms) & (part["timestamp"] <= end_ms)
             ]
@@ -381,11 +406,24 @@ class BinanceVisionPublicClient:
             index=index,
             name="funding_rate",
         )
+        interval_minutes_by_event = pd.Series(
+            (frame["funding_interval_hours"].astype(float) * 60).round().astype(int).to_numpy(),
+            index=index,
+            name="funding_interval_minutes",
+        )
+        rates.attrs["funding_interval_minutes"] = interval_minutes_by_event
         if len(rates) > 1:
-            maximum_gap = pd.Timedelta(minutes=interval_minutes) * 1.5
-            if (rates.index.to_series().diff().dropna() > maximum_gap).any():
+            actual_gaps = rates.index.to_series().diff().dropna().reset_index(drop=True)
+            previous_intervals = interval_minutes_by_event.iloc[:-1].reset_index(drop=True)
+            next_intervals = interval_minutes_by_event.iloc[1:].reset_index(drop=True)
+            expected_previous = pd.to_timedelta(previous_intervals, unit="m")
+            expected_next = pd.to_timedelta(next_intervals, unit="m")
+            valid = (actual_gaps == expected_previous) | (actual_gaps == expected_next)
+            if not valid.all():
+                bad = actual_gaps[~valid].head(3)
                 raise BinanceVisionDataError(
-                    f"funding archive has a missing settlement interval for {market}"
+                    f"funding archive has missing or irregular settlement events for "
+                    f"{market}: {list(bad)}"
                 )
         return rates
 
