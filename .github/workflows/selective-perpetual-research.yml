@@ -34,6 +34,20 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Check OKX public market-data reachability
+        run: |
+          python - <<'PY'
+          import requests
+          url = "https://www.okx.com/api/v5/public/instruments"
+          response = requests.get(url, params={"instType": "SWAP"}, timeout=15)
+          print("OKX HTTP status:", response.status_code)
+          response.raise_for_status()
+          payload = response.json()
+          if payload.get("code") != "0":
+              raise SystemExit("OKX public API returned an error")
+          print("OKX SWAP instruments returned:", len(payload.get("data", [])))
+          PY
+
       - name: Install research dependencies
         run: |
           python -m pip install --upgrade pip
