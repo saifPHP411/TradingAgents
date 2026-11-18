@@ -20,6 +20,7 @@ from tradingagents.crypto.backtest.perpetual_ema_walkforward import (
     _run_window,
     _summarize_development,
 )
+from tradingagents.crypto.backtest.perpetual_ema import PerpetualEMAStrategy, _features
 from tradingagents.crypto.binance_perpetual import BinanceUSDMPublicClient
 from tradingagents.crypto.binance_vision import BinanceVisionPublicClient
 from tradingagents.crypto.bybit_perpetual import BybitLinearPublicClient
@@ -255,6 +256,49 @@ def _validate(args: argparse.Namespace) -> pd.Timestamp | None:
     return cutoff.tz_convert("UTC")
 
 
+def _build_trade_ledger(records: list[dict], aligned: dict, warmup_bars: int, overrides: dict) -> list[dict]:
+    """Return auditable per-trade outcomes with indicators from the completed signal candle."""
+    ledger = []
+    cfg = PerpetualEMAStrategy(enabled=True, **overrides)
+    for row in records:
+        _instrument, traded, _mark, _funding = aligned[row["symbol"]]
+        start_ts = pd.Timestamp(row["start"])
+        end_ts = pd.Timestamp(row["end"])
+        start_pos = int(traded.index.get_loc(start_ts))
+        end_pos = int(traded.index.get_loc(end_ts)) + 1
+        warm_start = max(0, start_pos - warmup_bars)
+        feature_frame = _features(traded.iloc[warm_start:end_pos].copy(), cfg)
+        for trade in row["result"].trades:
+            entry_ts = pd.Timestamp(trade.entry_time)
+            signal_ts = entry_ts - pd.Timedelta(hours=4)
+            snapshot = {}
+            if signal_ts in feature_frame.index:
+                sig = feature_frame.loc[signal_ts]
+                for key in ("close", "mean_target", "mean_lower", "mean_upper", "rsi", "adx", "atr", "signal"):
+                    value = sig.get(key)
+                    snapshot[key] = None if pd.isna(value) else float(value)
+                previous = feature_frame.loc[signal_ts - pd.Timedelta(hours=4)] if signal_ts - pd.Timedelta(hours=4) in feature_frame.index else None
+                snapshot["previous_rsi"] = (
+                    None if previous is None or pd.isna(previous.get("rsi"))
+                    else float(previous.get("rsi"))
+                )
+                if snapshot.get("mean_target") and snapshot.get("close"):
+                    snapshot["distance_from_mid_pct"] = (
+                        snapshot["close"] / snapshot["mean_target"] - 1.0
+                    ) * 100.0
+            ledger.append({
+                "symbol": row["symbol"],
+                "fold": row["fold"],
+                "fold_start": row["start"],
+                "fold_end": row["end"],
+                "signal_candle_time": signal_ts.isoformat(),
+                "entry_features": snapshot,
+                "duration_4h_bars": (pd.Timestamp(trade.exit_time) - entry_ts).total_seconds() / 14400.0,
+                **trade.to_dict(),
+            })
+    return ledger
+
+
 def run_lab(args: argparse.Namespace) -> dict:
     """Run an exploratory historical screen; optionally exclude a previously inspected holdout."""
     cutoff = _validate(args)
@@ -357,6 +401,9 @@ def run_lab(args: argparse.Namespace) -> dict:
                     },
                     "development_only": summary,
                     "acceptance_gate": gate,
+                    **({
+                        "trade_ledger": _build_trade_ledger(records, aligned, args.warmup_bars, overrides)
+                    } if candidate_name == "selective_bollinger_rsi_range" else {}),
                 }
             passed = all(item["gate"]["passed"] for item in by_scenario.values())
             pfs = [
