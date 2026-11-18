@@ -238,7 +238,11 @@ class BinanceVisionPublicClient:
             path = self._monthly_path(dataset, market, month, INTERVAL)
             try:
                 monthly_bytes = self._csv_bytes(path)
-            except BinanceVisionDataError:
+            except BinanceVisionDataError as exc:
+                # A missing monthly file (HTTP 404) is expected before month-end.
+                # Malformed ZIP/CSV content and all other errors must fail closed.
+                if "HTTP 404" not in str(exc):
+                    raise
                 # The current month is often unavailable as a monthly archive
                 # until it closes. Fall back to official daily files for that
                 # month; never synthesize or forward-fill OHLC candles.
