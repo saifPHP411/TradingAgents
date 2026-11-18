@@ -48,6 +48,7 @@ jobs:
               f"{base}/klines/BTCUSDT/4h/BTCUSDT-4h-2026-10.zip",
               f"{base}/markPriceKlines/BTCUSDT/4h/BTCUSDT-4h-2026-10.zip",
               f"{base}/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2026-10.zip",
+              "https://data.binance.vision/data/futures/um/daily/markPriceKlines/BTCUSDT/4h/BTCUSDT-4h-2026-06-30.zip",
           ]
           for url in samples:
               response = requests.get(
