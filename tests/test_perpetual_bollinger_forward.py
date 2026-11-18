@@ -78,7 +78,7 @@ def test_forward_loader_uses_exchange_filters_and_starts_trading_at_cutoff():
         ):
             assert symbol == "BTCUSDT"
             assert interval_minutes == 480
-            assert end_ms == int(index[-1].timestamp() * 1000)
+            assert end_ms == int(index[260].timestamp() * 1000)
             return funding
 
     loaded = _load_symbol_window(
@@ -95,4 +95,71 @@ def test_forward_loader_uses_exchange_filters_and_starts_trading_at_cutoff():
     assert trade_start_index == 260
     assert filters["min_notional"] == 5.0
     assert filters["quantity_step"] == 0.001
-    assert filters["source"].startswith("current Binance USD-M")
+    assert filters["executable_filters_verified"] is False
+    assert filters["source"].startswith("Binance Vision research placeholders")
+
+@pytest.mark.unit
+def test_forward_funding_assumptions_are_explicit_and_do_not_rewrite_history():
+    from tradingagents.crypto.backtest.perpetual_bollinger_forward import (
+        _funding_with_forward_assumption,
+    )
+
+    historical_index = pd.date_range(
+        "2026-10-31T00:00:00Z", periods=3, freq="8h"
+    )
+    historical = pd.Series(
+        [-0.0001, 0.0002, -0.0001],
+        index=historical_index,
+        name="funding_rate",
+    )
+    historical.attrs["funding_interval_minutes"] = pd.Series(
+        480, index=historical_index, dtype=int
+    )
+    cutoff = pd.Timestamp("2026-11-01T00:00:00Z")
+    last_candle = pd.Timestamp("2026-11-03T20:00:00Z")
+
+    positive = _funding_with_forward_assumption(
+        historical,
+        forward_start=cutoff,
+        last_candle=last_candle,
+        interval_minutes=480,
+        forward_rate=0.0001,
+    )
+
+    assert positive.loc[historical_index].tolist() == historical.tolist()
+    assert positive.loc[cutoff] == pytest.approx(0.0001)
+    assert positive.loc[pd.Timestamp("2026-11-02T00:00:00Z")] == pytest.approx(0.0001)
+    assert positive.attrs["forward_funding_assumption"] == pytest.approx(0.0001)
+    assert positive.attrs["funding_interval_minutes"].eq(480).all()
+
+    zero = _funding_with_forward_assumption(
+        historical,
+        forward_start=cutoff,
+        last_candle=last_candle,
+        interval_minutes=480,
+        forward_rate=0.0,
+    )
+    negative = _funding_with_forward_assumption(
+        historical,
+        forward_start=cutoff,
+        last_candle=last_candle,
+        interval_minutes=480,
+        forward_rate=-0.0001,
+    )
+    assert zero.loc[cutoff] == 0.0
+    assert negative.loc[cutoff] == pytest.approx(-0.0001)
+
+
+@pytest.mark.unit
+def test_forward_report_does_not_claim_real_exchange_filters():
+    from tradingagents.crypto.backtest.perpetual_bollinger_forward import (
+        _load_symbol_window,
+    )
+
+    # The loader contract is tested separately with a fake Vision client;
+    # this assertion guards against reintroducing exchangeInfo claims.
+    import inspect
+
+    source = inspect.getsource(_load_symbol_window)
+    assert "Binance Vision research placeholders" in source
+    assert "executable_filters_verified" in source
