@@ -202,6 +202,29 @@ CANDIDATES: dict[str, dict] = {
         "mean_reversion_min_rsi_recovery": 2.5,
         "atr_multiple": 2.0, "max_holding_bars": 72,
     },
+    "bollinger_rsi_adverse_di_exit": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 2.0,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 32.0,
+        "mean_reversion_rsi_short": 68.0, "mean_reversion_max_adx": 18.0,
+        "mean_reversion_exit_adx": 22.0,
+        "mean_reversion_exit_confirmation_bars": 2,
+        "mean_reversion_exit_requires_adverse_di": True,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
+    "bollinger_rsi_di_confirmed_recovery": {
+        "signal_mode": "bollinger_reversion",
+        "fast": 14, "slow": 50, "trend": 200, "min_adx": None,
+        "mean_reversion_period": 20, "mean_reversion_std": 2.0,
+        "mean_reversion_rsi_period": 14, "mean_reversion_rsi_long": 32.0,
+        "mean_reversion_rsi_short": 68.0, "mean_reversion_max_adx": 18.0,
+        "mean_reversion_exit_adx": 22.0,
+        "mean_reversion_exit_confirmation_bars": 2,
+        "mean_reversion_exit_requires_adverse_di": True,
+        "mean_reversion_require_directional_confirmation": True,
+        "atr_multiple": 2.0, "max_holding_bars": 72,
+    },
 }
 
 
@@ -306,7 +329,7 @@ def _build_trade_ledger(records: list[dict], aligned: dict, warmup_bars: int, ov
             snapshot = {}
             if signal_ts in feature_frame.index:
                 sig = feature_frame.loc[signal_ts]
-                for key in ("close", "mean_target", "mean_lower", "mean_upper", "rsi", "adx", "atr", "signal"):
+                for key in ("close", "mean_target", "mean_lower", "mean_upper", "rsi", "adx", "plus_di", "minus_di", "atr", "signal"):
                     value = sig.get(key)
                     snapshot[key] = None if pd.isna(value) else float(value)
                 previous = feature_frame.loc[signal_ts - pd.Timedelta(hours=4)] if signal_ts - pd.Timedelta(hours=4) in feature_frame.index else None
@@ -435,7 +458,7 @@ def run_lab(args: argparse.Namespace) -> dict:
                     "acceptance_gate": gate,
                     **({
                         "trade_ledger": _build_trade_ledger(records, aligned, args.warmup_bars, overrides)
-                    } if candidate_name == "selective_bollinger_rsi_range" else {}),
+                    } if candidate_name.startswith("bollinger_rsi") or candidate_name == "selective_bollinger_rsi_range" else {}),
                 }
             passed = all(item["gate"]["passed"] for item in by_scenario.values())
             pfs = [
@@ -525,6 +548,12 @@ def main() -> int:
         "selective_bollinger_rsi_range/2x/realistic_estimate",
         "selective_bollinger_rsi_range/2x/conservative",
         "selective_bollinger_rsi_range/2x/stress",
+        "bollinger_rsi_adverse_di_exit/2x/realistic_estimate",
+        "bollinger_rsi_adverse_di_exit/2x/conservative",
+        "bollinger_rsi_adverse_di_exit/2x/stress",
+        "bollinger_rsi_di_confirmed_recovery/2x/realistic_estimate",
+        "bollinger_rsi_di_confirmed_recovery/2x/conservative",
+        "bollinger_rsi_di_confirmed_recovery/2x/stress",
     ):
         report_row = report["reports"].get(key, {})
         print(
