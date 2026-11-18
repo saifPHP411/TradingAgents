@@ -77,7 +77,7 @@ def test_binance_vision_funding_keeps_negative_and_positive_rates():
     rows = (
         "calc_time,funding_interval_hours,last_funding_rate\n"
         f"{start},8,-0.0001\n"
-        f"{start + interval},8,0.0002\n"
+        f"{start + interval + 3},8,0.0002\n"
     )
     suffix = "/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2025-01.zip"
     client = _client(
@@ -94,6 +94,7 @@ def test_binance_vision_funding_keeps_negative_and_positive_rates():
     assert rates.iloc[0] == pytest.approx(-0.0001)
     assert rates.iloc[1] == pytest.approx(0.0002)
     assert str(rates.index.tz) == "UTC"
+    assert str(rates.index[1]) == "2025-01-01 08:00:00+00:00"
     assert list(rates.attrs["funding_interval_minutes"]) == [480, 480]
 
 
