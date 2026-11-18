@@ -3,10 +3,6 @@ name: Manual selective perpetual strategy research
 on:
   workflow_dispatch:
     inputs:
-      exclude_after:
-        description: "Exact UTC timestamp marking the previously inspected final holdout start (ISO-8601, e.g. 2026-01-01T00:00:00+00:00)"
-        required: true
-        type: string
       days:
         description: "Maximum history lookback in days"
         required: true
