@@ -87,7 +87,7 @@ def test_binance_vision_funding_keeps_negative_and_positive_rates():
     rates = client.funding_rates(
         "BTCUSDT",
         start_ms=start,
-        end_ms=start + interval,
+        end_ms=start + interval + 1_000,
         interval_minutes=480,
     )
 
@@ -117,14 +117,14 @@ def test_binance_vision_recovers_missing_mark_candle_from_daily_archive():
     start = 1_735_689_600_000
     interval = 4 * 60 * 60 * 1000
     end = start + 3 * interval
-    monthly_rows = "\\n".join(
+    monthly_rows = "\n".join(
         [
             "open_time,open,high,low,close,volume,close_time",
             f"{start},100,102,99,101,0,{start + interval - 1}",
             f"{start + 2 * interval},102,104,101,103,0,{start + 3 * interval - 1}",
         ]
     )
-    daily_rows = "\\n".join(
+    daily_rows = "\n".join(
         [
             "open_time,open,high,low,close,volume,close_time",
             f"{start + interval},101,103,100,102,0,{start + 2 * interval - 1}",
