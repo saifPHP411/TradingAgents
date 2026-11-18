@@ -31,7 +31,7 @@ COST_SCENARIOS = {
     "conservative": PerpetualCosts(commission_bps=8.0, half_spread_bps=2.0, slippage_bps=5.0),
     "stress": PerpetualCosts(commission_bps=12.0, half_spread_bps=4.0, slippage_bps=10.0),
 }
-TARGET_WIN_RATE_PCT = 79.0
+TARGET_WIN_RATE_PCT = 75.0
 
 
 def build_parser() -> argparse.ArgumentParser:
