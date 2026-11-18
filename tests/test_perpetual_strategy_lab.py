@@ -113,7 +113,7 @@ def test_development_gate_rejects_target_miss_low_expectancy_or_risk_failures():
 
 @pytest.mark.unit
 def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_families():
-    assert len(CANDIDATES) == 19
+    assert len(CANDIDATES) == 22
     assert {
         "ema_14_50_adx18",
         "ema_9_30_adx22",
@@ -134,6 +134,9 @@ def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_fa
         "selective_bollinger_rsi_range_quality20",
         "bollinger_rsi_adverse_di_exit_quality20",
         "bollinger_rsi_adverse_di_exit_quality20_early_exit",
+        "bollinger_rsi_quality20_tighter_atr18",
+        "bollinger_rsi_quality20_fast_trend_exit",
+        "bollinger_rsi_quality20_reward_risk05",
     } == set(CANDIDATES)
     assert {"ema_cross", "donchian_breakout", "bollinger_reversion"} == {
         candidate["signal_mode"] for candidate in CANDIDATES.values()
@@ -156,6 +159,9 @@ def test_tournament_candidates_are_fixed_and_include_trend_and_mean_reversion_fa
             "selective_bollinger_rsi_range_quality20",
             "bollinger_rsi_adverse_di_exit_quality20",
             "bollinger_rsi_adverse_di_exit_quality20_early_exit",
+            "bollinger_rsi_quality20_tighter_atr18",
+            "bollinger_rsi_quality20_fast_trend_exit",
+            "bollinger_rsi_quality20_reward_risk05",
         )
     )
 
@@ -310,3 +316,24 @@ def test_early_exit_quality_candidate_is_a_small_controlled_follow_up():
     assert candidate["mean_reversion_exit_requires_adverse_di"] is True
     assert control["mean_reversion_exit_adx"] == 24.0
     assert control["mean_reversion_exit_confirmation_bars"] == 2
+
+@pytest.mark.unit
+def test_quality20_exit_experiments_change_one_risk_control_at_a_time():
+    baseline = CANDIDATES["bollinger_rsi_adverse_di_exit_quality20"]
+    tighter = CANDIDATES["bollinger_rsi_quality20_tighter_atr18"]
+    fast_exit = CANDIDATES["bollinger_rsi_quality20_fast_trend_exit"]
+    reward_filter = CANDIDATES["bollinger_rsi_quality20_reward_risk05"]
+
+    assert tighter["atr_multiple"] == 1.8
+    assert fast_exit["mean_reversion_exit_adx"] == 20.0
+    assert fast_exit["mean_reversion_exit_confirmation_bars"] == 1
+    assert reward_filter["mean_reversion_min_reward_risk"] == 0.5
+    for candidate in (tighter, fast_exit, reward_filter):
+        for key in (
+            "mean_reversion_std",
+            "mean_reversion_rsi_long",
+            "mean_reversion_rsi_short",
+            "mean_reversion_max_adx",
+            "mean_reversion_min_rsi_recovery",
+        ):
+            assert candidate[key] == baseline[key]
