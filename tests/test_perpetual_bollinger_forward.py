@@ -36,7 +36,7 @@ def test_forward_candidates_are_fixed_and_do_not_mutate_development_definitions(
 
 
 @pytest.mark.unit
-def test_forward_loader_uses_exchange_filters_and_starts_trading_at_cutoff():
+def test_forward_loader_uses_vision_placeholders_and_starts_trading_at_cutoff():
     index = pd.date_range("2026-09-01", periods=300, freq="4h", tz="UTC")
     frame = pd.DataFrame(
         {
@@ -79,7 +79,7 @@ def test_forward_loader_uses_exchange_filters_and_starts_trading_at_cutoff():
             assert symbol == "BTCUSDT"
             assert interval_minutes == 480
             assert end_ms == int(index[260].timestamp() * 1000)
-            return funding
+            return funding.loc[funding.index < index[260]]
 
     loaded = _load_symbol_window(
         FakeClient(),
@@ -91,7 +91,7 @@ def test_forward_loader_uses_exchange_filters_and_starts_trading_at_cutoff():
     _instrument, traded, mark, rates, trade_start_index, filters = loaded
 
     assert traded.index.equals(mark.index)
-    assert rates.equals(funding)
+    assert rates.equals(funding.loc[funding.index < index[260]])
     assert trade_start_index == 260
     assert filters["min_notional"] == 5.0
     assert filters["quantity_step"] == 0.001
