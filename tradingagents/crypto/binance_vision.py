@@ -178,7 +178,7 @@ class BinanceVisionPublicClient:
             csv_data = self._csv_bytes(path)
             raw = pd.read_csv(io.BytesIO(csv_data))
             names = {
-                str(column).strip().lower().lstrip("\\ufeff"): column
+                str(column).strip().lower().lstrip("\ufeff"): column
                 for column in raw.columns
             }
             if {"open_time", "open", "high", "low", "close"}.issubset(names):
