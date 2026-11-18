@@ -324,11 +324,48 @@ def run_backtest(
     rates.index = rates.index.tz_convert("UTC")
     if rates.index.has_duplicates or not rates.index.is_monotonic_increasing or rates.isna().any() or not rates.map(math.isfinite).all() or (rates.abs() > 0.05).any():
         raise ValueError("funding rates must be finite, unique, ordered and within +/-5%")
-    funding_gap = pd.Timedelta(minutes=instrument.funding_interval_minutes)
-    if len(rates) > 1 and not (rates.index.to_series().diff().dropna() == funding_gap).all():
-        raise ValueError("funding history contains missing or irregular settlement events")
-    if rates.index[0] - trade.index[0] > funding_gap or trade.index[-1] - rates.index[-1] > funding_gap:
-        raise ValueError("funding history does not cover the candle window within one venue settlement interval")
+    event_intervals = funding_rates.attrs.get("funding_interval_minutes")
+    if isinstance(event_intervals, pd.Series):
+        event_intervals = event_intervals.reindex(rates.index)
+        if (
+            event_intervals.isna().any()
+            or not event_intervals.map(
+                lambda value: math.isfinite(float(value))
+                and 1 <= int(value) <= 480
+                and float(value).is_integer()
+            ).all()
+        ):
+            raise ValueError("funding interval metadata is incomplete or invalid")
+        event_intervals = event_intervals.astype(int)
+        funding_gap = pd.Timedelta(minutes=int(event_intervals.max()))
+        if len(rates) > 1:
+            actual_gaps = rates.index.to_series().diff().dropna().reset_index(drop=True)
+            previous_intervals = event_intervals.iloc[:-1].reset_index(drop=True)
+            next_intervals = event_intervals.iloc[1:].reset_index(drop=True)
+            valid = (
+                actual_gaps == pd.to_timedelta(previous_intervals, unit="m")
+            ) | (
+                actual_gaps == pd.to_timedelta(next_intervals, unit="m")
+            )
+            if not valid.all():
+                raise ValueError(
+                    "funding history contains missing or irregular settlement events"
+                )
+    else:
+        funding_gap = pd.Timedelta(minutes=instrument.funding_interval_minutes)
+        if len(rates) > 1 and not (
+            rates.index.to_series().diff().dropna() == funding_gap
+        ).all():
+            raise ValueError(
+                "funding history contains missing or irregular settlement events"
+            )
+    if (
+        rates.index[0] - trade.index[0] > funding_gap
+        or trade.index[-1] - rates.index[-1] > funding_gap
+    ):
+        raise ValueError(
+            "funding history does not cover the candle window within one venue settlement interval"
+        )
     if not (rates.index.isin(trade.index)).all():
         raise ValueError("each funding event must align exactly to a candle open")
     if len(trade) < cfg.trend + cfg.atr_period + 3:
