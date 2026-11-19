@@ -526,9 +526,12 @@ class PerpetualDemoController:
                 if updated and (updated < start_ms or updated > end_ms):
                     continue
                 average_entry = row.get("avg_entry_price")
-                if expected_entry > 0 and average_entry:
-                    if abs(float(average_entry) - expected_entry) / expected_entry > 0.01:
-                        continue
+                if (
+                    expected_entry > 0
+                    and average_entry
+                    and abs(float(average_entry) - expected_entry) / expected_entry > 0.01
+                ):
+                    continue
                 matches.append(row)
             if not matches:
                 return {"attribution_status": "closed_pnl_not_found"}
@@ -766,7 +769,7 @@ class PerpetualDemoController:
                 confirmed = bool(meta.get("venue_position_confirmed", True))
                 if not confirmed:
                     order_rows = []
-                    try:
+                    with contextlib.suppress(Exception):
                         order_rows = self.broker.get_order_history(
                             symbol=symbol,
                             order_link_id=meta.get("order_link_id"),
@@ -777,8 +780,6 @@ class PerpetualDemoController:
                             ),
                             limit=5,
                         )
-                    except Exception:
-                        pass
                     entry_order = order_rows[0] if order_rows else {}
                     filled_quantity = float(entry_order.get("cum_exec_qty") or 0.0)
                     entry_status = str(entry_order.get("order_status") or "")
