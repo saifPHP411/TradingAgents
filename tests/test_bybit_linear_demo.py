@@ -55,10 +55,15 @@ class Public:
 
 
 class ScriptedTransport:
-    def __init__(self, *, position_rows=None, orders=None, create_error=None):
+    def __init__(
+        self, *, position_rows=None, orders=None, closed_rows=None,
+        history_rows=None, create_error=None
+    ):
         self.calls = []
         self.position_rows = position_rows or []
         self.orders = orders or []
+        self.closed_rows = closed_rows or []
+        self.history_rows = history_rows or []
         self.create_error = create_error
 
     def __call__(self, *, method, url, headers, params=None, data=None, timeout):
@@ -77,6 +82,10 @@ class ScriptedTransport:
         path = url.rsplit("/", 1)[-1]
         if method == "GET" and path == "tickers":
             return Response({"retCode": 0, "result": {"list": [{"markPrice": "100"}]}})
+        if method == "GET" and path == "closed-pnl":
+            return Response({"retCode": 0, "result": {"list": self.closed_rows}})
+        if method == "GET" and path == "history":
+            return Response({"retCode": 0, "result": {"list": self.history_rows}})
         if method == "GET" and path in {"list", "realtime"}:
             if url.endswith("/v5/position/list"):
                 return Response({"retCode": 0, "result": {"list": self.position_rows}})
@@ -329,3 +338,111 @@ def test_signed_get_query_order_matches_wire_parameter_order():
         b"demo-secret", signature_payload.encode(), hashlib.sha256
     ).hexdigest()
     assert call["headers"]["X-BAPI-SIGN"] == expected
+
+
+def test_get_closed_pnl_returns_exchange_prices_pnl_and_fees():
+    transport = ScriptedTransport(
+        closed_rows=[
+            {
+                "symbol": "BTCUSDT",
+                "orderId": "close-order-1",
+                "side": "Sell",
+                "qty": "0.001",
+                "closedSize": "0.001",
+                "avgEntryPrice": "64000",
+                "avgExitPrice": "63900",
+                "closedPnl": "-0.12",
+                "openFee": "0.035",
+                "closeFee": "0.035",
+                "fillCount": "2",
+                "leverage": "2",
+                "createdTime": "1700000001000",
+                "updatedTime": "1700000002000",
+            }
+        ]
+    )
+    result = broker(transport).get_closed_pnl(
+        symbol="BTCUSDT",
+        start_time_ms=1_700_000_000_000,
+        end_time_ms=1_700_000_060_000,
+    )
+
+    assert result == [
+        {
+            "symbol": "BTCUSDT",
+            "order_id": "close-order-1",
+            "side": "Sell",
+            "qty": 0.001,
+            "closed_size": 0.001,
+            "avg_entry_price": 64000.0,
+            "avg_exit_price": 63900.0,
+            "closed_pnl": -0.12,
+            "open_fee": 0.035,
+            "close_fee": 0.035,
+            "fill_count": 2.0,
+            "leverage": 2.0,
+            "created_time_ms": 1_700_000_001_000,
+            "updated_time_ms": 1_700_000_002_000,
+        }
+    ]
+    call = next(c for c in transport.calls if c["url"].endswith("/v5/position/closed-pnl"))
+    assert call["params"]["category"] == "linear"
+    assert call["params"]["symbol"] == "BTCUSDT"
+
+
+def test_get_order_history_identifies_attached_stop_or_take_profit():
+    transport = ScriptedTransport(
+        history_rows=[
+            {
+                "symbol": "SOLUSDT",
+                "orderId": "stop-order-1",
+                "orderLinkId": "sl-child-order",
+                "parentOrderLinkId": "SC-SOLUSDT-1700000000000",
+                "side": "Sell",
+                "qty": "0.1",
+                "orderStatus": "Filled",
+                "orderType": "Market",
+                "stopOrderType": "Stop",
+                "avgPrice": "74.98",
+                "cumExecQty": "0.1",
+                "cumExecValue": "7.498",
+                "triggerPrice": "74.98",
+                "takeProfit": "75.31",
+                "stopLoss": "74.98",
+                "tpslMode": "Full",
+                "tpTriggerBy": "MarkPrice",
+                "slTriggerBy": "MarkPrice",
+                "triggerBy": "MarkPrice",
+                "reduceOnly": True,
+                "closeOnTrigger": True,
+                "rejectReason": "",
+                "cancelType": "",
+                "positionIdx": 0,
+                "createdTime": "1700000001000",
+                "updatedTime": "1700000002000",
+            }
+        ]
+    )
+    result = broker(transport).get_order_history(
+        symbol="SOLUSDT",
+        order_id="stop-order-1",
+        start_time_ms=1_700_000_000_000,
+        end_time_ms=1_700_000_060_000,
+    )
+
+    assert result[0]["stop_order_type"] == "Stop"
+    assert result[0]["parent_order_link_id"] == "SC-SOLUSDT-1700000000000"
+    assert result[0]["trigger_price"] == 74.98
+    assert result[0]["reduce_only"] is True
+    assert result[0]["close_on_trigger"] is True
+    call = next(c for c in transport.calls if c["url"].endswith("/v5/order/history"))
+    assert call["params"]["orderId"] == "stop-order-1"
+
+
+def test_history_endpoints_reject_windows_larger_than_seven_days():
+    instance = broker(ScriptedTransport())
+    with pytest.raises(ValueError, match="seven days"):
+        instance.get_closed_pnl(
+            start_time_ms=1_700_000_000_000,
+            end_time_ms=1_700_700_000_000,
+        )
