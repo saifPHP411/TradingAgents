@@ -111,7 +111,7 @@ def test_perpetual_position_flat_state_must_match_chart_symbol(tmp_path):
     path = tmp_path / "perpetual_open_position.json"
     path.write_text(json.dumps({"state": "FLAT", "symbol": "ETHUSDT"}), encoding="utf-8")
 
-    status, position = dashboard._perpetual_position_view("BTCUSDT")
+    status, position, source = dashboard._perpetual_position_view("BTCUSDT")
 
     assert status == "invalid"
     assert position is None
