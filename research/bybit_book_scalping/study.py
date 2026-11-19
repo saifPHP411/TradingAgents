@@ -15,16 +15,16 @@ WEEK = 7 * 86400_000
 PROFILES = ("pressure_break", "exhaustion", "compression", "passive_retest")
 
 
-def load(start_date):
+def load(start_date, days=28):
     frames = []
-    for day in pd.date_range(start_date, periods=28):
+    for day in pd.date_range(start_date, periods=days):
         day_start = day.value // 10**6
         f = pd.read_csv(f"{day:%Y-%m-%d}.csv", names=COLS)
         frames.append(f.loc[f.ts.between(day_start, day_start + 86400_000 - 1)])
     df = pd.concat(frames, ignore_index=True).sort_values("ts")
     df = df.loc[~(df.ts // 5000).duplicated()].reset_index(drop=True)
     assert (df.ask > df.bid).all() and (df[COLS[3:]] > 0).all().all()
-    assert len(df) > 0.999 * 28 * 17280 and df.ts.diff().max() < 30000
+    assert len(df) > 0.999 * days * 17280 and df.ts.diff().max() < 30000
     return df
 
 
