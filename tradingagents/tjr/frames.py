@@ -152,7 +152,10 @@ class IntradaySeries:
         is inclusive of the close instant, because a bar is complete at its close.
         """
         cutoff = pd.Timestamp(as_of) - pd.Timedelta(minutes=self.bar_minutes)
-        return self.frame[self.frame.index <= cutoff]
+        # normalize_frame sorts the UTC DatetimeIndex once. searchsorted avoids a
+        # full-history boolean scan on every 1m/5m decision in a long backtest.
+        end = self.frame.index.searchsorted(cutoff, side="right")
+        return self.frame.iloc[:end]
 
     def session_bars(self, session: str, as_of: pd.Timestamp) -> pd.DataFrame:
         """The session's bars that had closed by ``as_of``.
@@ -162,9 +165,21 @@ class IntradaySeries:
         for the session to be open. For the equity default this is the 09:30–16:00
         ET window; for a 24/7 crypto policy it is the whole local day.
         """
-        frame = self.available(as_of)
-        if frame.empty:
-            return frame
+        cutoff = pd.Timestamp(as_of) - pd.Timedelta(minutes=self.bar_minutes)
+        session_open, _ = self.session.session_bounds(session)
+        if cutoff < session_open:
+            return self.frame.iloc[:0]
+
+        # Only inspect this session's prefix. The previous implementation first
+        # scanned every historical bar in available(), then built a session mask
+        # over that entire prefix at every decision instant. For a 120-day 1m
+        # cache this made the TJR loop roughly quadratic in history length.
+        index = self.frame.index
+        start = index.searchsorted(session_open, side="left")
+        end = index.searchsorted(cutoff, side="right")
+        if end <= start:
+            return self.frame.iloc[:0]
+        frame = self.frame.iloc[start:end]
         return frame[self.session.index_mask(frame.index, session)]
 
     def last_close(self, as_of: pd.Timestamp) -> float | None:
