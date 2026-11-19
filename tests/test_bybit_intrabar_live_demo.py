@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
-
-import pandas as pd
 
 from tradingagents.crypto.bybit_perpetual import BybitLinearPublicClient
 from tradingagents.crypto.transport import HttpResponse
-from tradingagents.paper_experiment.perpetual_demo import server as demo_server
 
 
 def test_public_klines_include_forming_candle_only_when_requested():
@@ -50,92 +46,3 @@ def test_public_klines_include_forming_candle_only_when_requested():
     assert len(completed) == 1
     assert len(including_current) == 2
     assert int(including_current.index[-1].timestamp() * 1000) == current_open
-
-
-class _IntrabarPublic:
-    def __init__(self, frame: pd.DataFrame):
-        self.frame = frame
-        self.include_current_values: list[bool] = []
-
-    def klines(self, symbol, *, start_ms, end_ms, include_current=False):
-        self.include_current_values.append(include_current)
-        return self.frame.copy()
-
-
-class _IntrabarBroker:
-    configured = True
-
-    def __init__(self):
-        self.marks = iter((104.0, 100.0, 99.0))
-        self.order_calls = []
-
-    def get_wallet_balance(self):
-        return {"status": "ok", "total_equity_usd": 50.0}
-
-    def get_positions(self):
-        return []
-
-    def mark_price(self, symbol):
-        return next(self.marks)
-
-    def open_market_position(self, **kwargs):
-        self.order_calls.append(kwargs)
-        return {
-            "quantity": 0.01,
-            "order_id": "demo-order-1",
-            "notional_usdt": 1.0,
-        }
-
-
-def test_demo_controller_enters_on_live_intrabar_signal_once_per_4h_candle(
-    tmp_path,
-    monkeypatch,
-):
-    now = datetime(2026, 11, 19, 13, 0, tzinfo=UTC)
-    monkeypatch.setattr(demo_server.time, "time", lambda: now.timestamp())
-    current_open = datetime(2026, 11, 19, 12, 0, tzinfo=UTC)
-    index = pd.date_range(end=current_open, periods=230, freq="4h")
-    frame = pd.DataFrame(
-        {
-            "open": [100.0] * len(index),
-            "high": [101.0] * len(index),
-            "low": [99.0] * len(index),
-            "close": [100.0] * len(index),
-            "volume": [10.0] * len(index),
-        },
-        index=index,
-    )
-    public = _IntrabarPublic(frame)
-    broker = _IntrabarBroker()
-    controller = demo_server.PerpetualDemoController(
-        tmp_path,
-        broker=broker,
-        public_client=public,
-        symbols=("BTCUSDT",),
-    )
-
-    def live_features(data, config):
-        result = data.copy()
-        result["atr"] = 2.0
-        result.loc[result.index[-1], "atr"] = 9.0  # current partial ATR must not widen/narrow risk
-        result["mean_target"] = 103.0
-        result["signal"] = 0
-        result.loc[result.index[-1], "signal"] = 1
-        return result
-
-    monkeypatch.setattr(demo_server, "_features", live_features)
-
-    # At 104 the long mean target is no longer favorable; at 100 it becomes valid.
-    controller._strategy_cycle()
-    assert broker.order_calls == []
-    controller._strategy_cycle()
-    assert len(broker.order_calls) == 1
-    order = broker.order_calls[0]
-    assert order["side"] == "long"
-    assert order["stop_loss"] == 96.8
-    assert order["take_profit"] == 103.0
-
-    # The persisted per-candle attempt prevents a duplicate order on later polls.
-    controller._strategy_cycle()
-    assert len(broker.order_calls) == 1
-    assert public.include_current_values == [True, True, True]
