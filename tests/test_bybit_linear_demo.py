@@ -313,6 +313,7 @@ def test_zero_position_rows_are_ignored():
     ])
     assert broker(transport).get_positions() == []
 
+
 def test_signed_get_query_order_matches_wire_parameter_order():
     transport = ScriptedTransport()
     instance = broker(transport)
