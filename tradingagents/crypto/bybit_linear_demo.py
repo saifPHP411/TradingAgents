@@ -160,7 +160,11 @@ class BybitLinearDemoBroker:
         url = DEMO_BASE_URL + path
         if not url.startswith(DEMO_BASE_URL + "/"):
             raise BybitLinearDemoRejected("refused a non-Demo Bybit endpoint")
-        query = dict(params or {})
+        # The exact query-string order sent over HTTP must match the order
+        # used in the V5 HMAC signature. Signing sorted keys while allowing
+        # requests to serialize the original insertion order causes retCode
+        # 10004 (signature error) on endpoints whose parameter order differs.
+        query = dict(sorted((params or {}).items(), key=lambda item: str(item[0])))
         payload = dict(body or {})
         headers = {"Accept": "application/json"}
         data = None
