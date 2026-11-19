@@ -20,7 +20,7 @@ means what a trader means by it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -133,6 +133,8 @@ class IntradaySeries:
     interval: str
     frame: pd.DataFrame
     session: SessionPolicy = DEFAULT_SESSION_POLICY
+    _analysis_cache: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+    """Per-series causal feature cache shared by point-in-time evaluations."""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", self.symbol.upper())
