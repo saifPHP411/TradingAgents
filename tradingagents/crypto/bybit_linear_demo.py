@@ -538,16 +538,23 @@ class BybitLinearDemoBroker:
         steps = (lev - instrument.min_leverage) / instrument.leverage_step
         if not math.isclose(steps, round(steps), rel_tol=0, abs_tol=1e-8):
             raise BybitLinearDemoRejected("requested leverage does not match the instrument leverage step")
-        self._request(
-            "POST",
-            "/v5/position/set-leverage",
-            body={
-                "category": "linear",
-                "symbol": symbol,
-                "buyLeverage": _decimal_string(lev),
-                "sellLeverage": _decimal_string(lev),
-            },
-        )
+        try:
+            self._request(
+                "POST",
+                "/v5/position/set-leverage",
+                body={
+                    "category": "linear",
+                    "symbol": symbol,
+                    "buyLeverage": _decimal_string(lev),
+                    "sellLeverage": _decimal_string(lev),
+                },
+            )
+        except BybitLinearDemoRejected as exc:
+            # Bybit retCode 110043 means the requested leverage is already set.
+            # It is a no-op success, not an order rejection; continue only for
+            # this exact response and keep every other exchange rejection fatal.
+            if "(retCode 110043)" not in str(exc):
+                raise
 
     def _assert_no_position_or_entry_order(self, symbol: str) -> None:
         positions = [p for p in self.get_positions() if p["symbol"] == symbol]
