@@ -88,10 +88,10 @@ jobs:
             --cache ./crypto-cache
       - name: Fetch up to 120 days of hourly candles required by regime-breakout
         run: |
-          python -m tradingagents.crypto.backtest.fetch \\
-            --symbols BTC/USDT ETH/USDT BNB/USDT \\
-            --interval 1h \\
-            --limit 2880 \\
+          python -m tradingagents.crypto.backtest.fetch \
+            --symbols BTC/USDT ETH/USDT BNB/USDT \
+            --interval 1h \
+            --limit 2880 \
             --cache ./crypto-cache
       - name: Run TJR baseline with explicit execution costs
         run: |
