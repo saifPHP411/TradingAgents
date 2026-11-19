@@ -57,10 +57,9 @@ def previous_session_levels(
     series: IntradaySeries, session: str, as_of: pd.Timestamp
 ) -> list[LiquidityLevel]:
     """The previous session's high and low, if that session is in the data."""
-    prior_sessions = _sessions_before(series, session, as_of)
-    if not prior_sessions:
+    previous = _previous_session(series, session, as_of)
+    if previous is None:
         return []
-    previous = prior_sessions[-1]
     bars = series.session_bars(previous, as_of)
     levels: list[LiquidityLevel] = []
     formed = series.session.session_close_utc(previous)
@@ -107,12 +106,42 @@ def running_extreme_before(frame: pd.DataFrame, *, kind: str) -> pd.Series:
     return values.shift(1).cummin()
 
 
-def _sessions_before(series: IntradaySeries, session: str, as_of: pd.Timestamp) -> list[str]:
-    frame = series.available(as_of)
-    if frame.empty:
-        return []
-    days = frame.index.tz_convert(series.session.timezone).strftime("%Y-%m-%d")
-    return sorted({d for d in days if d < session})
+def _previous_session(
+    series: IntradaySeries, session: str, as_of: pd.Timestamp
+) -> str | None:
+    """Latest available local-calendar session before the current one, without a history scan."""
+    index = series.frame.index
+    cutoff = pd.Timestamp(as_of) - pd.Timedelta(minutes=series.bar_minutes)
+    available_end = index.searchsorted(cutoff, side="right")
+    session_day_start = pd.Timestamp(session, tz=series.session.timezone).tz_convert("UTC")
+    current_day_start = index.searchsorted(session_day_start, side="left")
+    prior_end = min(available_end, current_day_start)
+    if prior_end <= 0:
+        return None
+    return series.session.session_of(index[prior_end - 1])
+
+
+def _confirmed_swing_points(
+    series: IntradaySeries, as_of: pd.Timestamp, *, lookback: int
+) -> list[Swing]:
+    """Reuse full-series swing calculations, exposing only swings confirmed by as_of.
+
+    A swing's confirmation bar is stored by its bar-start timestamp. Requiring that
+    bar's close to be at or before as_of is exactly the same causal cut as the
+    point-in-time frame, while avoiding a full-history rolling calculation at every
+    intraday decision.
+    """
+    key = ("tjr_swing_points", lookback)
+    swings = series._analysis_cache.get(key)
+    if swings is None:
+        swings = swing_points(series.frame, lookback=lookback)
+        series._analysis_cache[key] = swings
+    closed_by = pd.Timestamp(as_of)
+    return [
+        swing
+        for swing in swings
+        if swing.confirmed_at + pd.Timedelta(minutes=series.bar_minutes) <= closed_by
+    ]
 
 
 def completed_bar_levels(
@@ -144,11 +173,13 @@ def swing_levels(
     series: IntradaySeries, as_of: pd.Timestamp, *, lookback: int = 2
 ) -> list[LiquidityLevel]:
     """Confirmed swing highs and lows, as liquidity levels."""
-    frame = series.available(as_of)
-    if frame.empty:
-        return []
+    swings = _confirmed_swing_points(series, as_of, lookback=lookback)
+    return _swing_levels_from_points(swings)
+
+
+def _swing_levels_from_points(swings: list[Swing]) -> list[LiquidityLevel]:
     out: list[LiquidityLevel] = []
-    for swing in swing_points(frame, lookback=lookback):
+    for swing in swings:
         label = "swing_high" if swing.kind == "high" else "swing_low"
         out.append(
             LiquidityLevel(
@@ -216,9 +247,8 @@ def liquidity_levels(
         levels += completed_bar_levels(
             four_hour, label_prefix="prev_4h", session=session, as_of=as_of
         )
-    frame = base.available(as_of)
-    swings = swing_points(frame, lookback=swing_lookback) if not frame.empty else []
-    levels += swing_levels(base, as_of, lookback=swing_lookback)
+    swings = _confirmed_swing_points(base, as_of, lookback=swing_lookback)
+    levels += _swing_levels_from_points(swings)
     levels += equal_levels(swings, tolerance=equal_tolerance)
 
     seen: set[tuple[str, int]] = set()
