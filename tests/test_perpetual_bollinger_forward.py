@@ -14,7 +14,17 @@ from tradingagents.crypto.backtest.perpetual_bollinger_forward import (
     _count_forward_signals,
     _load_symbol_window,
     _parse_forward_start,
+    _safe_daily_archive_end,
 )
+
+
+@pytest.mark.unit
+def test_safe_daily_archive_end_excludes_the_latest_utc_day():
+    now = pd.Timestamp("2026-11-19T05:00:00Z")
+    assert _safe_daily_archive_end(now) == pd.Timestamp("2026-11-18T00:00:00Z")
+
+    with pytest.raises(ValueError, match="timezone"):
+        _safe_daily_archive_end(pd.Timestamp("2026-11-19T05:00:00"))
 
 
 @pytest.mark.unit

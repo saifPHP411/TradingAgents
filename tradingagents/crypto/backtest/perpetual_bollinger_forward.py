@@ -99,6 +99,14 @@ def _parse_forward_start(value: str) -> pd.Timestamp:
     return stamp
 
 
+def _safe_daily_archive_end(now: pd.Timestamp | None = None) -> pd.Timestamp:
+    """Exclude the latest UTC day because Vision daily archives may lag publication."""
+    current = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    if current.tzinfo is None:
+        raise ValueError("archive clock must include a timezone")
+    return current.tz_convert("UTC").normalize() - pd.Timedelta(days=1)
+
+
 def _validate_args(args: argparse.Namespace) -> pd.Timestamp:
     if not args.symbols or len(set(args.symbols)) != len(args.symbols):
         raise ValueError("symbols must be a non-empty unique list")
@@ -260,8 +268,9 @@ def _funding_with_forward_assumption(
 
 def run_forward_study(args: argparse.Namespace) -> dict:
     forward_start = _validate_args(args)
-    # Daily Vision archives are published after the UTC day has closed.
-    end = pd.Timestamp.now(tz="UTC").normalize()
+    # Vision daily archives can lag after UTC midnight. Exclude the latest
+    # completed UTC calendar day as well, rather than failing on partial archives.
+    end = _safe_daily_archive_end()
     if end <= forward_start:
         raise ValueError("no completed daily archive data exists after forward-start")
     start = forward_start - pd.Timedelta(hours=4 * args.warmup_bars)

@@ -68,7 +68,12 @@ jobs:
           if not math.isfinite(equity) or not 1.0 <= equity <= 1_000_000:
               raise SystemExit("initial equity must be finite and between 1 and 1000000 USDT")
           PY
-          python -m tradingagents.crypto.backtest.perpetual_bollinger_forward             --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT             --forward-start "$FORWARD_START"             --equity "$INITIAL_EQUITY"             --leverage 1 2             --warmup-bars 260             --output artifacts/perpetual_bollinger_forward.json
+          python -m tradingagents.crypto.backtest.perpetual_bollinger_forward \
+            --forward-start "$FORWARD_START" \
+            --equity "$INITIAL_EQUITY" \
+            --leverage 1 2 \
+            --warmup-bars 260 \
+            --output artifacts/perpetual_bollinger_forward.json
 
       - name: Upload forward-validation report
         if: always()
