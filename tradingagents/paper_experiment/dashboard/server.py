@@ -845,9 +845,10 @@ class Dashboard:
             status = result.get("status")
             position = result.get("position")
             if status == "flat" and position is None:
-                return "flat", None, "Bybit Demo read-only position endpoint"
+                return "flat", None, "validated futures position source"
             if status == "open" and isinstance(position, dict):
-                return "open", position, "Bybit Demo read-only position endpoint"
+                position["position_source"] = "Bybit Demo read-only position endpoint"
+                return "open", position, position.get("position_source")
             return "invalid", None, None
         except BybitPerpetualAccountNotConfigured:
             # With no credentials, a worker may still publish a validated local
@@ -871,7 +872,7 @@ class Dashboard:
         if raw_symbol != symbol:
             return "invalid", None, None
         if state == "FLAT":
-            return "flat", None, "validated local futures snapshot"
+            return "flat", None, "validated futures position source"
         if state != "OPEN":
             return "invalid", None, None
         side = str(raw.get("side", "")).strip().lower()
@@ -911,7 +912,7 @@ class Dashboard:
                 position["unrealized_pnl"] = float(pnl)
         except (TypeError, ValueError, OverflowError):
             return "invalid", None, None
-        return "open", position, "validated local futures snapshot"
+        return "open", position, position.get("position_source")
 
     def perpetual_chart(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
         """Read completed Bybit perpetual candles and an optional read-only Demo position.
