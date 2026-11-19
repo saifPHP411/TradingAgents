@@ -77,7 +77,7 @@ class ScriptedTransport:
         path = url.rsplit("/", 1)[-1]
         if method == "GET" and path == "tickers":
             return Response({"retCode": 0, "result": {"list": [{"markPrice": "100"}]}})
-        if method == "GET" and path == "list":
+        if method == "GET" and path in {"list", "realtime"}:
             if url.endswith("/v5/position/list"):
                 return Response({"retCode": 0, "result": {"list": self.position_rows}})
             return Response({"retCode": 0, "result": {"list": self.orders}})
@@ -212,6 +212,13 @@ def test_existing_position_blocks_another_entry():
         "size": "0.01",
         "side": "Buy",
         "positionIdx": 0,
+        "avgPrice": "100",
+        "markPrice": "101",
+        "leverage": "2",
+        "unrealisedPnl": "0.01",
+        "liqPrice": "50",
+        "stopLoss": "98",
+        "takeProfit": "104",
     }
     transport = ScriptedTransport(position_rows=[position])
     instance = broker(transport)
