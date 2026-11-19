@@ -45,7 +45,7 @@ DEFAULT_SYMBOLS = (
     "XRPUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT",
     "LTCUSDT", "AVAXUSDT", "DOTUSDT", "TRXUSDT",
 )
-STRATEGY_ID = "bollinger_rsi_quality20_atr16_di16"
+STRATEGY_ID = "ema_mtf_scalper_1m_5m_15m"
 STATE_FILE = "bybit_linear_demo_state.json"
 POLL_SECONDS = 15
 CANDLE_MS = 4 * 60 * 60 * 1000
