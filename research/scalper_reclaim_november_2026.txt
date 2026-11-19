@@ -1,0 +1,54 @@
+BTCUSDT baseline development {"n": 190, "wins": 25, "mean_net_bps": -16.818869634277412, "pf": 0.10481625462079973}
+BTCUSDT baseline holdout {"n": 167, "wins": 36, "mean_net_bps": -17.746083032680207, "pf": 0.1798245877409715}
+BTCUSDT cross development {"n": 13, "wins": 1, "mean_net_bps": -18.42417477663552, "pf": 0.09096205161631314}
+BTCUSDT cross holdout {"n": 4, "wins": 2, "mean_net_bps": -6.565201328448016, "pf": 0.580473147092084}
+BTCUSDT near development {"n": 34, "wins": 6, "mean_net_bps": -16.84403039656734, "pf": 0.13774045688697661}
+BTCUSDT near holdout {"n": 23, "wins": 9, "mean_net_bps": -10.55119608654413, "pf": 0.38681002383290114}
+ETHUSDT baseline development {"n": 177, "wins": 25, "mean_net_bps": -18.0507506365696, "pf": 0.09732872547453522}
+ETHUSDT baseline holdout {"n": 159, "wins": 38, "mean_net_bps": -17.88413983746466, "pf": 0.20606788999662273}
+ETHUSDT cross development {"n": 8, "wins": 1, "mean_net_bps": -18.602387146822497, "pf": 0.004128354604719108}
+ETHUSDT cross holdout {"n": 6, "wins": 1, "mean_net_bps": -19.229583936518043, "pf": 0.15971116352090436}
+ETHUSDT near development {"n": 29, "wins": 5, "mean_net_bps": -17.906665159909288, "pf": 0.09162385129561222}
+ETHUSDT near holdout {"n": 18, "wins": 4, "mean_net_bps": -19.530200350631066, "pf": 0.13202496100160774}
+XRPUSDT baseline development {"n": 154, "wins": 30, "mean_net_bps": -18.872783351335148, "pf": 0.13662187201323614}
+XRPUSDT baseline holdout {"n": 157, "wins": 41, "mean_net_bps": -18.31696352089616, "pf": 0.2103655381394411}
+XRPUSDT cross development {"n": 9, "wins": 2, "mean_net_bps": -14.82164359854394, "pf": 0.1773849487672542}
+XRPUSDT cross holdout {"n": 6, "wins": 2, "mean_net_bps": -15.499475398919095, "pf": 0.14291792706397094}
+XRPUSDT near development {"n": 22, "wins": 5, "mean_net_bps": -14.783856260028443, "pf": 0.21227812895537124}
+XRPUSDT near holdout {"n": 26, "wins": 7, "mean_net_bps": -16.082680652634853, "pf": 0.26871900648485675}
+TRXUSDT baseline development {"n": 158, "wins": 3, "mean_net_bps": -17.509411986017927, "pf": 0.0028201338479274802}
+TRXUSDT baseline holdout {"n": 87, "wins": 7, "mean_net_bps": -14.44468721215843, "pf": 0.05403525212058733}
+TRXUSDT cross development {"n": 32, "wins": 0, "mean_net_bps": -17.094549612137428, "pf": 0.0}
+TRXUSDT cross holdout {"n": 13, "wins": 1, "mean_net_bps": -16.674819295224946, "pf": 0.017642779464435945}
+TRXUSDT near development {"n": 26, "wins": 0, "mean_net_bps": -17.139834676312823, "pf": 0.0}
+TRXUSDT near holdout {"n": 9, "wins": 0, "mean_net_bps": -19.82702674976519, "pf": 0.0}
+LINKUSDT baseline development {"n": 152, "wins": 47, "mean_net_bps": -15.667804471691637, "pf": 0.24916774904369518}
+LINKUSDT baseline holdout {"n": 138, "wins": 24, "mean_net_bps": -20.655161913441606, "pf": 0.1641488850335821}
+LINKUSDT cross development {"n": 16, "wins": 7, "mean_net_bps": -11.636191930510218, "pf": 0.3768357620896257}
+LINKUSDT cross holdout {"n": 10, "wins": 0, "mean_net_bps": -31.157199339892124, "pf": 0.0}
+LINKUSDT near development {"n": 33, "wins": 12, "mean_net_bps": -13.77086877457927, "pf": 0.3081389128897132}
+LINKUSDT near holdout {"n": 29, "wins": 5, "mean_net_bps": -20.072338005284625, "pf": 0.25313965475573147}
+LTCUSDT baseline development {"n": 115, "wins": 29, "mean_net_bps": -15.870540714836835, "pf": 0.17728477649032412}
+LTCUSDT baseline holdout {"n": 122, "wins": 28, "mean_net_bps": -19.415031686627167, "pf": 0.17435834045376244}
+LTCUSDT cross development {"n": 22, "wins": 7, "mean_net_bps": -14.468929746599116, "pf": 0.20468738659815738}
+LTCUSDT cross holdout {"n": 18, "wins": 5, "mean_net_bps": -18.983345496247935, "pf": 0.15280610499398523}
+LTCUSDT near development {"n": 25, "wins": 5, "mean_net_bps": -18.261044716157382, "pf": 0.13620072380748188}
+LTCUSDT near holdout {"n": 27, "wins": 9, "mean_net_bps": -14.569312390751449, "pf": 0.2766966213701882}
+DOTUSDT baseline development {"n": 94, "wins": 29, "mean_net_bps": -15.715329509610912, "pf": 0.25753885709051577}
+DOTUSDT baseline holdout {"n": 118, "wins": 24, "mean_net_bps": -21.16846362059913, "pf": 0.16845173816546494}
+DOTUSDT cross development {"n": 11, "wins": 3, "mean_net_bps": -17.137562557305845, "pf": 0.21912883175652556}
+DOTUSDT cross holdout {"n": 13, "wins": 4, "mean_net_bps": -9.794790096194559, "pf": 0.28597624230098945}
+DOTUSDT near development {"n": 12, "wins": 3, "mean_net_bps": -16.832345577851605, "pf": 0.27430553514809886}
+DOTUSDT near holdout {"n": 19, "wins": 5, "mean_net_bps": -17.379245567547542, "pf": 0.18984227499373446}
+POOLED baseline development 0.00085 {"n": 1040, "wins": 188, "mean_net_bps": -17.064733902777668, "pf": 0.13972138446184967}
+POOLED baseline development 0.0012749999999999999 {"n": 1040, "wins": 159, "mean_net_bps": -25.564524409996817, "pf": 0.0506330942938248}
+POOLED baseline holdout 0.00085 {"n": 948, "wins": 198, "mean_net_bps": -18.625052824796526, "pf": 0.1767852563383991}
+POOLED baseline holdout 0.0012749999999999999 {"n": 948, "wins": 175, "mean_net_bps": -27.123739693285884, "pf": 0.07976029723418362}
+POOLED cross development 0.00085 {"n": 111, "wins": 21, "mean_net_bps": -15.871733898106699, "pf": 0.14582073620370095}
+POOLED cross development 0.0012749999999999999 {"n": 111, "wins": 17, "mean_net_bps": -24.37229893110499, "pf": 0.04969832999048018}
+POOLED cross holdout 0.00085 {"n": 70, "wins": 15, "mean_net_bps": -17.600175653517894, "pf": 0.13379322237718655}
+POOLED cross holdout 0.0012749999999999999 {"n": 70, "wins": 12, "mean_net_bps": -26.09983065940253, "pf": 0.04036772630637473}
+POOLED near development 0.00085 {"n": 181, "wins": 36, "mean_net_bps": -16.441015452070086, "pf": 0.16363981140960154}
+POOLED near development 0.0012749999999999999 {"n": 181, "wins": 32, "mean_net_bps": -24.940899382428405, "pf": 0.06312374063347205}
+POOLED near holdout 0.00085 {"n": 151, "wins": 39, "mean_net_bps": -16.533039447054396, "pf": 0.2393054957811451}
+POOLED near holdout 0.0012749999999999999 {"n": 151, "wins": 35, "mean_net_bps": -25.03134496036436, "pf": 0.11199286486416234}
