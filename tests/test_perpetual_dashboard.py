@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from tradingagents.paper_experiment.dashboard.server import INDEX_HTML, Dashboard
+from tradingagents.paper_experiment.dashboard.server import PERPETUAL_INDEX_HTML as INDEX_HTML, Dashboard
 
 
 class FakePerpetualClient:
