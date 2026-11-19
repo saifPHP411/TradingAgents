@@ -243,7 +243,8 @@ class PerpetualDemoController:
         frame.at[current_time, "low"] = min(float(frame.at[current_time, "low"]), mark)
         features = _features(frame, self.strategy)
         latest = features.iloc[-1]
-        atr = float(latest.atr)
+        latest_closed = features.iloc[-2]
+        atr = float(latest_closed.atr)
         target = float(latest.mean_target)
         if not math.isfinite(atr) or atr <= 0 or not math.isfinite(target) or target <= 0:
             raise BybitLinearDemoError("DI16 ATR or mean target is unavailable")
@@ -550,10 +551,11 @@ class PerpetualDemoController:
             if entry_attempts.get(symbol) == candle_key:
                 continue
             latest = features.iloc[-1]
+            latest_closed = features.iloc[-2]
             signal = int(latest.signal)
             if signal not in (-1, 1) or len(active_by_symbol) >= MAX_OPEN_POSITIONS:
                 continue
-            atr = float(latest.atr)
+            atr = float(latest_closed.atr)
             target = float(latest.mean_target)
             if not math.isfinite(atr) or atr <= 0 or not math.isfinite(target) or target <= 0:
                 continue
