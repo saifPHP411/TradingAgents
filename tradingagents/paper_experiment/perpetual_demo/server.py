@@ -158,8 +158,32 @@ class PerpetualDemoController:
             }
         try:
             account = self.broker.account_state()
+            now_ms = int(time.time() * 1000)
+            cache = self._state.get("closed_pnl_cache")
+            cache_age = (
+                now_ms - int(cache.get("fetched_at_ms", 0))
+                if isinstance(cache, dict)
+                else 60_001
+            )
+            closed_pnl_error = None
+            if cache_age >= 60_000:
+                try:
+                    cache = {
+                        "fetched_at_ms": now_ms,
+                        "rows": self.broker.get_closed_pnl(limit=50),
+                    }
+                    self._state["closed_pnl_cache"] = cache
+                    self._save_state()
+                except Exception as exc:
+                    closed_pnl_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+                    cache = cache if isinstance(cache, dict) else {"rows": []}
             return {
                 **account,
+                "closed_pnl": list(cache.get("rows", [])) if isinstance(cache, dict) else [],
+                "closed_pnl_fetched_at_ms": (
+                    int(cache.get("fetched_at_ms", 0)) if isinstance(cache, dict) else 0
+                ),
+                "closed_pnl_error": closed_pnl_error,
                 "strategy": dict(self._strategy_status),
                 "strategy_symbols": list(self.symbols),
                 "strategy_state": {
@@ -464,6 +488,85 @@ class PerpetualDemoController:
         self._save_state()
         return False
 
+    def _closed_trade_details(
+        self, symbol: str, meta: dict[str, Any], now_ms: int
+    ) -> dict[str, Any]:
+        """Reconcile a disappeared position to Bybit Closed PnL and its exit order."""
+        try:
+            entry_ms = int(meta.get("venue_entry_time_ms") or meta.get("entry_time_ms") or now_ms)
+            start_ms = max(1, entry_ms - 60_000)
+            end_ms = min(now_ms + 60_000, start_ms + 7 * 24 * 60 * 60 * 1000)
+            rows = self.broker.get_closed_pnl(
+                symbol=symbol, start_time_ms=start_ms, end_time_ms=end_ms, limit=100
+            )
+            expected_side = "Sell" if meta.get("side") == "long" else "Buy"
+            expected_entry = float(
+                meta.get("venue_entry_price") or meta.get("entry_price_mark") or 0.0
+            )
+            matches = []
+            for row in rows:
+                if row.get("side") != expected_side:
+                    continue
+                updated = int(row.get("updated_time_ms") or row.get("created_time_ms") or 0)
+                if updated and (updated < start_ms or updated > end_ms):
+                    continue
+                average_entry = row.get("avg_entry_price")
+                if expected_entry > 0 and average_entry:
+                    if abs(float(average_entry) - expected_entry) / expected_entry > 0.01:
+                        continue
+                matches.append(row)
+            if not matches:
+                return {"attribution_status": "closed_pnl_not_found"}
+            closed = max(
+                matches,
+                key=lambda row: int(row.get("updated_time_ms") or row.get("created_time_ms") or 0),
+            )
+            order_rows = self.broker.get_order_history(
+                symbol=symbol,
+                order_id=closed.get("order_id") or None,
+                start_time_ms=start_ms,
+                end_time_ms=end_ms,
+                limit=10,
+            )
+            order = order_rows[0] if order_rows else {}
+            stop_type = str(order.get("stop_order_type") or "").replace("_", "").lower()
+            link_id = str(order.get("order_link_id") or "")
+            if "takeprofit" in stop_type:
+                exit_reason = "take_profit"
+            elif "stop" in stop_type:
+                exit_reason = "stop_loss"
+            elif link_id.startswith("SC-X-"):
+                exit_reason = "strategy_market_exit"
+            else:
+                exit_reason = "venue_exit_unclassified"
+            open_fee = closed.get("open_fee")
+            close_fee = closed.get("close_fee")
+            return {
+                "attribution_status": "matched",
+                "closed_pnl": closed.get("closed_pnl"),
+                "open_fee": open_fee,
+                "close_fee": close_fee,
+                "fees_total": (
+                    float(open_fee or 0.0) + float(close_fee or 0.0)
+                    if open_fee is not None or close_fee is not None
+                    else None
+                ),
+                "closed_size": closed.get("closed_size"),
+                "avg_entry_price": closed.get("avg_entry_price"),
+                "avg_exit_price": closed.get("avg_exit_price"),
+                "close_order_id": closed.get("order_id"),
+                "close_order_link_id": link_id or None,
+                "close_order_status": order.get("order_status"),
+                "stop_order_type": order.get("stop_order_type"),
+                "trigger_price": order.get("trigger_price"),
+                "exit_reason": exit_reason,
+            }
+        except Exception as exc:
+            return {
+                "attribution_status": "lookup_error",
+                "attribution_error": f"{type(exc).__name__}: {str(exc)[:140]}",
+            }
+
     def _strategy_cycle(self) -> None:
         wallet = self.broker.get_wallet_balance()
         if wallet.get("status") != "ok":
@@ -508,8 +611,58 @@ class PerpetualDemoController:
                 # Never adopt or alter positions opened manually in the Demo desk.
                 if not isinstance(meta, dict):
                     continue
+                if not meta.get("venue_position_confirmed"):
+                    meta["venue_position_confirmed"] = True
+                    meta["venue_entry_price"] = position.get("entry_price")
+                    meta["venue_entry_time_ms"] = (
+                        position.get("created_time_ms") or meta.get("entry_time_ms") or now_ms
+                    )
+                    self._save_state()
+
+                pending = meta.get("pending_exit")
+                if isinstance(pending, dict):
+                    requested_ms = int(pending.get("requested_at_ms") or now_ms)
+                    pending_age = max(0, now_ms - requested_ms)
+                    order_status = ""
+                    try:
+                        history = self.broker.get_order_history(
+                            symbol=symbol,
+                            order_link_id=pending.get("order_link_id"),
+                            start_time_ms=max(1, requested_ms - 60_000),
+                            end_time_ms=min(now_ms + 30_000, requested_ms + 7 * 24 * 60 * 60 * 1000),
+                            limit=5,
+                        )
+                        if history:
+                            order_status = str(history[0].get("order_status") or "")
+                    except Exception as exc:
+                        order_status = f"lookup_error:{type(exc).__name__}"
+                    # A submitted close is not treated as a fill. Keep managing the
+                    # position until the venue confirms flat; retry only after a
+                    # market IOC has had time to settle or is terminal.
+                    if pending_age < 15_000 or (
+                        order_status in {"New", "PartiallyFilled", "Untriggered"}
+                        and pending_age < 60_000
+                    ):
+                        continue
+                    meta.pop("pending_exit", None)
+                    self._record({
+                        "type": "strategy_exit_retry",
+                        "symbol": symbol,
+                        "side": position["side"],
+                        "reason": pending.get("reason"),
+                        "previous_close_status": order_status or "not_found",
+                    })
+
+                retry_after = int(meta.get("exit_retry_after_ms") or 0)
+                if retry_after > now_ms:
+                    continue
                 try:
-                    entered_ms = int(meta.get("entry_time_ms") or position.get("created_time_ms") or now_ms)
+                    entered_ms = int(
+                        meta.get("venue_entry_time_ms")
+                        or meta.get("entry_time_ms")
+                        or position.get("created_time_ms")
+                        or now_ms
+                    )
                 except (TypeError, ValueError):
                     entered_ms = now_ms
                 held_ms = max(0, now_ms - entered_ms)
@@ -524,27 +677,130 @@ class PerpetualDemoController:
                 elif opposite_signal and held_ms >= 60_000:
                     exit_reason = "opposite_scalping_signal"
                 if exit_reason:
-                    close_result = self.broker.close_market_position(
-                        symbol, order_link_id=f"SC-X-{symbol}-{now_ms}"[-36:]
-                    )
-                    managed.pop(symbol, None)
-                    active_by_symbol.pop(symbol, None)
-                    cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
-                    self._record({
-                        "type": "strategy_exit", "symbol": symbol, "side": position["side"],
-                        "reason": exit_reason, "held_seconds": held_ms // 1000,
-                        "order_link_id": close_result.get("order_link_id"),
-                    })
+                    close_link_id = f"SC-X-{symbol}-{now_ms}"[-36:]
+                    meta["pending_exit"] = {
+                        "reason": exit_reason,
+                        "order_link_id": close_link_id,
+                        "requested_at_ms": now_ms,
+                    }
+                    self._save_state()
+                    try:
+                        close_result = self.broker.close_market_position(
+                            symbol, order_link_id=close_link_id
+                        )
+                        remaining = [
+                            item for item in self.broker.get_positions()
+                            if item["symbol"] == symbol
+                        ]
+                        if not remaining:
+                            exit_details = self._closed_trade_details(symbol, meta, now_ms)
+                            managed.pop(symbol, None)
+                            active_by_symbol.pop(symbol, None)
+                            cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
+                            self._record({
+                                "type": "strategy_exit",
+                                "symbol": symbol,
+                                "side": position["side"],
+                                "reason": exit_reason,
+                                "held_seconds": held_ms // 1000,
+                                "close_order_status": close_result.get("status"),
+                                "order_link_id": close_result.get("order_link_id"),
+                                **exit_details,
+                            })
+                        else:
+                            self._record({
+                                "type": "strategy_exit_pending",
+                                "symbol": symbol,
+                                "side": position["side"],
+                                "reason": exit_reason,
+                                "held_seconds": held_ms // 1000,
+                                "close_order_status": close_result.get("status"),
+                                "remaining_quantity": remaining[0].get("quantity"),
+                                "order_link_id": close_result.get("order_link_id"),
+                            })
+                    except Exception as exc:
+                        # Keep the pending close ID so a timeout is reconciled
+                        # before another reduce-only market close is submitted.
+                        self._record({
+                            "type": "strategy_exit_pending",
+                            "symbol": symbol,
+                            "side": position["side"],
+                            "reason": exit_reason,
+                            "close_order_status": "unknown",
+                            "detail": f"{type(exc).__name__}: {str(exc)[:120]}",
+                            "order_link_id": close_link_id,
+                        })
                 continue
 
-            # The exchange may already have triggered the attached SL or TP.
-            # Record disappearance without guessing which protection was hit.
+            # A position can disappear between the order-accepted response and
+            # the next account poll. Confirm whether the entry ever filled before
+            # treating that disappearance as an exit.
             if isinstance(meta, dict):
+                confirmed = bool(meta.get("venue_position_confirmed", True))
+                if not confirmed:
+                    order_rows = []
+                    try:
+                        order_rows = self.broker.get_order_history(
+                            symbol=symbol,
+                            order_link_id=meta.get("order_link_id"),
+                            start_time_ms=max(1, int(meta.get("entry_time_ms") or now_ms) - 60_000),
+                            end_time_ms=min(
+                                now_ms + 60_000,
+                                int(meta.get("entry_time_ms") or now_ms) + 7 * 24 * 60 * 60 * 1000,
+                            ),
+                            limit=5,
+                        )
+                    except Exception:
+                        pass
+                    entry_order = order_rows[0] if order_rows else {}
+                    filled_quantity = float(entry_order.get("cum_exec_qty") or 0.0)
+                    entry_status = str(entry_order.get("order_status") or "")
+                    entry_age = max(0, now_ms - int(meta.get("entry_time_ms") or now_ms))
+                    if filled_quantity <= 0 and entry_status in {
+                        "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"
+                    }:
+                        managed.pop(symbol, None)
+                        cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
+                        self._record({
+                            "type": "strategy_entry_unfilled",
+                            "symbol": symbol,
+                            "side": meta.get("side"),
+                            "order_status": entry_status,
+                            "reject_reason": entry_order.get("reject_reason"),
+                            "cancel_type": entry_order.get("cancel_type"),
+                            "order_link_id": meta.get("order_link_id"),
+                        })
+                        continue
+                    if filled_quantity <= 0 and entry_age < 120_000:
+                        continue
+                    if filled_quantity > 0:
+                        meta["venue_position_confirmed"] = True
+                        meta["venue_entry_price"] = entry_order.get("avg_price") or meta.get("entry_price_mark")
+                        meta["venue_entry_time_ms"] = (
+                            entry_order.get("created_time_ms") or meta.get("entry_time_ms") or now_ms
+                        )
+
+                exit_details = self._closed_trade_details(symbol, meta, now_ms)
+                pending_exit = meta.get("pending_exit")
                 managed.pop(symbol, None)
                 cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
+                event_type = "strategy_exit" if isinstance(pending_exit, dict) else "strategy_exit_observed"
                 self._record({
-                    "type": "strategy_exit_observed", "symbol": symbol,
-                    "side": meta.get("side"), "reason": "position_no_longer_open_at_venue",
+                    "type": event_type,
+                    "symbol": symbol,
+                    "side": meta.get("side"),
+                    "reason": (
+                        pending_exit.get("reason")
+                        if isinstance(pending_exit, dict)
+                        else exit_details.get("exit_reason", "position_no_longer_open_at_venue")
+                    ),
+                    "venue_exit_reason": exit_details.get("exit_reason"),
+                    "order_link_id": (
+                        pending_exit.get("order_link_id")
+                        if isinstance(pending_exit, dict)
+                        else exit_details.get("close_order_link_id")
+                    ),
+                    **exit_details,
                 })
                 continue
 
@@ -580,6 +836,7 @@ class PerpetualDemoController:
                 "side": side, "entry_time_ms": now_ms,
                 "entry_signal_candle": current_minute,
                 "entry_price_mark": market["mark_price"],
+                "venue_position_confirmed": False,
                 "stop_loss": stop, "take_profit": target,
                 "order_link_id": order_link_id,
             }
@@ -593,6 +850,9 @@ class PerpetualDemoController:
                 "leverage": self.strategy.leverage, "order_link_id": order_link_id,
                 "venue_order_id": result.get("order_id"),
                 "quantity": result.get("quantity"), "notional_usdt": result.get("notional_usdt"),
+                "initial_margin_usdt": result.get("initial_margin_usdt"),
+                "modeled_stop_risk_usdt": result.get("modeled_stop_risk_usdt"),
+                "entry_mark_price": market["mark_price"],
                 "stop_loss": stop, "take_profit": target,
             })
             self._strategy_status = {
