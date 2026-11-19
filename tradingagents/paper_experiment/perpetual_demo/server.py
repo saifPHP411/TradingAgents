@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from tradingagents.crypto.scalping import ScalpingConfig, evaluate_scalping_signal
 from tradingagents.crypto.bybit_linear_demo import (
     API_KEY_ENV,
     API_SECRET_ENV,
@@ -34,6 +33,7 @@ from tradingagents.crypto.bybit_linear_demo import (
     BybitLinearDemoRejected,
 )
 from tradingagents.crypto.bybit_perpetual_account import BybitPerpetualAccountError
+from tradingagents.crypto.scalping import ScalpingConfig, evaluate_scalping_signal
 from tradingagents.paper_experiment.dashboard.auth import (
     check_bearer,
     require_bindable,
