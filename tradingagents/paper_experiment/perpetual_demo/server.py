@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from tradingagents.crypto.backtest.perpetual_bollinger_forward import FORWARD_CANDIDATES
 from tradingagents.crypto.backtest.perpetual_ema import PerpetualEMAStrategy, _features
+from tradingagents.crypto.bybit_perpetual_account import BybitPerpetualAccountError
 from tradingagents.crypto.bybit_linear_demo import (
     API_KEY_ENV,
     API_SECRET_ENV,
@@ -210,7 +211,11 @@ class PerpetualDemoController:
                 "open_orders": [],
                 "strategy": dict(self._strategy_status),
                 "error_type": type(exc).__name__,
-                "detail": "Account data could not be verified. Balances and positions are not inferred or cached.",
+                "detail": (
+                    str(exc)[:220]
+                    if isinstance(exc, (BybitLinearDemoError, BybitPerpetualAccountError))
+                    else f"Account read failed safely ({type(exc).__name__})."
+                ),
             }
 
     def market(self, symbol: str) -> dict:
