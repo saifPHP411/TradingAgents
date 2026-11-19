@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from tradingagents.paper_experiment.dashboard.server import PERPETUAL_INDEX_HTML as INDEX_HTML, Dashboard
+from tradingagents.paper_experiment.dashboard.server import (
+    PERPETUAL_INDEX_HTML as INDEX_HTML,
+    Dashboard,
+)
 
 
 class FakePerpetualClient:
@@ -156,5 +159,5 @@ def test_dashboard_html_is_perpetual_only_and_has_position_chart_overlays():
     assert "BINANCE" not in INDEX_HTML
     assert "/api/perpetual/chart" in INDEX_HTML
     assert "drawChart" in INDEX_HTML
-    assert "TAKE PROFIT" in INDEX_HTML
+    assert "Take profit" in INDEX_HTML
     assert "No authenticated Bybit Futures position feed is connected" in INDEX_HTML
