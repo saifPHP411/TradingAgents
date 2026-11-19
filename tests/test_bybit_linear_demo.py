@@ -57,7 +57,7 @@ class Public:
 class ScriptedTransport:
     def __init__(
         self, *, position_rows=None, orders=None, closed_rows=None,
-        history_rows=None, create_error=None
+        history_rows=None, create_error=None, set_leverage_ret_code=0
     ):
         self.calls = []
         self.position_rows = position_rows or []
@@ -65,6 +65,7 @@ class ScriptedTransport:
         self.closed_rows = closed_rows or []
         self.history_rows = history_rows or []
         self.create_error = create_error
+        self.set_leverage_ret_code = set_leverage_ret_code
 
     def __call__(self, *, method, url, headers, params=None, data=None, timeout):
         self.calls.append(
@@ -91,7 +92,7 @@ class ScriptedTransport:
                 return Response({"retCode": 0, "result": {"list": self.position_rows}})
             return Response({"retCode": 0, "result": {"list": self.orders}})
         if method == "POST" and path == "set-leverage":
-            return Response({"retCode": 0, "result": {}})
+            return Response({"retCode": self.set_leverage_ret_code, "result": {}})
         if method == "POST" and path == "create":
             if self.create_error:
                 raise TimeoutError("simulated timeout")
@@ -298,6 +299,37 @@ def test_ambiguous_timeout_is_reconciled_without_blind_retry():
         )
     assert err.value.order_link_id == "DI16-BTCUSDT-ambiguous"
     assert len([c for c in transport.calls if c["url"].endswith("/v5/order/create")]) == 1
+
+
+def test_leverage_already_set_is_treated_as_noop_and_entry_continues():
+    transport = ScriptedTransport(set_leverage_ret_code=110043)
+    result = broker(transport).open_market_position(
+        symbol="BTCUSDT",
+        side="long",
+        leverage=2,
+        equity=50,
+        stop_loss=98,
+        take_profit=104,
+        order_link_id="EMA-BTCUSDT-110043",
+    )
+    assert result["status"] == "Created"
+    assert any(c["url"].endswith("/v5/position/set-leverage") for c in transport.calls)
+    assert any(c["url"].endswith("/v5/order/create") for c in transport.calls)
+
+
+def test_other_leverage_exchange_rejections_still_block_entry():
+    transport = ScriptedTransport(set_leverage_ret_code=110044)
+    with pytest.raises(BybitLinearDemoRejected, match="retCode 110044"):
+        broker(transport).open_market_position(
+            symbol="BTCUSDT",
+            side="long",
+            leverage=2,
+            equity=50,
+            stop_loss=98,
+            take_profit=104,
+            order_link_id="EMA-BTCUSDT-110044",
+        )
+    assert not any(c["url"].endswith("/v5/order/create") for c in transport.calls)
 
 
 def test_leverage_hard_cap_is_enforced_before_exchange_mutation():
