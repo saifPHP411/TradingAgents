@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Check out research candidate
         uses: actions/checkout@v4
@@ -85,6 +85,13 @@ jobs:
           python -m tradingagents.crypto.backtest.fetch \
             --symbols BTC/USDT ETH/USDT BNB/USDT \
             --limit 172800 \
+            --cache ./crypto-cache
+      - name: Fetch up to 120 days of hourly candles required by regime-breakout
+        run: |
+          python -m tradingagents.crypto.backtest.fetch \\
+            --symbols BTC/USDT ETH/USDT BNB/USDT \\
+            --interval 1h \\
+            --limit 2880 \\
             --cache ./crypto-cache
       - name: Run TJR baseline with explicit execution costs
         run: |
