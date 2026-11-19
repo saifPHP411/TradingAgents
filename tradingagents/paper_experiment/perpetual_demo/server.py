@@ -22,7 +22,6 @@ from urllib.parse import parse_qs, urlsplit
 
 from tradingagents.crypto.backtest.perpetual_bollinger_forward import FORWARD_CANDIDATES
 from tradingagents.crypto.backtest.perpetual_ema import PerpetualEMAStrategy, _features
-from tradingagents.crypto.bybit_perpetual_account import BybitPerpetualAccountError
 from tradingagents.crypto.bybit_linear_demo import (
     API_KEY_ENV,
     API_SECRET_ENV,
@@ -35,6 +34,7 @@ from tradingagents.crypto.bybit_linear_demo import (
     BybitLinearDemoNotConfigured,
     BybitLinearDemoRejected,
 )
+from tradingagents.crypto.bybit_perpetual_account import BybitPerpetualAccountError
 from tradingagents.crypto.perpetuals import PerpetualRiskSettings
 from tradingagents.paper_experiment.dashboard.auth import (
     check_bearer,
