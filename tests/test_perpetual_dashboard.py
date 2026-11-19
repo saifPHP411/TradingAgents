@@ -7,8 +7,8 @@ import pandas as pd
 import pytest
 
 from tradingagents.paper_experiment.dashboard.server import (
-    Dashboard,
     PERPETUAL_INDEX_HTML as INDEX_HTML,
+    Dashboard,
 )
 
 
