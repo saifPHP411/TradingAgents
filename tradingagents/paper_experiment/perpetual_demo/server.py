@@ -102,6 +102,7 @@ class PerpetualDemoController:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._instrument_cache: dict[str, Any] = {}
         self._strategy_status: dict[str, Any] = {
             "status": "idle",
             "strategy_id": STRATEGY_ID,
@@ -158,8 +159,43 @@ class PerpetualDemoController:
             }
         try:
             account = self.broker.account_state()
+            now_ms = int(time.time() * 1000)
+            cache = self._state.get("closed_pnl_cache")
+            cache_age = (
+                now_ms - int(cache.get("fetched_at_ms", 0))
+                if isinstance(cache, dict)
+                else 60_001
+            )
+            closed_pnl_error = None
+            if cache_age >= 60_000:
+                try:
+                    cache = {
+                        "fetched_at_ms": now_ms,
+                        "rows": self.broker.get_closed_pnl(limit=50),
+                    }
+                    self._state["closed_pnl_cache"] = cache
+                    self._save_state()
+                except Exception as exc:
+                    closed_pnl_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+                    cache = cache if isinstance(cache, dict) else {"rows": []}
             return {
                 **account,
+                "build": {
+                    "repository": "/".join(
+                        part for part in (
+                            os.environ.get("RAILWAY_GIT_REPO_OWNER", ""),
+                            os.environ.get("RAILWAY_GIT_REPO_NAME", ""),
+                        ) if part
+                    ) or None,
+                    "branch": os.environ.get("RAILWAY_GIT_BRANCH") or None,
+                    "commit_sha": os.environ.get("RAILWAY_GIT_COMMIT_SHA") or None,
+                    "deployment_id": os.environ.get("RAILWAY_DEPLOYMENT_ID") or None,
+                },
+                "closed_pnl": list(cache.get("rows", [])) if isinstance(cache, dict) else [],
+                "closed_pnl_fetched_at_ms": (
+                    int(cache.get("fetched_at_ms", 0)) if isinstance(cache, dict) else 0
+                ),
+                "closed_pnl_error": closed_pnl_error,
                 "strategy": dict(self._strategy_status),
                 "strategy_symbols": list(self.symbols),
                 "strategy_state": {
@@ -352,9 +388,12 @@ class PerpetualDemoController:
             if wallet.get("status") != "ok":
                 raise BybitLinearDemoError("Bybit Demo wallet preflight failed")
             _number(wallet.get("total_equity_usd"), "account equity")
-            # Resolve current exchange contract filters before the worker can be armed.
+            # Cache current contract filters before arming the worker. Symbols
+            # whose minimum order cannot fit the account's hard notional cap are
+            # skipped before signal execution rather than repeatedly rejected.
+            self._instrument_cache = {}
             for symbol in self.symbols:
-                self.broker.instrument_info(symbol)
+                self._instrument_cache[symbol] = self.broker.instrument_info(symbol)
             self.broker.get_positions()  # also refuses hedge-mode positions
             self._stop.clear()
             self._strategy_status = {
@@ -464,6 +503,88 @@ class PerpetualDemoController:
         self._save_state()
         return False
 
+    def _closed_trade_details(
+        self, symbol: str, meta: dict[str, Any], now_ms: int
+    ) -> dict[str, Any]:
+        """Reconcile a disappeared position to Bybit Closed PnL and its exit order."""
+        try:
+            entry_ms = int(meta.get("venue_entry_time_ms") or meta.get("entry_time_ms") or now_ms)
+            start_ms = max(1, entry_ms - 60_000)
+            end_ms = min(now_ms + 60_000, start_ms + 7 * 24 * 60 * 60 * 1000)
+            rows = self.broker.get_closed_pnl(
+                symbol=symbol, start_time_ms=start_ms, end_time_ms=end_ms, limit=100
+            )
+            expected_side = "Sell" if meta.get("side") == "long" else "Buy"
+            expected_entry = float(
+                meta.get("venue_entry_price") or meta.get("entry_price_mark") or 0.0
+            )
+            matches = []
+            for row in rows:
+                if row.get("side") != expected_side:
+                    continue
+                updated = int(row.get("updated_time_ms") or row.get("created_time_ms") or 0)
+                if updated and (updated < start_ms or updated > end_ms):
+                    continue
+                average_entry = row.get("avg_entry_price")
+                if (
+                    expected_entry > 0
+                    and average_entry
+                    and abs(float(average_entry) - expected_entry) / expected_entry > 0.01
+                ):
+                    continue
+                matches.append(row)
+            if not matches:
+                return {"attribution_status": "closed_pnl_not_found"}
+            closed = max(
+                matches,
+                key=lambda row: int(row.get("updated_time_ms") or row.get("created_time_ms") or 0),
+            )
+            order_rows = self.broker.get_order_history(
+                symbol=symbol,
+                order_id=closed.get("order_id") or None,
+                start_time_ms=start_ms,
+                end_time_ms=end_ms,
+                limit=10,
+            )
+            order = order_rows[0] if order_rows else {}
+            stop_type = str(order.get("stop_order_type") or "").replace("_", "").lower()
+            link_id = str(order.get("order_link_id") or "")
+            if "takeprofit" in stop_type:
+                exit_reason = "take_profit"
+            elif "stop" in stop_type:
+                exit_reason = "stop_loss"
+            elif link_id.startswith("SC-X-"):
+                exit_reason = "strategy_market_exit"
+            else:
+                exit_reason = "venue_exit_unclassified"
+            open_fee = closed.get("open_fee")
+            close_fee = closed.get("close_fee")
+            return {
+                "attribution_status": "matched",
+                "closed_pnl": closed.get("closed_pnl"),
+                "open_fee": open_fee,
+                "close_fee": close_fee,
+                "fees_total": (
+                    float(open_fee or 0.0) + float(close_fee or 0.0)
+                    if open_fee is not None or close_fee is not None
+                    else None
+                ),
+                "closed_size": closed.get("closed_size"),
+                "avg_entry_price": closed.get("avg_entry_price"),
+                "avg_exit_price": closed.get("avg_exit_price"),
+                "close_order_id": closed.get("order_id"),
+                "close_order_link_id": link_id or None,
+                "close_order_status": order.get("order_status"),
+                "stop_order_type": order.get("stop_order_type"),
+                "trigger_price": order.get("trigger_price"),
+                "exit_reason": exit_reason,
+            }
+        except Exception as exc:
+            return {
+                "attribution_status": "lookup_error",
+                "attribution_error": f"{type(exc).__name__}: {str(exc)[:140]}",
+            }
+
     def _strategy_cycle(self) -> None:
         wallet = self.broker.get_wallet_balance()
         if wallet.get("status") != "ok":
@@ -508,8 +629,70 @@ class PerpetualDemoController:
                 # Never adopt or alter positions opened manually in the Demo desk.
                 if not isinstance(meta, dict):
                     continue
+                if not meta.get("venue_position_confirmed"):
+                    meta["venue_position_confirmed"] = True
+                    meta["venue_entry_price"] = position.get("entry_price")
+                    meta["venue_entry_time_ms"] = (
+                        position.get("created_time_ms") or meta.get("entry_time_ms") or now_ms
+                    )
+                    self._save_state()
+
+                pending = meta.get("pending_exit")
+                if isinstance(pending, dict):
+                    requested_ms = int(pending.get("requested_at_ms") or now_ms)
+                    pending_age = max(0, now_ms - requested_ms)
+                    order_status = ""
+                    try:
+                        history = self.broker.get_order_history(
+                            symbol=symbol,
+                            order_link_id=pending.get("order_link_id"),
+                            start_time_ms=max(1, requested_ms - 60_000),
+                            end_time_ms=min(now_ms + 30_000, requested_ms + 7 * 24 * 60 * 60 * 1000),
+                            limit=5,
+                        )
+                        if history:
+                            order_status = str(history[0].get("order_status") or "")
+                    except Exception as exc:
+                        order_status = f"lookup_error:{type(exc).__name__}"
+                    # A submitted close is not treated as a fill. Keep managing the
+                    # position until the venue confirms flat; retry only after a
+                    # market IOC has had time to settle or is terminal.
+                    if order_status in {"Created", "New", "PartiallyFilled", "Untriggered"}:
+                        if pending_age >= 60_000 and not meta.get("pending_exit_stalled"):
+                            meta["pending_exit_stalled"] = True
+                            self._record({
+                                "type": "strategy_exit_stalled",
+                                "symbol": symbol,
+                                "reason": pending.get("reason"),
+                                "order_link_id": pending.get("order_link_id"),
+                                "order_status": order_status,
+                            })
+                        continue
+                    if (
+                        pending_age < 60_000
+                        and (not order_status or order_status.startswith("lookup_error:"))
+                    ) or (order_status == "Filled" and pending_age < 15_000):
+                        continue
+                    meta.pop("pending_exit", None)
+                    meta.pop("pending_exit_stalled", None)
+                    self._record({
+                        "type": "strategy_exit_retry",
+                        "symbol": symbol,
+                        "side": position["side"],
+                        "reason": pending.get("reason"),
+                        "previous_close_status": order_status or "not_found",
+                    })
+
+                retry_after = int(meta.get("exit_retry_after_ms") or 0)
+                if retry_after > now_ms:
+                    continue
                 try:
-                    entered_ms = int(meta.get("entry_time_ms") or position.get("created_time_ms") or now_ms)
+                    entered_ms = int(
+                        meta.get("venue_entry_time_ms")
+                        or meta.get("entry_time_ms")
+                        or position.get("created_time_ms")
+                        or now_ms
+                    )
                 except (TypeError, ValueError):
                     entered_ms = now_ms
                 held_ms = max(0, now_ms - entered_ms)
@@ -524,27 +707,139 @@ class PerpetualDemoController:
                 elif opposite_signal and held_ms >= 60_000:
                     exit_reason = "opposite_scalping_signal"
                 if exit_reason:
-                    close_result = self.broker.close_market_position(
-                        symbol, order_link_id=f"SC-X-{symbol}-{now_ms}"[-36:]
-                    )
-                    managed.pop(symbol, None)
-                    active_by_symbol.pop(symbol, None)
-                    cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
-                    self._record({
-                        "type": "strategy_exit", "symbol": symbol, "side": position["side"],
-                        "reason": exit_reason, "held_seconds": held_ms // 1000,
-                        "order_link_id": close_result.get("order_link_id"),
-                    })
+                    close_link_id = f"SC-X-{symbol}-{now_ms}"[-36:]
+                    meta["pending_exit"] = {
+                        "reason": exit_reason,
+                        "order_link_id": close_link_id,
+                        "requested_at_ms": now_ms,
+                    }
+                    self._save_state()
+                    try:
+                        close_result = self.broker.close_market_position(
+                            symbol, order_link_id=close_link_id
+                        )
+                        remaining = [
+                            item for item in self.broker.get_positions()
+                            if item["symbol"] == symbol
+                        ]
+                        if not remaining:
+                            exit_details = self._closed_trade_details(symbol, meta, now_ms)
+                            managed.pop(symbol, None)
+                            active_by_symbol.pop(symbol, None)
+                            cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
+                            self._record({
+                                "type": "strategy_exit",
+                                "symbol": symbol,
+                                "side": position["side"],
+                                "reason": exit_reason,
+                                "held_seconds": held_ms // 1000,
+                                "close_order_status": close_result.get("status"),
+                                "order_link_id": close_result.get("order_link_id"),
+                                **exit_details,
+                            })
+                        else:
+                            self._record({
+                                "type": "strategy_exit_pending",
+                                "symbol": symbol,
+                                "side": position["side"],
+                                "reason": exit_reason,
+                                "held_seconds": held_ms // 1000,
+                                "close_order_status": close_result.get("status"),
+                                "remaining_quantity": remaining[0].get("quantity"),
+                                "order_link_id": close_result.get("order_link_id"),
+                            })
+                    except Exception as exc:
+                        # Keep the pending close ID so a timeout is reconciled
+                        # before another reduce-only market close is submitted.
+                        self._record({
+                            "type": "strategy_exit_pending",
+                            "symbol": symbol,
+                            "side": position["side"],
+                            "reason": exit_reason,
+                            "close_order_status": "unknown",
+                            "detail": f"{type(exc).__name__}: {str(exc)[:120]}",
+                            "order_link_id": close_link_id,
+                        })
                 continue
 
-            # The exchange may already have triggered the attached SL or TP.
-            # Record disappearance without guessing which protection was hit.
+            # A position can disappear between the order-accepted response and
+            # the next account poll. Confirm whether the entry ever filled before
+            # treating that disappearance as an exit.
             if isinstance(meta, dict):
+                confirmed = bool(meta.get("venue_position_confirmed", True))
+                if not confirmed:
+                    order_rows = []
+                    with contextlib.suppress(Exception):
+                        order_rows = self.broker.get_order_history(
+                            symbol=symbol,
+                            order_link_id=meta.get("order_link_id"),
+                            start_time_ms=max(1, int(meta.get("entry_time_ms") or now_ms) - 60_000),
+                            end_time_ms=min(
+                                now_ms + 60_000,
+                                int(meta.get("entry_time_ms") or now_ms) + 7 * 24 * 60 * 60 * 1000,
+                            ),
+                            limit=5,
+                        )
+                    entry_order = order_rows[0] if order_rows else {}
+                    filled_quantity = float(entry_order.get("cum_exec_qty") or 0.0)
+                    entry_status = str(entry_order.get("order_status") or "")
+                    entry_age = max(0, now_ms - int(meta.get("entry_time_ms") or now_ms))
+                    if filled_quantity <= 0 and entry_status in {
+                        "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"
+                    }:
+                        managed.pop(symbol, None)
+                        cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
+                        self._record({
+                            "type": "strategy_entry_unfilled",
+                            "symbol": symbol,
+                            "side": meta.get("side"),
+                            "order_status": entry_status,
+                            "reject_reason": entry_order.get("reject_reason"),
+                            "cancel_type": entry_order.get("cancel_type"),
+                            "order_link_id": meta.get("order_link_id"),
+                        })
+                        continue
+                    if filled_quantity <= 0:
+                        if entry_age < 120_000:
+                            continue
+                        managed.pop(symbol, None)
+                        cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
+                        self._record({
+                            "type": "strategy_entry_unconfirmed",
+                            "symbol": symbol,
+                            "side": meta.get("side"),
+                            "order_status": entry_status or "not_found",
+                            "order_link_id": meta.get("order_link_id"),
+                            "detail": "No venue position or confirmed executed quantity was found within 120 seconds; this is not counted as a trade or exit.",
+                        })
+                        continue
+                    meta["venue_position_confirmed"] = True
+                    meta["venue_entry_price"] = entry_order.get("avg_price") or meta.get("entry_price_mark")
+                    meta["venue_entry_time_ms"] = (
+                        entry_order.get("created_time_ms") or meta.get("entry_time_ms") or now_ms
+                    )
+
+                exit_details = self._closed_trade_details(symbol, meta, now_ms)
+                pending_exit = meta.get("pending_exit")
                 managed.pop(symbol, None)
                 cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
+                event_type = "strategy_exit" if isinstance(pending_exit, dict) else "strategy_exit_observed"
                 self._record({
-                    "type": "strategy_exit_observed", "symbol": symbol,
-                    "side": meta.get("side"), "reason": "position_no_longer_open_at_venue",
+                    "type": event_type,
+                    "symbol": symbol,
+                    "side": meta.get("side"),
+                    "reason": (
+                        pending_exit.get("reason")
+                        if isinstance(pending_exit, dict)
+                        else exit_details.get("exit_reason", "position_no_longer_open_at_venue")
+                    ),
+                    "venue_exit_reason": exit_details.get("exit_reason"),
+                    "order_link_id": (
+                        pending_exit.get("order_link_id")
+                        if isinstance(pending_exit, dict)
+                        else exit_details.get("close_order_link_id")
+                    ),
+                    **exit_details,
                 })
                 continue
 
@@ -552,6 +847,36 @@ class PerpetualDemoController:
                 continue
             if current_signal not in (-1, 1) or len(active_by_symbol) >= MAX_OPEN_POSITIONS:
                 continue
+
+            instrument = self._instrument_cache.get(symbol)
+            if instrument is not None:
+                mark = float(market["mark_price"])
+                minimum_order_notional = max(
+                    float(instrument.min_notional),
+                    float(instrument.min_quantity) * mark,
+                )
+                maximum_order_notional = min(
+                    equity * 0.10 * self.strategy.leverage,
+                    equity * 0.20,
+                )
+                if minimum_order_notional > maximum_order_notional + 1e-8:
+                    skipped = self._state.setdefault("scalper_untradable_symbols", {})
+                    reason_key = (
+                        round(minimum_order_notional, 4),
+                        round(maximum_order_notional, 4),
+                    )
+                    if skipped.get(symbol) != list(reason_key):
+                        skipped[symbol] = list(reason_key)
+                        self._record({
+                            "type": "strategy_symbol_skipped",
+                            "symbol": symbol,
+                            "reason": "minimum_contract_notional_exceeds_account_limit",
+                            "minimum_quantity": instrument.min_quantity,
+                            "minimum_order_notional": minimum_order_notional,
+                            "maximum_order_notional": maximum_order_notional,
+                            "mark_price": mark,
+                        })
+                    continue
 
             side = "long" if current_signal > 0 else "short"
             stop = float(market["suggested_long_stop"] if side == "long" else market["suggested_short_stop"])
@@ -580,6 +905,7 @@ class PerpetualDemoController:
                 "side": side, "entry_time_ms": now_ms,
                 "entry_signal_candle": current_minute,
                 "entry_price_mark": market["mark_price"],
+                "venue_position_confirmed": False,
                 "stop_loss": stop, "take_profit": target,
                 "order_link_id": order_link_id,
             }
@@ -593,6 +919,9 @@ class PerpetualDemoController:
                 "leverage": self.strategy.leverage, "order_link_id": order_link_id,
                 "venue_order_id": result.get("order_id"),
                 "quantity": result.get("quantity"), "notional_usdt": result.get("notional_usdt"),
+                "initial_margin_usdt": result.get("initial_margin_usdt"),
+                "modeled_stop_risk_usdt": result.get("modeled_stop_risk_usdt"),
+                "entry_mark_price": market["mark_price"],
                 "stop_loss": stop, "take_profit": target,
             })
             self._strategy_status = {
@@ -663,7 +992,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
 <main id="app" style="display:none">
  <div class="top">
   <div><div class="brand">PERPETUAL DEMO DESK</div><div class="sub">Bybit · USDT Linear Perpetual · 1m scalping / 5m + 15m trend</div></div>
-  <div class="actions"><span id="venue-badge" class="pill warn">CHECKING</span><span id="refresh-time" class="pill">—</span><button id="refresh" class="secondary">Refresh</button></div>
+  <div class="actions"><span id="venue-badge" class="pill warn">CHECKING</span><span id="build-tag" class="pill">BUILD UNKNOWN</span><span id="refresh-time" class="pill">—</span><button id="refresh" class="secondary">Refresh</button></div>
  </div>
  <div id="message"></div>
  <div class="note"><b>DEMO ONLY:</b> this service is hard-locked to api-demo.bybit.com and category=linear. Spot and live trading are not available here. Max leverage 2x · max 2 open positions · 0.5% modeled risk per entry.</div>
@@ -711,6 +1040,11 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
    <div id="orders" class="tablewrap"><div class="empty">No verified open orders.</div></div>
   </section>
   <section class="panel wide">
+   <div class="heading"><h2>Closed trades · Bybit P&amp;L</h2><span class="pill">Venue-reported</span></div>
+   <div id="closed-pnl" class="tablewrap"><div class="empty">Loading closed P&amp;L history.</div></div>
+   <p id="closed-pnl-note" class="sub"></p>
+  </section>
+  <section class="panel wide">
    <div class="heading"><h2>Execution activity</h2><span class="pill">Last 20 events</span></div>
    <div id="events" class="rows"><div class="empty">No recorded activity.</div></div>
   </section>
@@ -726,14 +1060,15 @@ function fmt(v,d){var n=Number(v);return Number.isFinite(n)?n.toLocaleString(und
 function msg(t,ok){$("message").textContent=t;$("message").className=ok?"ok":"error";}
 async function api(path,options){options=options||{};options.headers=Object.assign({"Authorization":"Bearer "+TOKEN,"Content-Type":"application/json"},options.headers||{});var r=await fetch(path,options),body=await r.json().catch(function(){return {};});if(!r.ok)throw new Error(body.detail||body.error||"HTTP "+r.status);return body;}
 function connect(){TOKEN=$("token").value.trim();if(!TOKEN){msg("Dashboard token is required.",false);return;}localStorage.setItem("bybit_linear_demo_token",TOKEN);boot();}
-async function refresh(){try{var d=await api("/api/status");$("venue-badge").textContent=d.status==="ok"?"BYBIT DEMO · LINEAR":String(d.status||"UNKNOWN").toUpperCase();$("venue-badge").className="pill "+(d.status==="ok"?"safe":"warn");var w=d.wallet||{};$("equity").textContent=fmt(w.total_equity_usd);$("available").textContent=fmt(w.total_available_balance_usd);$("upl").textContent=fmt(w.total_perpetual_unrealized_pnl_usd);$("position-count").textContent=String((d.positions||[]).length);$("positions-badge").textContent=String((d.positions||[]).length)+" / 2";$("refresh-time").textContent=new Date().toLocaleTimeString();
-renderPositions(d.positions||[]);renderOrders(d.open_orders||[]);renderEvents((d.strategy_state||{}).events||[]);renderStrategy(d.strategy||{});
+async function refresh(){try{var d=await api("/api/status");$("venue-badge").textContent=d.status==="ok"?"BYBIT DEMO · LINEAR":String(d.status||"UNKNOWN").toUpperCase();$("venue-badge").className="pill "+(d.status==="ok"?"safe":"warn");var build=d.build||{};$("build-tag").textContent=(build.branch||"branch?")+" · "+(build.commit_sha?String(build.commit_sha).slice(0,8):"sha unavailable");var w=d.wallet||{};$("equity").textContent=fmt(w.total_equity_usd);$("available").textContent=fmt(w.total_available_balance_usd);$("upl").textContent=fmt(w.total_perpetual_unrealized_pnl_usd);$("position-count").textContent=String((d.positions||[]).length);$("positions-badge").textContent=String((d.positions||[]).length)+" / 2";$("refresh-time").textContent=new Date().toLocaleTimeString();
+renderPositions(d.positions||[]);renderOrders(d.open_orders||[]);renderClosedPnl(d.closed_pnl||[],d.closed_pnl_error,d.closed_pnl_fetched_at_ms);renderEvents((d.strategy_state||{}).events||[]);renderStrategy(d.strategy||{});
 if(d.status!=="ok")msg(d.detail||"Demo account is not ready. Check dedicated Contract Trade key permissions.",false);else if(d.spot_enabled!==false)msg("Safety error: service did not confirm Spot is disabled.",false);else $("message").style.display="none";
 }catch(e){msg(e.message,false);}}
 function renderStrategy(s){var state=s.status||"idle";$("strategy-badge").textContent=String(state).toUpperCase();$("strategy-badge").className="pill "+(state==="running"?"safe":state==="error"||state==="halted"?"bad":"");$("strategy-detail").textContent=s.detail||s.last_error||"Stopped.";var active=["starting","running","stopping"].indexOf(state)>=0;$("start-strategy").disabled=active||state==="halted";$("stop-strategy").disabled=!active;}
 function renderPositions(rows){if(!rows.length){$("positions").innerHTML='<div class="empty">No open USDT linear perpetual positions.</div>';return;}$("positions").innerHTML=rows.map(function(p){var side=String(p.side||"").toUpperCase(),pnl=Number(p.unrealized_pnl||0);return '<div class="rowitem"><div class="rowtop"><strong>'+esc(p.symbol)+' · '+esc(side)+'</strong><span class="pill">'+fmt(p.leverage,1)+'x</span></div><div class="stats"><div class="stat">Quantity<b>'+fmt(p.quantity,6)+'</b></div><div class="stat">Entry<b>'+fmt(p.entry_price,5)+'</b></div><div class="stat">Mark<b>'+fmt(p.mark_price,5)+'</b></div><div class="stat">Unrealized P&amp;L<b class="'+(pnl>0?"positive":pnl<0?"negative":"")+'">'+fmt(pnl,4)+' USDT</b></div><div class="stat">Stop loss<b>'+fmt(p.stop_loss,5)+'</b></div><div class="stat">Take profit<b>'+fmt(p.take_profit,5)+'</b></div></div><div class="actions" style="margin-top:10px"><button class="danger" data-close="'+esc(p.symbol)+'">Close position · Reduce Only</button></div></div>';}).join("");}
-function renderOrders(rows){if(!rows.length){$("orders").innerHTML='<div class="empty">No active exchange orders.</div>';return;}$("orders").innerHTML='<table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Order ID</th></tr></thead><tbody>'+rows.map(function(o){return '<tr><td>'+esc(o.symbol)+'</td><td>'+esc(o.side)+'</td><td>'+esc(o.qty)+'</td><td>'+esc(o.order_status)+'</td><td>'+esc(o.order_id).slice(0,12)+'</td></tr>';}).join("")+'</tbody></table>';}
-function renderEvents(rows){if(!rows.length){$("events").innerHTML='<div class="empty">No strategy or manual execution events.</div>';return;}$("events").innerHTML=rows.slice().reverse().map(function(e){return '<div class="rowitem"><div class="rowtop"><strong>'+esc(e.type||"event")+' · '+esc(e.symbol||"—")+'</strong><span class="sub">'+esc(e.at||"")+'</span></div><div class="sub">'+esc(e.side||e.reason||"")+' '+(e.leverage?esc(e.leverage)+"x":"")+' '+(e.order_link_id?"· "+esc(e.order_link_id):"")+'</div></div>';}).join("");}
+function renderOrders(rows){if(!rows.length){$("orders").innerHTML='<div class="empty">No active exchange orders.</div>';return;}$("orders").innerHTML='<table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Protection type</th><th>Trigger</th><th>Stop</th><th>Target</th><th>Reduce only</th><th>Order ID</th></tr></thead><tbody>'+rows.map(function(o){return '<tr><td>'+esc(o.symbol)+'</td><td>'+esc(o.side)+'</td><td>'+fmt(o.qty,6)+'</td><td>'+esc(o.order_status)+'</td><td>'+esc(o.stop_order_type||o.order_type)+'</td><td>'+esc(o.trigger_price||o.trigger_by||"—")+'</td><td>'+esc(o.stop_loss||"—")+'</td><td>'+esc(o.take_profit||"—")+'</td><td>'+String(!!o.reduce_only)+'</td><td>'+esc(o.order_id).slice(0,12)+'</td></tr>';}).join("")+'</tbody></table>';}
+function renderClosedPnl(rows,error,fetchedAt){if(error){$("closed-pnl").innerHTML='<div class="empty">Closed P&amp;L history unavailable: '+esc(error)+'</div>';return;}if(!rows.length){$("closed-pnl").innerHTML='<div class="empty">No closed linear P&amp;L records returned by Bybit.</div>';}else{$("closed-pnl").innerHTML='<table><thead><tr><th>Symbol</th><th>Direction</th><th>Closed size</th><th>Avg entry</th><th>Avg exit</th><th>Closed P&amp;L</th><th>Open fee</th><th>Close fee</th><th>Updated</th></tr></thead><tbody>'+rows.map(function(p){var pnl=Number(p.closed_pnl||0),direction=p.side==="Sell"?"LONG":p.side==="Buy"?"SHORT":p.side;return '<tr><td>'+esc(p.symbol)+'</td><td>'+esc(direction)+'</td><td>'+fmt(p.closed_size,6)+'</td><td>'+fmt(p.avg_entry_price,6)+'</td><td>'+fmt(p.avg_exit_price,6)+'</td><td class="'+(pnl>0?"positive":pnl<0?"negative":"")+'">'+fmt(pnl,6)+'</td><td>'+fmt(p.open_fee,6)+'</td><td>'+fmt(p.close_fee,6)+'</td><td>'+esc(p.updated_time_ms?new Date(p.updated_time_ms).toLocaleString():"—")+'</td></tr>';}).join("")+'</tbody></table>';}$("closed-pnl-note").textContent=fetchedAt?"Bybit Closed P&L snapshot · refreshed "+new Date(fetchedAt).toLocaleTimeString():"";}
+function renderEvents(rows){if(!rows.length){$("events").innerHTML='<div class="empty">No strategy or manual execution events.</div>';return;}$("events").innerHTML=rows.slice().reverse().map(function(e){var detail=[e.side?"side="+e.side:null,e.reason?"reason="+e.reason:null,e.venue_exit_reason?"venue_exit="+e.venue_exit_reason:null,e.order_status?"order="+e.order_status:null,e.close_order_status?"close="+e.close_order_status:null,e.reject_reason?"reject="+e.reject_reason:null,e.detail||null,e.minimum_order_notional!==undefined?"minOrder="+fmt(e.minimum_order_notional,4):null,e.maximum_order_notional!==undefined?"cap="+fmt(e.maximum_order_notional,4):null,e.minimum_quantity!==undefined?"minQty="+fmt(e.minimum_quantity,6):null,e.mark_price!==undefined?"mark="+fmt(e.mark_price,6):null,e.attribution_status?"PnL attribution="+e.attribution_status:null,e.closed_pnl!==undefined&&e.closed_pnl!==null?"closed PnL="+fmt(e.closed_pnl,6)+" USDT":null,e.fees_total!==undefined&&e.fees_total!==null?"fees="+fmt(e.fees_total,6)+" USDT":null,e.held_seconds!==undefined?"held="+e.held_seconds+"s":null].filter(Boolean).join(" · ");return '<div class="rowitem"><div class="rowtop"><strong>'+esc(e.type||"event")+' · '+esc(e.symbol||"—")+'</strong><span class="sub">'+esc(e.at||"")+'</span></div><div class="sub">'+esc(detail||"No additional details")+' '+(e.leverage?esc(e.leverage)+"x":"")+' '+(e.order_link_id?"· "+esc(e.order_link_id):"")+'</div></div>';}).join("");}
 async function loadMarket(){var s=$("symbol").value;try{var d=await api("/api/market?symbol="+encodeURIComponent(s));$("mark").value=fmt(d.mark_price,6);var side=$("side").value;var stop=side==="long"?d.suggested_long_stop:d.suggested_short_stop;var target=side==="long"?d.suggested_long_target:d.suggested_short_target;$("stop").value=stop==null?"":String(stop);$("target").value=target==null?"":String(target);$("market-note").textContent="Live mark "+fmt(d.mark_price,6)+" · forming 1m candle "+new Date(d.forming_candle_open).toLocaleString()+" · ATR "+fmt(d.atr,6)+" · RSI "+fmt(d.rsi,1)+" · 5m/15m bias L:"+d.long_bias+" S:"+d.short_bias+" · signal "+d.signal+" ("+d.signal_reason+") · qty step "+d.quantity_step;}catch(e){$("market-note").textContent="Market / scalping data unavailable: "+e.message;}}
 async function manual(side){$("side").value=side;var symbol=$("symbol").value,stop=Number($("stop").value),target=Number($("target").value),leverage=Number($("leverage").value);if(!Number.isFinite(stop)||!Number.isFinite(target)||stop<=0||target<=0){msg("Enter a valid stop loss and take profit first.",false);return;}if(!confirm("Submit a "+side.toUpperCase()+" market order on BYBIT DEMO "+symbol+" at up to "+leverage+"x? SL and TP will be attached at the exchange."))return;try{var d=await api("/api/order",{method:"POST",headers:{"X-Demo-Confirm":"yes"},body:JSON.stringify({symbol:symbol,side:side,leverage:leverage,stop_loss:stop,take_profit:target})});msg("Demo order accepted: "+(d.order_id||d.order_link_id)+" · "+fmt(d.quantity,6)+" "+symbol+". Confirm fill in the positions panel.",true);await refresh();}catch(e){msg(e.message,false);}}
 async function closePosition(symbol){if(!confirm("Close the entire "+symbol+" position using a reduce-only market order on Bybit Demo?"))return;try{var d=await api("/api/close",{method:"POST",headers:{"X-Demo-Confirm":"yes"},body:JSON.stringify({symbol:symbol})});msg(d.closed===false?"No open position was found.":"Reduce-only close accepted for "+symbol+".",true);await refresh();}catch(e){msg(e.message,false);}}
