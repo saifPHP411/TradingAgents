@@ -79,7 +79,7 @@ def replay(price, mark, inputs, variant, start, end):
         target = mark.at[t, "open"] + side * CFG.reward_risk * row.distance
         exit_time = expiry
         fill = price.at[expiry, "open"]
-        for stamp, bar in price.loc[t:expiry].iloc[:-1].iterrows():
+        for stamp, bar in mark.loc[t:expiry].iloc[:-1].iterrows():
             adverse, favorable = (bar.low, bar.high) if side == 1 else (bar.high, bar.low)
             if side * (adverse - stop) <= 0:
                 fill = min(stop, bar.open) if side == 1 else max(stop, bar.open)
@@ -87,6 +87,7 @@ def replay(price, mark, inputs, variant, start, end):
                 fill = target
             else:
                 continue
+            fill += price.at[stamp, "open"] - bar.open
             exit_time = stamp + pd.Timedelta(minutes=1)
             break
         pnl.append((side * (fill - entry) / entry, 1 + fill / entry))
