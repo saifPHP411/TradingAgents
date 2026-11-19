@@ -298,8 +298,13 @@ class BybitLinearDemoBroker:
             if not isinstance(row, dict):
                 raise BybitLinearDemoError("Bybit Demo returned a malformed position row")
             symbol = self._symbol(row.get("symbol", ""))
-            size = _finite_positive(row.get("size", "0.000000000000000001"), "position size") if str(row.get("size") or "0") != "0" else 0.0
-            if size <= 0:
+            try:
+                size = float(row.get("size") or 0)
+            except (TypeError, ValueError):
+                raise BybitLinearDemoError("Bybit Demo returned an invalid position size") from None
+            if not math.isfinite(size) or size < 0:
+                raise BybitLinearDemoError("Bybit Demo returned an invalid position size")
+            if size == 0:
                 continue
             if row.get("positionIdx") not in (0, "0", None):
                 raise BybitLinearDemoRejected(
@@ -413,8 +418,11 @@ class BybitLinearDemoBroker:
         if direction == 0:
             raise ValueError("side must be long or short")
         instrument = self.instrument_info(market)
+        lev = _finite_positive(leverage, "leverage")
+        if not 1.0 <= lev <= MAX_LEVERAGE:
+            raise BybitLinearDemoRejected("leverage must be between 1x and the hard 2x ceiling")
         risk = PerpetualRiskSettings(
-            leverage=float(leverage),
+            leverage=lev,
             max_leverage=MAX_LEVERAGE,
             risk_fraction=0.005,
             max_margin_fraction=0.10,
