@@ -354,11 +354,164 @@ class BybitLinearDemoBroker:
                 "side": str(row.get("side") or ""),
                 "qty": str(row.get("qty") or ""),
                 "order_status": str(row.get("orderStatus") or ""),
+                "order_type": str(row.get("orderType") or ""),
+                "stop_order_type": str(row.get("stopOrderType") or ""),
+                "trigger_price": str(row.get("triggerPrice") or "") or None,
+                "trigger_by": str(row.get("triggerBy") or "") or None,
+                "take_profit": str(row.get("takeProfit") or "") or None,
+                "stop_loss": str(row.get("stopLoss") or "") or None,
+                "tpsl_mode": str(row.get("tpslMode") or "") or None,
+                "tp_trigger_by": str(row.get("tpTriggerBy") or "") or None,
+                "sl_trigger_by": str(row.get("slTriggerBy") or "") or None,
+                "reduce_only": bool(row.get("reduceOnly", False)),
+                "close_on_trigger": bool(row.get("closeOnTrigger", False)),
+                "position_idx": int(row.get("positionIdx") or 0),
                 "created_time_ms": int(row.get("createdTime") or 0),
+                "updated_time_ms": int(row.get("updatedTime") or 0),
             }
             for row in rows
             if isinstance(row, dict)
         ]
+
+    @staticmethod
+    def _optional_number(value: object) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    @staticmethod
+    def _history_time(value: object) -> int:
+        try:
+            number = int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+        return number if number > 0 else 0
+
+    @staticmethod
+    def _validate_history_window(start_time_ms: int | None, end_time_ms: int | None) -> None:
+        for name, value in (("start_time_ms", start_time_ms), ("end_time_ms", end_time_ms)):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive integer")
+        if start_time_ms is not None and end_time_ms is not None:
+            if start_time_ms > end_time_ms:
+                raise ValueError("start_time_ms must not exceed end_time_ms")
+            if end_time_ms - start_time_ms > 7 * 24 * 60 * 60 * 1000:
+                raise ValueError("Bybit history windows cannot exceed seven days")
+
+    def get_closed_pnl(
+        self,
+        *,
+        symbol: str | None = None,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return venue-reported closed PnL, including average fill prices and fees."""
+        self._validate_history_window(start_time_ms, end_time_ms)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("closed PnL limit must be in [1, 100]")
+        params: dict[str, object] = {"category": "linear", "limit": limit}
+        if symbol:
+            params["symbol"] = self._symbol(symbol)
+        if start_time_ms is not None:
+            params["startTime"] = start_time_ms
+        if end_time_ms is not None:
+            params["endTime"] = end_time_ms
+        result = self._request("GET", "/v5/position/closed-pnl", params=params)
+        rows = result.get("list")
+        if not isinstance(rows, list):
+            raise BybitLinearDemoError("Bybit Demo closed-PnL response omitted its list")
+        normalized = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized.append({
+                "symbol": self._symbol(row.get("symbol", "")),
+                "order_id": str(row.get("orderId") or ""),
+                "side": str(row.get("side") or ""),
+                "qty": self._optional_number(row.get("qty")),
+                "closed_size": self._optional_number(row.get("closedSize")),
+                "avg_entry_price": self._optional_number(row.get("avgEntryPrice")),
+                "avg_exit_price": self._optional_number(row.get("avgExitPrice")),
+                "closed_pnl": self._optional_number(row.get("closedPnl")),
+                "open_fee": self._optional_number(row.get("openFee")),
+                "close_fee": self._optional_number(row.get("closeFee")),
+                "fill_count": self._optional_number(row.get("fillCount")),
+                "leverage": self._optional_number(row.get("leverage")),
+                "created_time_ms": self._history_time(row.get("createdTime")),
+                "updated_time_ms": self._history_time(row.get("updatedTime")),
+            })
+        return normalized
+
+    def get_order_history(
+        self,
+        *,
+        symbol: str | None = None,
+        order_id: str | None = None,
+        order_link_id: str | None = None,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return recent venue order records for exit attribution and fill reconciliation."""
+        self._validate_history_window(start_time_ms, end_time_ms)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
+            raise ValueError("order history limit must be in [1, 50]")
+        params: dict[str, object] = {"category": "linear", "limit": limit}
+        if symbol:
+            params["symbol"] = self._symbol(symbol)
+        if order_id:
+            params["orderId"] = _order_id(order_id)
+        if order_link_id:
+            params["orderLinkId"] = _order_id(order_link_id)
+        if start_time_ms is not None:
+            params["startTime"] = start_time_ms
+        if end_time_ms is not None:
+            params["endTime"] = end_time_ms
+        result = self._request("GET", "/v5/order/history", params=params)
+        rows = result.get("list")
+        if not isinstance(rows, list):
+            raise BybitLinearDemoError("Bybit Demo order-history response omitted its list")
+        normalized = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized.append({
+                "symbol": self._symbol(row.get("symbol", "")),
+                "order_id": str(row.get("orderId") or ""),
+                "order_link_id": str(row.get("orderLinkId") or ""),
+                "parent_order_link_id": str(row.get("parentOrderLinkId") or ""),
+                "side": str(row.get("side") or ""),
+                "qty": self._optional_number(row.get("qty")),
+                "order_status": str(row.get("orderStatus") or ""),
+                "order_type": str(row.get("orderType") or ""),
+                "stop_order_type": str(row.get("stopOrderType") or ""),
+                "avg_price": self._optional_number(row.get("avgPrice")),
+                "cum_exec_qty": self._optional_number(row.get("cumExecQty")),
+                "cum_exec_value": self._optional_number(row.get("cumExecValue")),
+                "cum_fee_detail": row.get("cumFeeDetail"),
+                "trigger_price": self._optional_number(row.get("triggerPrice")),
+                "take_profit": self._optional_number(row.get("takeProfit")),
+                "stop_loss": self._optional_number(row.get("stopLoss")),
+                "tpsl_mode": str(row.get("tpslMode") or "") or None,
+                "tp_trigger_by": str(row.get("tpTriggerBy") or "") or None,
+                "sl_trigger_by": str(row.get("slTriggerBy") or "") or None,
+                "trigger_by": str(row.get("triggerBy") or "") or None,
+                "reduce_only": bool(row.get("reduceOnly", False)),
+                "close_on_trigger": bool(row.get("closeOnTrigger", False)),
+                "reject_reason": str(row.get("rejectReason") or "") or None,
+                "cancel_type": str(row.get("cancelType") or "") or None,
+                "position_idx": int(row.get("positionIdx") or 0),
+                "created_time_ms": self._history_time(row.get("createdTime")),
+                "updated_time_ms": self._history_time(row.get("updatedTime")),
+            })
+        return normalized
 
     def get_order_by_link_id(self, symbol: str, order_link_id: str) -> dict | None:
         market = self._symbol(symbol)
