@@ -639,9 +639,9 @@ class PerpetualDemoController:
                     # A submitted close is not treated as a fill. Keep managing the
                     # position until the venue confirms flat; retry only after a
                     # market IOC has had time to settle or is terminal.
-                    if pending_age < 15_000 or (
-                        order_status in {"New", "PartiallyFilled", "Untriggered"}
-                        and pending_age < 60_000
+                    if pending_age < 60_000 and (
+                        not order_status
+                        or order_status in {"New", "PartiallyFilled", "Untriggered", "Filled"}
                     ):
                         continue
                     meta.pop("pending_exit", None)
@@ -771,14 +771,25 @@ class PerpetualDemoController:
                             "order_link_id": meta.get("order_link_id"),
                         })
                         continue
-                    if filled_quantity <= 0 and entry_age < 120_000:
+                    if filled_quantity <= 0:
+                        if entry_age < 120_000:
+                            continue
+                        managed.pop(symbol, None)
+                        cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
+                        self._record({
+                            "type": "strategy_entry_unconfirmed",
+                            "symbol": symbol,
+                            "side": meta.get("side"),
+                            "order_status": entry_status or "not_found",
+                            "order_link_id": meta.get("order_link_id"),
+                            "detail": "No venue position or confirmed executed quantity was found within 120 seconds; this is not counted as a trade or exit.",
+                        })
                         continue
-                    if filled_quantity > 0:
-                        meta["venue_position_confirmed"] = True
-                        meta["venue_entry_price"] = entry_order.get("avg_price") or meta.get("entry_price_mark")
-                        meta["venue_entry_time_ms"] = (
-                            entry_order.get("created_time_ms") or meta.get("entry_time_ms") or now_ms
-                        )
+                    meta["venue_position_confirmed"] = True
+                    meta["venue_entry_price"] = entry_order.get("avg_price") or meta.get("entry_price_mark")
+                    meta["venue_entry_time_ms"] = (
+                        entry_order.get("created_time_ms") or meta.get("entry_time_ms") or now_ms
+                    )
 
                 exit_details = self._closed_trade_details(symbol, meta, now_ms)
                 pending_exit = meta.get("pending_exit")
@@ -971,6 +982,11 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
    <div id="orders" class="tablewrap"><div class="empty">No verified open orders.</div></div>
   </section>
   <section class="panel wide">
+   <div class="heading"><h2>Closed trades · Bybit P&amp;L</h2><span class="pill">Venue-reported</span></div>
+   <div id="closed-pnl" class="tablewrap"><div class="empty">Loading closed P&amp;L history.</div></div>
+   <p id="closed-pnl-note" class="sub"></p>
+  </section>
+  <section class="panel wide">
    <div class="heading"><h2>Execution activity</h2><span class="pill">Last 20 events</span></div>
    <div id="events" class="rows"><div class="empty">No recorded activity.</div></div>
   </section>
@@ -987,13 +1003,14 @@ function msg(t,ok){$("message").textContent=t;$("message").className=ok?"ok":"er
 async function api(path,options){options=options||{};options.headers=Object.assign({"Authorization":"Bearer "+TOKEN,"Content-Type":"application/json"},options.headers||{});var r=await fetch(path,options),body=await r.json().catch(function(){return {};});if(!r.ok)throw new Error(body.detail||body.error||"HTTP "+r.status);return body;}
 function connect(){TOKEN=$("token").value.trim();if(!TOKEN){msg("Dashboard token is required.",false);return;}localStorage.setItem("bybit_linear_demo_token",TOKEN);boot();}
 async function refresh(){try{var d=await api("/api/status");$("venue-badge").textContent=d.status==="ok"?"BYBIT DEMO · LINEAR":String(d.status||"UNKNOWN").toUpperCase();$("venue-badge").className="pill "+(d.status==="ok"?"safe":"warn");var w=d.wallet||{};$("equity").textContent=fmt(w.total_equity_usd);$("available").textContent=fmt(w.total_available_balance_usd);$("upl").textContent=fmt(w.total_perpetual_unrealized_pnl_usd);$("position-count").textContent=String((d.positions||[]).length);$("positions-badge").textContent=String((d.positions||[]).length)+" / 2";$("refresh-time").textContent=new Date().toLocaleTimeString();
-renderPositions(d.positions||[]);renderOrders(d.open_orders||[]);renderEvents((d.strategy_state||{}).events||[]);renderStrategy(d.strategy||{});
+renderPositions(d.positions||[]);renderOrders(d.open_orders||[]);renderClosedPnl(d.closed_pnl||[],d.closed_pnl_error,d.closed_pnl_fetched_at_ms);renderEvents((d.strategy_state||{}).events||[]);renderStrategy(d.strategy||{});
 if(d.status!=="ok")msg(d.detail||"Demo account is not ready. Check dedicated Contract Trade key permissions.",false);else if(d.spot_enabled!==false)msg("Safety error: service did not confirm Spot is disabled.",false);else $("message").style.display="none";
 }catch(e){msg(e.message,false);}}
 function renderStrategy(s){var state=s.status||"idle";$("strategy-badge").textContent=String(state).toUpperCase();$("strategy-badge").className="pill "+(state==="running"?"safe":state==="error"||state==="halted"?"bad":"");$("strategy-detail").textContent=s.detail||s.last_error||"Stopped.";var active=["starting","running","stopping"].indexOf(state)>=0;$("start-strategy").disabled=active||state==="halted";$("stop-strategy").disabled=!active;}
 function renderPositions(rows){if(!rows.length){$("positions").innerHTML='<div class="empty">No open USDT linear perpetual positions.</div>';return;}$("positions").innerHTML=rows.map(function(p){var side=String(p.side||"").toUpperCase(),pnl=Number(p.unrealized_pnl||0);return '<div class="rowitem"><div class="rowtop"><strong>'+esc(p.symbol)+' · '+esc(side)+'</strong><span class="pill">'+fmt(p.leverage,1)+'x</span></div><div class="stats"><div class="stat">Quantity<b>'+fmt(p.quantity,6)+'</b></div><div class="stat">Entry<b>'+fmt(p.entry_price,5)+'</b></div><div class="stat">Mark<b>'+fmt(p.mark_price,5)+'</b></div><div class="stat">Unrealized P&amp;L<b class="'+(pnl>0?"positive":pnl<0?"negative":"")+'">'+fmt(pnl,4)+' USDT</b></div><div class="stat">Stop loss<b>'+fmt(p.stop_loss,5)+'</b></div><div class="stat">Take profit<b>'+fmt(p.take_profit,5)+'</b></div></div><div class="actions" style="margin-top:10px"><button class="danger" data-close="'+esc(p.symbol)+'">Close position · Reduce Only</button></div></div>';}).join("");}
-function renderOrders(rows){if(!rows.length){$("orders").innerHTML='<div class="empty">No active exchange orders.</div>';return;}$("orders").innerHTML='<table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Order ID</th></tr></thead><tbody>'+rows.map(function(o){return '<tr><td>'+esc(o.symbol)+'</td><td>'+esc(o.side)+'</td><td>'+esc(o.qty)+'</td><td>'+esc(o.order_status)+'</td><td>'+esc(o.order_id).slice(0,12)+'</td></tr>';}).join("")+'</tbody></table>';}
-function renderEvents(rows){if(!rows.length){$("events").innerHTML='<div class="empty">No strategy or manual execution events.</div>';return;}$("events").innerHTML=rows.slice().reverse().map(function(e){return '<div class="rowitem"><div class="rowtop"><strong>'+esc(e.type||"event")+' · '+esc(e.symbol||"—")+'</strong><span class="sub">'+esc(e.at||"")+'</span></div><div class="sub">'+esc(e.side||e.reason||"")+' '+(e.leverage?esc(e.leverage)+"x":"")+' '+(e.order_link_id?"· "+esc(e.order_link_id):"")+'</div></div>';}).join("");}
+function renderOrders(rows){if(!rows.length){$("orders").innerHTML='<div class="empty">No active exchange orders.</div>';return;}$("orders").innerHTML='<table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Protection type</th><th>Trigger</th><th>Stop</th><th>Target</th><th>Reduce only</th><th>Order ID</th></tr></thead><tbody>'+rows.map(function(o){return '<tr><td>'+esc(o.symbol)+'</td><td>'+esc(o.side)+'</td><td>'+fmt(o.qty,6)+'</td><td>'+esc(o.order_status)+'</td><td>'+esc(o.stop_order_type||o.order_type)+'</td><td>'+esc(o.trigger_price||o.trigger_by||"—")+'</td><td>'+esc(o.stop_loss||"—")+'</td><td>'+esc(o.take_profit||"—")+'</td><td>'+String(!!o.reduce_only)+'</td><td>'+esc(o.order_id).slice(0,12)+'</td></tr>';}).join("")+'</tbody></table>';}
+function renderClosedPnl(rows,error,fetchedAt){if(error){$("closed-pnl").innerHTML='<div class="empty">Closed P&amp;L history unavailable: '+esc(error)+'</div>';return;}if(!rows.length){$("closed-pnl").innerHTML='<div class="empty">No closed linear P&amp;L records returned by Bybit.</div>';}else{$("closed-pnl").innerHTML='<table><thead><tr><th>Symbol</th><th>Direction</th><th>Closed size</th><th>Avg entry</th><th>Avg exit</th><th>Closed P&amp;L</th><th>Open fee</th><th>Close fee</th><th>Updated</th></tr></thead><tbody>'+rows.map(function(p){var pnl=Number(p.closed_pnl||0),direction=p.side==="Sell"?"LONG":p.side==="Buy"?"SHORT":p.side;return '<tr><td>'+esc(p.symbol)+'</td><td>'+esc(direction)+'</td><td>'+fmt(p.closed_size,6)+'</td><td>'+fmt(p.avg_entry_price,6)+'</td><td>'+fmt(p.avg_exit_price,6)+'</td><td class="'+(pnl>0?"positive":pnl<0?"negative":"")+'">'+fmt(pnl,6)+'</td><td>'+fmt(p.open_fee,6)+'</td><td>'+fmt(p.close_fee,6)+'</td><td>'+esc(p.updated_time_ms?new Date(p.updated_time_ms).toLocaleString():"—")+'</td></tr>';}).join("")+'</tbody></table>';}$("closed-pnl-note").textContent=fetchedAt?"Bybit Closed P&L snapshot · refreshed "+new Date(fetchedAt).toLocaleTimeString():"";}
+function renderEvents(rows){if(!rows.length){$("events").innerHTML='<div class="empty">No strategy or manual execution events.</div>';return;}$("events").innerHTML=rows.slice().reverse().map(function(e){var detail=[e.side?"side="+e.side:null,e.reason?"reason="+e.reason:null,e.venue_exit_reason?"venue_exit="+e.venue_exit_reason:null,e.order_status?"order="+e.order_status:null,e.close_order_status?"close="+e.close_order_status:null,e.reject_reason?"reject="+e.reject_reason:null,e.detail||null,e.attribution_status?"PnL attribution="+e.attribution_status:null,e.closed_pnl!==undefined&&e.closed_pnl!==null?"closed PnL="+fmt(e.closed_pnl,6)+" USDT":null,e.fees_total!==undefined&&e.fees_total!==null?"fees="+fmt(e.fees_total,6)+" USDT":null,e.held_seconds!==undefined?"held="+e.held_seconds+"s":null].filter(Boolean).join(" · ");return '<div class="rowitem"><div class="rowtop"><strong>'+esc(e.type||"event")+' · '+esc(e.symbol||"—")+'</strong><span class="sub">'+esc(e.at||"")+'</span></div><div class="sub">'+esc(detail||"No additional details")+' '+(e.leverage?esc(e.leverage)+"x":"")+' '+(e.order_link_id?"· "+esc(e.order_link_id):"")+'</div></div>';}).join("");}
 async function loadMarket(){var s=$("symbol").value;try{var d=await api("/api/market?symbol="+encodeURIComponent(s));$("mark").value=fmt(d.mark_price,6);var side=$("side").value;var stop=side==="long"?d.suggested_long_stop:d.suggested_short_stop;var target=side==="long"?d.suggested_long_target:d.suggested_short_target;$("stop").value=stop==null?"":String(stop);$("target").value=target==null?"":String(target);$("market-note").textContent="Live mark "+fmt(d.mark_price,6)+" · forming 1m candle "+new Date(d.forming_candle_open).toLocaleString()+" · ATR "+fmt(d.atr,6)+" · RSI "+fmt(d.rsi,1)+" · 5m/15m bias L:"+d.long_bias+" S:"+d.short_bias+" · signal "+d.signal+" ("+d.signal_reason+") · qty step "+d.quantity_step;}catch(e){$("market-note").textContent="Market / scalping data unavailable: "+e.message;}}
 async function manual(side){$("side").value=side;var symbol=$("symbol").value,stop=Number($("stop").value),target=Number($("target").value),leverage=Number($("leverage").value);if(!Number.isFinite(stop)||!Number.isFinite(target)||stop<=0||target<=0){msg("Enter a valid stop loss and take profit first.",false);return;}if(!confirm("Submit a "+side.toUpperCase()+" market order on BYBIT DEMO "+symbol+" at up to "+leverage+"x? SL and TP will be attached at the exchange."))return;try{var d=await api("/api/order",{method:"POST",headers:{"X-Demo-Confirm":"yes"},body:JSON.stringify({symbol:symbol,side:side,leverage:leverage,stop_loss:stop,take_profit:target})});msg("Demo order accepted: "+(d.order_id||d.order_link_id)+" · "+fmt(d.quantity,6)+" "+symbol+". Confirm fill in the positions panel.",true);await refresh();}catch(e){msg(e.message,false);}}
 async function closePosition(symbol){if(!confirm("Close the entire "+symbol+" position using a reduce-only market order on Bybit Demo?"))return;try{var d=await api("/api/close",{method:"POST",headers:{"X-Demo-Confirm":"yes"},body:JSON.stringify({symbol:symbol})});msg(d.closed===false?"No open position was found.":"Reduce-only close accepted for "+symbol+".",true);await refresh();}catch(e){msg(e.message,false);}}
