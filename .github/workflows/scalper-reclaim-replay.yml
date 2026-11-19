@@ -1,0 +1,23 @@
+name: Scalper reclaim replay
+on:
+  push:
+    branches: [research/scalper-reclaim-replay-20261119]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install 'pandas>=2.2,<3'
+      - run: python -m scripts.scalper_reclaim_replay | tee replay.txt
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scalper-replay
+          path: replay.txt
