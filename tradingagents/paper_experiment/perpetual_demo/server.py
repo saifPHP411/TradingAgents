@@ -102,6 +102,7 @@ class PerpetualDemoController:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._instrument_cache: dict[str, Any] = {}
         self._strategy_status: dict[str, Any] = {
             "status": "idle",
             "strategy_id": STRATEGY_ID,
@@ -376,9 +377,12 @@ class PerpetualDemoController:
             if wallet.get("status") != "ok":
                 raise BybitLinearDemoError("Bybit Demo wallet preflight failed")
             _number(wallet.get("total_equity_usd"), "account equity")
-            # Resolve current exchange contract filters before the worker can be armed.
+            # Cache current contract filters before arming the worker. Symbols
+            # whose minimum order cannot fit the account's hard notional cap are
+            # skipped before signal execution rather than repeatedly rejected.
+            self._instrument_cache = {}
             for symbol in self.symbols:
-                self.broker.instrument_info(symbol)
+                self._instrument_cache[symbol] = self.broker.instrument_info(symbol)
             self.broker.get_positions()  # also refuses hedge-mode positions
             self._stop.clear()
             self._strategy_status = {
@@ -819,6 +823,36 @@ class PerpetualDemoController:
                 continue
             if current_signal not in (-1, 1) or len(active_by_symbol) >= MAX_OPEN_POSITIONS:
                 continue
+
+            instrument = self._instrument_cache.get(symbol)
+            if instrument is not None:
+                mark = float(market["mark_price"])
+                minimum_order_notional = max(
+                    float(instrument.min_notional),
+                    float(instrument.min_quantity) * mark,
+                )
+                maximum_order_notional = min(
+                    equity * 0.10 * self.strategy.leverage,
+                    equity * 0.20,
+                )
+                if minimum_order_notional > maximum_order_notional + 1e-8:
+                    skipped = self._state.setdefault("scalper_untradable_symbols", {})
+                    reason_key = (
+                        round(minimum_order_notional, 4),
+                        round(maximum_order_notional, 4),
+                    )
+                    if skipped.get(symbol) != list(reason_key):
+                        skipped[symbol] = list(reason_key)
+                        self._record({
+                            "type": "strategy_symbol_skipped",
+                            "symbol": symbol,
+                            "reason": "minimum_contract_notional_exceeds_account_limit",
+                            "minimum_quantity": instrument.min_quantity,
+                            "minimum_order_notional": minimum_order_notional,
+                            "maximum_order_notional": maximum_order_notional,
+                            "mark_price": mark,
+                        })
+                    continue
 
             side = "long" if current_signal > 0 else "short"
             stop = float(market["suggested_long_stop"] if side == "long" else market["suggested_short_stop"])
