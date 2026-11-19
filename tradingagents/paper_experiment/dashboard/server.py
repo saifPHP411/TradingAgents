@@ -825,7 +825,7 @@ class Dashboard:
             self._perpetual_shadow_thread.start()
             return dict(self._perpetual_shadow_status)
 
-    def _perpetual_position_view(self, symbol: str) -> tuple[str, dict[str, Any] | None]:
+    def _perpetual_position_view(self, symbol: str) -> tuple[str, dict[str, Any] | None, str | None]:
         """Read a genuine Bybit Demo linear position, falling back to a validated local snapshot.
 
         The live account path is signed and GET-only. Missing credentials mean
@@ -872,7 +872,7 @@ class Dashboard:
         if raw_symbol != symbol:
             return "invalid", None, None
         if state == "FLAT":
-            return "flat", None, "Bybit Demo read-only position endpoint"
+            return "flat", None, "validated local futures snapshot"
         if state != "OPEN":
             return "invalid", None, None
         side = str(raw.get("side", "")).strip().lower()
@@ -912,7 +912,7 @@ class Dashboard:
                 position["unrealized_pnl"] = float(pnl)
         except (TypeError, ValueError, OverflowError):
             return "invalid", None, None
-        return "open", position, "Bybit Demo read-only position endpoint"
+        return "open", position, position.get("position_source")
 
     def perpetual_chart(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
         """Read completed Bybit perpetual candles and an optional read-only Demo position.
