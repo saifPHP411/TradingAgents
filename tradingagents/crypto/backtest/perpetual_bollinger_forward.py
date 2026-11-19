@@ -25,7 +25,19 @@ from tradingagents.crypto.backtest.perpetual_ema_walkforward import COST_SCENARI
 from tradingagents.crypto.binance_vision import BinanceVisionPublicClient
 from tradingagents.crypto.perpetuals import PerpetualRiskSettings
 
-DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
+CORE_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
+ADDITIONAL_SYMBOLS = (
+    "XRPUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
+    "LINKUSDT",
+    "LTCUSDT",
+    "AVAXUSDT",
+    "DOTUSDT",
+    "TRXUSDT",
+)
+DEFAULT_SYMBOLS = CORE_SYMBOLS + ADDITIONAL_SYMBOLS
+UNIVERSE_VERSION = "expanded_usdt_perpetual_universe_v1"
 DEFAULT_FORWARD_START = "2026-11-01T00:00:00+00:00"
 FUNDING_SCENARIOS = {
     "zero_forward_funding": 0.0,
@@ -374,8 +386,15 @@ def run_forward_study(args: argparse.Namespace) -> dict:
         "portfolio_warning": (
             "Each symbol is simulated independently with the full initial equity. "
             "These results are not a combined multi-symbol portfolio and must not "
-            "be summed as if the same 50 USDT were deployed four times."
+            "be summed as if the same initial equity were deployed across every symbol."
         ),
+        "symbol_universe": {
+            "version": UNIVERSE_VERSION,
+            "core_symbols": list(CORE_SYMBOLS),
+            "additional_symbols": list(ADDITIONAL_SYMBOLS),
+            "requested_symbols": list(args.symbols),
+            "loaded_symbols": list(aligned),
+        },
         "research_instrument_assumptions": instruments,
         "symbol_data_errors": errors,
         "parameters_locked_before_forward_run": True,

@@ -7,6 +7,9 @@ import pandas as pd
 import pytest
 
 from tradingagents.crypto.backtest.perpetual_bollinger_forward import (
+    ADDITIONAL_SYMBOLS,
+    CORE_SYMBOLS,
+    DEFAULT_SYMBOLS,
     FORWARD_CANDIDATES,
     _count_forward_signals,
     _load_symbol_window,
@@ -35,6 +38,15 @@ def test_forward_candidates_are_fixed_and_do_not_mutate_development_definitions(
     assert std_candidate["atr_multiple"] == 1.6
     assert std_candidate["mean_reversion_std"] == 1.8
     assert len(FORWARD_CANDIDATES) == 2
+
+
+@pytest.mark.unit
+def test_default_forward_universe_expands_without_dropping_core_markets():
+    assert CORE_SYMBOLS == ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
+    assert len(ADDITIONAL_SYMBOLS) == 8
+    assert len(DEFAULT_SYMBOLS) == 12
+    assert DEFAULT_SYMBOLS == CORE_SYMBOLS + ADDITIONAL_SYMBOLS
+    assert len(set(DEFAULT_SYMBOLS)) == len(DEFAULT_SYMBOLS)
 
 
 @pytest.mark.unit
