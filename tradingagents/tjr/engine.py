@@ -329,10 +329,17 @@ class TjrBacktester:
             row = self._bar_closing_at(self.five_minute[symbol], instant)
             if row is None:
                 continue
+            open_price = float(row["open"])
             if position.stop is not None and float(row["low"]) <= position.stop:
-                self._close_position(symbol, position, instant, position.stop, "stop")
+                # A stop-market order cannot be filled at its stop after a gap
+                # through it; the open is the first available executable price.
+                exit_price = min(open_price, position.stop)
+                self._close_position(symbol, position, instant, exit_price, "stop")
             elif position.target is not None and float(row["high"]) >= position.target:
-                self._close_position(symbol, position, instant, position.target, "target")
+                # A resting take-profit limit receives price improvement when
+                # the market opens beyond the limit in the favorable direction.
+                exit_price = max(open_price, position.target)
+                self._close_position(symbol, position, instant, exit_price, "target")
 
     def _close_all(self, session: str, instant: pd.Timestamp) -> None:
         if not self.config.flat_by_session_close:
@@ -391,6 +398,12 @@ class TjrBacktester:
     def _process_entries(
         self, session: str, instant: pd.Timestamp, day_start_equity: float
     ) -> None:
+        # The final close instant belongs to the previous session's last bar,
+        # but the next bar may already exist at the next session's open. Never
+        # turn a signal formed on that boundary into a fill in the next session
+        # and then close it against the previous session's final close.
+        if instant >= self.session_policy.session_close_utc(session):
+            return
         for symbol in self.symbols:
             if symbol in self._open:
                 continue

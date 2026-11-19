@@ -82,6 +82,17 @@ class TestRiskLimits:
     def test_a_positive_risk_per_trade_is_accepted(self):
         assert RiskLimits(max_risk_per_trade=250.0).max_risk_per_trade == 250.0
 
+    def test_risk_per_trade_fraction_defaults_to_disabled(self):
+        assert RiskLimits().risk_per_trade_fraction is None
+
+    def test_a_valid_risk_per_trade_fraction_is_accepted(self):
+        assert RiskLimits(risk_per_trade_fraction=0.01).risk_per_trade_fraction == 0.01
+
+    @pytest.mark.parametrize("bad", [0.0, -0.01, 1.01, float("nan"), float("inf")])
+    def test_an_invalid_risk_per_trade_fraction_is_rejected(self, bad):
+        with pytest.raises(ValidationError):
+            RiskLimits(risk_per_trade_fraction=bad)
+
     @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
     def test_an_invalid_risk_per_trade_is_rejected(self, bad):
         """Zero, negative, NaN and infinite budgets are all refused at construction."""
@@ -229,6 +240,37 @@ class TestRiskPerTradeSizing:
         assert decision.approved
         assert decision.quantity == pytest.approx(20.0)
         assert any("max_risk_per_trade" in note for note in decision.notes)
+
+    def test_equity_fraction_risk_budget_sizes_from_stop_distance(self):
+        # 1% of 100,000 = 1,000 risk budget; 10 risk per unit -> 100 units.
+        decision = self._engine(
+            max_position_size=0.2, risk_per_trade_fraction=0.01
+        ).evaluate(
+            _signal(size=0.1, stop_loss=90.0), _ledger(100_000.0), price=100.0
+        )
+        assert decision.approved
+        assert decision.quantity == pytest.approx(100.0)
+
+    def test_tighter_absolute_or_equity_fraction_budget_wins(self):
+        # 1% of 100,000 = 1,000, but the absolute cap of 50 is tighter:
+        # 50 / (100 - 90) = 5 units.
+        decision = self._engine(
+            max_position_size=0.2,
+            max_risk_per_trade=50.0,
+            risk_per_trade_fraction=0.01,
+        ).evaluate(
+            _signal(size=0.1, stop_loss=90.0), _ledger(100_000.0), price=100.0
+        )
+        assert decision.quantity == pytest.approx(5.0)
+
+    def test_equity_fraction_budget_is_not_applied_without_a_valid_stop(self):
+        decision = self._engine(
+            max_position_size=0.2, risk_per_trade_fraction=0.01
+        ).evaluate(
+            _signal(size=0.1, stop_loss=None), _ledger(100_000.0), price=100.0
+        )
+        assert decision.quantity == pytest.approx(100.0)
+        assert any("no usable stop" in note for note in decision.notes)
 
     def test_the_risk_cap_never_increases_the_size(self):
         """A budget larger than the trade's own risk must not grow the order."""

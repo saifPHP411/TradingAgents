@@ -44,9 +44,10 @@ def _order(side=OrderSide.BUY, quantity=10, order_type=OrderType.MARKET, limit_p
     )
 
 
-def _market(price=100.0, *, symbol="AAPL", is_open=True, volume=None, timestamp=T0) -> MarketContext:
+def _market(price=100.0, *, symbol="AAPL", is_open=True, volume=None, timestamp=T0,
+            low=None, high=None) -> MarketContext:
     return MarketContext(symbol=symbol, price=price, timestamp=timestamp, is_open=is_open,
-                         average_daily_volume=volume)
+                         average_daily_volume=volume, low=low, high=high)
 
 
 def _sim(cash=10_000.0, costs=None, **kwargs) -> tuple[ExecutionSimulator, Ledger]:
@@ -209,6 +210,41 @@ class TestLimitOrders:
         assert filled.reject_reason is RejectReason.LIMIT_NOT_REACHED
         assert ledger.position_quantity("AAPL") == 10
 
+    def test_marketable_buy_limit_pays_taker_fee_not_maker_fee(self):
+        costs = CostModel(maker_fee_bps=1.0, taker_fee_bps=10.0)
+        sim, ledger = _sim(costs=costs)
+        filled = sim.submit(
+            _order(order_type=OrderType.LIMIT, limit_price=105.0),
+            market=_market(100.0),
+        )
+        assert filled.status is OrderStatus.FILLED
+        # The buy limit crosses the reference price and executes immediately.
+        assert ledger.total_fees == pytest.approx(1.0)
+
+    def test_marketable_sell_limit_pays_taker_fee_not_maker_fee(self):
+        costs = CostModel(maker_fee_bps=1.0, taker_fee_bps=10.0)
+        sim, ledger = _sim(costs=costs)
+        ledger.apply_fill(
+            symbol="AAPL", quantity=10, price=100.0, fee=0.0, timestamp=T0
+        )
+        filled = sim.submit(
+            _order(side=OrderSide.SELL, order_type=OrderType.LIMIT, limit_price=95.0),
+            market=_market(110.0, timestamp=T1),
+        )
+        assert filled.status is OrderStatus.FILLED
+        assert ledger.total_fees == pytest.approx(1.1)
+
+    def test_passive_buy_limit_reached_inside_bar_pays_maker_fee(self):
+        costs = CostModel(maker_fee_bps=1.0, taker_fee_bps=10.0)
+        sim, ledger = _sim(costs=costs)
+        filled = sim.submit(
+            _order(order_type=OrderType.LIMIT, limit_price=95.0),
+            market=_market(100.0, low=94.0),
+        )
+        assert filled.status is OrderStatus.FILLED
+        assert filled.average_fill_price == pytest.approx(95.0)
+        assert ledger.total_fees == pytest.approx(0.095)
+
     def test_a_limit_order_without_a_limit_price_is_a_construction_error(self):
         with pytest.raises(ValidationError):
             _order(order_type=OrderType.LIMIT, limit_price=None)
@@ -306,6 +342,20 @@ class TestPartialFills:
         assert filled.filled_quantity == pytest.approx(100.0)
         assert filled.remaining_quantity == pytest.approx(900.0)
         assert ledger.position_quantity("AAPL") == pytest.approx(100.0)
+
+    def test_partial_fill_slippage_uses_executed_quantity_not_requested_size(self):
+        costs = CostModel(slippage_volume_factor=10.0, max_slippage_bps=500.0)
+        sim, ledger = _sim(
+            cash=1_000_000.0, costs=costs, max_volume_participation=0.1
+        )
+        order = _order(quantity=1_000)
+        filled = sim.submit(order, market=_market(100.0, volume=1_000.0))
+        assert filled.status is OrderStatus.PARTIALLY_FILLED
+        assert filled.filled_quantity == pytest.approx(100.0)
+        # 100 units are 10% of 1,000 ADV: 100 bps impact, not
+        # 500 bps from incorrectly pricing the unfilled 1,000-unit request.
+        assert filled.average_fill_price == pytest.approx(101.0)
+        assert ledger.cash == pytest.approx(1_000_000.0 - 100.0 * 101.0)
 
     def test_a_small_order_still_fills_completely(self):
         sim, _ = _sim(max_volume_participation=0.1)

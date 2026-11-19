@@ -1,0 +1,389 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from tradingagents.crypto.backtest.turtle_trend import (
+    COST_SCENARIOS,
+    TurtleExecutionCosts,
+    TurtlePortfolioSettings,
+    TurtleTrendSettings,
+    _features,
+    resample_hourly_to_4h,
+    run_backtest,
+)
+
+pytestmark = pytest.mark.unit
+
+
+def _hourly_frame(size: int = 12, start: str = "2026-01-01T00:00:00Z") -> pd.DataFrame:
+    index = pd.date_range(start, periods=size, freq="h")
+    close = np.linspace(100.0, 101.0, size)
+    return pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.full(size, 1000.0),
+        },
+        index=index,
+    )
+
+
+def _features_with_signal(frame, benchmark_close, settings):
+    features = frame.copy()
+    features["atr"] = 1.0
+    features["exit_low"] = 1.0
+    features["long_entry"] = False
+    features.iloc[1, features.columns.get_loc("long_entry")] = True
+    return features
+
+
+def test_hourly_to_4h_uses_only_complete_utc_buckets():
+    hourly = _hourly_frame(9, "2026-01-01T01:00:00Z")
+    four_hour = resample_hourly_to_4h(hourly)
+
+    # 01:00-03:00 is incomplete; 04:00-07:00 is one complete bucket;
+    # 08:00 is a partial final bucket and must be excluded.
+    assert len(four_hour) == 1
+    assert four_hour.index[0] == pd.Timestamp("2026-01-01T08:00:00Z")
+    assert four_hour.iloc[0]["open"] == pytest.approx(hourly.iloc[3]["open"])
+    assert four_hour.iloc[0]["close"] == pytest.approx(hourly.iloc[6]["close"])
+    assert four_hour.iloc[0]["volume"] == pytest.approx(4000.0)
+
+
+def test_hourly_to_4h_fails_closed_on_missing_hour():
+    hourly = _hourly_frame(12).drop(pd.Timestamp("2026-01-01T05:00:00Z"))
+    with pytest.raises(ValueError, match="missing or irregular 1h"):
+        resample_hourly_to_4h(hourly)
+
+
+def test_breakout_entry_executes_at_next_4h_open(monkeypatch):
+    import tradingagents.crypto.backtest.turtle_trend as module
+
+    frame = _hourly_frame(6, "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(module, "_features", _features_with_signal)
+    result = run_backtest(
+        frame,
+        execution=TurtleExecutionCosts(10, 1, 2),
+        portfolio=TurtlePortfolioSettings(
+            initial_cash=1000, risk_fraction=0.01, max_notional_fraction=0.5
+        ),
+        start_index=0,
+        end_index=5,
+    )
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.entry_time == frame.index[2].isoformat()
+    assert trade.entry_price > frame.iloc[2].open
+    assert trade.exit_reason == "end_of_window"
+    assert trade.fees > 0
+
+
+def test_atr_stop_gap_fills_at_adverse_open_not_stop(monkeypatch):
+    import tradingagents.crypto.backtest.turtle_trend as module
+
+    frame = _hourly_frame(6, "2026-01-01T00:00:00Z")
+    frame.iloc[3, frame.columns.get_loc("open")] = 95.0
+    frame.iloc[3, frame.columns.get_loc("high")] = 96.0
+    frame.iloc[3, frame.columns.get_loc("low")] = 94.0
+    frame.iloc[3, frame.columns.get_loc("close")] = 95.0
+    monkeypatch.setattr(module, "_features", _features_with_signal)
+    result = run_backtest(
+        frame,
+        execution=TurtleExecutionCosts(0, 1, 2),
+        start_index=0,
+        end_index=5,
+    )
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_reason == "atr_stop"
+    assert trade.exit_price < 95.0
+
+
+def test_donchian_close_exit_is_filled_at_following_open(monkeypatch):
+    import tradingagents.crypto.backtest.turtle_trend as module
+
+    frame = _hourly_frame(6, "2026-01-01T00:00:00Z")
+    frame.iloc[3, frame.columns.get_loc("open")] = 98.5
+    frame.iloc[3, frame.columns.get_loc("close")] = 98.0
+    frame.iloc[3, frame.columns.get_loc("high")] = 99.0
+    frame.iloc[3, frame.columns.get_loc("low")] = 97.5
+    frame.iloc[4, frame.columns.get_loc("open")] = 97.0
+    frame.iloc[4, frame.columns.get_loc("high")] = 98.0
+    frame.iloc[4, frame.columns.get_loc("low")] = 96.5
+    frame.iloc[4, frame.columns.get_loc("close")] = 97.0
+
+    def features_with_channel_exit(data, benchmark_close, settings):
+        features = data.copy()
+        features["atr"] = 10.0
+        features["exit_low"] = 99.5
+        features["long_entry"] = False
+        features.iloc[1, features.columns.get_loc("long_entry")] = True
+        return features
+
+    monkeypatch.setattr(module, "_features", features_with_channel_exit)
+    result = run_backtest(
+        frame,
+        execution=TurtleExecutionCosts(0, 1, 2),
+        start_index=0,
+        end_index=5,
+    )
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_reason == "donchian_exit"
+    assert trade.exit_time == frame.index[4].isoformat()
+    assert trade.exit_price < 97.0
+
+
+def test_cost_assumptions_are_validated():
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        TurtleExecutionCosts(float("inf"), 0, 0)
+    with pytest.raises(ValueError, match="risk_fraction"):
+        TurtlePortfolioSettings(risk_fraction=0.5)
+    with pytest.raises(ValueError, match="smaller than entry"):
+        TurtleTrendSettings(entry_lookback=20, exit_lookback=20)
+
+
+def test_optional_adx_and_relative_volume_filters_gate_only_when_configured():
+    size = 80
+    steps = np.arange(size, dtype=float)
+    close = 100.0 + steps * 0.15 + 0.8 * np.sin(steps * 1.2)
+    close[-1] = float(np.max(close[-11:-1]) + 0.6)
+    open_price = close - 0.05
+    frame = pd.DataFrame(
+        {
+            "open": open_price,
+            "high": np.maximum(open_price, close) + 0.2,
+            "low": np.minimum(open_price, close) - 0.2,
+            "close": close,
+            "volume": np.full(size, 1000.0),
+        },
+        index=pd.date_range("2026-01-01T00:00:00Z", periods=size, freq="4h"),
+    )
+    benchmark = frame.close.copy()
+    settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=10,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+    )
+
+    baseline = _features(frame, benchmark, settings)
+    filtered_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=10,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+        min_adx=20.0,
+        min_relative_volume=1.2,
+    )
+    filtered = _features(frame, benchmark, filtered_settings)
+    expected = (
+        baseline.long_entry
+        & baseline.adx.ge(20.0)
+        & baseline.relative_volume.ge(1.2)
+    ).rename("long_entry")
+
+    pd.testing.assert_series_equal(filtered.long_entry, expected)
+    assert baseline.long_entry.iloc[-1]
+    assert baseline.relative_volume.iloc[-1] == pytest.approx(1.0)
+    assert not filtered.long_entry.iloc[-1]
+
+
+def test_optional_filter_thresholds_are_validated():
+    with pytest.raises(ValueError, match="min_adx"):
+        TurtleTrendSettings(min_adx=-0.1)
+    with pytest.raises(ValueError, match="min_adx"):
+        TurtleTrendSettings(min_adx=100.1)
+    with pytest.raises(ValueError, match="min_relative_volume"):
+        TurtleTrendSettings(min_relative_volume=0.0)
+    with pytest.raises(ValueError, match="min_relative_volume"):
+        TurtleTrendSettings(min_relative_volume=float("nan"))
+
+
+def test_optional_benchmark_momentum_filter_rejects_weak_market_trend():
+    size = 80
+    steps = np.arange(size, dtype=float)
+    close = 100.0 + steps * 0.15 + 0.8 * np.sin(steps * 1.2)
+    close[-1] = float(np.max(close[-11:-1]) + 0.6)
+    open_price = close - 0.05
+    index = pd.date_range("2026-01-01T00:00:00Z", periods=size, freq="4h")
+    frame = pd.DataFrame(
+        {
+            "open": open_price,
+            "high": np.maximum(open_price, close) + 0.2,
+            "low": np.minimum(open_price, close) - 0.2,
+            "close": close,
+            "volume": np.full(size, 1000.0),
+        },
+        index=index,
+    )
+    benchmark_values = np.r_[np.linspace(80.0, 120.0, 60), np.linspace(120.0, 117.0, 20)]
+    benchmark = pd.Series(benchmark_values, index=index)
+    base_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=30,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+        benchmark_momentum_bars=20,
+    )
+    filtered_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=30,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+        benchmark_momentum_bars=20,
+        require_benchmark_momentum_positive=True,
+    )
+
+    baseline = _features(frame, benchmark, base_settings)
+    filtered = _features(frame, benchmark, filtered_settings)
+    expected = (
+        baseline.long_entry
+        & benchmark.gt(benchmark.shift(20))
+    ).rename("long_entry")
+
+    pd.testing.assert_series_equal(filtered.long_entry, expected)
+    assert baseline.long_entry.iloc[-1]
+    assert benchmark.iloc[-1] > baseline.benchmark_ema.iloc[-1]
+    assert benchmark.iloc[-1] < benchmark.iloc[-21]
+    assert not filtered.long_entry.iloc[-1]
+
+
+
+def test_positive_directional_movement_filter_is_optional_and_causal():
+    size = 120
+    steps = np.arange(size, dtype=float)
+    close = 100.0 + steps * 0.10 + 1.4 * np.sin(steps * 0.9)
+    close[-1] = float(np.max(close[-11:-1]) + 0.8)
+    open_price = close - 0.08
+    frame = pd.DataFrame(
+        {
+            "open": open_price,
+            "high": np.maximum(open_price, close) + 0.25,
+            "low": np.minimum(open_price, close) - 0.25,
+            "close": close,
+            "volume": np.full(size, 1000.0),
+        },
+        index=pd.date_range("2026-01-01T00:00:00Z", periods=size, freq="4h"),
+    )
+    base_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=20,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+    )
+    filtered_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=20,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+        require_positive_di=True,
+    )
+
+    baseline = _features(frame, frame.close, base_settings)
+    filtered = _features(frame, frame.close, filtered_settings)
+    expected = (
+        baseline.long_entry & baseline.plus_di.gt(baseline.minus_di)
+    ).rename("long_entry")
+
+    pd.testing.assert_series_equal(filtered.long_entry, expected)
+    assert baseline.long_entry.iloc[-1]
+    assert baseline.plus_di.notna().any()
+    assert baseline.minus_di.notna().any()
+
+
+def test_rising_adx_filter_requires_prior_completed_adx_value():
+    size = 120
+    steps = np.arange(size, dtype=float)
+    close = 100.0 + steps * 0.10 + 1.4 * np.sin(steps * 0.9)
+    close[-1] = float(np.max(close[-11:-1]) + 0.8)
+    open_price = close - 0.08
+    frame = pd.DataFrame(
+        {
+            "open": open_price,
+            "high": np.maximum(open_price, close) + 0.25,
+            "low": np.minimum(open_price, close) - 0.25,
+            "close": close,
+            "volume": np.full(size, 1000.0),
+        },
+        index=pd.date_range("2026-01-01T00:00:00Z", periods=size, freq="4h"),
+    )
+    base_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=20,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+    )
+    filtered_settings = TurtleTrendSettings(
+        entry_lookback=10,
+        exit_lookback=5,
+        atr_period=5,
+        ema_period=20,
+        ema_slope_bars=2,
+        adx_period=5,
+        volume_period=5,
+        require_adx_rising=True,
+    )
+
+    baseline = _features(frame, frame.close, base_settings)
+    filtered = _features(frame, frame.close, filtered_settings)
+    expected = (
+        baseline.long_entry & baseline.adx.gt(baseline.adx.shift(1))
+    ).rename("long_entry")
+
+    pd.testing.assert_series_equal(filtered.long_entry, expected)
+    assert baseline.long_entry.iloc[-1]
+    assert pd.isna(baseline.adx.shift(1).iloc[0])
+
+
+def test_new_dmi_switches_require_real_booleans():
+    with pytest.raises(ValueError, match="require_positive_di"):
+        TurtleTrendSettings(require_positive_di=1)
+    with pytest.raises(ValueError, match="require_adx_rising"):
+        TurtleTrendSettings(require_adx_rising="yes")
+
+
+
+def test_high_cost_stress_scenario_is_severe_and_explicitly_not_venue_quote():
+    stress = COST_SCENARIOS["high_cost_stress"]
+
+    assert stress.commission_bps == 30
+    assert stress.half_spread_bps == 5
+    assert stress.slippage_bps == 10
+    assert (
+        stress.commission_bps + stress.half_spread_bps + stress.slippage_bps
+    ) == 45
+    assert set(COST_SCENARIOS) == {
+        "frictionless",
+        "realistic_estimate",
+        "conservative_estimate",
+        "high_cost_stress",
+    }

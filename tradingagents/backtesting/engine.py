@@ -587,7 +587,11 @@ class PortfolioBacktester:
             return
         sold = quantity
         exit_price = price
-        exit_fee = self.config.costs.fee_for_fill(quantity=sold, price=exit_price)
+        exit_fee = self.config.costs.fee_for_fill(
+            quantity=sold,
+            price=exit_price,
+            is_maker=order.order_type is OrderType.LIMIT,
+        )
         entry_fee_share = (
             position.entry_fees * (sold / position.quantity) if position.quantity else 0.0
         )
@@ -732,7 +736,11 @@ class PortfolioBacktester:
         blends it, rather than a single cumulative charge.
         """
         existing = self._open.get(order_symbol := item.order.symbol)
-        fees = self.config.costs.fee_for_fill(quantity=quantity, price=price)
+        fees = self.config.costs.fee_for_fill(
+            quantity=quantity,
+            price=price,
+            is_maker=item.order.order_type is OrderType.LIMIT,
+        )
         if existing is None:
             self._open[order_symbol] = OpenPosition(
                 symbol=order_symbol,
@@ -772,45 +780,58 @@ class PortfolioBacktester:
     # --- Exits --------------------------------------------------------------
 
     def _process_exits(self, session: str) -> None:
-        """Exit positions whose time is up, or whose stop or target was touched."""
+        """Exit at the open when the holding clock expires; otherwise check intraday stops.
+
+        A position becomes active as soon as its entry fills at the session open,
+        so its stop and target must be checked against that same session's range.
+        The holding-period clock is different: it advances only on later sessions.
+
+        When the time exit is due, it is a market exit at this session's open.
+        The day's later high/low cannot be used to choose a better or worse exit
+        after the position should already have been closed.
+        """
         for symbol, position in list(self._open.items()):
-            if position.entry_session == session:
-                # Entered at this session's open, so no full session has elapsed
-                # yet; its clock starts on the next session.
-                continue
             bar = self.feed.bar(symbol, session)
             if bar is None:
                 # The symbol did not trade; its clock does not advance either, so
                 # a five-session hold is five of the symbol's own sessions.
                 continue
-            position.sessions_held += 1
-            trigger = self._exit_trigger(position, bar, session)
-            if trigger is None:
-                continue
-            price, reason = trigger
+
+            if position.entry_session != session:
+                position.sessions_held += 1
+
+            if position.holding_period_elapsed:
+                # The scheduled exit is at the open. Do not inspect this session's
+                # later high/low once the time-based market exit is due.
+                price, reason = bar.open, "holding_period"
+            else:
+                # Stops and targets are active immediately after an entry fill,
+                # including the remainder of the entry session.
+                trigger = self._exit_trigger(position, bar, session)
+                if trigger is None:
+                    continue
+                price, reason = trigger
+
             self._close_position(position, session, price, reason)
 
     def _exit_trigger(
         self, position: OpenPosition, bar, session: str
     ) -> tuple[float, str] | None:
-        """The price and reason to exit at, or ``None`` to keep holding.
+        """Return an intraday stop/target trigger, or None to keep holding.
 
-        Stops and targets are checked before the scheduled exit, and both fill at
-        the level rather than at the bar's open, because the level is the price
-        the order was placed to get. A gap through the level fills at the open,
-        which is the honest outcome: the stop could not have been honoured at its
-        own price if the session opened beyond it.
+        Scheduled holding-period exits are handled first by _process_exits at
+        this session's open, before the bar's later high/low can be consulted.
+        Here, stops and targets fill at their level unless the market gapped
+        through that level, in which case the open is the available fill.
+        If both levels fall inside one OHLC bar, stop remains the conservative
+        priority because the intrabar path is unknown.
         """
         if position.stop_loss is not None and bar.low <= position.stop_loss:
-            # Filling at the open when it gapped below the stop: the level could
-            # not have been honoured at its own price.
             price = min(bar.open, position.stop_loss)
             return price, "stop_loss"
         if position.take_profit is not None and bar.high >= position.take_profit:
             price = max(bar.open, position.take_profit)
             return price, "take_profit"
-        if position.holding_period_elapsed:
-            return bar.open, "holding_period"
         return None
 
     def _close_position(self, position: OpenPosition, session: str, price: float, reason: str) -> None:

@@ -78,6 +78,7 @@ from ..market_data_wiring import (
 )
 from ..providers.base import ProviderNotConfiguredError
 from .auth import DashboardAuthError, check_bearer, require_bindable, resolve_token
+from .chart import DEFAULT_CHART_INTERVAL, DEFAULT_CHART_LIMIT, CryptoChartService
 from .crypto_view import CryptoViewService
 from .paper_control import PaperTradingController, PaperTradingDisabled, _endpoint_for_provider
 from .state import DashboardStateError, ExperimentView
@@ -100,6 +101,23 @@ ROOT_ENV = "TRADINGAGENTS_EXPERIMENT_ROOT"
 """Environment variable the module entry point reads ``--root`` from."""
 
 HEALTH_PATH = "/healthz"
+
+AUTO_START_PERPETUAL_STUDY_ENV = "TRADINGAGENTS_AUTO_START_PERPETUAL_STUDY"
+AUTO_START_PERPETUAL_LAB_ENV = "TRADINGAGENTS_AUTO_START_PERPETUAL_LAB"
+AUTO_START_PERPETUAL_SHADOW_ENV = "TRADINGAGENTS_AUTO_START_PERPETUAL_SHADOW"
+PERPETUAL_LAB_REPORT_FILE = "perpetual_strategy_lab.json"
+PERPETUAL_SHADOW_POLL_SECONDS = 900
+PERPETUAL_ONLY_ENV = "TRADINGAGENTS_PERPETUAL_ONLY"
+PERPETUAL_CHART_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
+PERPETUAL_POSITION_FILE = "perpetual_open_position.json"
+PERPETUAL_ACCOUNT_BASELINE_ENV = "TRADINGAGENTS_INITIAL_CAPITAL_USDT"
+PERPETUAL_ACCOUNT_BASELINE_FILE = "perpetual_account_baseline.json"
+PERPETUAL_ACCOUNT_HISTORY_FILE = "perpetual_account_history.json"
+
+
+def _perpetual_only_enabled() -> bool:
+    return os.environ.get(PERPETUAL_ONLY_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
 """The unauthenticated liveness probe.
 
 The deployment's health check names this path, so it is a named constant rather
@@ -244,6 +262,44 @@ def _ensure_experiment(root: Path, *, crypto_symbols: tuple[str, ...] = ()) -> N
         raise RuntimeError(f"Failed to create crypto experiment: {exc}") from exc
 
 
+def _maybe_auto_start_perpetual_study(dashboard: Any, root: str | Path) -> None:
+    """Keep the legacy fixed-EMA runner disabled after its holdout has been inspected."""
+    enabled = os.environ.get(AUTO_START_PERPETUAL_STUDY_ENV, "").strip().lower()
+    if enabled in {"1", "true", "yes", "on"}:
+        print(
+            "  legacy perpetual holdout auto-start: disabled; use the development-only strategy lab",
+            flush=True,
+        )
+
+
+def _maybe_auto_start_perpetual_lab(dashboard: Any, root: str | Path) -> None:
+    """Optionally start the development-only candidate tournament once."""
+    enabled = os.environ.get(AUTO_START_PERPETUAL_LAB_ENV, "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return
+    report_path = Path(root) / PERPETUAL_LAB_REPORT_FILE
+    if report_path.is_file():
+        print("  perpetual strategy lab auto-start: skipped (saved report already exists)", flush=True)
+        return
+    status = dashboard.start_perpetual_lab()
+    print(
+        f"  perpetual strategy lab auto-start: {status.get('status', 'unknown')}",
+        flush=True,
+    )
+
+
+def _maybe_auto_start_perpetual_shadow(dashboard: Any, root: str | Path) -> None:
+    """Start the persistent read-only forward evaluator when explicitly enabled."""
+    enabled = os.environ.get(AUTO_START_PERPETUAL_SHADOW_ENV, "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return
+    status = dashboard.start_perpetual_shadow()
+    print(
+        f"  perpetual shadow forward auto-start: {status.get('status', 'unknown')}",
+        flush=True,
+    )
+
+
 class Dashboard:
     """The dashboard's configuration and shared state, one per server."""
 
@@ -267,12 +323,19 @@ class Dashboard:
         paper_execution_provider: str = EXECUTION_PROVIDER_ALPACA_PAPER,
         crypto_engine=None,
         crypto_symbols: tuple[str, ...] = (),
+        chart_service: CryptoChartService | None = None,
         refresh_policy=None,
         refresh_fetcher=None,
+        perpetual_client_factory=None,
+        perpetual_account_client_factory=None,
+        perpetual_only_mode: bool | None = None,
     ) -> None:
         self.root = Path(root)
         self.token = resolve_token(token)
         self.allow_control = allow_control
+        self.perpetual_only_mode = _perpetual_only_enabled() if perpetual_only_mode is None else bool(perpetual_only_mode)
+        self._perpetual_client_factory = perpetual_client_factory
+        self._perpetual_account_client_factory = perpetual_account_client_factory
         self.max_sessions_per_call = max_sessions_per_call
         self.stub = stub
         self._lock = threading.Lock()
@@ -280,32 +343,805 @@ class Dashboard:
         self.last_run: dict[str, Any] | None = None
         self.refresh_policy = refresh_policy
         self.refresh_fetcher = refresh_fetcher
-        self.paper = PaperTradingController(
-            self.root,
-            enabled=allow_paper_trading,
-            order_notional=paper_order_notional,
-            stub=stub,
-            broker_factory=broker_factory,
-            market_data_factory=market_data_factory,
-            whole_shares=paper_whole_shares,
-            market_data_provider=paper_market_data_provider,
-            market_data_max_age_seconds=paper_market_data_max_age_seconds,
-            decision_source_kind=paper_decision_source,
-            max_price_deviation=paper_max_price_deviation,
-            # The execution broker. Alpaca Paper is the default; Bybit Demo is
-            # an explicit opt-in that never falls back to Alpaca.
-            execution_provider=paper_execution_provider,
+        if self.perpetual_only_mode:
+            # Do not instantiate the legacy Spot/equity or paper-trading stack at
+            # all in this deployment. Perpetual routes own their own public
+            # market-data and optional read-only Demo position clients.
+            self.paper = None
+            self.crypto = None
+            self.chart_service = None
+        else:
+            self.paper = PaperTradingController(
+                self.root,
+                enabled=allow_paper_trading,
+                order_notional=paper_order_notional,
+                stub=stub,
+                broker_factory=broker_factory,
+                market_data_factory=market_data_factory,
+                whole_shares=paper_whole_shares,
+                market_data_provider=paper_market_data_provider,
+                market_data_max_age_seconds=paper_market_data_max_age_seconds,
+                decision_source_kind=paper_decision_source,
+                max_price_deviation=paper_max_price_deviation,
+                # The execution broker. Alpaca Paper is the default; Bybit Demo is
+                # an explicit opt-in that never falls back to Alpaca.
+                execution_provider=paper_execution_provider,
+            )
+            self.crypto = CryptoViewService(
+                engine=crypto_engine,
+                symbols=tuple(crypto_symbols),
+                worker_status=lambda: self.paper.status(),
+                strategy_evaluations=lambda: self.paper.strategy_evaluations(),
+            )
+            self.chart_service = chart_service or CryptoChartService()
+        # Independent read-only Bybit linear-perpetual research job. This never
+        # starts a broker worker and never submits an exchange order.
+        self._perpetual_study_lock = threading.Lock()
+        self._perpetual_study_thread: threading.Thread | None = None
+        self._perpetual_study_status: dict[str, Any] = {"status": "idle"}
+        self._perpetual_lab_lock = threading.Lock()
+        self._perpetual_lab_thread: threading.Thread | None = None
+        self._perpetual_lab_status: dict[str, Any] = {"status": "idle"}
+        self._perpetual_shadow_lock = threading.Lock()
+        self._perpetual_shadow_thread: threading.Thread | None = None
+        self._perpetual_shadow_stop = threading.Event()
+        self._perpetual_shadow_status: dict[str, Any] = {"status": "idle"}
+        self._perpetual_account_lock = threading.Lock()
+
+    def perpetual_study_status(self) -> dict[str, Any]:
+        with self._perpetual_study_lock:
+            status = dict(self._perpetual_study_status)
+        if status.get("status") != "idle":
+            return status
+
+        # A completed report lives on the Railway volume. Recover its status after
+        # a container restart instead of showing "idle" beside a finished study.
+        report_path = self.root / "perpetual_ema_walkforward.json"
+        if not report_path.is_file():
+            return status
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            summary = {}
+            for key, value in report["reports"].items():
+                holdout = value["untouched_final_holdout"]
+                summary[key] = {
+                    "win_rate_pct": holdout["win_rate_pct"],
+                    "return_pct": holdout["equal_weight_return_pct"],
+                    "profit_factor": holdout["profit_factor"],
+                    "trades": holdout["trades"],
+                    "liquidations": holdout["liquidations"],
+                    "passed": value["acceptance_gate"]["passed"],
+                }
+        except (OSError, ValueError, KeyError, TypeError):
+            return status
+        return {
+            "status": "completed",
+            "completed_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(report_path.stat().st_mtime)
+            ),
+            "orders_submitted": False,
+            "demo_ready": False,
+            "report_file": report_path.name,
+            "summary": summary,
+        }
+
+    def start_perpetual_study(self) -> dict[str, Any]:
+        """Start the one-time historical holdout study; never overwrite a consumed holdout."""
+        report_path = self.root / "perpetual_ema_walkforward.json"
+        if report_path.is_file():
+            return {
+                **self.perpetual_study_status(),
+                "rerun_blocked": True,
+                "reason": (
+                    "The historical holdout has already been evaluated. Re-running "
+                    "the same rolling window would not create independent evidence."
+                ),
+            }
+        with self._perpetual_study_lock:
+            if self._perpetual_study_thread is not None and self._perpetual_study_thread.is_alive():
+                return dict(self._perpetual_study_status)
+            started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._perpetual_study_status = {
+                "status": "running",
+                "started_at": started_at,
+                "orders_submitted": False,
+                "demo_ready": False,
+            }
+
+            def run() -> None:
+                try:
+                    from types import SimpleNamespace
+
+                    from tradingagents.crypto.backtest.perpetual_ema_walkforward import run_study
+
+                    args = SimpleNamespace(
+                        symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"],
+                        data_source="bybit",
+                        base_url="https://api.bybit.com",
+                        days=730,
+                        equity=1_000.0,
+                        leverage=[1.0, 2.0],
+                        warmup_bars=260,
+                        test_bars=200,
+                        holdout_fraction=0.20,
+                    )
+                    report = run_study(args)
+                    report_path = self.root / "perpetual_ema_walkforward.json"
+                    report_path.parent.mkdir(parents=True, exist_ok=True)
+                    report_path.write_text(
+                        json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    summary = {}
+                    for key, value in report["reports"].items():
+                        holdout = value["untouched_final_holdout"]
+                        summary[key] = {
+                            "win_rate_pct": holdout["win_rate_pct"],
+                            "return_pct": holdout["equal_weight_return_pct"],
+                            "profit_factor": holdout["profit_factor"],
+                            "trades": holdout["trades"],
+                            "liquidations": holdout["liquidations"],
+                            "passed": value["acceptance_gate"]["passed"],
+                        }
+                    with self._perpetual_study_lock:
+                        self._perpetual_study_status = {
+                            "status": "completed",
+                            "started_at": started_at,
+                            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "orders_submitted": False,
+                            "demo_ready": False,
+                            "report_file": report_path.name,
+                            "summary": summary,
+                        }
+                except Exception as exc:  # noqa: BLE001 - report a failed research job, never crash the dashboard
+                    with self._perpetual_study_lock:
+                        self._perpetual_study_status = {
+                            "status": "error",
+                            "started_at": started_at,
+                            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "orders_submitted": False,
+                            "demo_ready": False,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc)[:500],
+                        }
+
+            self._perpetual_study_thread = threading.Thread(
+                target=run, name="perpetual-walkforward-study", daemon=True
+            )
+            self._perpetual_study_thread.start()
+            return dict(self._perpetual_study_status)
+
+    def perpetual_lab_status(self) -> dict[str, Any]:
+        """Recover a development-only perpetual candidate tournament report."""
+        with self._perpetual_lab_lock:
+            status = dict(self._perpetual_lab_status)
+        if status.get("status") != "idle":
+            return status
+        report_path = self.root / PERPETUAL_LAB_REPORT_FILE
+        if not report_path.is_file():
+            return status
+        try:
+            from tradingagents.crypto.backtest.perpetual_strategy_lab import (
+                PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES,
+            )
+
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            grouped = []
+            exclusions = PREVIOUS_HOLDOUT_DISQUALIFIED_CANDIDATES
+            for item in report.get("rankings", []):
+                candidate = item["candidate"]
+                leverage = float(item["leverage"])
+                scenario_rows = {}
+                for scenario in ("realistic_estimate", "conservative", "stress"):
+                    key = f"{candidate}/{leverage:g}x/{scenario}"
+                    row = report["reports"][key]
+                    metrics = row["development_only"]
+                    scenario_rows[scenario] = {
+                        "win_rate_pct": metrics.get("win_rate_pct"),
+                        "return_pct": metrics.get("equal_weight_compounded_return_pct"),
+                        "profit_factor": metrics.get("profit_factor"),
+                        "trades": metrics.get("trades"),
+                        "positive_folds": metrics.get("positive_folds"),
+                        "fold_count": metrics.get("fold_count"),
+                        "positive_symbols": metrics.get("positive_symbols"),
+                        "symbol_count": metrics.get("symbol_count"),
+                        "liquidations": metrics.get("liquidations"),
+                        "passed": row["acceptance_gate"]["passed"],
+                    }
+                rejection = exclusions.get(candidate)
+                grouped.append({
+                    **item,
+                    "scenarios": scenario_rows,
+                    "previous_holdout_rejected": rejection is not None,
+                    "previous_holdout_rejection_reason": rejection,
+                    "selection_eligible": (
+                        bool(item.get("development_gate_passed_all_costs"))
+                        and rejection is None
+                    ),
+                })
+            eligible = [row for row in grouped if row["selection_eligible"]]
+            eligible.sort(
+                key=lambda row: (
+                    row.get("minimum_scenario_profit_factor") or -math.inf,
+                    row.get("conservative_return_pct") or -math.inf,
+                ),
+                reverse=True,
+            )
+            best_candidate = eligible[0] if eligible else None
+        except (OSError, ValueError, KeyError, TypeError):
+            return {"status": "error", "error": "saved perpetual strategy lab report is invalid"}
+        return {
+            "status": "completed",
+            "completed_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(report_path.stat().st_mtime)
+            ),
+            "orders_submitted": False,
+            "demo_ready": False,
+            "final_holdout_evaluated": False,
+            "previously_inspected_holdout_reused": False,
+            "excluded_previous_holdout_start": report.get("excluded_previous_holdout_start"),
+            "best_candidate": best_candidate,
+            "candidate_disqualifications": [
+                {"candidate": candidate, "reason": reason}
+                for candidate, reason in exclusions.items()
+            ],
+            "selection_rule": (
+                "A development candidate is eligible only when all three modeled cost gates "
+                "pass and no previously inspected independent holdout has rejected that "
+                "same fixed strategy. No eligible candidate means no selection."
+            ),
+            "results": grouped,
+            "report_file": report_path.name,
+            "rerun_blocked": True,
+        }
+
+    def start_perpetual_lab(self) -> dict[str, Any]:
+        """Run fixed candidates strictly before the previously inspected holdout."""
+        if not self.perpetual_only_mode:
+            return {
+                "status": "error",
+                "error": "The development-only strategy lab requires perpetual-only mode.",
+                "orders_submitted": False,
+                "demo_ready": False,
+            }
+        report_path = self.root / PERPETUAL_LAB_REPORT_FILE
+        if report_path.is_file():
+            return {
+                **self.perpetual_lab_status(),
+                "rerun_blocked": True,
+                "reason": (
+                    "This development sample has already been used for candidate selection; "
+                    "reruns would increase selection bias."
+                ),
+            }
+        prior_path = self.root / "perpetual_ema_walkforward.json"
+        try:
+            prior_report = json.loads(prior_path.read_text(encoding="utf-8"))
+            cutoff = prior_report["final_holdout_start"]
+            if not isinstance(cutoff, str) or not cutoff:
+                raise ValueError("missing holdout cutoff")
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return {
+                "status": "error",
+                "error": (
+                    "The saved historical EMA report and final_holdout_start cutoff are required. "
+                    "The lab refuses to guess the consumed holdout boundary."
+                ),
+                "orders_submitted": False,
+                "demo_ready": False,
+            }
+
+        with self._perpetual_lab_lock:
+            if self._perpetual_lab_thread is not None and self._perpetual_lab_thread.is_alive():
+                return dict(self._perpetual_lab_status)
+            started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._perpetual_lab_status = {
+                "status": "running",
+                "started_at": started_at,
+                "orders_submitted": False,
+                "demo_ready": False,
+                "final_holdout_evaluated": False,
+                "excluded_previous_holdout_start": cutoff,
+            }
+
+            def run() -> None:
+                try:
+                    from types import SimpleNamespace
+
+                    from tradingagents.crypto.backtest.perpetual_strategy_lab import run_lab
+
+                    args = SimpleNamespace(
+                        symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"],
+                        days=730,
+                        equity=1_000.0,
+                        leverage=[1.0, 2.0],
+                        warmup_bars=260,
+                        test_bars=200,
+                        exclude_after=cutoff,
+                    )
+                    report = run_lab(args)
+                    report_path.parent.mkdir(parents=True, exist_ok=True)
+                    report_path.write_text(
+                        json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    best = report.get("best_candidate")
+                    print(
+                        "perpetual strategy lab completed: "
+                        f"best_candidate={best.get('candidate') if best else 'NONE'} "
+                        f"leverage={best.get('leverage') if best else 'NONE'} "
+                        f"development_folds={report.get('development_folds')} "
+                        "previous_holdout_reused=False final_holdout_evaluated=False "
+                        "orders_submitted=False demo_ready=False",
+                        flush=True,
+                    )
+                    # Emit reproducible aggregate Win Rate / Return / PF results
+                    # to platform logs so the report can be audited without
+                    # reading dashboard credentials or exposing account secrets.
+                    for ranking in report.get("rankings", []):
+                        candidate = ranking["candidate"]
+                        leverage = float(ranking["leverage"])
+                        for scenario in ("realistic_estimate", "conservative", "stress"):
+                            key = f"{candidate}/{leverage:g}x/{scenario}"
+                            item = report["reports"][key]
+                            metrics = item["development_only"]
+                            gate = item["acceptance_gate"]
+                            print(
+                                "perpetual strategy result: "
+                                f"candidate={candidate} leverage={leverage:g}x "
+                                f"scenario={scenario} "
+                                f"win_rate_pct={metrics.get('win_rate_pct')} "
+                                f"return_pct={metrics.get('equal_weight_compounded_return_pct')} "
+                                f"profit_factor={metrics.get('profit_factor')} "
+                                f"trades={metrics.get('trades')} "
+                                f"positive_folds={metrics.get('positive_folds')}/"
+                                f"{metrics.get('fold_count')} "
+                                f"positive_symbols={metrics.get('positive_symbols')}/"
+                                f"{metrics.get('symbol_count')} "
+                                f"liquidations={metrics.get('liquidations')} "
+                                f"gate_passed={gate.get('passed')}",
+                                flush=True,
+                            )
+                    with self._perpetual_lab_lock:
+                        self._perpetual_lab_status = {"status": "idle"}
+                    recovered = self.perpetual_lab_status()
+                    with self._perpetual_lab_lock:
+                        self._perpetual_lab_status = {
+                            **recovered,
+                            "status": "completed",
+                            "started_at": started_at,
+                            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        }
+                except Exception as exc:  # noqa: BLE001 - fail this research run, not the dashboard
+                    with self._perpetual_lab_lock:
+                        self._perpetual_lab_status = {
+                            "status": "error",
+                            "started_at": started_at,
+                            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "orders_submitted": False,
+                            "demo_ready": False,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc)[:500],
+                        }
+
+            self._perpetual_lab_thread = threading.Thread(
+                target=run, name="perpetual-strategy-lab", daemon=True
+            )
+            self._perpetual_lab_thread.start()
+            return dict(self._perpetual_lab_status)
+
+    def perpetual_shadow_status(self) -> dict[str, Any]:
+        """Return persisted forward-test results plus any current worker error."""
+        from tradingagents.crypto.backtest.perpetual_shadow_forward import read_shadow_status
+
+        status = read_shadow_status(self.root)
+        with self._perpetual_shadow_lock:
+            worker = dict(self._perpetual_shadow_status)
+        if worker.get("status") in {"starting", "error"}:
+            status["status"] = worker["status"]
+            if worker.get("error"):
+                status["last_error"] = worker["error"]
+            if worker.get("started_at"):
+                status.setdefault("worker_started_at", worker["started_at"])
+        return status
+
+    def start_perpetual_shadow(self) -> dict[str, Any]:
+        """Run the public-data shadow evaluator; this path never constructs a broker."""
+        if not self.perpetual_only_mode:
+            return {
+                "status": "error",
+                "error": "The shadow forward evaluator requires perpetual-only mode.",
+                "orders_submitted": False,
+                "execution_enabled": False,
+                "demo_ready": False,
+            }
+        with self._perpetual_shadow_lock:
+            if (
+                self._perpetual_shadow_thread is not None
+                and self._perpetual_shadow_thread.is_alive()
+            ):
+                return dict(self._perpetual_shadow_status)
+            started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._perpetual_shadow_stop.clear()
+            self._perpetual_shadow_status = {
+                "status": "starting",
+                "started_at": started_at,
+                "orders_submitted": False,
+                "execution_enabled": False,
+                "demo_ready": False,
+            }
+
+            def run() -> None:
+                from tradingagents.crypto.backtest.perpetual_shadow_forward import (
+                    run_shadow_cycle,
+                )
+
+                while not self._perpetual_shadow_stop.is_set():
+                    try:
+                        result = run_shadow_cycle(self.root)
+                        with self._perpetual_shadow_lock:
+                            self._perpetual_shadow_status = dict(result)
+                        print(
+                            "perpetual shadow forward cycle: "
+                            f"status={result.get('status')} "
+                            f"bars={result.get('forward_bars', 0)} "
+                            f"rows={len(result.get('results', []))} "
+                            "orders_submitted=False execution_enabled=False",
+                            flush=True,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - public-data failures do not stop the dashboard
+                        error = f"{type(exc).__name__}: {str(exc)[:240]}"
+                        with self._perpetual_shadow_lock:
+                            self._perpetual_shadow_status = {
+                                "status": "error",
+                                "started_at": started_at,
+                                "error": error,
+                                "orders_submitted": False,
+                                "execution_enabled": False,
+                                "demo_ready": False,
+                            }
+                        print(
+                            "perpetual shadow forward cycle failed: "
+                            f"{type(exc).__name__}; retrying after poll interval",
+                            flush=True,
+                        )
+                    self._perpetual_shadow_stop.wait(PERPETUAL_SHADOW_POLL_SECONDS)
+
+            self._perpetual_shadow_thread = threading.Thread(
+                target=run, name="perpetual-shadow-forward", daemon=True
+            )
+            self._perpetual_shadow_thread.start()
+            return dict(self._perpetual_shadow_status)
+
+    def _perpetual_position_view(self, symbol: str) -> tuple[str, dict[str, Any] | None, str | None]:
+        """Read a genuine Bybit Demo linear position, falling back to a validated local snapshot.
+
+        The live account path is signed and GET-only. Missing credentials mean
+        "unavailable", never "flat"; Spot positions are never consulted.
+        """
+        from tradingagents.crypto.bybit_perpetual_account import (
+            BybitLinearDemoPositionClient,
+            BybitPerpetualAccountNotConfigured,
         )
-        # The crypto half of the dashboard: a read-only view over the live crypto
-        # engine (Binance public market data) and the worker's recorded status.
-        # The engine is injected, so the dashboard reads the *same* engine the
-        # strategy and the worker read, and a test can drive it offline.
-        self.crypto = CryptoViewService(
-            engine=crypto_engine,
-            symbols=tuple(crypto_symbols),
-            worker_status=lambda: self.paper.status(),
-            strategy_evaluations=lambda: self.paper.strategy_evaluations(),
+        try:
+            account_client = (
+                self._perpetual_account_client_factory()
+                if self._perpetual_account_client_factory is not None
+                else BybitLinearDemoPositionClient()
+            )
+            result = account_client.get_position(symbol)
+            status = result.get("status")
+            position = result.get("position")
+            if status == "flat" and position is None:
+                return "flat", None, "Bybit Demo read-only position endpoint"
+            if status == "open" and isinstance(position, dict):
+                return "open", position, "Bybit Demo read-only position endpoint"
+            return "invalid", None, None
+        except BybitPerpetualAccountNotConfigured:
+            # With no credentials, a worker may still publish a validated local
+            # snapshot. A failed signed request, by contrast, must not be hidden
+            # by an older cached position.
+            pass
+        except Exception:  # noqa: BLE001 - account details/secrets never reach the page
+            return "error", None, None
+
+        path = self.root / PERPETUAL_POSITION_FILE
+        if not path.is_file():
+            return "unavailable", None, None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return "invalid", None, None
+        if not isinstance(raw, dict):
+            return "invalid", None, None
+        state = str(raw.get("state", "")).strip().upper()
+        raw_symbol = str(raw.get("symbol", "")).strip().upper()
+        if raw_symbol != symbol:
+            return "invalid", None, None
+        if state == "FLAT":
+            return "flat", None, "validated local futures snapshot"
+        if state != "OPEN":
+            return "invalid", None, None
+        side = str(raw.get("side", "")).strip().lower()
+        if side not in {"long", "short"}:
+            return "invalid", None, None
+
+        def positive(name: str, *, optional: bool = False):
+            value = raw.get(name)
+            if optional and value is None:
+                return None
+            if isinstance(value, bool):
+                raise ValueError(name)
+            parsed = float(value)
+            if not math.isfinite(parsed) or parsed <= 0:
+                raise ValueError(name)
+            return parsed
+
+        try:
+            position = {
+                "symbol": symbol,
+                "side": side,
+                "quantity": positive("quantity"),
+                "leverage": positive("leverage"),
+                "entry_price": positive("entry_price"),
+                "mark_price": positive("mark_price", optional=True),
+                "stop_loss": positive("stop_loss", optional=True),
+                "take_profit": positive("take_profit", optional=True),
+                "liquidation_price": positive("liquidation_price", optional=True),
+                "unrealized_pnl": raw.get("unrealized_pnl"),
+                "updated_at": raw.get("updated_at"),
+                "position_source": "validated local futures snapshot",
+            }
+            pnl = position["unrealized_pnl"]
+            if pnl is not None:
+                if isinstance(pnl, bool) or not math.isfinite(float(pnl)):
+                    raise ValueError("unrealized_pnl")
+                position["unrealized_pnl"] = float(pnl)
+        except (TypeError, ValueError, OverflowError):
+            return "invalid", None, None
+        return "open", position, "validated local futures snapshot"
+
+    def perpetual_chart(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
+        """Read completed Bybit perpetual candles and an optional read-only Demo position.
+
+        Only the four supported USDT linear contracts are exposed. Market candles
+        are public; a position is read through an authenticated GET-only Demo client
+        when its credential pair is configured. No order endpoint is called.
+        """
+        market = str(symbol).strip().upper()
+        if market not in PERPETUAL_CHART_SYMBOLS:
+            raise ValueError("unsupported linear perpetual chart symbol")
+        if self._perpetual_client_factory is None:
+            from tradingagents.crypto.bybit_perpetual import BybitLinearPublicClient
+            client = BybitLinearPublicClient()
+        else:
+            client = self._perpetual_client_factory()
+        instrument = client.instrument_info(market)
+        if (
+            instrument.status != "Trading"
+            or instrument.contract_type != "LinearPerpetual"
+            or instrument.quote_coin != "USDT"
+            or instrument.settle_coin != "USDT"
+        ):
+            raise ValueError("symbol is not an active USDT linear perpetual")
+        end_ms = int(time.time() * 1000)
+        start_ms = end_ms - 160 * 4 * 60 * 60 * 1000
+        frame = client.klines(market, start_ms=start_ms, end_ms=end_ms)
+        if frame is None or frame.empty:
+            raise RuntimeError("Bybit returned no completed 4-hour candles")
+        candles = []
+        for stamp, row in frame.tail(160).iterrows():
+            values = [float(row[name]) for name in ("open", "high", "low", "close")]
+            if not all(math.isfinite(value) and value > 0 for value in values):
+                continue
+            volume = float(row.get("volume", 0.0))
+            if not math.isfinite(volume) or volume < 0:
+                raise RuntimeError("Bybit returned an invalid candle volume")
+            candles.append({
+                "time": stamp.isoformat(),
+                "open": values[0],
+                "high": values[1],
+                "low": values[2],
+                "close": values[3],
+                "volume": volume,
+            })
+        if not candles:
+            raise RuntimeError("Bybit returned no valid completed candles")
+        position_status, position, position_source = self._perpetual_position_view(market)
+        return {
+            "status": "ok",
+            "venue": "Bybit V5 public linear perpetual market data",
+            "category": "linear",
+            "symbol": market,
+            "timeframe": "4h",
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "candles": candles,
+            "position_status": position_status,
+            "position": position,
+            "position_source": position_source,
+            "orders_submitted": False,
+        }
+
+    def perpetual_account(self) -> dict[str, Any]:
+        """Return verified Bybit Demo wallet, recent closed PnL and tracked equity.
+
+        All exchange reads are signed GET requests. The baseline is either an
+        explicit operator-supplied initial capital or the first verified equity
+        snapshot. External deposits/withdrawals are not silently treated as PnL.
+        """
+        if not self.perpetual_only_mode:
+            return {
+                "status": "disabled",
+                "detail": "The futures account view is available only in perpetual-only mode.",
+                "orders_submitted": False,
+            }
+        from tradingagents.crypto.bybit_perpetual_account import (
+            BybitLinearDemoPositionClient,
+            BybitPerpetualAccountNotConfigured,
         )
+        with self._perpetual_account_lock:
+            try:
+                client = (
+                    self._perpetual_account_client_factory()
+                    if self._perpetual_account_client_factory is not None
+                    else BybitLinearDemoPositionClient()
+                )
+                wallet = client.get_wallet_balance()
+                if wallet.get("status") != "ok":
+                    raise ValueError("Bybit wallet payload did not pass validation")
+                equity = float(wallet["total_equity_usd"])
+                if not math.isfinite(equity) or equity < 0:
+                    raise ValueError("Bybit returned an invalid account equity")
+                try:
+                    closed = client.get_closed_pnl(limit=100)
+                    if closed.get("status") != "ok":
+                        raise ValueError("closed-PnL payload did not pass validation")
+                    closed_error_type = None
+                except Exception as exc:  # noqa: BLE001 - wallet data remains independently useful
+                    closed = {"status": "error", "records": [], "window": None,
+                              "next_page_available": False}
+                    closed_error_type = type(exc).__name__
+            except BybitPerpetualAccountNotConfigured:
+                return {
+                    "status": "not_configured",
+                    "detail": "Read-only Bybit Demo wallet credentials are not configured.",
+                    "orders_submitted": False,
+                }
+            except Exception as exc:  # noqa: BLE001 - never expose credentials or response bodies
+                return {
+                    "status": "error",
+                    "error_type": type(exc).__name__,
+                    "detail": "Bybit Demo account data is unavailable or failed validation; balances are hidden.",
+                    "orders_submitted": False,
+                }
+
+            baseline_env = os.environ.get(PERPETUAL_ACCOUNT_BASELINE_ENV, "").strip()
+            baseline_source = "first_verified_snapshot"
+            baseline: float | None = None
+            baseline_at: str | None = None
+            if baseline_env:
+                try:
+                    baseline = float(baseline_env)
+                except ValueError:
+                    return {
+                        "status": "error",
+                        "error_type": "InvalidInitialCapital",
+                        "detail": f"{PERPETUAL_ACCOUNT_BASELINE_ENV} must be a positive USDT amount.",
+                        "orders_submitted": False,
+                    }
+                if not math.isfinite(baseline) or baseline <= 0:
+                    return {
+                        "status": "error",
+                        "error_type": "InvalidInitialCapital",
+                        "detail": f"{PERPETUAL_ACCOUNT_BASELINE_ENV} must be a positive USDT amount.",
+                        "orders_submitted": False,
+                    }
+                baseline_source = "configured_initial_capital"
+                baseline_at = "operator-configured"
+            else:
+                baseline_path = self.root / PERPETUAL_ACCOUNT_BASELINE_FILE
+                if baseline_path.is_file():
+                    try:
+                        saved = json.loads(baseline_path.read_text(encoding="utf-8"))
+                        baseline = float(saved["initial_capital_usd"])
+                        baseline_at = str(saved["baseline_at"])
+                        if not math.isfinite(baseline) or baseline <= 0:
+                            raise ValueError("invalid saved initial capital")
+                    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                        return {
+                            "status": "error",
+                            "error_type": "InvalidBaseline",
+                            "detail": "Saved initial-capital baseline is invalid; it was not overwritten.",
+                            "orders_submitted": False,
+                        }
+                else:
+                    if equity <= 0:
+                        return {
+                            "status": "error",
+                            "error_type": "ZeroInitialEquity",
+                            "detail": "The first verified wallet equity is zero; set the actual original capital with TRADINGAGENTS_INITIAL_CAPITAL_USDT before calculating a return.",
+                            "orders_submitted": False,
+                        }
+                    baseline = equity
+                    baseline_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = baseline_path.with_suffix(".tmp")
+                    temporary.write_text(
+                        json.dumps({
+                            "initial_capital_usd": baseline,
+                            "baseline_at": baseline_at,
+                            "source": baseline_source,
+                        }, sort_keys=True, allow_nan=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    os.replace(temporary, baseline_path)
+
+            assert baseline is not None
+            now_ms = int(time.time() * 1000)
+            pnl = equity - baseline
+            return_pct = pnl / baseline * 100.0
+            history_path = self.root / PERPETUAL_ACCOUNT_HISTORY_FILE
+            history_error = None
+            try:
+                history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else []
+                if not isinstance(history, list):
+                    raise ValueError("history is not a list")
+                if not history or now_ms - int(history[-1].get("timestamp_ms", 0)) >= 60_000:
+                    history.append({
+                        "timestamp_ms": now_ms,
+                        "equity_usd": equity,
+                        "wallet_balance_usd": wallet.get("total_wallet_balance_usd"),
+                        "perpetual_unrealized_pnl_usd": wallet.get("total_perpetual_unrealized_pnl_usd"),
+                    })
+                    history = history[-1000:]
+                    temporary = history_path.with_suffix(".tmp")
+                    temporary.write_text(
+                        json.dumps(history, sort_keys=True, allow_nan=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    os.replace(temporary, history_path)
+            except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError):
+                history = []
+                history_error = "Equity history could not be read or persisted."
+
+            records = closed.get("records", []) if closed.get("status") == "ok" else []
+            cumulative = 0.0
+            closed_curve = []
+            for record in records:
+                cumulative += float(record["closed_pnl"])
+                closed_curve.append({
+                    "timestamp_ms": record["created_time_ms"],
+                    "cumulative_closed_pnl": cumulative,
+                    "trade_pnl": record["closed_pnl"],
+                    "symbol": record["symbol"],
+                })
+            return {
+                "status": "ok",
+                "account": wallet,
+                "initial_capital_usd": baseline,
+                "initial_capital_source": baseline_source,
+                "initial_capital_at": baseline_at,
+                "net_pnl_since_initial_capital_usd": pnl,
+                "return_since_initial_capital_pct": return_pct,
+                "equity_history": history,
+                "closed_pnl_curve": closed_curve,
+                "closed_trades": records,
+                "closed_pnl_status": closed.get("status", "error"),
+                "closed_pnl_error_type": closed_error_type,
+                "closed_pnl_window": closed.get("window"),
+                "closed_pnl_next_page_available": bool(closed.get("next_page_available")),
+                "equity_history_note": history_error,
+                "capital_flow_adjusted": False,
+                "capital_flow_note": (
+                    "Return is equity versus the configured or first-observed baseline. "
+                    "Deposits and withdrawals are not yet reconciled; configure the original "
+                    "capital explicitly and exclude external transfers before treating this "
+                    "percentage as an investment return."
+                ),
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "source": "Bybit Demo read-only wallet and linear closed-PnL endpoints",
+                "orders_submitted": False,
+            }
 
     def view(self) -> ExperimentView:
         return ExperimentView(self.root)
@@ -337,6 +1173,10 @@ class Dashboard:
 
     def positions(self) -> dict[str, Any]:
         """Open positions, broker-sourced, reconciled against the simulation book."""
+        if self.perpetual_only_mode:
+            return {"positions": [], "count": 0, "positions_checked_at": None, "positions_at": None,
+                    "quote_checked_at": None, "quote_refresh_status": "disabled",
+                    "banner": "Perpetual research only — Spot execution is disabled", "live": False}
         from .engine_view import positions_view
 
         status = self.paper.status()
@@ -392,6 +1232,15 @@ class Dashboard:
             "live": False,
         }
 
+    def chart(self, symbol: str, interval: str = DEFAULT_CHART_INTERVAL) -> dict[str, Any]:
+        """A bounded public Spot chart for a symbol configured on this dashboard."""
+        from tradingagents.crypto.symbols import parse_pair
+
+        canonical = parse_pair(symbol).canonical
+        if canonical not in set(self.crypto.symbols):
+            raise ValueError("symbol is not configured for this dashboard")
+        return self.chart_service.get(canonical, interval, DEFAULT_CHART_LIMIT)
+
     def trades(self) -> dict[str, Any]:
         """The trade journal: submitted orders and settled trades, kept apart."""
         from .engine_view import trades_view
@@ -422,6 +1271,8 @@ class Dashboard:
         processed, that would silently burn the session. The provider reads its
         own credential; this method neither reads nor logs one.
         """
+        if self.perpetual_only_mode:
+            raise PermissionError("Spot/equity simulation controls are disabled in perpetual-only mode")
         if not self.allow_control:
             raise PermissionError(
                 "control is disabled; start the dashboard with --allow-control to "
@@ -518,9 +1369,16 @@ def make_handler(dashboard: Dashboard):
                 self._send_json(200, {"status": "ok"})
                 return
             if path == "/":
-                self._send_html(200, INDEX_HTML)
+                self._send_html(200, PERPETUAL_INDEX_HTML if dashboard.perpetual_only_mode else INDEX_HTML)
                 return
             if not self._authed():
+                return
+            if dashboard.perpetual_only_mode and path.startswith("/api/") and path not in {
+                "/api/perpetual/study/status", "/api/perpetual/chart",
+                "/api/perpetual/lab/status", "/api/perpetual/account",
+                "/api/perpetual/shadow/status"
+            }:
+                self._send_json(410, {"error": "Spot/equity API is disabled in perpetual-only mode"})
                 return
             try:
                 if path == "/api/summary":
@@ -613,6 +1471,30 @@ def make_handler(dashboard: Dashboard):
                     self._send_json(200, dashboard.crypto.health())
                 elif path == "/api/crypto":
                     self._send_json(200, dashboard.crypto.snapshot())
+                elif path == "/api/crypto/chart":
+                    query = parse_qs(urlsplit(self.path).query)
+                    default_symbol = dashboard.crypto.symbols[0] if dashboard.crypto.symbols else ""
+                    symbol = (query.get("symbol") or [default_symbol])[0]
+                    interval = (query.get("interval") or [DEFAULT_CHART_INTERVAL])[0]
+                    self._send_json(200, dashboard.chart(symbol, interval))
+                elif path == "/api/perpetual/study/status":
+                    self._send_json(200, dashboard.perpetual_study_status())
+                elif path == "/api/perpetual/lab/status":
+                    self._send_json(200, dashboard.perpetual_lab_status())
+                elif path == "/api/perpetual/account":
+                    self._send_json(200, dashboard.perpetual_account())
+                elif path == "/api/perpetual/shadow/status":
+                    self._send_json(200, dashboard.perpetual_shadow_status())
+                elif path == "/api/perpetual/chart":
+                    if not self._authed():
+                        return
+                    symbol = parse_qs(urlsplit(self.path).query).get("symbol", ["BTCUSDT"])[0]
+                    try:
+                        self._send_json(200, dashboard.perpetual_chart(symbol))
+                    except ValueError as exc:
+                        self._send_json(400, {"error": str(exc)})
+                    except Exception as exc:  # noqa: BLE001 - public data errors are surfaced without credentials
+                        self._send_json(502, {"error": f"{type(exc).__name__}: {exc}"})
                 else:
                     self._send_json(404, {"error": "not found"})
             except DashboardStateError as exc:
@@ -622,6 +1504,25 @@ def make_handler(dashboard: Dashboard):
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib name
             path = urlsplit(self.path).path
+            if path == "/api/perpetual/lab/start":
+                if not self._authed():
+                    return
+                if not dashboard.perpetual_only_mode:
+                    self._send_json(409, {"error": "perpetual-only mode is required for the strategy lab"})
+                    return
+                if (self.headers.get("X-Perpetual-Lab-Confirm") or "").lower() != "yes":
+                    self._send_json(403, {"error": "explicit strategy-lab confirmation required"})
+                    return
+                self._send_json(202, dashboard.start_perpetual_lab())
+                return
+            if path == "/api/perpetual/study/start":
+                if not self._authed():
+                    return
+                if (self.headers.get("X-Perpetual-Study-Confirm") or "").lower() != "yes":
+                    self._send_json(403, {"error": "explicit research confirmation required"})
+                    return
+                self._send_json(202, dashboard.start_perpetual_study())
+                return
             if path in ("/api/paper/start", "/api/paper/stop"):
                 self._handle_paper_control(path)
                 return
@@ -629,6 +1530,9 @@ def make_handler(dashboard: Dashboard):
                 self._send_json(404, {"error": "not found"})
                 return
             if not self._authed():
+                return
+            if dashboard.perpetual_only_mode:
+                self._send_json(410, {"error": "Spot/equity simulation controls are disabled in perpetual-only mode"})
                 return
             # A deliberate, explicit header so a stray form post or a CSRF-style
             # request cannot trigger a run.
@@ -672,6 +1576,9 @@ def make_handler(dashboard: Dashboard):
             any header — the broker reads its own environment variables.
             """
             if not self._authed():
+                return
+            if dashboard.perpetual_only_mode:
+                self._send_json(410, {"error": "Spot paper execution is disabled in perpetual-only mode"})
                 return
             if (self.headers.get(PAPER_CONFIRM_HEADER) or "").lower() != "yes":
                 self._send_json(
@@ -1039,39 +1946,48 @@ def main(argv: list[str] | None = None) -> int:
     if not args.root:
         parser.error(f"an experiment directory is required: pass --root or set {ROOT_ENV}")
     port = args.port if args.port is not None else int(os.environ.get("PORT", "8000"))
-    try:
-        provider, max_age, whole_shares = resolve_settings(
-            provider=args.paper_market_data,
-            max_age=args.paper_snapshot_max_age_seconds,
-            fractional=args.paper_fractional_shares,
+    perpetual_only_mode = _perpetual_only_enabled()
+    if perpetual_only_mode:
+        # Avoid even resolving or logging Spot/paper providers on the futures-only service.
+        provider = PROVIDER_BAR_OPEN
+        max_age = DEFAULT_MAX_SNAPSHOT_AGE_SECONDS
+        whole_shares = WHOLE_SHARES
+        decision_source = DECISION_SOURCE_HISTORY
+        execution_provider = EXECUTION_PROVIDER_ALPACA_PAPER
+        max_price_deviation = DEFAULT_MAX_PRICE_DEVIATION
+        crypto_symbols = ()
+        print("perpetual-only mode: Spot/equity providers and paper settings skipped", flush=True)
+    else:
+        try:
+            provider, max_age, whole_shares = resolve_settings(
+                provider=args.paper_market_data,
+                max_age=args.paper_snapshot_max_age_seconds,
+                fractional=args.paper_fractional_shares,
+            )
+            decision_source = resolve_paper_settings(
+                decision_source=args.paper_decision_source,
+            )[3]
+            execution_provider = _resolve_execution_provider(args)
+            max_price_deviation = _resolve_max_price_deviation(args)
+        except MarketDataWiringError as exc:
+            parser.error(str(exc))
+        print(
+            f"paper market data: {describe_provider(provider)}"
+            + (
+                f"; snapshot max age {max_age:.0f}s"
+                if provider == "alpaca_snapshot" and max_age is not None
+                else ""
+            ),
         )
-        decision_source = resolve_paper_settings(
-            decision_source=args.paper_decision_source,
-        )[3]
-        execution_provider = _resolve_execution_provider(args)
-        max_price_deviation = _resolve_max_price_deviation(args)
-    except MarketDataWiringError as exc:
-        parser.error(str(exc))
-    print(
-        f"paper market data: {describe_provider(provider)}"
-        + (
-            f"; snapshot max age {max_age:.0f}s"
-            if provider == "alpaca_snapshot" and max_age is not None
-            else ""
-        ),
-    )
-    print(f"paper decision source: {describe_decision_source(decision_source)}")
-    print(
-        f"paper execution provider: {describe_execution_provider(execution_provider)}",
-    )
-    # The endpoint the provider resolves to. The provider name alone does not say
-    # which host receives the order, and a mismatch between the two is exactly
-    # what made a Bybit selection appear to trade on Alpaca. Secret-free: a URL.
-    print(
-        "paper execution endpoint: "
-        f"{_endpoint_for_provider(execution_provider)}",
-    )
-    crypto_symbols = _crypto_symbols(args)
+        print(f"paper decision source: {describe_decision_source(decision_source)}")
+        print(
+            f"paper execution provider: {describe_execution_provider(execution_provider)}",
+        )
+        print(
+            "paper execution endpoint: "
+            f"{_endpoint_for_provider(execution_provider)}",
+        )
+        crypto_symbols = _crypto_symbols(args)
     try:
         serve(
             args.root,
@@ -1084,7 +2000,10 @@ def main(argv: list[str] | None = None) -> int:
             auto_interval=args.auto_interval,
             allow_paper_trading=args.allow_paper_trading,
             paper_order_notional=args.paper_order_notional,
-            market_data_factory=_market_data_factory_for(provider, max_age_seconds=max_age),
+            market_data_factory=(
+                None if perpetual_only_mode
+                else _market_data_factory_for(provider, max_age_seconds=max_age)
+            ),
             paper_whole_shares=whole_shares,
             paper_market_data_provider=provider,
             paper_market_data_max_age_seconds=max_age,
@@ -1092,7 +2011,7 @@ def main(argv: list[str] | None = None) -> int:
             paper_max_price_deviation=max_price_deviation,
             paper_execution_provider=execution_provider,
             crypto_symbols=crypto_symbols,
-            crypto_live=bool(getattr(args, "crypto_live", False)),
+            crypto_live=bool(getattr(args, "crypto_live", False)) and not perpetual_only_mode,
         )
     except DashboardAuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1145,13 +2064,15 @@ def serve(
     than by an empty engine. It is off by default: with no symbols and no live
     flag the crypto section reports *not started* instead of inventing data.
     """
-    # Ensure crypto experiment exists (idempotent, safe to call on every startup)
-    _ensure_experiment(root, crypto_symbols=crypto_symbols)
+    perpetual_only_mode = _perpetual_only_enabled()
+    # The perpetual-only deployment must not create or refresh the legacy Spot/equity experiment.
+    if not perpetual_only_mode:
+        _ensure_experiment(root, crypto_symbols=crypto_symbols)
 
     resolved = resolve_token(token)
     require_bindable(host, resolved)
     crypto_engine = None
-    if crypto_live and crypto_symbols:
+    if crypto_live and crypto_symbols and not perpetual_only_mode:
         crypto_engine = _build_crypto_engine(crypto_symbols)
     dashboard = Dashboard(
         root,
@@ -1171,21 +2092,30 @@ def serve(
         paper_execution_provider=paper_execution_provider,
         crypto_engine=crypto_engine,
         crypto_symbols=tuple(crypto_symbols),
+        perpetual_only_mode=perpetual_only_mode,
     )
+    _maybe_auto_start_perpetual_study(dashboard, root)
+    _maybe_auto_start_perpetual_lab(dashboard, root)
+    _maybe_auto_start_perpetual_shadow(dashboard, root)
     httpd = ThreadingHTTPServer((host, port), make_handler(dashboard))
     httpd.daemon_threads = True
     print(f"dashboard on http://{host}:{port}  (root: {Path(root).resolve()})")
     print(f"  auth: {'token required' if resolved else 'loopback only, no token'}")
-    print(f"  control: {'enabled' if allow_control else 'read-only'}")
-    print(
-        "  paper trading: "
-        + (
-            f"enabled ({banner_for_provider(paper_execution_provider)}, order notional {paper_order_notional:g})"
-            if allow_paper_trading
-            else "disabled (pass --allow-paper-trading to enable)"
+    print(f"  control: {'read-only' if perpetual_only_mode else ('enabled' if allow_control else 'read-only')}")
+    if perpetual_only_mode:
+        print("  mode: linear USDT perpetual research only; Spot/paper stack not initialized", flush=True)
+    else:
+        print(
+            "  paper trading: "
+            + (
+                f"enabled ({banner_for_provider(paper_execution_provider)}, order notional {paper_order_notional:g})"
+                if allow_paper_trading
+                else "disabled (pass --allow-paper-trading to enable)"
+            )
         )
-    )
-    if auto_advance:
+    if auto_advance and perpetual_only_mode:
+        print("  auto-advance: disabled in perpetual-only mode", flush=True)
+    elif auto_advance:
         if not allow_control:
             print("  auto-advance: refused (needs --allow-control)", flush=True)
         else:
@@ -1202,10 +2132,11 @@ def serve(
         # Stop the paper worker's loop before the process exits, so a shutdown
         # never leaves a cycle mid-flight and never places a new order. This is
         # best-effort: a stop failure must not mask the server's own shutdown.
-        try:
-            dashboard.paper.shutdown()
-        except Exception as exc:  # noqa: BLE001 - shutdown must not raise
-            print(f"  paper trading: stop on shutdown failed: {type(exc).__name__}", flush=True)
+        if dashboard.paper is not None:
+            try:
+                dashboard.paper.shutdown()
+            except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+                print(f"  paper trading: stop on shutdown failed: {type(exc).__name__}", flush=True)
         httpd.server_close()
 
 
@@ -2359,6 +3290,186 @@ boot();
 </script>
 </body>
 </html>
+"""
+
+PERPETUAL_INDEX_HTML = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark"><title>TradingAgents · Perpetual Lab</title>
+<style>
+:root{color-scheme:dark;--bg:#10070c;--panel:#24131b;--line:#51303f;--muted:#c4aab5;--text:#fff3f7;--cyan:#d58aa6;--green:#59d69d;--red:#ff7f98;--amber:#e9b86f;--blue:#c78ba7}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:radial-gradient(ellipse at 12% 0%,rgba(128,28,64,.24),transparent 38%),#10070c;color:var(--text);font:14px/1.5 Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
+body{padding:env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 20px)}button,input,select{font:inherit}button{cursor:pointer}
+.shell{width:min(1440px,100%);margin:auto;padding:0 22px}.top{position:sticky;top:0;z-index:5;background:rgba(16,7,12,.94);backdrop-filter:blur(16px);border-bottom:1px solid rgba(194,120,149,.22)}
+.toprow{display:flex;align-items:center;gap:12px;min-height:66px}.brand{font-weight:850;letter-spacing:.1em;text-transform:uppercase}.brand small{display:block;color:var(--muted);font-size:10px;letter-spacing:.15em}.push{flex:1}
+.pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:#2a1821;color:var(--muted);border-radius:999px;padding:5px 9px;font-size:10px;font-weight:800;letter-spacing:.05em;white-space:nowrap}.safe{color:var(--green);border-color:rgba(89,214,157,.34)}.warn{color:var(--amber);border-color:rgba(233,184,111,.34)}
+.hero{padding:24px 0 16px;display:flex;justify-content:space-between;align-items:end;gap:16px}.kicker{font-size:10px;color:var(--cyan);font-weight:800;letter-spacing:.2em}h1{font-size:clamp(26px,4vw,40px);line-height:1.08;margin:8px 0;letter-spacing:-.04em}.hero p{color:var(--muted);max-width:720px;margin:0;font-size:13px}
+.actions{display:flex;gap:8px;flex-wrap:wrap}.control,button.action{border:1px solid var(--line);background:#351c29;color:var(--text);border-radius:11px;padding:10px 12px;min-height:41px}button.action.primary{background:linear-gradient(110deg,#8e254b,#c66b8d);border:0;color:#fff3f7;font-weight:850}button:disabled{opacity:.48;cursor:wait}select.control{min-width:135px}
+.notice{padding:11px 13px;border:1px solid rgba(233,184,111,.28);background:rgba(233,184,111,.09);border-radius:13px;color:#f0d5de;font-size:12px;margin-bottom:14px}.notice strong{color:#ffe7ed}
+.layout{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(280px,.8fr);gap:14px;align-items:start}.panel{background:linear-gradient(145deg,rgba(46,22,32,.98),rgba(22,10,15,.98));border:1px solid var(--line);border-radius:17px;overflow:hidden;box-shadow:0 20px 50px rgba(0,0,0,.2)}
+.panelhead{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid rgba(194,120,149,.16)}.panelhead h2{font-size:12px;margin:0;text-transform:uppercase;letter-spacing:.12em}.sub{font-size:11px;color:var(--muted)}
+.canvaswrap{position:relative;padding:8px 9px 5px}#chart{display:block;width:100%;height:440px;touch-action:pan-y}.chart-empty{position:absolute;inset:8px 9px 5px;display:none;align-items:center;justify-content:center;text-align:center;padding:26px;color:var(--muted);background:rgba(17,8,13,.78);border-radius:12px;pointer-events:none}
+.legend{display:flex;gap:12px;flex-wrap:wrap;padding:0 16px 13px;color:var(--muted);font-size:10px}.legend span{display:inline-flex;align-items:center;gap:6px}.swatch{width:17px;height:2px;background:var(--cyan)}.entry{background:var(--blue)}.stop{background:var(--red)}.target{background:var(--green)}.liq{background:var(--amber)}
+.side{display:grid;gap:13px}.pad{padding:15px}.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.metric{padding:10px;border:1px solid rgba(194,120,149,.16);border-radius:12px;background:rgba(28,12,19,.72);min-width:0}.metric label{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.metric b{display:block;font-size:18px;margin-top:3px;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.metric small{font-size:10px;color:var(--muted)}
+.position{display:grid;gap:7px}.position-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.position-head b{font-size:14px}.level{display:grid;grid-template-columns:1fr auto;gap:12px;padding:7px 0;border-bottom:1px solid rgba(194,120,149,.14);font-variant-numeric:tabular-nums}.level span:first-child{color:var(--muted)}.empty-state{padding:13px;border:1px dashed rgba(194,120,149,.28);border-radius:12px;color:var(--muted);font-size:12px}
+.study-status{color:var(--muted);font-size:12px;margin:10px 0}.study-grid{display:grid;gap:8px}.study-row{padding:10px;border-radius:11px;background:rgba(28,12,19,.78);border:1px solid rgba(194,120,149,.16)}.study-row strong{display:block;font-size:12px;margin-bottom:4px}.study-row p{margin:0;color:var(--muted);font-size:11px;line-height:1.6}.gate-pass{color:var(--green)}.gate-fail{color:var(--red)}
+#error{display:none;margin:12px 0;padding:10px 13px;border:1px solid rgba(255,127,152,.38);background:rgba(255,127,152,.10);border-radius:12px;color:#ffb6c7;font-size:12px;white-space:pre-wrap}.tokenbox{display:flex;gap:8px;max-width:430px}.tokenbox input{min-width:0;flex:1;background:#160b11;border:1px solid var(--line);border-radius:10px;padding:10px 12px;color:var(--text)}.muted{color:var(--muted)}.small{font-size:11px}.footer{margin-top:14px;color:#a88998;font-size:10px;text-align:center}
+.account-panel{grid-column:1/-1;background:linear-gradient(135deg,rgba(58,19,38,.98),rgba(24,10,17,.99));border-color:rgba(194,120,149,.25)}
+.account-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}
+.account-chart{min-width:0;padding:12px;border:1px solid rgba(194,120,149,.16);border-radius:13px;background:rgba(18,8,13,.62)}
+.account-chart h3{font-size:11px;letter-spacing:.1em;text-transform:uppercase;margin:0 0 7px;color:#f1dbe3}
+.account-chart canvas{display:block;width:100%;height:190px}
+.account-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.account-note{font-size:11px;color:var(--muted);line-height:1.6;margin:10px 0 0}
+.account-table{overflow:auto;margin-top:12px}
+.account-table table{border-collapse:collapse;width:100%;min-width:620px;font-size:11px;font-variant-numeric:tabular-nums}
+.account-table th,.account-table td{padding:8px 9px;border-bottom:1px solid rgba(194,120,149,.13);text-align:right;white-space:nowrap}
+.account-table th:first-child,.account-table td:first-child{text-align:left}
+.account-table th{color:var(--muted);font-size:9px;letter-spacing:.08em;text-transform:uppercase}
+.metric .positive{color:var(--green)}.metric .negative{color:var(--red)}
+.account-heading{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.account-heading h2{font-size:12px;letter-spacing:.12em;text-transform:uppercase;margin:0}
+@media(max-width:900px){.layout{grid-template-columns:minmax(0,1fr)}.side{grid-template-columns:repeat(2,minmax(0,1fr))}.side .wide{grid-column:1/-1}}
+@media(max-width:620px){.shell{padding:0 12px}.toprow{min-height:59px}.brand{font-size:13px}.hero{display:block;padding:18px 0 13px}.hero .actions{margin-top:13px}.actions{width:100%}.actions>*{flex:1}.layout{gap:10px}.side{grid-template-columns:1fr}.side .wide{grid-column:auto}.panelhead,.pad{padding:12px}#chart{height:335px}.metric b{font-size:16px}.account-grid{grid-template-columns:1fr}.account-chart canvas{height:170px}.account-panel{padding:12px}}
+@media(max-width:360px){.shell{padding:0 9px}.pill{font-size:9px;padding:5px 6px}#chart{height:295px}.tokenbox{flex-direction:column}.tokenbox button{width:100%}.metric{padding:8px}.metric b{font-size:15px}}
+@media(max-width:620px){.shell{padding:0 12px}.toprow{min-height:59px}.brand{font-size:13px}.hero{display:block;padding:18px 0 13px}.hero .actions{margin-top:13px}.actions{width:100%}.actions>*{flex:1}.layout{gap:10px}.side{grid-template-columns:1fr}.side .wide{grid-column:auto}.panelhead,.pad{padding:12px}#chart{height:335px}.metric b{font-size:16px}}
+@media(max-width:360px){.shell{padding:0 9px}.pill{font-size:9px;padding:5px 6px}#chart{height:295px}.tokenbox{flex-direction:column}.tokenbox button{width:100%}}
+</style></head>
+<body>
+<header class="top"><div class="shell toprow"><div class="brand">TradingAgents<small>Linear perpetual research lab</small></div><div class="push"></div><span class="pill safe">● RESEARCH ONLY</span><span class="pill warn">ORDERS DISABLED</span></div></header>
+<main class="shell">
+<section class="hero"><div><div class="kicker">BYBIT · LINEAR USDT PERPETUALS · ISOLATED RESEARCH</div><h1>Perpetuals, with evidence.</h1><p>One focused workspace for leveraged strategy research, honest after-cost metrics and a clean chart. No Spot engine, no fabricated positions and no exchange orders.</p></div><div class="actions"><select id="symbol" class="control" aria-label="Perpetual symbol"><option value="BTCUSDT">BTC / USDT</option><option value="ETHUSDT">ETH / USDT</option><option value="SOLUSDT">SOL / USDT</option><option value="BNBUSDT">BNB / USDT</option></select><button id="refresh" class="action" type="button">Refresh chart</button></div></section>
+<div class="notice"><strong>Leverage is not a profitability signal.</strong> Research leverage is capped at 2x and defaults to 1x. Simulated returns are estimates, not proof of future results or Bybit execution readiness.</div>
+<div id="error"></div>
+<section id="auth" class="panel pad" style="display:none;margin-bottom:14px"><div class="panelhead" style="padding:0 0 12px;border:0"><h2>Dashboard access</h2></div><div class="tokenbox"><input id="token" type="password" autocomplete="off" placeholder="Dashboard access token"><button id="connect" class="action primary" type="button">Connect</button></div><p class="muted small">Token is stored in this browser only.</p></section>
+<section class="layout" id="main" style="display:none">
+<section class="panel pad account-panel">
+<div class="account-heading"><h2>Demo account & capital performance</h2><div class="push"></div><span id="account-status" class="pill warn">ACCOUNT UNKNOWN</span><button id="refresh-account" class="action" type="button">Refresh account</button></div>
+<div id="account-metrics" class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(145px,1fr));margin-top:13px"><div class="empty-state">Waiting for authenticated read-only Bybit Demo wallet data…</div></div>
+<div class="account-grid">
+<div class="account-chart"><h3>Tracked account equity</h3><canvas id="equity-chart" aria-label="Account equity history"></canvas><div id="equity-chart-note" class="muted small">History begins when monitoring first connects.</div></div>
+<div class="account-chart"><h3>Realized P&amp;L · recent 7 days</h3><canvas id="realized-chart" aria-label="Cumulative realized profit and loss chart"></canvas><div id="realized-chart-note" class="muted small">Closed-position records returned by Bybit.</div></div>
+</div>
+<div class="account-meta"><span id="account-updated" class="muted small">Updated: —</span><span id="account-baseline" class="muted small">Initial capital: —</span></div>
+<p id="account-note" class="account-note">Balances and performance are shown only after a successful authenticated Bybit Demo read. No orders are sent.</p>
+<div class="account-table" id="closed-trades"><div class="empty-state">Closed trades will appear here after account data is available.</div></div>
+</section>
+<div class="panel"><div class="panelhead"><div><h2 id="chart-title">BTCUSDT · 4H</h2><div class="sub" id="chart-sub">Bybit public linear perpetual data</div></div><div class="push"></div><span class="pill" id="market-state">CONNECTING</span></div><div class="canvaswrap"><canvas id="chart" aria-label="Bybit 4-hour candlestick chart"></canvas><div id="chart-empty" class="chart-empty"></div></div><div class="legend"><span><i class="swatch"></i>Candles</span><span><i class="swatch entry"></i>Entry</span><span><i class="swatch stop"></i>Stop loss</span><span><i class="swatch target"></i>Take profit</span><span><i class="swatch liq"></i>Est. liquidation</span></div></div>
+<aside class="side">
+<section class="panel pad"><div class="panelhead" style="padding:0 0 12px;border:0"><h2>Market snapshot</h2></div><div class="metrics"><div class="metric"><label>Last close</label><b id="last-price">—</b><small id="last-time">—</small></div><div class="metric"><label>4H candles</label><b id="bars">—</b><small>Completed only</small></div><div class="metric"><label>Instrument</label><b id="instrument">—</b><small>USDT linear</small></div><div class="metric"><label>Data updated</label><b id="updated">—</b><small>Bybit public endpoint</small></div></div></section>
+<section class="panel pad"><div class="position-head"><h2 style="font-size:12px;letter-spacing:.12em;margin:0">Open futures position</h2><span id="position-badge" class="pill">UNKNOWN</span></div><div id="position-body" class="empty-state" style="margin-top:11px">Checking position source…</div></section>
+<section class="panel pad wide"><div class="position-head"><h2 style="font-size:12px;letter-spacing:.12em;margin:0">Shadow Forward Test</h2><span id="shadow-badge" class="pill warn">STARTING</span></div><p id="shadow-status" class="study-status">Monitoring future completed Bybit 4h candles. Five fixed candidates · 1x / 2x · realistic, conservative and stress costs. No orders.</p><div id="shadow-results" class="study-grid" style="margin-top:12px"><div class="empty-state">Waiting for the first untouched forward candles.</div></div><p id="shadow-updated" class="muted small" style="margin-top:10px">The forward boundary is persisted on the research volume.</p></section>
+<section class="panel pad wide"><div class="position-head"><h2 style="font-size:12px;letter-spacing:.12em;margin:0">Strategy tournament</h2><span id="study-badge" class="pill">IDLE</span></div><p id="study-status" class="study-status">Five fixed EMA and Donchian families · 1x / 2x · three cost models · development folds only.</p><button id="run-study" class="action primary" type="button" style="width:100%">Run strategy tournament</button><div id="study-results" class="study-grid" style="margin-top:12px"></div></section>
+</aside></section>
+<div class="footer">Bybit USDT linear perpetuals · authenticated Demo account is read-only · no Spot engine · no orders submitted</div>
+</main>
+<script>
+(function(){
+"use strict";
+var $=function(id){return document.getElementById(id);},TOKEN=localStorage.getItem("ta_token")||"",DATA=null,ACCOUNT_DATA=null,STUDY_TIMER=null,CHART_TIMER=null,ACCOUNT_TIMER=null,SHADOW_TIMER=null;
+function fmt(v,d){if(v===null||v===undefined||!Number.isFinite(Number(v)))return "—";return Number(v).toLocaleString(undefined,{maximumFractionDigits:d===undefined?2:d});}
+function esc(v){return String(v===null||v===undefined?"":v).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
+function showError(s){var el=$("error");el.style.display=s?"block":"none";el.textContent=s||"";}
+async function api(path,opts){opts=opts||{};opts.headers=Object.assign({},opts.headers||{},{Authorization:"Bearer "+TOKEN});var r=await fetch(path,opts),j={};try{j=await r.json();}catch(e){}if(r.status===401)throw new Error("Access token is invalid or missing.");if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j;}
+function connect(){TOKEN=$("token").value.trim();if(!TOKEN){showError("Enter the dashboard token.");return;}localStorage.setItem("ta_token",TOKEN);boot();}
+function boot(){ $("auth").style.display="none";$("main").style.display="grid";showError("");refreshChart();refreshStudy();refreshAccount();refreshShadow();if(CHART_TIMER)clearInterval(CHART_TIMER);if(STUDY_TIMER)clearInterval(STUDY_TIMER);if(ACCOUNT_TIMER)clearInterval(ACCOUNT_TIMER);if(SHADOW_TIMER)clearInterval(SHADOW_TIMER);CHART_TIMER=setInterval(refreshChart,60000);STUDY_TIMER=setInterval(refreshStudy,10000);ACCOUNT_TIMER=setInterval(refreshAccount,60000);SHADOW_TIMER=setInterval(refreshShadow,60000);}
+function drawChart(payload){
+ var canvas=$("chart"),r=canvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1,w=Math.max(250,r.width),h=Math.max(260,r.height);canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);var ctx=canvas.getContext("2d");ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);
+ var candles=payload.candles||[];if(!candles.length){$("chart-empty").style.display="flex";$("chart-empty").textContent="No completed Bybit candles available.";return;}$("chart-empty").style.display="none";
+ var p=payload.position,levels=[];if(p){if(p.entry_price)levels.push({name:"ENTRY",v:Number(p.entry_price),c:"#c78ba7"});if(p.stop_loss)levels.push({name:"STOP",v:Number(p.stop_loss),c:"#ff7f98"});if(p.take_profit)levels.push({name:"TARGET",v:Number(p.take_profit),c:"#59d69d"});if(p.liquidation_price)levels.push({name:"LIQUIDATION",v:Number(p.liquidation_price),c:"#e9b86f"});}
+ var vals=[];candles.forEach(function(c){vals.push(Number(c.high),Number(c.low));});levels.forEach(function(x){vals.push(x.v);});vals=vals.filter(Number.isFinite);var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),span=hi-lo;if(!Number.isFinite(span)||span<=0)span=Math.max(1,Math.abs(hi)*.01);lo-=span*.08;hi+=span*.08;
+ var left=10,right=91,top=18,bottom=35,pb=h-52,ph=pb-top,pw=w-left-right,step=pw/candles.length;function y(v){return top+(hi-v)/(hi-lo)*ph;}
+ ctx.font="10px ui-monospace,monospace";ctx.strokeStyle="rgba(196,170,181,.18)";ctx.fillStyle="#c4aab5";ctx.textAlign="left";
+ for(var i=0;i<=5;i++){var yy=top+ph*i/5;ctx.beginPath();ctx.moveTo(left,yy);ctx.lineTo(w-right,yy);ctx.stroke();ctx.fillText(fmt(hi-(hi-lo)*i/5,2),w-right+7,yy+3);}
+ var maxVol=Math.max.apply(null,candles.map(function(c){return Number(c.volume)||0;}))||1;
+ candles.forEach(function(c,i){var x=left+step*(i+.5),o=Number(c.open),cl=Number(c.close),hh=Number(c.high),ll=Number(c.low);if(![o,cl,hh,ll].every(Number.isFinite))return;var up=cl>=o,col=up?"#59d69d":"#ff7f98",bw=Math.max(2,Math.min(10,step*.62)),yo=y(o),yc=y(cl);ctx.strokeStyle=col;ctx.fillStyle=col;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,y(hh));ctx.lineTo(x,y(ll));ctx.stroke();ctx.fillRect(x-bw/2,Math.min(yo,yc),bw,Math.max(1,Math.abs(yc-yo)));var vol=Math.max(0,Number(c.volume)||0);ctx.globalAlpha=.28;ctx.fillRect(x-bw/2,pb+6,bw,22*vol/maxVol);ctx.globalAlpha=1;});
+ ctx.fillStyle="#c4aab5";ctx.textAlign="center";[0,Math.floor(candles.length/2),candles.length-1].forEach(function(i){var t=new Date(candles[i].time);ctx.fillText(isNaN(t.getTime())?"":t.toLocaleDateString(undefined,{month:"short",day:"numeric"}),left+step*(i+.5),h-10);});
+ var lastY=-999;levels.sort(function(a,b){return b.v-a.v;}).forEach(function(l){var yy=y(l.v);if(yy<top||yy>pb)return;ctx.save();ctx.strokeStyle=l.c;ctx.setLineDash([5,4]);ctx.beginPath();ctx.moveTo(left,yy);ctx.lineTo(w-right,yy);ctx.stroke();ctx.restore();var ly=Math.max(top+9,Math.min(pb-9,yy));if(ly-lastY<19)ly=Math.min(pb-9,lastY+19);lastY=ly;ctx.fillStyle="rgba(17,8,13,.98)";ctx.fillRect(w-right+3,ly-9,right-5,18);ctx.fillStyle=l.c;ctx.textAlign="left";ctx.textBaseline="middle";ctx.font="9px ui-monospace,monospace";ctx.fillText(l.name+" "+fmt(l.v,2),w-right+7,ly);});
+ if(p&&p.mark_price){ctx.strokeStyle="#d58aa6";ctx.setLineDash([2,3]);ctx.beginPath();ctx.moveTo(left,y(Number(p.mark_price)));ctx.lineTo(w-right,y(Number(p.mark_price)));ctx.stroke();ctx.setLineDash([]);}
+}
+function renderPosition(d){var s=d.position_status||"unavailable",p=d.position,b=$("position-badge"),el=$("position-body");b.textContent=s.toUpperCase();b.className="pill "+(s==="open"?"safe":s==="flat"?"":"warn");
+ if(s==="unavailable"){el.className="empty-state";el.textContent="No authenticated Bybit Futures position feed is connected. The dashboard will not infer a position from Spot data or invent entry levels. Market chart only.";return;}
+ if(s==="invalid"){el.className="empty-state";el.textContent="Position snapshot failed validation and is hidden.";return;}
+ if(s==="error"){el.className="empty-state";el.textContent="The Bybit Demo position read failed. Position status is unknown, not flat; check read-only API permissions and connection.";return;}
+ if(s==="flat"){el.className="empty-state";el.textContent="The connected futures source reports no open position.";return;}
+ if(!p){el.className="empty-state";el.textContent="No verified open position is available.";return;}
+ el.className="position";el.innerHTML='<div class="position-head"><b>'+esc(p.symbol)+' · '+esc(p.side.toUpperCase())+'</b><span class="pill safe">'+fmt(p.leverage,1)+'x</span></div>'+
+ [['Quantity',fmt(p.quantity,6)],['Entry',fmt(p.entry_price,4)],['Mark',fmt(p.mark_price,4)],['Unrealized P&L',fmt(p.unrealized_pnl,3)],['Stop loss',fmt(p.stop_loss,4)],['Take profit',fmt(p.take_profit,4)],['Liquidation price',fmt(p.liquidation_price,4)]].map(function(x){return '<div class="level"><span>'+x[0]+'</span><b>'+x[1]+'</b></div>';}).join("")+
+ '<div class="muted small">Snapshot: '+esc(p.updated_at||"unknown")+'</div>';
+}
+async function refreshChart(){var symbol=$("symbol").value;$("chart-title").textContent=symbol+" · 4H";$("market-state").textContent="LOADING";try{var d=await api("/api/perpetual/chart?symbol="+encodeURIComponent(symbol));DATA=d;var bars=d.candles||[],last=bars[bars.length-1]||{};$("market-state").textContent="LIVE DATA";$("market-state").className="pill safe";$("last-price").textContent=fmt(last.close,4);$("last-time").textContent=last.time?new Date(last.time).toLocaleString():"—";$("bars").textContent=String(bars.length);$("instrument").textContent=d.category==="linear"?"USDT LINEAR":"—";$("updated").textContent=d.updated_at?new Date(d.updated_at).toLocaleTimeString():"—";$("chart-sub").textContent="Bybit public · completed candles only";renderPosition(d);drawChart(d);showError("");}catch(e){$("market-state").textContent="UNAVAILABLE";$("market-state").className="pill warn";$("chart-empty").style.display="flex";$("chart-empty").textContent=e.message;$("position-badge").textContent="UNKNOWN";$("position-body").className="empty-state";$("position-body").textContent="Position status unavailable.";showError(e.message);}}
+function drawSeries(canvasId,points,valueKey,color,baseline){
+ var canvas=$(canvasId),rect=canvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1,w=Math.max(220,rect.width),h=Math.max(130,rect.height);
+ canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);var ctx=canvas.getContext("2d");ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);
+ var vals=(points||[]).map(function(p){return Number(p[valueKey]);}).filter(Number.isFinite);
+ if(baseline!==null&&baseline!==undefined&&Number.isFinite(Number(baseline)))vals.push(Number(baseline));
+ if(!vals.length){ctx.fillStyle="#c4aab5";ctx.font="12px system-ui";ctx.textAlign="center";ctx.fillText("No history recorded yet",w/2,h/2);return;}
+ var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),span=hi-lo;if(span<=0)span=Math.max(1,Math.abs(hi)*.02);lo-=span*.12;hi+=span*.12;
+ var left=12,right=12,top=12,bottom=23,pw=w-left-right,ph=h-top-bottom;
+ ctx.font="9px ui-monospace,monospace";ctx.fillStyle="#c4aab5";ctx.strokeStyle="rgba(196,170,181,.15)";
+ for(var i=0;i<=3;i++){var gridY=top+ph*i/3;ctx.beginPath();ctx.moveTo(left,gridY);ctx.lineTo(w-right,gridY);ctx.stroke();ctx.textAlign="left";ctx.fillText(fmt(hi-(hi-lo)*i/3,2),left+2,gridY-3);}
+ function y(v){return top+(hi-v)/(hi-lo)*ph;}
+ if(baseline!==null&&baseline!==undefined&&Number.isFinite(Number(baseline))){ctx.save();ctx.strokeStyle="rgba(233,184,111,.8)";ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(left,y(Number(baseline)));ctx.lineTo(w-right,y(Number(baseline)));ctx.stroke();ctx.restore();}
+ if(points&&points.length){ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();points.forEach(function(p,i){var x=left+(points.length===1?pw/2:pw*i/(points.length-1)),v=Number(p[valueKey]);if(!Number.isFinite(v))return;if(i===0)ctx.moveTo(x,y(v));else ctx.lineTo(x,y(v));});ctx.stroke();var last=Number(points[points.length-1][valueKey]);if(Number.isFinite(last)){ctx.fillStyle=color;ctx.beginPath();ctx.arc(w-right-1,y(last),3.2,0,Math.PI*2);ctx.fill();}}
+ ctx.fillStyle="#c4aab5";ctx.textAlign="left";ctx.fillText(points&&points.length?new Date(points[0].timestamp_ms).toLocaleDateString(): "",left,h-5);ctx.textAlign="right";ctx.fillText(points&&points.length?new Date(points[points.length-1].timestamp_ms).toLocaleDateString():"",w-right,h-5);
+}
+function accountMetric(label,value,hint,kind){return '<div class="metric"><label>'+esc(label)+'</label><b class="'+(kind||"")+'">'+value+'</b><small>'+esc(hint||"")+'</small></div>';}
+function renderAccount(d){
+ ACCOUNT_DATA=d;var badge=$("account-status"),metrics=$("account-metrics"),note=$("account-note");
+ badge.textContent=String(d.status||"unknown").replace(/_/g," ").toUpperCase();badge.className="pill "+(d.status==="ok"?"safe":"warn");
+ if(d.status!=="ok"){
+  metrics.innerHTML='<div class="empty-state" style="grid-column:1/-1">'+esc(d.detail||"Account data is unavailable. Balances are intentionally hidden.")+'</div>';
+  $("equity-chart-note").textContent="No verified account equity history.";
+  $("realized-chart-note").textContent="No verified closed-PnL history.";
+  $("closed-trades").innerHTML='<div class="empty-state">Closed trades are unavailable until the Bybit Demo read succeeds.</div>';
+  $("account-updated").textContent="Updated: —";$("account-baseline").textContent="Initial capital: —";
+  note.textContent="The dashboard never treats an API error as a zero balance or a flat account. Check Bybit Demo read-only Account and Contract-position permissions.";
+  drawSeries("equity-chart",[],"equity_usd","#d58aa6",null);drawSeries("realized-chart",[],"cumulative_closed_pnl","#59d69d",0);return;
+ }
+ var a=d.account||{},trades=d.closed_trades||[],realized=trades.reduce(function(sum,t){return sum+Number(t.closed_pnl||0);},0);
+ var marginUse=(a.total_initial_margin_usd!==null&&a.total_initial_margin_usd!==undefined&&Number(a.total_equity_usd)>0)?Number(a.total_initial_margin_usd)/Number(a.total_equity_usd)*100:null;
+ var pnl=Number(d.net_pnl_since_initial_capital_usd),ret=Number(d.return_since_initial_capital_pct);
+ metrics.innerHTML=
+ accountMetric("Account equity",fmt(a.total_equity_usd)+" USD","Bybit Unified account")+
+ accountMetric("Wallet balance",fmt(a.total_wallet_balance_usd)+" USD","Excludes unrealized P&L")+
+ accountMetric("Available margin",fmt(a.total_available_balance_usd)+" USD","Bybit reported available balance")+
+ accountMetric("Margin balance",fmt(a.total_margin_balance_usd)+" USD","Wallet + perpetual UPL")+
+ accountMetric("Perpetual unrealized P&L",fmt(a.total_perpetual_unrealized_pnl_usd)+" USD","All linear / futures UPL",Number(a.total_perpetual_unrealized_pnl_usd)>0?"positive":Number(a.total_perpetual_unrealized_pnl_usd)<0?"negative":"")+
+ accountMetric("Initial capital",fmt(d.initial_capital_usd)+" USD",d.initial_capital_source==="configured_initial_capital"?"Operator configured":"First verified snapshot")+
+ accountMetric("Net P&L since baseline",(pnl>0?"+":"")+fmt(pnl)+" USD","Equity minus baseline",pnl>0?"positive":pnl<0?"negative":"")+
+ accountMetric("Return since baseline",(ret>0?"+":"")+fmt(ret,2)+"%","External flows not adjusted",ret>0?"positive":ret<0?"negative":"")+
+ accountMetric("Realized P&L · 7d",(realized>0?"+":"")+fmt(realized)+" USD",trades.length+" closed records",realized>0?"positive":realized<0?"negative":"")+
+ accountMetric("Initial margin ratio",marginUse===null?"—":fmt(marginUse,2)+"%","Initial margin / account equity");
+ var history=d.equity_history||[],curve=d.closed_pnl_curve||[];
+ drawSeries("equity-chart",history,"equity_usd","#d58aa6",Number(d.initial_capital_usd));
+ drawSeries("realized-chart",curve,"cumulative_closed_pnl",curve.length&&Number(curve[curve.length-1].cumulative_closed_pnl)<0?"#ff7f98":"#59d69d",0);
+ $("equity-chart-note").textContent=history.length+" saved snapshots · tracking starts when this dashboard first reads the wallet.";
+ $("realized-chart-note").textContent=(d.closed_pnl_window||"Recent records")+" · cumulative closed P&L from returned records only.";
+ $("account-updated").textContent="Updated: "+(d.updated_at?new Date(d.updated_at).toLocaleString():"—");
+ $("account-baseline").textContent="Baseline: "+fmt(d.initial_capital_usd)+" USD · "+esc(d.initial_capital_at||"");
+ note.textContent=(d.capital_flow_note||"")+(d.equity_history_note?(" "+d.equity_history_note):"");
+ var recent=trades.slice().sort(function(x,y){return y.created_time_ms-x.created_time_ms;}).slice(0,8);
+ $("closed-trades").innerHTML=recent.length?'<table><thead><tr><th>Closed</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Closed P&L</th><th>Fees</th></tr></thead><tbody>'+recent.map(function(t){var fees=Number(t.open_fee||0)+Number(t.close_fee||0),v=Number(t.closed_pnl);return '<tr><td>'+esc(new Date(t.created_time_ms).toLocaleString())+'</td><td><b>'+esc(t.symbol)+'</b></td><td>'+esc(t.side)+'</td><td>'+fmt(t.quantity,5)+'</td><td>'+fmt(t.entry_price,4)+'</td><td>'+fmt(t.exit_price,4)+'</td><td class="'+(v>0?"positive":v<0?"negative":"")+'">'+(v>0?"+":"")+fmt(v,3)+'</td><td>'+fmt(fees,4)+'</td></tr>';}).join("")+'</tbody></table>':'<div class="empty-state">No closed linear-perpetual records were returned for the recent 7-day window.</div>';
+}
+async function refreshAccount(){try{renderAccount(await api("/api/perpetual/account"));}catch(e){renderAccount({status:"error",detail:e.message});}}
+function renderShadow(s){var b=$("shadow-badge"),st=$("shadow-status"),box=$("shadow-results"),updated=$("shadow-updated");var state=String(s.status||"idle");b.textContent=state.replace(/_/g," ").toUpperCase();b.className="pill "+(state==="running"?"safe":state==="error"?"warn":"");var detail=s.detail||"All five fixed candidates are being tracked in parallel; no candidate is selected.";if(state==="error")detail="Market-data cycle failed; the saved forward boundary is preserved. "+(s.last_error||s.error||"The worker will retry.");if(s.forward_start)detail+=" Forward start: "+s.forward_start+".";if(s.forward_bars!==undefined)detail+=" Future completed 4h bars: "+s.forward_bars+".";if(s.cycles!==undefined)detail+=" Completed scoring cycles: "+s.cycles+".";st.textContent=detail;updated.textContent="Last completed candle: "+(s.last_bar_time||"waiting")+" · Last update: "+(s.last_updated_at||s.last_checked_at||"—")+" · Simulated equity: 1,000 USD per symbol; not account capital.";var rows=s.results||[];if(!rows.length){box.innerHTML='<div class="empty-state">'+esc(s.detail||"Waiting for untouched future candles; no result has been scored yet.")+'</div>';return;}box.innerHTML=rows.map(function(r){var wr=r.win_rate_pct===null?"—":fmt(r.win_rate_pct,1)+"%",pf=r.profit_factor===null?"—":String(r.profit_factor),ret=r.estimated_equal_weight_return_pct===null?"—":fmt(r.estimated_equal_weight_return_pct,3)+"%";return '<div class="study-row"><strong>'+esc(r.candidate)+' · '+fmt(r.leverage,1)+'x · '+esc(r.scenario)+'</strong><p>Closed trades: '+esc(r.closed_trades)+' · WR: '+wr+' · PF: '+esc(pf)+'</p><p>Realized net P&amp;L: '+fmt(r.realized_net_pnl_usd,3)+' USD · estimated open P&amp;L after exit costs: '+fmt(r.estimated_open_pnl_after_exit_costs_usd,3)+' USD</p><p>Mean simulated return: '+ret+' · Max symbol drawdown: '+fmt(r.max_symbol_drawdown_pct,2)+'% · Open positions: '+esc(r.open_positions)+' · Liquidations: '+esc(r.liquidations)+'</p></div>';}).join("");}
+async function refreshShadow(){try{renderShadow(await api("/api/perpetual/shadow/status"));}catch(e){$("shadow-status").textContent="Shadow forward status unavailable: "+e.message;}}
+function renderStudy(s){var b=$("study-badge"),st=$("study-status"),box=$("study-results"),btn=$("run-study");b.textContent=String(s.status||"idle").toUpperCase();b.className="pill "+(s.status==="completed"?"safe":s.status==="error"?"warn":"");btn.disabled=s.status==="running"||s.status==="completed";btn.textContent=s.status==="running"?"TOURNAMENT RUNNING…":s.status==="completed"?"LAB COMPLETE · RERUN LOCKED":"Run strategy tournament";
+ if(s.status==="running"){st.textContent="Comparing fixed EMA and Donchian candidates only on time-ordered development folds before the already-inspected holdout. No exchange orders are submitted.";return;}
+ if(s.status==="error"){st.textContent="Research failed: "+(s.error||s.error_type||"unknown error");box.innerHTML="";return;}
+ if(s.status!=="completed"){st.textContent="No tournament report loaded. Start the fixed-candidate development study.";box.innerHTML="";return;}
+ var best=s.best_candidate,exclusions=s.candidate_disqualifications||[];
+ if(best){st.textContent="Development shortlist: "+best.candidate+" at "+fmt(best.leverage,1)+"x. This is still not independent final validation.";}
+ else if(exclusions.length){st.textContent="NO ELIGIBLE STRATEGY. EMA14/EMA50 was rejected by the previously inspected independent holdout at 1x and 2x. Every other candidate failed at least one cost or consistency gate. No strategy is approved for trading.";}
+ else{st.textContent="No candidate passed all three after-cost development gates. No strategy is selected; execution remains disabled.";}
+ box.innerHTML=(s.results||[]).map(function(row){var scenarios=row.scenarios||{},r=scenarios.realistic_estimate||{},c=scenarios.conservative||{},x=scenarios.stress||{},rejected=!!row.previous_holdout_rejected,ok=!!row.selection_eligible,label=rejected?"REJECTED BY PRIOR HOLDOUT":(ok?"ELIGIBLE":"NOT SELECTED"),reason=rejected?'<p class="gate-fail">'+esc(row.previous_holdout_rejection_reason)+'</p>':"";function m(v){return "WR "+(v.win_rate_pct===null?"—":fmt(v.win_rate_pct,1)+"%")+" · R "+(v.return_pct===null?"—":fmt(v.return_pct,2)+"%")+" · PF "+esc(v.profit_factor)+" · N "+esc(v.trades);}return '<div class="study-row"><strong>'+esc(row.candidate)+' · '+fmt(row.leverage,1)+'x <span class="'+(ok?"gate-pass":"gate-fail")+'">'+label+'</span></strong>'+reason+'<p>Realistic: '+m(r)+'</p><p>Conservative: '+m(c)+'</p><p>Stress: '+m(x)+'</p><p>Consistent folds: '+esc(c.positive_folds)+'/'+esc(c.fold_count)+' · Positive symbols: '+esc(c.positive_symbols)+'/'+esc(c.symbol_count)+' · Liquidations: '+esc(c.liquidations)+'</p></div>';}).join("");
+}
+async function refreshStudy(){try{renderStudy(await api("/api/perpetual/lab/status"));}catch(e){$("study-status").textContent="Lab status unavailable: "+e.message;}}
+async function runStudy(){var b=$("run-study");b.disabled=true;try{renderStudy(await api("/api/perpetual/lab/start",{method:"POST",headers:{"X-Perpetual-Lab-Confirm":"yes"}}));setTimeout(refreshStudy,1200);}catch(e){showError(e.message);}finally{setTimeout(refreshStudy,1500);}}
+$("connect").addEventListener("click",connect);$("token").addEventListener("keydown",function(e){if(e.key==="Enter")connect();});$("symbol").addEventListener("change",refreshChart);$("refresh").addEventListener("click",refreshChart);$("refresh-account").addEventListener("click",refreshAccount);$("run-study").addEventListener("click",runStudy);window.addEventListener("resize",function(){if(DATA)drawChart(DATA);if(ACCOUNT_DATA)renderAccount(ACCOUNT_DATA);});if(TOKEN)boot();else $("auth").style.display="block";
+})();
+</script>
+</body></html>
 """
 
 

@@ -323,13 +323,19 @@ class ExecutionSimulator:
                 price = max(reference, order.limit_price)
             return self._apply_liquidity_budget(order, remaining, liquidity_budget), price
 
+        # Participation and shared liquidity budgets determine the quantity
+        # that actually trades. Market impact must be based on that fill size,
+        # not the order's original requested size; otherwise a 10%-of-volume
+        # partial fill is charged as if the entire oversized order traded.
+        quantity = self._fillable_quantity(order, market, liquidity_budget=liquidity_budget)
+        if quantity <= 0:
+            return 0.0, 0.0
         fill_price, _, _ = self.costs.fill_price(
             side=Side.BUY if order.side is OrderSide.BUY else Side.SELL,
             reference_price=reference,
-            quantity=order.quantity,
+            quantity=quantity,
             average_daily_volume=market.average_daily_volume,
         )
-        quantity = self._fillable_quantity(order, market, liquidity_budget=liquidity_budget)
         return quantity, fill_price
 
     def _fillable_quantity(
@@ -370,12 +376,33 @@ class ExecutionSimulator:
 
     # --- Applying the fill --------------------------------------------------
 
+    @staticmethod
+    def _is_maker_fill(order: Order, market: MarketContext) -> bool:
+        """Classify liquidity conservatively from the supplied bar context.
+
+        Market orders always take liquidity. A buy LIMIT at or above the
+        reference price, or a sell LIMIT at or below it, is marketable and
+        therefore taker. A non-marketable limit that is subsequently reached
+        by the bar range is modelled as maker; OHLCV cannot verify queue priority.
+        """
+        if order.order_type is OrderType.MARKET or order.limit_price is None:
+            return False
+        assert market.price is not None
+        if order.side is OrderSide.BUY:
+            return order.limit_price < market.price
+        return order.limit_price > market.price
+
     def _apply(self, order: Order, market: MarketContext, quantity: float, price: float) -> Order:
         """Move the ledger, then record the outcome on the order."""
         signed = quantity if order.side is OrderSide.BUY else -quantity
-        # A limit order rests in the book (maker); a market order takes (taker).
+        # A LIMIT order is not automatically a maker order. If its limit crosses
+        # the current reference price, it is immediately marketable and removes
+        # liquidity (taker). Only a non-marketable limit that is later reached
+        # inside the bar is modelled as maker. OHLCV cannot establish queue
+        # position, so this is still an estimate, not proof of a maker fill.
+        is_maker = self._is_maker_fill(order, market)
         commission = self.costs.fee_for_fill(
-            quantity=quantity, price=price, is_maker=order.order_type is OrderType.LIMIT
+            quantity=quantity, price=price, is_maker=is_maker
         )
 
         try:

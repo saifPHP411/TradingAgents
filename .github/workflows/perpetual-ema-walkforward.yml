@@ -1,0 +1,54 @@
+name: Manual leveraged perpetual EMA walk-forward study
+
+on:
+  # Manual only: exchange public APIs may be restricted from hosted CI regions.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perpetual-ema-walkforward-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bybit-linear-perpetual-study:
+    name: Bybit 4h multi-symbol 1x and 2x OOS study
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out research branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install focused research dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pandas requests python-dotenv pydantic
+
+      - name: Run fixed-parameter Bybit linear perpetual walk-forward study
+        run: |
+          mkdir -p artifacts
+          python -m tradingagents.crypto.backtest.perpetual_ema_walkforward \
+            --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT \
+            --data-source bybit \
+            --days 730 \
+            --warmup-bars 260 \
+            --test-bars 200 \
+            --holdout-fraction 0.20 \
+            --leverage 1 2 \
+            --output artifacts/perpetual_ema_walkforward.json
+
+      - name: Upload research report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bybit-perpetual-ema-walkforward
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30

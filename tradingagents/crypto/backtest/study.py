@@ -745,14 +745,34 @@ def cost_scenarios(config: CryptoBacktestConfig) -> dict[str, CostModel]:
     """The cost schedules a study reports, from frictionless to realistic.
 
     A frictionless run is included *and labelled*, so a reader can see how much of
-    a result is friction. The realistic scenario is a 10 bps taker fee (Binance's
-    spot taker rate), a 1 bp half-spread and 2 bps slippage — stated, not implied.
+    a result is friction. The realistic scenario uses a 10 bps per-fill commission
+    (matching Bybit's published VIP 0 spot rate as a reference), a 1 bp half-spread
+    and 2 bps slippage. Account- and region-specific fees must still be verified.
     """
     return {
         "frictionless": CostModel(),
         "realistic": CostModel(commission_rate=0.0010, half_spread_bps=1.0, slippage_bps=2.0),
         "conservative": CostModel(commission_rate=0.0015, half_spread_bps=2.0, slippage_bps=5.0),
     }
+
+
+def _config_with_costs(config: CryptoBacktestConfig, costs: CostModel) -> CryptoBacktestConfig:
+    """Copy every study setting while replacing only the execution-cost schedule."""
+    return CryptoBacktestConfig(
+        symbols=config.symbols,
+        initial_cash=config.initial_cash,
+        currency=config.currency,
+        session_policy=config.session_policy,
+        risk_limits=config.risk_limits,
+        costs=costs,
+        settings=config.settings,
+        allow_short=config.allow_short,
+        flat_by_session_close=config.flat_by_session_close,
+        periods=config.periods,
+        walk_forward_folds=config.walk_forward_folds,
+        regime_trend_sessions=config.regime_trend_sessions,
+        regime_threshold=config.regime_threshold,
+    )
 
 
 def run_cost_scenarios(
@@ -764,21 +784,7 @@ def run_cost_scenarios(
     """Run the full window under each cost scenario."""
     out: list[PeriodResult] = []
     for label, costs in cost_scenarios(config).items():
-        scenario_config = CryptoBacktestConfig(
-            symbols=config.symbols,
-            initial_cash=config.initial_cash,
-            currency=config.currency,
-            session_policy=config.session_policy,
-            risk_limits=config.risk_limits,
-            costs=costs,
-            settings=config.settings,
-            allow_short=config.allow_short,
-            flat_by_session_close=config.flat_by_session_close,
-            periods=config.periods,
-            walk_forward_folds=config.walk_forward_folds,
-            regime_trend_sessions=config.regime_trend_sessions,
-            regime_threshold=config.regime_threshold,
-        )
+        scenario_config = _config_with_costs(config, costs)
         result = run_window(
             series,
             scenario_config,
@@ -800,6 +806,40 @@ def run_cost_scenarios(
             )
         )
     return out
+
+
+def run_period_cost_scenarios(
+    series: Mapping[str, Mapping[str, IntradaySeries]],
+    config: CryptoBacktestConfig,
+    *,
+    evaluation_cache: dict | None = None,
+) -> dict[str, list[PeriodResult]]:
+    """Run every requested period and the max window under every cost schedule."""
+    return {
+        label: run_periods(
+            series,
+            _config_with_costs(config, costs),
+            evaluation_cache=evaluation_cache,
+        )
+        for label, costs in cost_scenarios(config).items()
+    }
+
+
+def run_walk_forward_cost_scenarios(
+    series: Mapping[str, Mapping[str, IntradaySeries]],
+    config: CryptoBacktestConfig,
+    *,
+    evaluation_cache: dict | None = None,
+) -> dict[str, list[PeriodResult]]:
+    """Run every disjoint OOS fold under every cost schedule."""
+    return {
+        label: run_walk_forward(
+            series,
+            _config_with_costs(config, costs),
+            evaluation_cache=evaluation_cache,
+        )
+        for label, costs in cost_scenarios(config).items()
+    }
 
 
 def sensitivity_variants(config: CryptoBacktestConfig) -> dict[str, dict]:
@@ -963,6 +1003,8 @@ class CryptoStudyResult:
     walk_forward: list[PeriodResult] = field(default_factory=list)
     regimes: list[PeriodResult] = field(default_factory=list)
     cost_scenarios: list[PeriodResult] = field(default_factory=list)
+    period_cost_scenarios: dict[str, list[PeriodResult]] = field(default_factory=dict)
+    walk_forward_cost_scenarios: dict[str, list[PeriodResult]] = field(default_factory=dict)
     sensitivity: list[PeriodResult] = field(default_factory=list)
     determinism: dict = field(default_factory=dict)
     universe: dict = field(default_factory=dict)
@@ -987,6 +1029,24 @@ class CryptoStudyResult:
             "walk_forward": [p.to_dict() for p in self.walk_forward],
             "regimes": [p.to_dict() for p in self.regimes],
             "cost_scenarios": [p.to_dict() for p in self.cost_scenarios],
+            "period_cost_scenarios": {
+                label: [p.to_dict() for p in rows]
+                for label, rows in self.period_cost_scenarios.items()
+            },
+            "walk_forward_cost_scenarios": {
+                label: [p.to_dict() for p in rows]
+                for label, rows in self.walk_forward_cost_scenarios.items()
+            },
+            "cost_assumptions": {
+                label: {
+                    "commission_rate": model.commission_rate,
+                    "half_spread_bps": model.half_spread_bps,
+                    "slippage_bps": model.slippage_bps,
+                    "maker_fee_bps": model.maker_fee_bps,
+                    "taker_fee_bps": model.taker_fee_bps,
+                }
+                for label, model in cost_scenarios(self.config).items()
+            },
             "sensitivity": [p.to_dict() for p in self.sensitivity],
             "determinism": self.determinism,
             "trades": self.trades,
@@ -1010,16 +1070,54 @@ def run_study(
     cache: dict = {}
     sessions = sessions_for(series, config.session_policy)
     full_intervals = intervals_for_window(series, sessions)
+    scenarios = cost_scenarios(config)
+    frictionless_config = _config_with_costs(config, scenarios["frictionless"])
     full = run_window(
         series,
-        config,
+        frictionless_config,
         intervals=full_intervals,
         evaluation_cache=cache,
         run_id="crypto-tjr-full",
     )
+    # The base period and fold runs are already the frictionless scenario. Reuse
+    # them rather than simulating the same bars a second time.
+    periods = run_periods(series, frictionless_config, evaluation_cache=cache)
+    walk_forward = run_walk_forward(series, frictionless_config, evaluation_cache=cache)
+    period_cost_results: dict[str, list[PeriodResult]] = {"frictionless": periods}
+    walk_forward_cost_results: dict[str, list[PeriodResult]] = {
+        "frictionless": walk_forward
+    }
+    for label in ("realistic", "conservative"):
+        scenario_config = _config_with_costs(config, scenarios[label])
+        period_cost_results[label] = run_periods(
+            series, scenario_config, evaluation_cache=cache
+        )
+        walk_forward_cost_results[label] = run_walk_forward(
+            series, scenario_config, evaluation_cache=cache
+        )
+    full_cost_results = []
+    for label in ("frictionless", "realistic", "conservative"):
+        max_period = next(
+            (row for row in period_cost_results[label] if row.label == "max"),
+            None,
+        )
+        if max_period is not None:
+            full_cost_results.append(
+                PeriodResult(
+                    label=label,
+                    days=None,
+                    start=max_period.start,
+                    end=max_period.end,
+                    sessions=max_period.sessions,
+                    metrics=max_period.metrics,
+                )
+            )
     notes = [
         "The strategy is the unchanged TJR rule chain; only the session policy and "
         "the entry-window cut are adapted for a 24/7 market, and both are reported.",
+        "Historical research bars are Binance public Spot data; Bybit Demo Spot is "
+        "the intended execution venue. This reporting-only study is a cross-venue "
+        "proxy and does not change the live decision-data source.",
         "Every figure comes from real bars the venue served; a period the data does "
         "not cover is reported short, never padded.",
     ]
@@ -1028,15 +1126,19 @@ def run_study(
         generated_at=datetime.now(UTC).isoformat(),
         coverage=dict(coverage or {}),
         universe=dict(universe or {}),
-        periods=run_periods(series, config, evaluation_cache=cache),
-        per_symbol=per_symbol_metrics(series, config, evaluation_cache=cache),
-        walk_forward=run_walk_forward(series, config, evaluation_cache=cache),
-        regimes=run_regimes(series, config, evaluation_cache=cache),
-        cost_scenarios=run_cost_scenarios(series, config, evaluation_cache=cache),
+        periods=periods,
+        per_symbol=per_symbol_metrics(series, frictionless_config, evaluation_cache=cache),
+        walk_forward=walk_forward,
+        regimes=run_regimes(series, frictionless_config, evaluation_cache=cache),
+        cost_scenarios=full_cost_results,
+        period_cost_scenarios=period_cost_results,
+        walk_forward_cost_scenarios=walk_forward_cost_results,
         sensitivity=(
-            run_sensitivity(series, config, evaluation_cache=cache) if include_sensitivity else []
+            run_sensitivity(series, frictionless_config, evaluation_cache=cache)
+            if include_sensitivity
+            else []
         ),
-        determinism=determinism_check(series, config),
+        determinism=determinism_check(series, frictionless_config),
         trades=[
             {
                 "symbol": t.symbol,
@@ -1079,6 +1181,8 @@ __all__ = [
     "metrics_for",
     "per_symbol_metrics",
     "run_cost_scenarios",
+    "run_period_cost_scenarios",
+    "run_walk_forward_cost_scenarios",
     "run_periods",
     "run_regimes",
     "run_sensitivity",
