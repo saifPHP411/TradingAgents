@@ -864,20 +864,20 @@ class Dashboard:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return "invalid", None, None
+            return "invalid", None
         if not isinstance(raw, dict):
-            return "invalid", None, None
+            return "invalid", None
         state = str(raw.get("state", "")).strip().upper()
         raw_symbol = str(raw.get("symbol", "")).strip().upper()
         if raw_symbol != symbol:
-            return "invalid", None, None
+            return "invalid", None
         if state == "FLAT":
             return "flat", None
         if state != "OPEN":
-            return "invalid", None, None
+            return "invalid", None
         side = str(raw.get("side", "")).strip().lower()
         if side not in {"long", "short"}:
-            return "invalid", None, None
+            return "invalid", None
 
         def positive(name: str, *, optional: bool = False):
             value = raw.get(name)
@@ -911,7 +911,7 @@ class Dashboard:
                     raise ValueError("unrealized_pnl")
                 position["unrealized_pnl"] = float(pnl)
         except (TypeError, ValueError, OverflowError):
-            return "invalid", None, None
+            return "invalid", None
         return "open", position
 
     def perpetual_chart(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
