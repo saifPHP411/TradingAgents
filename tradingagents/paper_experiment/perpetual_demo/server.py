@@ -202,7 +202,13 @@ class PerpetualDemoController:
                 ),
             }
 
-    def _scalping_market(self, symbol: str, now_ms: int | None = None) -> dict:
+    def _scalping_market(
+        self,
+        symbol: str,
+        now_ms: int | None = None,
+        *,
+        include_instrument: bool = True,
+    ) -> dict:
         market = str(symbol or "").strip().upper()
         if market not in self.symbols:
             raise ValueError("symbol is outside the configured Demo perpetual universe")
@@ -245,7 +251,7 @@ class PerpetualDemoController:
                 target_distance = stop_distance * self.strategy.reward_risk
                 long_stop, long_target = mark - stop_distance, mark + target_distance
                 short_stop, short_target = mark + stop_distance, mark - target_distance
-        instrument = self.broker.instrument_info(market)
+        instrument = self.broker.instrument_info(market) if include_instrument else None
         return {
             "status": "ok", "venue": "Bybit Demo", "category": "linear",
             "symbol": market, "timeframe": "1m", "trend_timeframes": ["5m", "15m"],
@@ -258,9 +264,10 @@ class PerpetualDemoController:
             "short_bias": bool(signal.get("short_bias", False)),
             "suggested_long_stop": long_stop, "suggested_long_target": long_target,
             "suggested_short_stop": short_stop, "suggested_short_target": short_target,
-            "quantity_step": instrument.quantity_step, "min_quantity": instrument.min_quantity,
-            "min_notional": instrument.min_notional,
-            "max_leverage": min(MAX_LEVERAGE, instrument.max_leverage),
+            "quantity_step": instrument.quantity_step if instrument else None,
+            "min_quantity": instrument.min_quantity if instrument else None,
+            "min_notional": instrument.min_notional if instrument else None,
+            "max_leverage": min(MAX_LEVERAGE, instrument.max_leverage) if instrument else MAX_LEVERAGE,
             "updated_at": datetime.now(UTC).isoformat(),
         }
 
@@ -480,7 +487,7 @@ class PerpetualDemoController:
             if self._stop.is_set():
                 break
             try:
-                market = self._scalping_market(symbol, now_ms)
+                market = self._scalping_market(symbol, now_ms, include_instrument=False)
                 scanned += 1
                 scan_errors.pop(symbol, None)
             except Exception as exc:
