@@ -103,7 +103,16 @@ def setup(months=MONTHS):
 
 
 def episode(
-    tape, scores, first, model, leverage, stress, scale=1, audit=None, specs=None
+    tape,
+    scores,
+    first,
+    model,
+    leverage,
+    stress,
+    scale=1,
+    audit=None,
+    specs=None,
+    risk_budget=None,
 ):
     end = first + 7 * 96 * scale
     balance = peak = 50.0
@@ -136,9 +145,18 @@ def episode(
                 )
                 if leverage > max_lev:
                     continue
-                amount = (
-                    math.floor(balance * 0.50 * leverage / price / qty_step) * qty_step
-                )
+                units = balance * 0.50 * leverage / price
+                if risk_budget is not None:
+                    stop_distance = scores[a, i // scale, -1] * (
+                        1.25 if model == 2 else 1.75
+                    )
+                    units = min(
+                        units,
+                        balance
+                        * risk_budget
+                        / (stop_distance + price * 2 * (fee + slip)),
+                    )
+                amount = math.floor(units / qty_step) * qty_step
                 if (
                     amount * price < min_value
                     or amount * price > tier_cap
