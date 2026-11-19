@@ -141,8 +141,16 @@ class BybitLinearDemoPositionClient:
             or not isinstance(body.get("result"), dict)
         ):
             code = body.get("retCode") if isinstance(body, dict) else None
+            raw_message = body.get("retMsg", "") if isinstance(body, dict) else ""
+            # Exchange retMsg is a short diagnostic string, but never allow a
+            # credential value or control character to escape into API output.
+            message = str(raw_message).replace(self._key, "[redacted]").replace(
+                self._secret, "[redacted]"
+            )
+            message = " ".join(message.split())[:160]
+            suffix = f": {message}" if message else ""
             raise BybitPerpetualAccountError(
-                f"Bybit Demo rejected the read-only position request (retCode {code})"
+                f"Bybit Demo rejected the read-only request (retCode {code}){suffix}"
             )
         return body["result"]
 
