@@ -26,7 +26,7 @@ class BybitPublicDataError(RuntimeError):
 
 
 class BybitLinearPublicClient:
-    """Minimal public V5 reader with bounded pagination and completed candles only."""
+    """Minimal public V5 reader with bounded pagination and opt-in forming candles."""
 
     def __init__(self, base_url: str = BASE_URL, transport: Callable | None = None, timeout: float = 15.0):
         url = urlsplit(base_url)
@@ -88,7 +88,16 @@ class BybitLinearPublicClient:
             funding_interval_minutes=funding_minutes,
         )
 
-    def _candles(self, symbol: str, start_ms: int, end_ms: int, endpoint: str, with_volume: bool) -> pd.DataFrame:
+    def _candles(
+        self,
+        symbol: str,
+        start_ms: int,
+        end_ms: int,
+        endpoint: str,
+        with_volume: bool,
+        *,
+        include_current: bool = False,
+    ) -> pd.DataFrame:
         market = self._symbol(symbol)
         if isinstance(start_ms, bool) or isinstance(end_ms, bool) or not isinstance(start_ms, int) or not isinstance(end_ms, int) or start_ms <= 0 or end_ms <= start_ms:
             raise ValueError("start_ms/end_ms must be positive ordered integers")
@@ -107,7 +116,9 @@ class BybitLinearPublicClient:
                     raise BybitPublicDataError("malformed candle row")
                 stamp = int(row[0])
                 stamps.append(stamp)
-                if start_ms <= stamp <= end_ms and stamp + duration <= server_ms:
+                completed = stamp + duration <= server_ms
+                forming = include_current and stamp <= server_ms < stamp + duration
+                if start_ms <= stamp <= end_ms and (completed or forming):
                     values = [self._number(v, "OHLC price") for v in row[1:5]]
                     if with_volume:
                         values.append(self._number(row[5], "volume", True))
@@ -127,8 +138,23 @@ class BybitLinearPublicClient:
             raise BybitPublicDataError("duplicate or unordered candle timestamps")
         return frame
 
-    def klines(self, symbol: str, *, start_ms: int, end_ms: int) -> pd.DataFrame:
-        return self._candles(symbol, start_ms, end_ms, "/v5/market/kline", True)
+    def klines(
+        self,
+        symbol: str,
+        *,
+        start_ms: int,
+        end_ms: int,
+        include_current: bool = False,
+    ) -> pd.DataFrame:
+        """Fetch 4h candles; include the in-progress candle only when explicitly requested."""
+        return self._candles(
+            symbol,
+            start_ms,
+            end_ms,
+            "/v5/market/kline",
+            True,
+            include_current=include_current,
+        )
 
     def mark_price_klines(self, symbol: str, *, start_ms: int, end_ms: int) -> pd.DataFrame:
         return self._candles(symbol, start_ms, end_ms, "/v5/market/mark-price-kline", False)
