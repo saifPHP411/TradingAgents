@@ -825,7 +825,7 @@ class Dashboard:
             self._perpetual_shadow_thread.start()
             return dict(self._perpetual_shadow_status)
 
-    def _perpetual_position_view(self, symbol: str) -> tuple[str, dict[str, Any] | None, str | None]:
+    def _perpetual_position_view(self, symbol: str) -> tuple[str, dict[str, Any] | None]:
         """Read a genuine Bybit Demo linear position, falling back to a validated local snapshot.
 
         The live account path is signed and GET-only. Missing credentials mean
@@ -845,22 +845,22 @@ class Dashboard:
             status = result.get("status")
             position = result.get("position")
             if status == "flat" and position is None:
-                return "flat", None, "Bybit Demo read-only position endpoint"
+                return "flat", None
             if status == "open" and isinstance(position, dict):
                 position["position_source"] = "Bybit Demo read-only position endpoint"
-                return "open", position, position.get("position_source")
-            return "invalid", None, None
+                return "open", position
+            return "invalid", None
         except BybitPerpetualAccountNotConfigured:
             # With no credentials, a worker may still publish a validated local
             # snapshot. A failed signed request, by contrast, must not be hidden
             # by an older cached position.
             pass
         except Exception:  # noqa: BLE001 - account details/secrets never reach the page
-            return "error", None, None
+            return "error", None
 
         path = self.root / PERPETUAL_POSITION_FILE
         if not path.is_file():
-            return "unavailable", None, None
+            return "unavailable", None
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -872,7 +872,7 @@ class Dashboard:
         if raw_symbol != symbol:
             return "invalid", None, None
         if state == "FLAT":
-            return "flat", None, "validated local futures snapshot"
+            return "flat", None
         if state != "OPEN":
             return "invalid", None, None
         side = str(raw.get("side", "")).strip().lower()
@@ -912,7 +912,7 @@ class Dashboard:
                 position["unrealized_pnl"] = float(pnl)
         except (TypeError, ValueError, OverflowError):
             return "invalid", None, None
-        return "open", position, position.get("position_source")
+        return "open", position
 
     def perpetual_chart(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
         """Read completed Bybit perpetual candles and an optional read-only Demo position.
@@ -960,7 +960,8 @@ class Dashboard:
             })
         if not candles:
             raise RuntimeError("Bybit returned no valid completed candles")
-        position_status, position, position_source = self._perpetual_position_view(market)
+        position_status, position = self._perpetual_position_view(market)
+        position_source = position.get("position_source") if isinstance(position, dict) else None
         return {
             "status": "ok",
             "venue": "Bybit V5 public linear perpetual market data",
