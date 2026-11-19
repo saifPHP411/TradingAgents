@@ -312,3 +312,19 @@ def test_zero_position_rows_are_ignored():
         {"symbol": "BTCUSDT", "size": "0.000", "side": "", "positionIdx": 0}
     ])
     assert broker(transport).get_positions() == []
+
+def test_signed_get_query_order_matches_wire_parameter_order():
+    transport = ScriptedTransport()
+    instance = broker(transport)
+    assert instance.get_positions() == []
+
+    call = next(c for c in transport.calls if c["url"].endswith("/v5/position/list"))
+    params = call["params"]
+    assert list(params) == sorted(params, key=str)
+
+    signed_query = "&".join(f"{key}={params[key]}" for key in sorted(params, key=str))
+    signature_payload = "1700000000000" + "demo-key" + "5000" + signed_query
+    expected = hmac.new(
+        b"demo-secret", signature_payload.encode(), hashlib.sha256
+    ).hexdigest()
+    assert call["headers"]["X-BAPI-SIGN"] == expected
