@@ -117,6 +117,7 @@ def test_demo_controller_enters_on_live_intrabar_signal_once_per_4h_candle(
     def live_features(data, config):
         result = data.copy()
         result["atr"] = 2.0
+        result.loc[result.index[-1], "atr"] = 9.0  # current partial ATR must not widen/narrow risk
         result["mean_target"] = 103.0
         result["signal"] = 0
         result.loc[result.index[-1], "signal"] = 1
