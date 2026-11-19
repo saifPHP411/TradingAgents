@@ -98,7 +98,7 @@ def replay(price, mark, inputs, variant, start, end):
 def report(trades, cost):
     net = [gross - cost * turnover for gross, turnover in trades]
     loss = -sum(min(0, x) for x in net)
-    return {"n": len(net), "wins": sum(x > 0 for x in net),
+    return {"n": len(net), "wins": int(sum(x > 0 for x in net)),
             "mean_net_bps": 10000 * sum(net) / len(net) if net else None,
             "pf": sum(max(0, x) for x in net) / loss if loss else None}
 
