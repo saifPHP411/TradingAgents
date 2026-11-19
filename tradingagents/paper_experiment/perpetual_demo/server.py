@@ -49,7 +49,7 @@ DEFAULT_SYMBOLS = (
 )
 STRATEGY_ID = "bollinger_rsi_quality20_atr16_di16"
 STATE_FILE = "bybit_linear_demo_state.json"
-POLL_SECONDS = 45
+POLL_SECONDS = 15
 CANDLE_MS = 4 * 60 * 60 * 1000
 MAX_REQUEST_BYTES = 16_384
 
@@ -225,12 +225,24 @@ class PerpetualDemoController:
         instrument = self.broker.instrument_info(market)
         now_ms = int(time.time() * 1000)
         start_ms = now_ms - 300 * CANDLE_MS
-        frame = self.public.klines(market, start_ms=start_ms, end_ms=now_ms)
+        frame = self.public.klines(
+            market,
+            start_ms=start_ms,
+            end_ms=now_ms,
+            include_current=True,
+        )
         if frame is None or len(frame) < 230:
-            raise BybitLinearDemoError("not enough completed 4-hour candles for DI16 indicators")
+            raise BybitLinearDemoError("not enough 4-hour candles for DI16 indicators")
+        forming_open_ms = int(frame.index[-1].timestamp() * 1000)
+        if not forming_open_ms <= now_ms < forming_open_ms + CANDLE_MS:
+            raise BybitLinearDemoError("live forming 4-hour candle is unavailable; refusing stale-close signals")
+        mark = self.broker.mark_price(market)
+        current_time = frame.index[-1]
+        frame.at[current_time, "close"] = mark
+        frame.at[current_time, "high"] = max(float(frame.at[current_time, "high"]), mark)
+        frame.at[current_time, "low"] = min(float(frame.at[current_time, "low"]), mark)
         features = _features(frame, self.strategy)
         latest = features.iloc[-1]
-        mark = self.broker.mark_price(market)
         atr = float(latest.atr)
         target = float(latest.mean_target)
         if not math.isfinite(atr) or atr <= 0 or not math.isfinite(target) or target <= 0:
@@ -242,8 +254,10 @@ class PerpetualDemoController:
             "symbol": market,
             "timeframe": "4h",
             "mark_price": mark,
-            "last_completed_candle": frame.index[-1].isoformat(),
-            "last_close": float(frame.iloc[-1].close),
+            "last_completed_candle": frame.index[-2].isoformat(),
+            "forming_candle_open": current_time.isoformat(),
+            "signal_basis": "forming_4h_candle_with_live_mark_price",
+            "last_close": float(mark),
             "atr": atr,
             "mean_target": target,
             "signal": int(latest.signal),
@@ -345,7 +359,7 @@ class PerpetualDemoController:
                 "status": "starting",
                 "strategy_id": STRATEGY_ID,
                 "name": "Bollinger RSI Mean Reversion · DI16 + ATR1.6",
-                "timeframe": "4h",
+                "timeframe": "4h_intrabar_live_mark",
                 "symbols": list(self.symbols),
                 "leverage": 2.0,
                 "max_leverage": MAX_LEVERAGE,
@@ -353,7 +367,7 @@ class PerpetualDemoController:
                 "orders_submitted": False,
                 "execution_enabled": True,
                 "started_at": datetime.now(UTC).isoformat(),
-                "detail": "Preflight passed; waiting for the next newly completed 4-hour candle.",
+                "detail": f"Preflight passed; checking forming 4-hour candles against live Mark Price every {self.poll_seconds}s.",
             }
             self._thread = threading.Thread(
                 target=self._strategy_loop,
@@ -378,7 +392,7 @@ class PerpetualDemoController:
         self._strategy_status = {
             **self._strategy_status,
             "status": "running",
-            "detail": "DI16 + ATR1.6 is monitoring completed 4-hour candles; entries are capped by account risk controls.",
+            "detail": f"DI16 + ATR1.6 is checking the forming 4-hour candle with live Mark Price every {self.poll_seconds}s; entries are capped by account risk controls.",
         }
         while not self._stop.is_set():
             try:
@@ -460,6 +474,8 @@ class PerpetualDemoController:
             raise BybitLinearDemoRejected("Demo account has more than two open positions; entries halted")
         active_by_symbol = {p["symbol"]: p for p in positions}
         last_processed = self._state.setdefault("last_processed_candles", {})
+        entry_attempts = self._state.setdefault("entry_attempt_candles", {})
+        rejections = self._state.setdefault("entry_rejections", {})
         managed = self._state.setdefault("strategy_positions", {})
         for symbol in self.symbols:
             if self._stop.is_set():
@@ -469,36 +485,52 @@ class PerpetualDemoController:
                 symbol,
                 start_ms=now_ms - 300 * CANDLE_MS,
                 end_ms=now_ms,
+                include_current=True,
             )
             if frame is None or len(frame) < 230:
                 continue
-            features = _features(frame, self.strategy)
             candle_time = frame.index[-1]
-            candle_key = candle_time.isoformat()
-            if last_processed.get(symbol) == candle_key:
+            candle_open_ms = int(candle_time.timestamp() * 1000)
+            if not candle_open_ms <= now_ms < candle_open_ms + CANDLE_MS:
+                # Never silently fall back to a completed-candle-only entry.
                 continue
-            # Persist the candle before any order submission: restart/timeout never replays it.
-            last_processed[symbol] = candle_key
-            self._save_state()
-            latest = features.iloc[-1]
+            mark = self.broker.mark_price(symbol)
+            frame.at[candle_time, "close"] = mark
+            frame.at[candle_time, "high"] = max(float(frame.at[candle_time, "high"]), mark)
+            frame.at[candle_time, "low"] = min(float(frame.at[candle_time, "low"]), mark)
+            features = _features(frame, self.strategy)
+            candle_key = candle_time.isoformat()
+            completed_candle_time = frame.index[-2]
+            completed_candle_key = completed_candle_time.isoformat()
             position = active_by_symbol.get(symbol)
             if position is not None:
+                # Position trend exits and max-hold accounting remain based on
+                # completed 4h bars; exchange-side Mark Price SL/TP protect intrabar.
+                if last_processed.get(symbol) == completed_candle_key:
+                    continue
+                last_processed[symbol] = completed_candle_key
+                self._save_state()
                 meta = managed.get(symbol)
                 if not isinstance(meta, dict):
                     continue  # manual positions are never silently managed by the strategy worker
+                latest_closed = features.iloc[-2]
                 direction = 1 if position["side"] == "long" else -1
-                adx = float(latest.adx) if math.isfinite(float(latest.adx)) else 0.0
-                plus_di = float(latest.plus_di) if math.isfinite(float(latest.plus_di)) else 0.0
-                minus_di = float(latest.minus_di) if math.isfinite(float(latest.minus_di)) else 0.0
+                adx = float(latest_closed.adx) if math.isfinite(float(latest_closed.adx)) else 0.0
+                plus_di = float(latest_closed.plus_di) if math.isfinite(float(latest_closed.plus_di)) else 0.0
+                minus_di = float(latest_closed.minus_di) if math.isfinite(float(latest_closed.minus_di)) else 0.0
                 adverse = (direction > 0 and minus_di > plus_di) or (direction < 0 and plus_di > minus_di)
                 count = int(meta.get("trend_exit_bars", 0)) + 1 if adx > 24.0 and adverse else 0
                 meta["trend_exit_bars"] = count
                 entry_candle = pd_timestamp(meta.get("entry_candle"))
-                held_bars = max(0, int((candle_time - entry_candle).total_seconds() // (4 * 3600))) if entry_candle else 0
+                held_bars = (
+                    max(0, int((completed_candle_time - entry_candle).total_seconds() // (4 * 3600)))
+                    if entry_candle
+                    else 0
+                )
                 if count >= 2 or held_bars >= 72:
                     close_result = self.broker.close_market_position(
                         symbol,
-                        order_link_id=f"DI16-X-{symbol}-{int(candle_time.timestamp())}"[-36:],
+                        order_link_id=f"DI16-X-{symbol}-{int(completed_candle_time.timestamp())}"[-36:],
                     )
                     managed.pop(symbol, None)
                     active_by_symbol.pop(symbol, None)
@@ -511,26 +543,42 @@ class PerpetualDemoController:
                         }
                     )
                 continue
+
+            # Re-evaluate the forming 4h candle on every live-price poll. Once
+            # an order attempt is persisted, this symbol cannot re-enter during
+            # the same 4h candle, including after a process restart.
+            if entry_attempts.get(symbol) == candle_key:
+                continue
+            latest = features.iloc[-1]
             signal = int(latest.signal)
             if signal not in (-1, 1) or len(active_by_symbol) >= MAX_OPEN_POSITIONS:
                 continue
             atr = float(latest.atr)
             target = float(latest.mean_target)
-            mark = self.broker.mark_price(symbol)
             if not math.isfinite(atr) or atr <= 0 or not math.isfinite(target) or target <= 0:
                 continue
             side = "long" if signal > 0 else "short"
             stop = mark - signal * self.strategy.atr_multiple * atr
             if (signal > 0 and not stop < mark < target) or (signal < 0 and not target < mark < stop):
-                self._record(
-                    {
-                        "type": "strategy_rejection",
-                        "symbol": symbol,
-                        "reason": "mean_target_not_favorable_at_actual_mark",
-                    }
-                )
+                previous_rejection = rejections.get(symbol)
+                current_rejection = {"candle": candle_key, "reason": "mean_target_not_favorable_at_live_mark"}
+                if previous_rejection != current_rejection:
+                    rejections[symbol] = current_rejection
+                    self._record(
+                        {
+                            "type": "strategy_rejection",
+                            "symbol": symbol,
+                            "reason": current_rejection["reason"],
+                        }
+                    )
                 continue
+
             order_link_id = f"DI16-{symbol}-{int(candle_time.timestamp())}"[-36:]
+            # Persist before submitting so a timeout/restart cannot duplicate the
+            # same live-candle signal. The venue order ID is reconciled in logs.
+            entry_attempts[symbol] = candle_key
+            rejections.pop(symbol, None)
+            self._save_state()
             result = self.broker.open_market_position(
                 symbol=symbol,
                 side=side,
@@ -635,7 +683,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
    <div class="heading"><h2>DI16 strategy</h2><span id="strategy-badge" class="pill">IDLE</span></div>
    <div class="rowitem">
     <strong>Bollinger + RSI Mean Reversion</strong>
-    <div class="sub">DI16 filter · ATR 1.6 · 4-hour candles · 12 USDT perpetual pairs</div>
+    <div class="sub">DI16 filter · ATR 1.6 · live Mark Price entries · 4-hour context · 12 USDT perpetual pairs</div>
     <div class="stats">
      <div class="stat">Leverage<b>2x max</b></div><div class="stat">Risk per entry<b>0.5% equity</b></div>
      <div class="stat">Daily stop<b>3%</b></div><div class="stat">Drawdown stop<b>10%</b></div>
@@ -643,7 +691,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
    </div>
    <p id="strategy-detail" class="muted">Stopped. No automatic orders.</p>
    <div class="actions"><button id="start-strategy" class="primary">Start DI16 Auto</button><button id="stop-strategy" class="danger" disabled>Stop strategy</button></div>
-   <div class="note">The strategy uses only completed 4H candles. Exchange-side Mark Price stop-loss and take-profit are attached to each entry. Starting the strategy enables automatic Demo orders after a new signal; it does not guarantee profitability.</div>
+   <div class="note">The strategy evaluates the forming 4H candle against live Mark Price every 15 seconds; entries no longer wait for candle close. Exchange-side Mark Price stop-loss and take-profit are attached to each entry. Starting the strategy enables automatic Demo orders after an intrabar signal; it does not guarantee profitability.</div>
   </section>
   <section class="panel">
    <div class="heading"><h2>Manual Demo order</h2><span class="pill">BUY / SELL</span></div>
@@ -691,7 +739,7 @@ function renderStrategy(s){var state=s.status||"idle";$("strategy-badge").textCo
 function renderPositions(rows){if(!rows.length){$("positions").innerHTML='<div class="empty">No open USDT linear perpetual positions.</div>';return;}$("positions").innerHTML=rows.map(function(p){var side=String(p.side||"").toUpperCase(),pnl=Number(p.unrealized_pnl||0);return '<div class="rowitem"><div class="rowtop"><strong>'+esc(p.symbol)+' · '+esc(side)+'</strong><span class="pill">'+fmt(p.leverage,1)+'x</span></div><div class="stats"><div class="stat">Quantity<b>'+fmt(p.quantity,6)+'</b></div><div class="stat">Entry<b>'+fmt(p.entry_price,5)+'</b></div><div class="stat">Mark<b>'+fmt(p.mark_price,5)+'</b></div><div class="stat">Unrealized P&amp;L<b class="'+(pnl>0?"positive":pnl<0?"negative":"")+'">'+fmt(pnl,4)+' USDT</b></div><div class="stat">Stop loss<b>'+fmt(p.stop_loss,5)+'</b></div><div class="stat">Take profit<b>'+fmt(p.take_profit,5)+'</b></div></div><div class="actions" style="margin-top:10px"><button class="danger" data-close="'+esc(p.symbol)+'">Close position · Reduce Only</button></div></div>';}).join("");}
 function renderOrders(rows){if(!rows.length){$("orders").innerHTML='<div class="empty">No active exchange orders.</div>';return;}$("orders").innerHTML='<table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Order ID</th></tr></thead><tbody>'+rows.map(function(o){return '<tr><td>'+esc(o.symbol)+'</td><td>'+esc(o.side)+'</td><td>'+esc(o.qty)+'</td><td>'+esc(o.order_status)+'</td><td>'+esc(o.order_id).slice(0,12)+'</td></tr>';}).join("")+'</tbody></table>';}
 function renderEvents(rows){if(!rows.length){$("events").innerHTML='<div class="empty">No strategy or manual execution events.</div>';return;}$("events").innerHTML=rows.slice().reverse().map(function(e){return '<div class="rowitem"><div class="rowtop"><strong>'+esc(e.type||"event")+' · '+esc(e.symbol||"—")+'</strong><span class="sub">'+esc(e.at||"")+'</span></div><div class="sub">'+esc(e.side||e.reason||"")+' '+(e.leverage?esc(e.leverage)+"x":"")+' '+(e.order_link_id?"· "+esc(e.order_link_id):"")+'</div></div>';}).join("");}
-async function loadMarket(){var s=$("symbol").value;try{var d=await api("/api/market?symbol="+encodeURIComponent(s));$("mark").value=fmt(d.mark_price,6);var side=$("side").value;$("stop").value=String(side==="long"?d.suggested_long_stop:d.suggested_short_stop);$("target").value=String(side==="long"?d.suggested_long_target:d.suggested_short_target);$("market-note").textContent="Completed candle "+new Date(d.last_completed_candle).toLocaleString()+" · ATR "+fmt(d.atr,6)+" · BB mean "+fmt(d.mean_target,6)+" · signal "+d.signal+" · qty step "+d.quantity_step;}catch(e){$("market-note").textContent="Market / DI16 data unavailable: "+e.message;}}
+async function loadMarket(){var s=$("symbol").value;try{var d=await api("/api/market?symbol="+encodeURIComponent(s));$("mark").value=fmt(d.mark_price,6);var side=$("side").value;$("stop").value=String(side==="long"?d.suggested_long_stop:d.suggested_short_stop);$("target").value=String(side==="long"?d.suggested_long_target:d.suggested_short_target);$("market-note").textContent="Live mark "+fmt(d.mark_price,6)+" · forming 4h candle "+new Date(d.forming_candle_open).toLocaleString()+" · ATR "+fmt(d.atr,6)+" · BB mean "+fmt(d.mean_target,6)+" · intrabar signal "+d.signal+" · qty step "+d.quantity_step;}catch(e){$("market-note").textContent="Market / DI16 data unavailable: "+e.message;}}
 async function manual(side){$("side").value=side;var symbol=$("symbol").value,stop=Number($("stop").value),target=Number($("target").value),leverage=Number($("leverage").value);if(!Number.isFinite(stop)||!Number.isFinite(target)||stop<=0||target<=0){msg("Enter a valid stop loss and take profit first.",false);return;}if(!confirm("Submit a "+side.toUpperCase()+" market order on BYBIT DEMO "+symbol+" at up to "+leverage+"x? SL and TP will be attached at the exchange."))return;try{var d=await api("/api/order",{method:"POST",headers:{"X-Demo-Confirm":"yes"},body:JSON.stringify({symbol:symbol,side:side,leverage:leverage,stop_loss:stop,take_profit:target})});msg("Demo order accepted: "+(d.order_id||d.order_link_id)+" · "+fmt(d.quantity,6)+" "+symbol+". Confirm fill in the positions panel.",true);await refresh();}catch(e){msg(e.message,false);}}
 async function closePosition(symbol){if(!confirm("Close the entire "+symbol+" position using a reduce-only market order on Bybit Demo?"))return;try{var d=await api("/api/close",{method:"POST",headers:{"X-Demo-Confirm":"yes"},body:JSON.stringify({symbol:symbol})});msg(d.closed===false?"No open position was found.":"Reduce-only close accepted for "+symbol+".",true);await refresh();}catch(e){msg(e.message,false);}}
 async function startStrategy(){if(!confirm("Start automatic DI16 + ATR1.6 trading on Bybit Demo USDT Perpetual? Orders may be sent when new 4H signals appear."))return;try{var s=await api("/api/strategy/start",{method:"POST",headers:{"X-Demo-Confirm":"yes"},body:"{}"});renderStrategy(s);msg("DI16 strategy start requested. Automatic orders remain limited to Bybit Demo.",true);}catch(e){msg(e.message,false);}await refresh();}
