@@ -7,6 +7,7 @@ linear broker, and both require an explicit confirmation header.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -35,7 +36,6 @@ from tradingagents.crypto.bybit_linear_demo import (
 )
 from tradingagents.crypto.perpetuals import PerpetualRiskSettings
 from tradingagents.paper_experiment.dashboard.auth import (
-    DashboardAuthError,
     check_bearer,
     require_bindable,
     resolve_token,
@@ -418,13 +418,11 @@ class PerpetualDemoController:
             risk["halt_reason"] = "daily_loss_limit" if daily_loss >= 0.03 else "max_drawdown_limit"
             risk["halted_at"] = datetime.now(UTC).isoformat()
             for position in positions:
-                try:
+                with contextlib.suppress(Exception):
                     self.broker.close_market_position(
                         position["symbol"],
                         order_link_id=f"KILL-{position['symbol']}-{uuid.uuid4().hex[:12]}",
                     )
-                except Exception:
-                    pass
             self._record(
                 {
                     "type": "risk_halt",
