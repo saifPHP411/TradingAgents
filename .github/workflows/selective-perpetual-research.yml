@@ -1,0 +1,91 @@
+name: Selective perpetual strategy research
+
+on:
+  push:
+    branches:
+      - high-winrate-selective-mr
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Maximum history lookback in days"
+        required: true
+        default: "730"
+        type: string
+      initial_equity:
+        description: "Starting account equity in USDT for the sizing feasibility test"
+        required: true
+        default: "50"
+        type: string
+      data_source:
+        description: "Public historical market-data source"
+        required: true
+        default: "binance-vision"
+        type: choice
+        options:
+          - bybit
+          - binance-vision
+          - binance-usdm
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selective-perpetual-research-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  research:
+    name: 4h selective Bollinger RSI perpetual research
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out research branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install research dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pandas requests python-dotenv pydantic
+
+      - name: Validate lookback and run full-history exploratory tournament
+        env:
+          DAYS: ${{ inputs.days || '730' }}
+          DATA_SOURCE: ${{ inputs.data_source || 'binance-vision' }}
+          INITIAL_EQUITY: ${{ inputs.initial_equity || '50' }}
+        run: |
+          mkdir -p artifacts
+          python - <<'PY'
+          import os
+          days = int(os.environ["DAYS"])
+          if not 180 <= days <= 3650:
+              raise SystemExit("days must be between 180 and 3650")
+          if os.environ["DATA_SOURCE"] not in {"bybit", "binance-vision", "binance-usdm"}:
+              raise SystemExit("unsupported public data source")
+          equity = float(os.environ["INITIAL_EQUITY"])
+          if not 1.0 <= equity <= 1_000_000 or not __import__("math").isfinite(equity):
+              raise SystemExit("initial equity must be finite and between 1 and 1000000 USDT")
+          PY
+          python -m tradingagents.crypto.backtest.perpetual_strategy_lab \
+            --data-source "$DATA_SOURCE" \
+            --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT \
+            --days "$DAYS" \
+            --equity "$INITIAL_EQUITY" \
+            --warmup-bars 260 \
+            --test-bars 200 \
+            --leverage 1 2 \
+            --output artifacts/perpetual_strategy_lab.json
+
+      - name: Upload research report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selective-perpetual-strategy-research
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30

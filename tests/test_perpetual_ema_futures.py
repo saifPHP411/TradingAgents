@@ -219,3 +219,106 @@ def test_liquidation_buffer_is_validated_and_conservative_by_default():
         PerpetualRiskSettings(liquidation_buffer_fraction=0.0)
     with pytest.raises(ValueError, match="liquidation_buffer_fraction"):
         PerpetualRiskSettings(liquidation_buffer_fraction=0.11)
+
+
+def test_bollinger_reversion_features_are_causal_and_well_formed():
+    import math
+
+    from tradingagents.crypto.backtest.perpetual_ema import _features
+
+    index = pd.date_range("2024-01-01", periods=500, freq="4h", tz="UTC")
+    close = pd.Series(
+        [100.0 + 3.0 * math.sin(i / 9.0) + 0.002 * i for i in range(len(index))],
+        index=index,
+    )
+    bars = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 0.3,
+            "low": close - 0.3,
+            "close": close,
+        },
+        index=index,
+    )
+    cfg = PerpetualEMAStrategy(
+        enabled=True,
+        signal_mode="bollinger_reversion",
+        min_adx=None,
+        mean_reversion_std=1.5,
+        mean_reversion_rsi_long=45.0,
+        mean_reversion_rsi_short=55.0,
+        mean_reversion_max_adx=100.0,
+    )
+    original = _features(bars, cfg)
+    changed = bars.copy()
+    changed.iloc[-1, changed.columns.get_loc("close")] *= 1.2
+    changed.iloc[-1, changed.columns.get_loc("high")] *= 1.2
+    changed.iloc[-1, changed.columns.get_loc("open")] *= 1.2
+    altered = _features(changed, cfg)
+
+    for column in ("mean_target", "mean_lower", "mean_upper", "rsi", "signal"):
+        assert column in original
+        pd.testing.assert_series_equal(
+            original[column].iloc[:-1],
+            altered[column].iloc[:-1],
+        )
+
+
+@pytest.mark.parametrize(
+    ("entry_open", "exit_bar", "expected_reason"),
+    [
+        (100.0, (100.0, 102.0, 99.0, 101.2), "mean_reversion_target"),
+        (100.0, (100.0, 102.0, 97.5, 100.5), "atr_stop"),
+        (102.0, None, "target_not_favorable_after_gap"),
+    ],
+)
+def test_bollinger_reversion_target_stop_priority_and_gap_guard(
+    monkeypatch, entry_open, exit_bar, expected_reason
+):
+    import tradingagents.crypto.backtest.perpetual_ema as engine
+
+    traded, mark, funding, index = _synthetic_perpetual_window()
+    traded.loc[index[201], ["open", "high", "low", "close"]] = [
+        entry_open,
+        entry_open + 0.5,
+        entry_open - 0.5,
+        entry_open,
+    ]
+    if exit_bar is not None:
+        traded.loc[index[202], ["open", "high", "low", "close"]] = list(exit_bar)
+    mark = traded.copy()
+    signals = pd.Series(0, index=index, dtype=int)
+    signals.loc[index[200]] = 1
+
+    def forced_features(data, cfg):
+        return pd.DataFrame(
+            {
+                "atr": pd.Series(1.0, index=data.index),
+                "signal": signals,
+                "mean_target": pd.Series(101.0, index=data.index),
+                "adx": pd.Series(10.0, index=data.index),
+            },
+            index=data.index,
+        )
+
+    monkeypatch.setattr(engine, "_features", forced_features)
+    result = engine.run_backtest(
+        traded,
+        mark,
+        funding,
+        instrument(),
+        strategy=PerpetualEMAStrategy(
+            enabled=True,
+            signal_mode="bollinger_reversion",
+            min_adx=None,
+            atr_multiple=2.0,
+        ),
+    )
+
+    if expected_reason == "target_not_favorable_after_gap":
+        assert result.trades == []
+        assert result.rejections[expected_reason] == 1
+    else:
+        assert len(result.trades) == 1
+        assert result.trades[0].exit_reason == expected_reason
+

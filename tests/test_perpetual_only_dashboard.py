@@ -335,15 +335,20 @@ def test_demo_position_reader_treats_zero_optional_levels_as_unavailable():
 
 def test_lab_status_does_not_promote_ema_candidate_rejected_by_prior_holdout(tmp_path):
     candidate = "ema_14_50_adx18"
+    # The development metrics deliberately pass today's 75% gate. The
+    # candidate must still remain ineligible because this exact fixed EMA
+    # strategy was rejected by the previously inspected independent holdout.
     metrics = {
-        "win_rate_pct": 44.5,
+        "win_rate_pct": 80.0,
         "equal_weight_compounded_return_pct": 2.0,
+        "expectancy_per_trade": 0.25,
         "profit_factor": 1.7,
         "trades": 80,
         "positive_folds": 10,
         "fold_count": 16,
         "positive_symbols": 4,
         "symbol_count": 4,
+        "worst_fold_drawdown_pct": 5.0,
         "liquidations": 0,
     }
     reports = {}

@@ -32,6 +32,19 @@ class PerpetualEMAStrategy:
     signal_mode: str = "ema_cross"
     breakout_period: int = 20
     max_holding_bars: int = 180
+    mean_reversion_period: int = 20
+    mean_reversion_std: float = 2.0
+    mean_reversion_rsi_period: int = 14
+    mean_reversion_rsi_long: float = 32.0
+    mean_reversion_rsi_short: float = 68.0
+    mean_reversion_max_adx: float = 18.0
+    mean_reversion_exit_adx: float | None = None
+    mean_reversion_exit_confirmation_bars: int = 1
+    mean_reversion_min_reward_risk: float = 0.0
+    mean_reversion_min_rsi_recovery: float = 0.0
+    mean_reversion_max_adverse_di_spread: float | None = None
+    mean_reversion_require_directional_confirmation: bool = False
+    mean_reversion_exit_requires_adverse_di: bool = False
     interval_minutes: int = 240
     risk: PerpetualRiskSettings = field(default_factory=PerpetualRiskSettings)
 
@@ -48,8 +61,60 @@ class PerpetualEMAStrategy:
             raise ValueError("ATR multiple must be finite and positive")
         if self.min_adx is not None and (not math.isfinite(self.min_adx) or not 0 <= self.min_adx <= 100):
             raise ValueError("min_adx must be in [0, 100]")
-        if self.signal_mode not in {"ema_cross", "donchian_breakout"}:
-            raise ValueError("signal_mode must be ema_cross or donchian_breakout")
+        if self.signal_mode not in {"ema_cross", "donchian_breakout", "bollinger_reversion"}:
+            raise ValueError("unsupported signal_mode")
+        if (
+            isinstance(self.mean_reversion_period, bool)
+            or not isinstance(self.mean_reversion_period, int)
+            or not 10 <= self.mean_reversion_period <= 100
+        ):
+            raise ValueError("mean_reversion_period must be an integer in [10, 100]")
+        if (
+            isinstance(self.mean_reversion_rsi_period, bool)
+            or not isinstance(self.mean_reversion_rsi_period, int)
+            or not 5 <= self.mean_reversion_rsi_period <= 50
+        ):
+            raise ValueError("mean_reversion_rsi_period must be an integer in [5, 50]")
+        if not math.isfinite(self.mean_reversion_std) or self.mean_reversion_std <= 0:
+            raise ValueError("mean_reversion_std must be finite and positive")
+        if not (
+            0 <= self.mean_reversion_rsi_long < 50
+            < self.mean_reversion_rsi_short <= 100
+        ):
+            raise ValueError("mean-reversion RSI thresholds must straddle 50")
+        if not math.isfinite(self.mean_reversion_max_adx) or not 0 <= self.mean_reversion_max_adx <= 100:
+            raise ValueError("mean_reversion_max_adx must be in [0, 100]")
+        if self.mean_reversion_exit_adx is not None and (
+            not math.isfinite(self.mean_reversion_exit_adx)
+            or not self.mean_reversion_max_adx <= self.mean_reversion_exit_adx <= 100
+        ):
+            raise ValueError("mean_reversion_exit_adx must be None or between entry ADX ceiling and 100")
+        if (
+            isinstance(self.mean_reversion_exit_confirmation_bars, bool)
+            or not isinstance(self.mean_reversion_exit_confirmation_bars, int)
+            or not 1 <= self.mean_reversion_exit_confirmation_bars <= 12
+        ):
+            raise ValueError("mean_reversion_exit_confirmation_bars must be an integer in [1, 12]")
+        if (
+            not math.isfinite(self.mean_reversion_min_reward_risk)
+            or not 0 <= self.mean_reversion_min_reward_risk <= 5
+        ):
+            raise ValueError("mean_reversion_min_reward_risk must be in [0, 5]")
+        if (
+            not math.isfinite(self.mean_reversion_min_rsi_recovery)
+            or not 0 <= self.mean_reversion_min_rsi_recovery <= 30
+        ):
+            raise ValueError("mean_reversion_min_rsi_recovery must be in [0, 30]")
+        if self.mean_reversion_max_adverse_di_spread is not None and (
+            isinstance(self.mean_reversion_max_adverse_di_spread, bool)
+            or not math.isfinite(self.mean_reversion_max_adverse_di_spread)
+            or not 0 <= self.mean_reversion_max_adverse_di_spread <= 100
+        ):
+            raise ValueError("mean_reversion_max_adverse_di_spread must be None or in [0, 100]")
+        if not isinstance(self.mean_reversion_require_directional_confirmation, bool):
+            raise ValueError("mean_reversion_require_directional_confirmation must be boolean")
+        if not isinstance(self.mean_reversion_exit_requires_adverse_di, bool):
+            raise ValueError("mean_reversion_exit_requires_adverse_di must be boolean")
         if (
             isinstance(self.breakout_period, bool)
             or not isinstance(self.breakout_period, int)
@@ -157,6 +222,22 @@ def _validate(frame: pd.DataFrame, name: str) -> pd.DataFrame:
     return data
 
 
+def _apply_adverse_di_spread_filter(
+    long_reentry: pd.Series,
+    short_reentry: pd.Series,
+    plus_di: pd.Series,
+    minus_di: pd.Series,
+    maximum_spread: float,
+) -> tuple[pd.Series, pd.Series]:
+    """Filter mean-reversion entries with excessive DI dominance against them."""
+    long_adverse_spread = (minus_di - plus_di).clip(lower=0.0)
+    short_adverse_spread = (plus_di - minus_di).clip(lower=0.0)
+    return (
+        long_reentry & long_adverse_spread.notna() & (long_adverse_spread <= maximum_spread),
+        short_reentry & short_adverse_spread.notna() & (short_adverse_spread <= maximum_spread),
+    )
+
+
 def _features(data: pd.DataFrame, cfg: PerpetualEMAStrategy) -> pd.DataFrame:
     x = data.copy()
     prev = x.close.shift(1)
@@ -171,9 +252,38 @@ def _features(data: pd.DataFrame, cfg: PerpetualEMAStrategy) -> pd.DataFrame:
     smooth_tr = tr.ewm(alpha=alpha, adjust=False, min_periods=cfg.atr_period).mean().replace(0, math.nan)
     pdi = 100 * plus.ewm(alpha=alpha, adjust=False, min_periods=cfg.atr_period).mean() / smooth_tr
     mdi = 100 * minus.ewm(alpha=alpha, adjust=False, min_periods=cfg.atr_period).mean() / smooth_tr
+    x["plus_di"] = pdi
+    x["minus_di"] = mdi
     dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, math.nan)
     x["adx"] = dx.ewm(alpha=alpha, adjust=False, min_periods=cfg.atr_period).mean()
     adx_ok = x.adx >= cfg.min_adx if cfg.min_adx is not None else True
+    if cfg.signal_mode == "bollinger_reversion":
+        center = x.close.rolling(
+            cfg.mean_reversion_period,
+            min_periods=cfg.mean_reversion_period,
+        ).mean()
+        deviation = x.close.rolling(
+            cfg.mean_reversion_period,
+            min_periods=cfg.mean_reversion_period,
+        ).std(ddof=0)
+        x["mean_target"] = center
+        x["mean_lower"] = center - cfg.mean_reversion_std * deviation
+        x["mean_upper"] = center + cfg.mean_reversion_std * deviation
+        delta = x.close.diff()
+        gains = delta.clip(lower=0.0)
+        losses = -delta.clip(upper=0.0)
+        avg_gain = gains.ewm(
+            alpha=1 / cfg.mean_reversion_rsi_period,
+            adjust=False,
+            min_periods=cfg.mean_reversion_rsi_period,
+        ).mean()
+        avg_loss = losses.ewm(
+            alpha=1 / cfg.mean_reversion_rsi_period,
+            adjust=False,
+            min_periods=cfg.mean_reversion_rsi_period,
+        ).mean()
+        denominator = (avg_gain + avg_loss).replace(0, math.nan)
+        x["rsi"] = (100.0 * avg_gain / denominator).fillna(50.0)
     x["signal"] = 0
     if cfg.signal_mode == "ema_cross":
         x.loc[
@@ -190,7 +300,7 @@ def _features(data: pd.DataFrame, cfg: PerpetualEMAStrategy) -> pd.DataFrame:
             & adx_ok,
             "signal",
         ] = -1
-    else:
+    elif cfg.signal_mode == "donchian_breakout":
         # Previous-window channels are shifted before comparing the current
         # completed close, preventing the current candle from entering its own
         # breakout threshold.
@@ -204,6 +314,38 @@ def _features(data: pd.DataFrame, cfg: PerpetualEMAStrategy) -> pd.DataFrame:
         x["prior_channel_low"] = prior_low
         x.loc[(x.close > prior_high) & (x.close > x.trend) & adx_ok, "signal"] = 1
         x.loc[(x.close < prior_low) & (x.close < x.trend) & adx_ok, "signal"] = -1
+    else:
+        # Enter only after price closes back inside the prior extreme band and
+        # RSI turns with it. Freeze the signal candle's mid-band before the
+        # next-open fill. The ADX ceiling avoids fading strong trends.
+        range_ok = x.adx <= cfg.mean_reversion_max_adx
+        long_reentry = (
+            (x.close.shift(1) <= x.mean_lower.shift(1))
+            & (x.close > x.mean_lower)
+            & (x.rsi.shift(1) <= cfg.mean_reversion_rsi_long)
+            & ((x.rsi - x.rsi.shift(1)) >= cfg.mean_reversion_min_rsi_recovery)
+            & range_ok
+        )
+        short_reentry = (
+            (x.close.shift(1) >= x.mean_upper.shift(1))
+            & (x.close < x.mean_upper)
+            & (x.rsi.shift(1) >= cfg.mean_reversion_rsi_short)
+            & ((x.rsi.shift(1) - x.rsi) >= cfg.mean_reversion_min_rsi_recovery)
+            & range_ok
+        )
+        if cfg.mean_reversion_require_directional_confirmation:
+            long_reentry &= x.plus_di >= x.minus_di
+            short_reentry &= x.minus_di >= x.plus_di
+        if cfg.mean_reversion_max_adverse_di_spread is not None:
+            long_reentry, short_reentry = _apply_adverse_di_spread_filter(
+                long_reentry,
+                short_reentry,
+                x.plus_di,
+                x.minus_di,
+                cfg.mean_reversion_max_adverse_di_spread,
+            )
+        x.loc[long_reentry, "signal"] = 1
+        x.loc[short_reentry, "signal"] = -1
     return x
 
 
@@ -249,11 +391,48 @@ def run_backtest(
     rates.index = rates.index.tz_convert("UTC")
     if rates.index.has_duplicates or not rates.index.is_monotonic_increasing or rates.isna().any() or not rates.map(math.isfinite).all() or (rates.abs() > 0.05).any():
         raise ValueError("funding rates must be finite, unique, ordered and within +/-5%")
-    funding_gap = pd.Timedelta(minutes=instrument.funding_interval_minutes)
-    if len(rates) > 1 and not (rates.index.to_series().diff().dropna() == funding_gap).all():
-        raise ValueError("funding history contains missing or irregular settlement events")
-    if rates.index[0] - trade.index[0] > funding_gap or trade.index[-1] - rates.index[-1] > funding_gap:
-        raise ValueError("funding history does not cover the candle window within one venue settlement interval")
+    event_intervals = funding_rates.attrs.get("funding_interval_minutes")
+    if isinstance(event_intervals, pd.Series):
+        event_intervals = event_intervals.reindex(rates.index)
+        if (
+            event_intervals.isna().any()
+            or not event_intervals.map(
+                lambda value: math.isfinite(float(value))
+                and 1 <= int(value) <= 480
+                and float(value).is_integer()
+            ).all()
+        ):
+            raise ValueError("funding interval metadata is incomplete or invalid")
+        event_intervals = event_intervals.astype(int)
+        funding_gap = pd.Timedelta(minutes=int(event_intervals.max()))
+        if len(rates) > 1:
+            actual_gaps = rates.index.to_series().diff().dropna().reset_index(drop=True)
+            previous_intervals = event_intervals.iloc[:-1].reset_index(drop=True)
+            next_intervals = event_intervals.iloc[1:].reset_index(drop=True)
+            valid = (
+                actual_gaps == pd.to_timedelta(previous_intervals, unit="m")
+            ) | (
+                actual_gaps == pd.to_timedelta(next_intervals, unit="m")
+            )
+            if not valid.all():
+                raise ValueError(
+                    "funding history contains missing or irregular settlement events"
+                )
+    else:
+        funding_gap = pd.Timedelta(minutes=instrument.funding_interval_minutes)
+        if len(rates) > 1 and not (
+            rates.index.to_series().diff().dropna() == funding_gap
+        ).all():
+            raise ValueError(
+                "funding history contains missing or irregular settlement events"
+            )
+    if (
+        rates.index[0] - trade.index[0] > funding_gap
+        or trade.index[-1] - rates.index[-1] > funding_gap
+    ):
+        raise ValueError(
+            "funding history does not cover the candle window within one venue settlement interval"
+        )
     if not (rates.index.isin(trade.index)).all():
         raise ValueError("each funding event must align exactly to a candle open")
     if len(trade) < cfg.trend + cfg.atr_period + 3:
@@ -267,6 +446,7 @@ def run_backtest(
     position: dict | None = None
     pending_exit: str | None = None
     pending_signal, pending_atr = 0, math.nan
+    pending_target = math.nan
     peak = cash
     day_start = cash
     day = trade.index[0].date()
@@ -329,7 +509,7 @@ def run_backtest(
                 close(float(row.open), stamp, "ema_reversal")
             elif i - position["index"] >= cfg.max_holding_bars:
                 close(float(row.open), stamp, "max_holding_bars")
-                pending_signal, pending_atr = 0, math.nan
+                pending_signal, pending_atr, pending_target = 0, math.nan, math.nan
             elif (d > 0 and mr.low <= liq) or (d < 0 and mr.high >= liq):
                 close(liq, stamp, "liquidation")
                 closed_intrabar = True
@@ -337,56 +517,131 @@ def run_backtest(
                 raw = min(float(row.open), position["stop"]) if d > 0 and row.open <= position["stop"] else max(float(row.open), position["stop"]) if d < 0 and row.open >= position["stop"] else position["stop"]
                 close(raw, stamp, "atr_stop")
                 closed_intrabar = True
+            elif cfg.signal_mode == "bollinger_reversion" and (
+                (d > 0 and row.high >= position["target"])
+                or (d < 0 and row.low <= position["target"])
+            ):
+                target = float(position["target"])
+                raw = max(float(row.open), target) if d > 0 else min(float(row.open), target)
+                close(raw, stamp, "mean_reversion_target")
+                closed_intrabar = True
         if closed_intrabar:
-            # A stop/liquidation within this candle cannot be followed by a
-            # re-entry priced at the same candle's open. Wait for a fresh signal.
-            pending_signal, pending_atr = 0, math.nan
+            # An intrabar exit cannot be followed by a re-entry at this candle's
+            # open. Wait for a fresh completed signal on a later candle.
+            pending_signal, pending_atr, pending_target = 0, math.nan, math.nan
 
         if position is None and pending_signal and not daily_halt and not global_halt:
             raw_entry = float(row.open)
             direction = pending_signal
             fill = raw_entry * (1 + direction * fees.impact_rate)
             stop = fill - direction * cfg.atr_multiple * pending_atr
-            sizing = size_linear_position(
-                equity=max(cash, 1e-9), entry_price=fill, stop_price=stop,
-                direction=direction, cost_rate_per_fill=fees.per_fill_rate,
-                instrument=instrument, risk=cfg.risk,
+            target = (
+                float(pending_target)
+                if cfg.signal_mode == "bollinger_reversion" and math.isfinite(pending_target)
+                else None
             )
-            if not sizing.approved:
-                reject(sizing.rejection_reason or "sizing_rejected")
-            else:
-                liq = estimate_isolated_liquidation_price(
-                    entry_price=fill,
-                    leverage=cfg.risk.leverage,
-                    maintenance_margin_rate=cfg.risk.maintenance_margin_rate,
-                    direction=direction,
+            target_is_valid = (
+                cfg.signal_mode != "bollinger_reversion"
+                or (
+                    target is not None
+                    and ((direction > 0 and target > fill) or (direction < 0 and target < fill))
                 )
-                if (direction > 0 and liq >= fill) or (direction < 0 and liq <= fill):
-                    reject("invalid_liquidation_estimate")
+            )
+            entry_rejection_reason = None
+            if not target_is_valid:
+                entry_rejection_reason = "target_not_favorable_after_gap"
+            elif (
+                cfg.signal_mode == "bollinger_reversion"
+                and cfg.mean_reversion_min_reward_risk > 0
+            ):
+                target_exit_fill = target * (1 - direction * fees.impact_rate)
+                stop_exit_fill = stop * (1 - direction * fees.impact_rate)
+                net_reward = (
+                    direction * (target_exit_fill - fill)
+                    - (fill + target_exit_fill) * fees.fee_rate
+                )
+                net_risk = (
+                    abs(stop_exit_fill - fill)
+                    + (fill + stop_exit_fill) * fees.fee_rate
+                )
+                reward_risk = net_reward / net_risk if net_risk > 0 else 0.0
+                if reward_risk < cfg.mean_reversion_min_reward_risk:
+                    entry_rejection_reason = "target_reward_risk_below_minimum"
+            if entry_rejection_reason:
+                reject(entry_rejection_reason)
+            else:
+                sizing = size_linear_position(
+                    equity=max(cash, 1e-9), entry_price=fill, stop_price=stop,
+                    direction=direction, cost_rate_per_fill=fees.per_fill_rate,
+                    instrument=instrument, risk=cfg.risk,
+                )
+                if not sizing.approved:
+                    reject(sizing.rejection_reason or "sizing_rejected")
                 else:
-                    buffer = cfg.risk.liquidation_buffer_fraction
-                    liquidation_clears_stop = (
-                        liq < stop * (1.0 - buffer)
-                        if direction > 0
-                        else liq > stop * (1.0 + buffer)
+                    liq = estimate_isolated_liquidation_price(
+                        entry_price=fill,
+                        leverage=cfg.risk.leverage,
+                        maintenance_margin_rate=cfg.risk.maintenance_margin_rate,
+                        direction=direction,
                     )
-                    if not liquidation_clears_stop:
-                        reject("liquidation_too_close_to_atr_stop")
+                    if (direction > 0 and liq >= fill) or (direction < 0 and liq <= fill):
+                        reject("invalid_liquidation_estimate")
                     else:
-                        entry_fee = sizing.notional * fees.fee_rate
-                        cash -= entry_fee
-                        position = {"direction": direction, "qty": sizing.quantity, "entry": fill,
-                            "time": stamp.isoformat(), "index": i, "entry_fee": entry_fee,
-                            "margin": sizing.initial_margin, "stop": stop, "liq": liq, "funding": 0.0}
-            pending_signal, pending_atr = 0, math.nan
+                        buffer = cfg.risk.liquidation_buffer_fraction
+                        liquidation_clears_stop = (
+                            liq < stop * (1.0 - buffer)
+                            if direction > 0
+                            else liq > stop * (1.0 + buffer)
+                        )
+                        if not liquidation_clears_stop:
+                            reject("liquidation_too_close_to_atr_stop")
+                        else:
+                            entry_fee = sizing.notional * fees.fee_rate
+                            cash -= entry_fee
+                            position = {"direction": direction, "qty": sizing.quantity, "entry": fill,
+                                "time": stamp.isoformat(), "index": i, "entry_fee": entry_fee,
+                                "margin": sizing.initial_margin, "stop": stop, "liq": liq,
+                                "target": target, "funding": 0.0, "trend_exit_bars": 0}
+            pending_signal, pending_atr, pending_target = 0, math.nan, math.nan
 
         if position is not None:
             d = position["direction"]
             mtm = cash + d * (float(mr.close) - position["entry"]) * position["qty"]
             atr_now = features.iloc[i].atr
-            if pd.notna(atr_now) and atr_now > 0:
+            if cfg.signal_mode != "bollinger_reversion" and pd.notna(atr_now) and atr_now > 0:
                 candidate = float(row.close) - d * cfg.atr_multiple * float(atr_now)
                 position["stop"] = max(position["stop"], candidate) if d > 0 else min(position["stop"], candidate)
+            if cfg.signal_mode == "bollinger_reversion":
+                exit_adx = (
+                    cfg.mean_reversion_exit_adx
+                    if cfg.mean_reversion_exit_adx is not None
+                    else cfg.mean_reversion_max_adx
+                )
+                adx_is_high = (
+                    pd.notna(features.iloc[i].adx)
+                    and float(features.iloc[i].adx) > exit_adx
+                )
+                adverse_di = True
+                if cfg.mean_reversion_exit_requires_adverse_di:
+                    plus_di = features.iloc[i].get("plus_di", math.nan)
+                    minus_di = features.iloc[i].get("minus_di", math.nan)
+                    adverse_di = (
+                        pd.notna(plus_di)
+                        and pd.notna(minus_di)
+                        and (
+                            (d > 0 and float(minus_di) > float(plus_di))
+                            or (d < 0 and float(plus_di) > float(minus_di))
+                        )
+                    )
+                if adx_is_high and adverse_di:
+                    position["trend_exit_bars"] += 1
+                else:
+                    position["trend_exit_bars"] = 0
+                if (
+                    pending_exit is None
+                    and position["trend_exit_bars"] >= cfg.mean_reversion_exit_confirmation_bars
+                ):
+                    pending_exit = "trend_regime_exit"
         else:
             mtm = cash
         if not math.isfinite(mtm) or mtm <= 0:
@@ -394,17 +649,21 @@ def run_backtest(
         curve.append(mtm)
         peak = max(peak, mtm)
         if mtm <= day_start * (1 - cfg.risk.max_daily_loss_fraction):
-            daily_halt, pending_signal, pending_atr = True, 0, math.nan
+            daily_halt, pending_signal, pending_atr, pending_target = True, 0, math.nan, math.nan
             if position is not None:
                 pending_exit = "daily_loss_limit"
         if mtm <= peak * (1 - cfg.risk.max_drawdown_fraction):
-            global_halt, pending_signal, pending_atr = True, 0, math.nan
+            global_halt, pending_signal, pending_atr, pending_target = True, 0, math.nan, math.nan
             if position is not None:
                 pending_exit = "max_drawdown_limit"
         if i >= trade_start_index and not global_halt and not daily_halt:
             sig = int(features.iloc[i].signal)
-            if sig:
+            if sig and (
+                cfg.signal_mode != "bollinger_reversion" or position is None
+            ):
                 pending_signal, pending_atr = sig, float(features.iloc[i].atr)
+                if cfg.signal_mode == "bollinger_reversion":
+                    pending_target = float(features.iloc[i].mean_target)
 
     if position is not None:
         close(float(trade.iloc[-1].close), trade.index[-1], "end_of_window")
@@ -414,7 +673,19 @@ def run_backtest(
         equity_curve=curve, rejections=rejected,
         assumptions={"instrument": instrument.symbol, "contract": "linear USDT perpetual", "margin_mode": "isolated",
             "position_mode": "one-way", "leverage": cfg.risk.leverage, "research_leverage_ceiling": 2.0,
-            "strategy": ("EMA14/EMA50 cross + EMA200 trend + ADX, ATR trailing stop" if cfg.signal_mode == "ema_cross" else f"Donchian {cfg.breakout_period} breakout + EMA{cfg.trend} regime + ADX, ATR trailing stop"),
+            "strategy": (
+                "EMA14/EMA50 cross + EMA200 trend + ADX, ATR trailing stop"
+                if cfg.signal_mode == "ema_cross"
+                else (
+                    f"Donchian {cfg.breakout_period} breakout + EMA{cfg.trend} regime + ADX, ATR trailing stop"
+                    if cfg.signal_mode == "donchian_breakout"
+                    else (
+                        f"Bollinger({cfg.mean_reversion_period}, {cfg.mean_reversion_std:g}) re-entry + "
+                        f"RSI({cfg.mean_reversion_rsi_period}) recovery + ADX <= "
+                        f"{cfg.mean_reversion_max_adx:g}; frozen mid-band target, ATR stop"
+                    )
+                )
+            ),
             "signal_timing": "completed 4h candle, next candle open", "funding_series_required": True,
             "mark_price_liquidation": True, "liquidation_estimate": "approximate, not Bybit tier formula",
             "liquidation_buffer_fraction": cfg.risk.liquidation_buffer_fraction,
