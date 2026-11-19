@@ -13,7 +13,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Mapping
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from urllib.parse import quote, urlsplit
 
 import requests
