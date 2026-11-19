@@ -654,12 +654,24 @@ class PerpetualDemoController:
                     # A submitted close is not treated as a fill. Keep managing the
                     # position until the venue confirms flat; retry only after a
                     # market IOC has had time to settle or is terminal.
-                    if pending_age < 60_000 and (
-                        not order_status
-                        or order_status in {"New", "PartiallyFilled", "Untriggered", "Filled"}
-                    ):
+                    if order_status in {"Created", "New", "PartiallyFilled", "Untriggered"}:
+                        if pending_age >= 60_000 and not meta.get("pending_exit_stalled"):
+                            meta["pending_exit_stalled"] = True
+                            self._record({
+                                "type": "strategy_exit_stalled",
+                                "symbol": symbol,
+                                "reason": pending.get("reason"),
+                                "order_link_id": pending.get("order_link_id"),
+                                "order_status": order_status,
+                            })
+                        continue
+                    if (
+                        pending_age < 60_000
+                        and (not order_status or order_status.startswith("lookup_error:"))
+                    ) or (order_status == "Filled" and pending_age < 15_000):
                         continue
                     meta.pop("pending_exit", None)
+                    meta.pop("pending_exit_stalled", None)
                     self._record({
                         "type": "strategy_exit_retry",
                         "symbol": symbol,
