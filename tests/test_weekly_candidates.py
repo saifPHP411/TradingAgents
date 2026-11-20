@@ -134,3 +134,47 @@ def test_zero_cost_ablation_vs_realistic_on_same_forced_loss(monkeypatch):
             {"BTCUSDT": bars}, "ema9_ema21_rsi_momentum",
             start=1440, end=11520, commission_rate=float("nan"),
         )
+
+
+@pytest.mark.parametrize(
+    ("strategy", "misaligned_index"),
+    [
+        ("ema60_rsi_pullback", 246),
+        ("donchian_15m_trend", 246),
+        ("vwap_15m_reclaim", 246),
+    ],
+)
+def test_predeclared_multitimeframe_candidates_wait_for_bar_close(strategy, misaligned_index):
+    bars = sample_bars(360)
+    features = indicators(bars)
+    assert signal(bars, features, misaligned_index, strategy) == 0
+
+
+@pytest.mark.parametrize(
+    "strategy",
+    ["ema60_rsi_pullback", "donchian_15m_trend", "vwap_15m_reclaim"],
+)
+def test_new_candidates_do_not_peek_at_future_candles(strategy):
+    bars = sample_bars(400)
+    index = 284  # last minute of a completed 15m bar
+    before = signal(bars, indicators(bars), index, strategy)
+    bars[285] = Bar(bars[285].ms, 100, 1000, 1, 500, 100000)
+    after = signal(bars, indicators(bars), index, strategy)
+    assert before == after
+
+
+def test_new_candidates_have_longer_hold_limits_and_valid_settings():
+    assert set(weekly_candidates.HOLD_BY_STRATEGY).issubset(weekly_candidates.STRATEGIES)
+    assert weekly_candidates.HOLD_BY_STRATEGY["donchian_15m_trend"] == 240
+    assert weekly_candidates.MAX_NOTIONAL_FRACTION == 0.2
+    bars = sample_bars(300)
+    assert signal(bars, indicators(bars), 119, "donchian_15m_trend") == 0
+
+
+def test_daily_vwap_only_contains_current_session_prices():
+    bars = sample_bars(1442)
+    bars[1439] = Bar(bars[1439].ms, 100, 110, 90, 100, 1000)
+    # By the next UTC day cumulative VWAP must restart.
+    bars[1440] = Bar(bars[1440].ms, 200, 202, 198, 200, 1000)
+    features = indicators(bars)
+    assert features["vwap"][1440] == pytest.approx(200)
