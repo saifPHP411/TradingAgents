@@ -1,11 +1,9 @@
 """Synthetic, no-network checks for paired long/short historical research."""
 from __future__ import annotations
 
-import io
 import json
 import math
-import zipfile
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 
 import pytest
 
