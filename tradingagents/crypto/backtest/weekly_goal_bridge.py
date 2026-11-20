@@ -10,6 +10,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+from statistics import mean, median
 
 try:
     from .weekly_goal import audit_weekly_goal
@@ -148,6 +149,23 @@ def compare_artifacts(paths: list[Path]) -> dict:
                     w["net_return_pct"] > 0 for w in audit["windows"]
                 ),
                 "closed_trades": sum(w["closed_trades"] for w in audit["windows"]),
+                "total_net_profit_usdt_across_independent_trials": sum(
+                    w["weekly_net_profit_usdt"] for w in audit["windows"]
+                ),
+                "average_weekly_net_profit_usdt": mean(
+                    w["weekly_net_profit_usdt"] for w in audit["windows"]
+                ),
+                "median_weekly_net_profit_usdt": median(
+                    w["weekly_net_profit_usdt"] for w in audit["windows"]
+                ),
+                "worst_weekly_net_profit_usdt": min(
+                    w["weekly_net_profit_usdt"] for w in audit["windows"]
+                ),
+                "pooled_net_win_rate_pct": (
+                    100 * sum(w["winning_trades"] for w in audit["windows"])
+                    / sum(w["closed_trades"] for w in audit["windows"])
+                    if sum(w["closed_trades"] for w in audit["windows"]) else None
+                ),
                 "highest_weekly_win_rate_pct": max(
                     (w["win_rate_pct"] or 0.0 for w in audit["windows"]), default=None,
                 ),
@@ -159,6 +177,28 @@ def compare_artifacts(paths: list[Path]) -> dict:
             }
         evaluations[strategy] = by_scenario
 
+    # Ranking is descriptive of this already-explored historical sample.
+    # It is NOT forward/out-of-sample proof or a reason to activate Bybit.
+    exploratory_ranking = sorted(
+        (
+            {
+                "strategy": name,
+                "median_weekly_net_profit_usdt": scenarios["realistic_estimate"][
+                    "median_weekly_net_profit_usdt"
+                ],
+                "worst_weekly_net_profit_usdt": scenarios["realistic_estimate"][
+                    "worst_weekly_net_profit_usdt"
+                ],
+                "positive_weeks": scenarios["realistic_estimate"]["weeks_net_positive"],
+            }
+            for name, scenarios in evaluations.items()
+        ),
+        key=lambda row: (
+            -row["median_weekly_net_profit_usdt"],
+            -row["worst_weekly_net_profit_usdt"],
+            row["strategy"],
+        ),
+    )
     return {
         "schema_version": 1,
         "research_only": True,
@@ -171,6 +211,8 @@ def compare_artifacts(paths: list[Path]) -> dict:
             "periods": len(loaded),
         },
         "tested_strategies": len(evaluations),
+        "exploratory_ranking_by_median_realistic_weekly_net_profit": exploratory_ranking,
+        "ranking_is_out_of_sample_evidence": False,
         "strategy_comparisons": evaluations,
         "conclusion": "No model can be approved until the missing venue evidence and untouched holdout have been independently established.",
     }
