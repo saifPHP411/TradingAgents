@@ -17,6 +17,7 @@ import math
 import re
 from collections import deque
 from datetime import UTC, datetime
+from pathlib import Path
 
 from .triad_consensus import TriadInput, evaluate_triad
 
@@ -47,6 +48,7 @@ class TriadShadowWatcher:
         self._emitted: set[str] = set()
         self._emitted_order: deque[str] = deque(maxlen=256)
         self.received = 0
+        self.market_events = 0
         self.rejected = 0
         self.scans = 0
 
@@ -108,6 +110,7 @@ class TriadShadowWatcher:
                 self.rejected += 1
                 return
             self.mark[symbol] = (mark, ts)
+            self.market_events += 1
         elif topic.startswith("orderbook.1."):
             symbol = topic.removeprefix("orderbook.1.")
             data = message.get("data")
@@ -129,6 +132,7 @@ class TriadShadowWatcher:
                 self.rejected += 1
                 return
             self.book[symbol] = (bid, ask, ts)
+            self.market_events += 1
         elif topic.startswith("kline.1."):
             from .backtest.weekly_candidates import Bar
 
@@ -167,6 +171,7 @@ class TriadShadowWatcher:
                     history.clear()
                     self.rejected += 1
                 history.append(bar)
+                self.market_events += 1
         # Unknown topics include subscription acknowledgements and pong: safe to ignore.
 
     def tick(self, *, now_ms: int | None = None) -> dict:
@@ -313,15 +318,57 @@ def main() -> None:
         "--symbols", nargs="+",
         default=["BTCUSDT", "ETHUSDT", "XRPUSDT", "LTCUSDT"],
     )
+    parser.add_argument(
+        "--max-seconds", type=int,
+        help="Optional time limit (1–120 s) for read-only CI stream verification",
+    )
+    parser.add_argument("--out", type=Path, help="Write bounded observer proof JSON")
     args = parser.parse_args()
+    if args.max_seconds is not None and not 1 <= args.max_seconds <= 120:
+        parser.error("--max-seconds must be in the inclusive range 1 to 120")
     watcher = TriadShadowWatcher(tuple(args.symbols))
+    bootstrap = load_rest_history(watcher)
     print(json.dumps({
         "mode": "SHADOW_ONLY_NO_ORDER_SUBMISSION",
         "strategy": "donchian_15m_trend_plus_triads",
         "roles": ["sniper", "analyst", "professor"],
-        "bootstrap": load_rest_history(watcher),
+        "bootstrap": bootstrap,
     }), flush=True)
-    asyncio.run(observe_forever(watcher))
+    if args.max_seconds is None:
+        asyncio.run(observe_forever(watcher))
+        return
+    try:
+        asyncio.run(asyncio.wait_for(
+            observe_forever(watcher), timeout=args.max_seconds
+        ))
+    except TimeoutError:
+        pass
+    report = {
+        "status": (
+            "public_market_data_observed" if watcher.market_events and watcher.scans
+            else "unavailable_or_no_public_events"
+        ),
+        "research_only": True,
+        "orders_submitted": False,
+        "demo_ready": False,
+        "symbols": list(watcher.symbols),
+        "bounded_seconds": args.max_seconds,
+        "bootstrap": bootstrap,
+        "public_market_events_received": watcher.market_events,
+        "one_second_checks_completed": watcher.scans,
+        "rejected_messages": watcher.rejected,
+        "notes": (
+            "A public market event proves only source reachability; "
+            "it does not verify 15m readiness, three-vote approval, "
+            "Bybit order fills or profitable trading."
+        ),
+    }
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(report), flush=True)
+    if report["status"] != "public_market_data_observed":
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
