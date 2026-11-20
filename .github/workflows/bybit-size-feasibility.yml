@@ -39,6 +39,11 @@ jobs:
           name: bybit-public-size-${{ matrix.symbol }}
           path: artifacts/bybit-size-${{ matrix.symbol }}.json
           if-no-files-found: error
+      - name: Require verified public market data
+        if: steps.check.outcome != 'success'
+        run: |
+          echo "::error::Both public market hosts unavailable or invalid. Filter feasibility remains UNKNOWN, not PASS."
+          exit 1
       - name: Clarify evidence limitations
         if: always()
         run: |
