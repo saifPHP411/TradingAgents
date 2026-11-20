@@ -396,7 +396,7 @@ def simulate_week(
     }
 
 
-def screen_20x_70pct(weeks: list[dict]) -> dict:
+def screen_weekly_net_50usdt(weeks: list[dict]) -> dict:
     """Compare *every* isolated 50-USDT week with the literal goal.
 
     This is an exploratory score of simulated candles, never an independently
@@ -407,11 +407,13 @@ def screen_20x_70pct(weeks: list[dict]) -> dict:
         trade_count = week["trades"]
         win_rate = week["win_rate_pct"]
         equity = week["final_equity_usdt"]
+        weekly_profit = equity - INITIAL_USDT
+        profit_goal_met = weekly_profit >= 50.0 - 1e-9
         objective_met = (
             trade_count >= 30
             and win_rate is not None
             and win_rate >= 70.0
-            and equity >= 1000.0
+            and profit_goal_met
         )
         outcomes.append({
             "start": week["start"],
@@ -419,9 +421,11 @@ def screen_20x_70pct(weeks: list[dict]) -> dict:
             "trades": trade_count,
             "win_rate_pct": win_rate,
             "final_usdt": equity,
-            "weekly_20x_and_70pct_met": objective_met,
+            "net_profit_usdt": weekly_profit,
+            "weekly_profit_50usdt_met": profit_goal_met,
+            "weekly_profit_50usdt_and_70pct_met": objective_met,
         })
-    hits = sum(item["weekly_20x_and_70pct_met"] for item in outcomes)
+    hits = sum(item["weekly_profit_50usdt_and_70pct_met"] for item in outcomes)
     return {
         "tested_seven_day_periods": len(outcomes),
         "weeks_meeting_both_goals": hits,
@@ -487,7 +491,7 @@ def run_scan(*, start_day: date, days: int, symbols: tuple[str, ...], transport=
         "cost_scenario_comparison": scenario_reports,
         "weekly_goal_screen": {
             name: {
-                scenario: screen_20x_70pct(weeks)
+                scenario: screen_weekly_net_50usdt(weeks)
                 for scenario, weeks in comparisons.items()
             }
             for name, comparisons in scenario_reports.items()
