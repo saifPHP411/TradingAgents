@@ -35,7 +35,11 @@ Input format (illustrative structure, **not** observed market data):
     "funding_included": true,
     "liquidations_included": true,
     "unrealized_pnl_included": true,
-    "no_external_cash_flows": true
+    "no_external_cash_flows": true,
+    "venue_filters_enforced": true,
+    "position_risk_limits_enforced": true,
+    "no_lookahead": true,
+    "order_fills_verified_or_conservatively_modeled": true
   },
   "account_equity": [
     {"timestamp": "2026-10-01T00:00:00Z", "equity_usdt": 50,
@@ -71,12 +75,14 @@ requires:
   those criteria. This is an extra robustness gate, not a guarantee of
   future performance.
 - Explicit provenance flags covering untouched holdout, fees, slippage,
-  funding, liquidations, unrealized account equity and absence of deposits.
+  funding, liquidations, unrealized account equity, no deposits, venue filters,
+  risk limits, no lookahead and order-fill modeling.
 
 Even a passing historical score is explicitly
-`historical_evidence_passed_not_forward_verified`, not a live-trading
-authorization. Flags are self-reported by the producer: an independent
-review of raw fills and equity is still required. Daily drawdown samples
+`reported_historical_goal_passed_not_forward_verified`, not a live-trading
+authorization. Flags are self-reported by the producer, so the report uses
+reported_evidence_gate_passed and keeps independently_verified_by_this_tool
+false: an independent review of raw fills and equity is still required. Daily drawdown samples
 are not evidence of maximum *intraday* drawdown.
 
 ## Research track — strategy independent
