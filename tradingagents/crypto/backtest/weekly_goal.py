@@ -1,4 +1,4 @@
-"""Research-only audit of 50-to-1000 USDT in seven days and >=70% wins.
+"""Research-only audit of >=50 USDT weekly net profit from a 50 USDT start.
 
 Uses a single shared-account equity curve and net closed trades. The script
 never invents missing returns or authorizes actual trading.
@@ -12,7 +12,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 START_USDT = 50.0
-TARGET_USDT = 1000.0
+WEEKLY_MIN_NET_PROFIT_USDT = 50.0
+# Independent trials must finish at >=100 USDT. A continuous account does
+# not reset each week: its goal is >=50 USDT *additional* profit per week.
+TARGET_USDT = START_USDT + WEEKLY_MIN_NET_PROFIT_USDT
 TARGET_MULTIPLE = TARGET_USDT / START_USDT
 WIN_RATE_MIN = 70.0
 DAYS_PER_WEEK = 7
@@ -146,14 +149,17 @@ def audit_weekly_goal(report: dict) -> dict:
         for equity in week_points:
             peak = max(peak, equity)
             sampled_dd = max(sampled_dd, (peak - equity) / peak if peak > 0 else 1.0)
+        net_profit_usdt = closing - opening
+        profit_target_met = (
+            net_profit_usdt >= WEEKLY_MIN_NET_PROFIT_USDT - 1e-9
+            and flat_boundaries and reconciled and liquidations == 0
+        )
+        # The historical 70% win-rate preference remains a separate,
+        # stricter combined evidence gate. Do not call 70% profitable by itself.
         pass_goal = (
             count >= MIN_WEEKLY_TRADES
             and win_rate is not None and win_rate >= WIN_RATE_MIN
-            and math.isclose(opening, START_USDT, abs_tol=1e-9, rel_tol=0)
-            and closing >= TARGET_USDT
-            and liquidations == 0
-            and flat_boundaries
-            and reconciled
+            and profit_target_met
         )
         windows.append({
             "week_start": begin.isoformat(),
@@ -162,6 +168,9 @@ def audit_weekly_goal(report: dict) -> dict:
             "closing_equity_usdt": closing,
             "normalized_50_usdt_final": START_USDT * growth,
             "net_return_pct": (growth - 1) * 100,
+            "weekly_net_profit_usdt": net_profit_usdt,
+            "weekly_profit_goal_met": profit_target_met,
+            "weekly_win_rate_70pct_met": win_rate is not None and win_rate >= WIN_RATE_MIN,
             "win_rate_pct": win_rate,
             "closed_trades": count,
             "winning_trades": wins,
@@ -199,8 +208,9 @@ def audit_weekly_goal(report: dict) -> dict:
         "orders_submitted": False,
         "auto_deployment_allowed": False,
         "objective": {
-            "start_usdt": START_USDT, "end_usdt": TARGET_USDT,
-            "seven_day_growth_multiple": TARGET_MULTIPLE,
+            "start_usdt": START_USDT, "end_usdt_for_isolated_50_start": TARGET_USDT,
+            "weekly_min_net_profit_usdt": WEEKLY_MIN_NET_PROFIT_USDT,
+            "isolated_start_50_growth_multiple": TARGET_MULTIPLE,
             "required_win_rate_pct": WIN_RATE_MIN,
             "minimum_closed_trades_per_week": MIN_WEEKLY_TRADES,
             "minimum_independent_weeks": MIN_INDEPENDENT_WEEKS,
@@ -220,7 +230,7 @@ def audit_weekly_goal(report: dict) -> dict:
             "Meeting this gate does not independently verify venue fills, capital limits, or source data.",
             "Snapshots must be from one shared account, not merged independent per-symbol runs.",
             "Daily samples understate intraday drawdown and omit some margin breaches.",
-            "Trade PnL must be net of costs; win rate alone does not establish profitability.",
+            "Require >=50 USDT weekly net account growth after costs; win rate alone does not establish profitability.",
             "A week only qualifies when both boundaries are flat and trade PnL reconciles to equity.",
             "A single best week or development-only search never establishes strategy quality.",
         ],
@@ -314,8 +324,9 @@ def audit_isolated_weekly_trials(report: dict) -> dict:
         "source": report.get("source"),
         "account_mode": "independent_50_usdt_weekly_replays",
         "objective": {
-            "start_usdt": START_USDT, "end_usdt": TARGET_USDT,
-            "seven_day_growth_multiple": TARGET_MULTIPLE,
+            "start_usdt": START_USDT, "end_usdt_for_isolated_50_start": TARGET_USDT,
+            "weekly_min_net_profit_usdt": WEEKLY_MIN_NET_PROFIT_USDT,
+            "isolated_start_50_growth_multiple": TARGET_MULTIPLE,
             "required_win_rate_pct": WIN_RATE_MIN,
             "minimum_closed_trades_per_week": MIN_WEEKLY_TRADES,
             "minimum_independent_weeks": MIN_INDEPENDENT_WEEKS,
@@ -334,7 +345,7 @@ def audit_isolated_weekly_trials(report: dict) -> dict:
         "complete_chronological_coverage": not untested_gaps_days,
         "windows": windows,
         "limitations": [
-            "Each isolated weekly replay restarts one account from 50 USDT.",
+            "Each isolated weekly replay restarts one account from 50 USDT and needs >=100 USDT at its end.",
             "Unexamined gaps between seven-day trials block approval to limit cherry-picking.",
             "All weeks are reported; the best week is never selected.",
             "Self-reported quality flags and fills need independent validation.",
