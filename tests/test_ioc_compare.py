@@ -75,7 +75,9 @@ def test_limit_ioc_never_fills_outside_price_cap(side, levels, cap, expected):
 
 
 def test_same_orderbook_gives_more_market_fills_but_worse_price(tmp_path):
-    archive = make_archive(tmp_path, [orderbook(T0 + 2300)])
+    archive = make_archive(tmp_path, [
+        orderbook(T0 + 2200), orderbook(T0 + 2300, "delta", bids=[], asks=[]),
+    ])
     trades = replay_archive(archive, [signal()], latency_ms=250)
     assert len(trades) == 1
     trade = trades[0]
@@ -91,26 +93,51 @@ def test_same_orderbook_gives_more_market_fills_but_worse_price(tmp_path):
     assert summary["market_ioc"]["conditional_net_pnl_usdt"] is None
 
 
-def test_replay_waits_for_new_book_event_and_uses_incremental_updates(tmp_path):
+def test_replay_uses_only_book_available_at_arrival_before_future_delta(tmp_path):
     archive = make_archive(tmp_path, [
-        orderbook(T0 + 100),
+        orderbook(T0 + 2200),
         orderbook(T0 + 2400, "delta", bids=[], asks=[["100.05", "0"]]),
     ])
     trades = replay_archive(archive, [signal()], latency_ms=250)
-    assert trades[0]["book_ts_ms"] == T0 + 2400
+    assert trades[0]["status"] == "modeled"
+    assert trades[0]["book_ts_ms"] == T0 + 2200
+    assert trades[0]["send_ts_ms"] == T0 + 2250
+    assert trades[0]["book_age_ms"] == 50
+    assert trades[0]["limit_ioc"]["filled_quantity"] == pytest.approx(0.7)
+
+
+def test_exact_arrival_timestamp_sees_instantaneous_book_update(tmp_path):
+    archive = make_archive(tmp_path, [
+        orderbook(T0 + 2200),
+        orderbook(T0 + 2250, "delta", bids=[], asks=[["100.05", "0"]]),
+        orderbook(T0 + 2300, "delta", bids=[], asks=[]),
+    ])
+    trades = replay_archive(archive, [signal()], latency_ms=250)
+    assert trades[0]["book_ts_ms"] == T0 + 2250
     assert trades[0]["limit_ioc"]["filled_quantity"] == pytest.approx(0.2)
 
 
+def test_next_snapshot_after_arrival_cannot_supply_future_liquidity(tmp_path):
+    archive = make_archive(tmp_path, [orderbook(T0 + 2300)])
+    trade = replay_archive(archive, [signal()], latency_ms=250)[0]
+    assert trade["status"] == "no_fresh_book_as_of_arrival"
+
+
 def test_signal_expiration_or_stale_book_fails_closed(tmp_path):
-    archive = make_archive(tmp_path, [orderbook(T0 + 10000)])
+    archive = make_archive(tmp_path, [
+        orderbook(T0 + 100),
+        orderbook(T0 + 2300, "delta", bids=[], asks=[]),
+    ])
     assert replay_archive(
         archive, [signal()], max_book_delay_ms=100
-    )[0]["status"] == "unreplayable_book_or_expired"
-    late_archive = make_archive(tmp_path, [orderbook(T0 + 60100)])
+    )[0]["status"] == "no_fresh_book_as_of_arrival"
+    late_archive = make_archive(tmp_path, [
+        orderbook(T0 + 59500), orderbook(T0 + 60100, "delta", bids=[], asks=[]),
+    ])
     assert replay_archive(
-        late_archive, [signal(signal_ts_ms=str(T0 + 59800))], latency_ms=0,
+        late_archive, [signal(signal_ts_ms=str(T0 + 59800))], latency_ms=250,
         max_book_delay_ms=1000,
-    )[0]["status"] == "unreplayable_book_or_expired"
+    )[0]["status"] == "signal_expired_before_arrival"
 
 
 def test_missing_archive_event_is_not_counted_as_unfilled(tmp_path):
@@ -123,7 +150,9 @@ def test_missing_archive_event_is_not_counted_as_unfilled(tmp_path):
 
 
 def test_pnl_only_when_independent_exit_price_provided(tmp_path):
-    archive = make_archive(tmp_path, [orderbook(T0 + 2300)])
+    archive = make_archive(tmp_path, [
+        orderbook(T0 + 2200), orderbook(T0 + 2300, "delta", bids=[], asks=[]),
+    ])
     reports = replay_archive(archive, [signal(exit_price="101")])
     assert reports[0]["market_ioc"]["conditional_net_pnl_usdt"] is not None
     assert reports[0]["limit_ioc"]["conditional_net_pnl_usdt"] is not None
@@ -154,3 +183,9 @@ def test_load_signals_rejects_duplicate_identifiers(tmp_path):
 def test_invalid_expiry_cannot_extend_signal_into_later_minute():
     with pytest.raises(ValueError, match="expiry"):
         signal(signal_expires_ms=str(T0 + 100000))
+
+
+def test_nan_price_cap_is_rejected(tmp_path):
+    archive = make_archive(tmp_path, [orderbook(T0 + 2200)])
+    with pytest.raises(ValueError, match="invalid replay settings"):
+        replay_archive(archive, [signal()], limit_bps=float("nan"))
