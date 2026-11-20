@@ -2,7 +2,6 @@
 
 import numpy as np
 import pandas as pd
-
 from data import SYMBOLS
 from flow_weekly import replay_grid
 from weekly import load
@@ -54,12 +53,12 @@ def scores_for_asset(trade, benchmark, tradable):
     ).shift(freq="15min")
 
 
-def prepare(months):
+def prepare(months, symbols=SYMBOLS):
     tape = []
     scores = []
     btc = load("BTCUSDT", "klines", months)
     benchmark = btc.close.resample("h", label="right").last().pct_change()
-    for symbol in SYMBOLS:
+    for symbol in symbols:
         trade = btc if symbol == "BTCUSDT" else load(symbol, "klines", months)
         mark = load(symbol, "markPriceKlines", months)
         funding = load(symbol, "fundingRate", months)

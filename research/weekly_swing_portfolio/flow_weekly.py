@@ -4,7 +4,6 @@ from itertools import product
 
 import numpy as np
 import pandas as pd
-
 from data import SYMBOLS, archive
 from weekly import episode, load
 
@@ -55,10 +54,10 @@ def hourly_signals(trade, volume):
     ).shift(freq="15min")
 
 
-def prepare(months):
+def prepare(months, symbols=SYMBOLS):
     tape = []
     signals = []
-    for symbol in SYMBOLS:
+    for symbol in symbols:
         trade, mark, funding = (
             load(symbol, kind, months)
             for kind in ("klines", "markPriceKlines", "fundingRate")

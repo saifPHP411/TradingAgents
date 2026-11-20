@@ -4,7 +4,6 @@ import math
 
 import numpy as np
 import pandas as pd
-
 from data import MONTHS, SYMBOLS, archive
 
 START = pd.Timestamp("2025-11-03", tz="UTC")
@@ -116,6 +115,7 @@ def episode(
     stop_atr=None,
     reward_risk=None,
     max_hold_bars=None,
+    symbols=SYMBOLS,
 ):
     end = first + 7 * 96 * scale
     hold_bars = (
@@ -143,10 +143,10 @@ def episode(
                 side = 1 if score > 0 else -1
                 price = tape[a, i, 0] * (1 + side * slip)
                 qty_step, min_value, mm_rate, max_lev, tier_cap = (
-                    specs[SYMBOLS[a]]
+                    specs[symbols[a]]
                     if specs
                     else (
-                        STEP[SYMBOLS[a]],
+                        STEP[symbols[a]],
                         100 if a == 0 else 20 if a == 1 else 5,
                         0.005,
                         50,
@@ -219,7 +219,7 @@ def episode(
                 {
                     "entry": int(opened),
                     "exit": int(i),
-                    "symbol": SYMBOLS[a],
+                    "symbol": symbols[a],
                     "side": int(side),
                     "qty": float(qty),
                     "entry_price": float(price),
