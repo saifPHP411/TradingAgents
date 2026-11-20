@@ -1,4 +1,4 @@
-"""Two-week exploratory multi-strategy study on historical Binance USD-M 1m bars.
+"""Exploratory multi-strategy study on historical Binance USD-M 1m bars.
 
 Strictly research only. Uses completed-minute signals, next-minute open fills,
 conservative stop-first OHLC exits, actual public archive candles and estimated
@@ -32,6 +32,15 @@ STRATEGIES = {
     "ema9_ema21_rsi_momentum": (0.0040, 0.0080),
     "bollinger_rsi_reversion": (0.0045, 0.0060),
     "donchian20_breakout": (0.0055, 0.0100),
+    # Predeclared, lower-frequency 1m-executed strategies with longer holds.
+    "ema60_rsi_pullback": (0.0060, 0.0120),
+    "donchian_15m_trend": (0.0080, 0.0180),
+    "vwap_15m_reclaim": (0.0060, 0.0120),
+}
+HOLD_BY_STRATEGY = {
+    "ema60_rsi_pullback": 180,
+    "donchian_15m_trend": 240,
+    "vwap_15m_reclaim": 120,
 }
 
 
@@ -110,9 +119,31 @@ def indicators(bars: list[Bar]) -> dict[str, list[float]]:
     ema9 = [close[0]]
     ema21 = [close[0]]
     alpha9, alpha21 = 2 / 10, 2 / 22
+    ema60 = [close[0]]
+    ema240 = [close[0]]
     for price in close[1:]:
         ema9.append(ema9[-1] * (1 - alpha9) + price * alpha9)
         ema21.append(ema21[-1] * (1 - alpha21) + price * alpha21)
+        ema60.append(ema60[-1] * (1 - 2 / 61) + price * (2 / 61))
+        ema240.append(ema240[-1] * (1 - 2 / 241) + price * (2 / 241))
+    # Anchored UTC-session VWAP; each value includes only the current and past bars.
+    vwap = []
+    session = None
+    cumulative_price_volume = 0.0
+    cumulative_volume = 0.0
+    for bar in bars:
+        day = bar.ms // (86_400_000)
+        if day != session:
+            session = day
+            cumulative_price_volume = 0.0
+            cumulative_volume = 0.0
+        typical = (bar.high + bar.low + bar.close) / 3
+        cumulative_price_volume += typical * bar.volume
+        cumulative_volume += bar.volume
+        vwap.append(
+            cumulative_price_volume / cumulative_volume
+            if cumulative_volume else bar.close
+        )
     rsi = [50.0] * len(close)
     gains = losses = 0.0
     for i in range(1, len(close)):
@@ -129,7 +160,11 @@ def indicators(bars: list[Bar]) -> dict[str, list[float]]:
             losses = (13 * losses + loss) / 14
         if i >= 14:
             rsi[i] = (100 * gains / (gains + losses)) if gains + losses else 50.0
-    return {"ema9": ema9, "ema21": ema21, "rsi": rsi}
+    return {
+        "ema9": ema9, "ema21": ema21,
+        "ema60": ema60, "ema240": ema240, "vwap": vwap,
+        "rsi": rsi,
+    }
 
 
 def signal(bars: list[Bar], feat: dict, i: int, strategy: str) -> int:
@@ -166,6 +201,55 @@ def signal(bars: list[Bar], feat: dict, i: int, strategy: str) -> int:
         if close > previous_high and 55 < rsi < 85:
             return 1
         if close < previous_low and 15 < rsi < 45:
+            return -1
+    elif strategy == "ema60_rsi_pullback":
+        # Evaluated only at five-minute closing bars (next minute executes).
+        if (i + 1) % 5:
+            return 0
+        fast, slow = feat["ema60"], feat["ema240"]
+        body_pct = abs(close - bars[i].open) / close
+        if not 0.0001 <= body_pct <= 0.008:
+            return 0
+        if (
+            fast[i] > slow[i] and close > slow[i]
+            and bars[i - 1].close <= fast[i - 1] and close > fast[i]
+            and 50 <= rsi <= 70
+        ):
+            return 1
+        if (
+            fast[i] < slow[i] and close < slow[i]
+            and bars[i - 1].close >= fast[i - 1] and close < fast[i]
+            and 30 <= rsi <= 50
+        ):
+            return -1
+    elif strategy == "donchian_15m_trend":
+        # 15-minute close, previous 3h high/low, 1h/4h EMA regime.
+        if (i + 1) % 15:
+            return 0
+        fast, slow = feat["ema60"][i], feat["ema240"][i]
+        previous_high = max(bar.high for bar in bars[i - 180:i])
+        previous_low = min(bar.low for bar in bars[i - 180:i])
+        recent_volume = sum(bar.volume for bar in bars[i - 14:i + 1])
+        baseline_volume = sum(bar.volume for bar in bars[i - 60:i]) / 4
+        if recent_volume < baseline_volume * 1.1:
+            return 0
+        if fast > slow and close > previous_high and 56 <= rsi <= 85:
+            return 1
+        if fast < slow and close < previous_low and 15 <= rsi <= 44:
+            return -1
+    elif strategy == "vwap_15m_reclaim":
+        if (i + 1) % 15:
+            return 0
+        vwap, ema60, ema240 = feat["vwap"], feat["ema60"], feat["ema240"]
+        if (
+            ema60[i] > ema240[i] and close > vwap[i]
+            and bars[i - 1].close <= vwap[i - 1] and 52 <= rsi <= 72
+        ):
+            return 1
+        if (
+            ema60[i] < ema240[i] and close < vwap[i]
+            and bars[i - 1].close >= vwap[i - 1] and 28 <= rsi <= 48
+        ):
             return -1
     else:
         raise ValueError("unknown predeclared strategy")
@@ -217,7 +301,10 @@ def simulate_week(
             stop, target = position["stop"], position["target"]
             is_stop = bar.low <= stop if direction > 0 else bar.high >= stop
             is_target = bar.high >= target if direction > 0 else bar.low <= target
-            deadline = i - position["entry_idx"] >= HOLD_MINUTES - 1
+            deadline = (
+                i - position["entry_idx"]
+                >= HOLD_BY_STRATEGY.get(strategy, HOLD_MINUTES) - 1
+            )
             is_final = i == end - 1
             if is_stop or is_target or deadline or is_final:
                 # Worst-case within-candle exit: stop wins any stop/target tie.
