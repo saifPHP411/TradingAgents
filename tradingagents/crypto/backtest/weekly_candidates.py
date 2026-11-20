@@ -36,11 +36,19 @@ STRATEGIES = {
     "ema60_rsi_pullback": (0.0060, 0.0120),
     "donchian_15m_trend": (0.0080, 0.0180),
     "vwap_15m_reclaim": (0.0060, 0.0120),
+    # Predeclared, cost-aware event studies from volatility and session-return
+    # hypotheses; not tuned on the October/November evaluation windows.
+    "volatility_spike_5m_long_12h": (0.0200, 0.0350),
+    "hourly_impulse_momentum_6h": (0.0150, 0.0300),
+    "hourly_impulse_reversal_6h": (0.0150, 0.0300),
 }
 HOLD_BY_STRATEGY = {
     "ema60_rsi_pullback": 180,
     "donchian_15m_trend": 240,
     "vwap_15m_reclaim": 120,
+    "volatility_spike_5m_long_12h": 720,
+    "hourly_impulse_momentum_6h": 360,
+    "hourly_impulse_reversal_6h": 360,
 }
 
 
@@ -254,6 +262,38 @@ def signal(bars: list[Bar], feat: dict, i: int, strategy: str) -> int:
             and bars[i - 1].close >= vwap[i - 1] and 28 <= rsi <= 48
         ):
             return -1
+    elif strategy == "volatility_spike_5m_long_12h":
+        # UTC-aligned five-minute close. The signal is volatility-only and
+        # long-only; execution happens at the next minute's open. Benchmark
+        # against zero-cost and stress models before considering deployment.
+        if (i + 1) % 5 or i < 120:
+            return 0
+        impulse = abs(close / bars[i - 5].close - 1)
+        baseline = mean(
+            abs(bars[k].close / bars[k - 5].close - 1)
+            for k in range(i - 5, i - 65, -5)
+        )
+        current_volume = sum(bar.volume for bar in bars[i - 4:i + 1])
+        prior_volume = sum(bar.volume for bar in bars[i - 64:i - 4]) / 12
+        if (
+            impulse >= 0.008 and impulse > 2.0 * baseline
+            and current_volume >= 1.2 * prior_volume and current_volume > 0
+        ):
+            return 1
+    elif strategy in {"hourly_impulse_momentum_6h", "hourly_impulse_reversal_6h"}:
+        # Preceding full 60-minute return and traded volume, with previous
+        # four completed hours for the volume baseline. No forward bars.
+        if (i + 1) % 60 or i < 360:
+            return 0
+        hourly_return = close / bars[i - 60].close - 1
+        if not 0.012 <= abs(hourly_return) <= 0.08:
+            return 0
+        current_volume = sum(bar.volume for bar in bars[i - 59:i + 1])
+        previous_volume = sum(bar.volume for bar in bars[i - 299:i - 59]) / 4
+        if current_volume < 1.2 * previous_volume or current_volume <= 0:
+            return 0
+        direction = 1 if hourly_return > 0 else -1
+        return direction if strategy == "hourly_impulse_momentum_6h" else -direction
     else:
         raise ValueError("unknown predeclared strategy")
     return 0
