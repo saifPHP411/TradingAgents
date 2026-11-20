@@ -24,6 +24,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - sample: september-4weeks
+            start: "2026-09-06"
+            days: 28
+            symbols: "BTCUSDT XRPUSDT ETHUSDT LTCUSDT"
           - sample: october-4weeks
             start: "2026-10-04"
             days: 28
@@ -58,7 +62,7 @@ jobs:
           retention-days: 14
 
   goal-audit:
-    name: Cross-check net $50/week and win rate against account audit
+    name: Cross-check 10 weeks against $50 net-profit audit
     needs: research
     runs-on: ubuntu-latest
     timeout-minutes: 6
@@ -77,6 +81,7 @@ jobs:
         run: |
           python tradingagents/crypto/backtest/weekly_goal_bridge.py \
             --input \
+              downloaded/weekly-candidates-september-4weeks.json \
               downloaded/weekly-candidates-october-4weeks.json \
               downloaded/weekly-candidates-november-2weeks.json \
             --output artifacts/weekly-goal-crosscheck.json
