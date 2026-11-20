@@ -1,0 +1,93 @@
+name: Exploratory daily cross-sectional $50-net weekly trial
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/weekly-relative-strength.yml"
+      - "tradingagents/crypto/backtest/weekly_relative_strength.py"
+      - "tradingagents/crypto/backtest/weekly_goal_bridge.py"
+      - "tradingagents/crypto/backtest/weekly_goal.py"
+      - "tests/test_weekly_relative_strength.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ranked-study:
+    name: Cross-sectional UTC-day trial (${{ matrix.period }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - period: august-5weeks
+            start: "2026-08-02"
+            days: 35
+          - period: september-4weeks
+            start: "2026-09-06"
+            days: 28
+          - period: october-4weeks
+            start: "2026-10-04"
+            days: 28
+          - period: november-2weeks
+            start: "2026-11-01"
+            days: 14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Historical USD-M archives, no Bybit account access or orders
+        env:
+          START: ${{ matrix.start }}
+          DAYS: ${{ matrix.days }}
+          PERIOD: ${{ matrix.period }}
+        run: |
+          python tradingagents/crypto/backtest/weekly_relative_strength.py \
+            --start "$START" --days "$DAYS" \
+            --symbols BTCUSDT ETHUSDT XRPUSDT LTCUSDT \
+            --output "artifacts/cross-sectional-${PERIOD}.json"
+      - name: Upload all no-order simulated weekly ledgers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-sectional-${{ matrix.period }}
+          path: artifacts/cross-sectional-${{ matrix.period }}.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  strict-audit:
+    name: Validate 15 weeks of net account profit, costs and evidence gaps
+    runs-on: ubuntu-latest
+    needs: ranked-study
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Download every period artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cross-sectional-*
+          path: downloaded
+          merge-multiple: true
+      - name: Cross-check all three strategies and all cost models
+        run: |
+          python tradingagents/crypto/backtest/weekly_goal_bridge.py \
+            --input \
+              downloaded/cross-sectional-august-5weeks.json \
+              downloaded/cross-sectional-september-4weeks.json \
+              downloaded/cross-sectional-october-4weeks.json \
+              downloaded/cross-sectional-november-2weeks.json \
+            --output artifacts/cross-sectional-net-profit-audit.json
+      - name: Preserve evidence and honest rejection states
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-sectional-weekly-net-profit-evidence
+          path: artifacts/cross-sectional-net-profit-audit.json
+          retention-days: 14
+          if-no-files-found: warn
