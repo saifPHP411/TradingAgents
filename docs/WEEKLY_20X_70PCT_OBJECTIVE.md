@@ -65,7 +65,7 @@ positions, margin and competing trades. It reports **every nonoverlapping
 7-day week** rather than selecting the best-looking one. Its evidence gate
 requires:
 
-- Each trial opens with 50 USDT and closes at or above 1,000 USDT. Report independent trials in chronological order in `weekly_runs`. Gaps between seven-day trials are permitted.
+- Each trial opens with 50 USDT and closes at or above 1,000 USDT. Report independent trials in chronological order in `weekly_runs`. Gaps may be included for diagnostic review, but an unexamined gap blocks the repeatability acceptance gate.
 - Closed net-of-cost trade win rate >=70%.
 - At least 30 closed trades per week.
 - No liquidations in any qualifying week.
@@ -160,8 +160,8 @@ commission does not cure its directional signal.
 For the literal question "Can 50 USDT become 1,000 USDT in a week?",
 the audit supports a top-level `weekly_runs` list. Each element contains
 its own eight daily `account_equity` checkpoints and complete
-`closed_trades` array. All four or more historical trials are *chronologically
-consecutive*, **each independently resets to 50 USDT**, and all account
+`closed_trades` array. Four or more fully evaluated historical trials should be *chronologically
+consecutive* for repeatability acceptance; **each independently resets to 50 USDT**, and all account
 positions must be flat at each week's start and end. Trade IDs must be globally
 unique across the trials.
 
@@ -171,3 +171,47 @@ a **50 -> 1,000 USDT weekly experiment**, not infinite capital scaling.
 The separate original account-equity mode can evaluate a real continuously
 compounding account, but requires appropriate actual portfolio evidence.
 Neither mode asserts that a one-week historical success guarantees repetition.
+
+## Codex PR #22 continuation — integrated research evidence audit
+
+The original weekly-candidate research output was not wired into the strict
+account-equity acceptance gate. The new standalone module
+`tradingagents/crypto/backtest/weekly_goal_bridge.py` fixes that gap.
+
+The `.github/workflows/weekly-candidates.yml` workflow now:
+
+1. Replays all six fixed families in October (four weeks) and November (two
+   weeks), across four assets in a single-account, no-orders simulation.
+2. Uploads the raw JSON artifacts, preserving every simulated closed trade,
+   daily account-equity checkpoint, and each of three cost assumptions.
+3. Downloads **both** JSON artifacts into a follow-on `goal-audit` CI job.
+4. Replays all six weeks for every strategy/scenario through the
+   `weekly_goal.py` independent-week audit and publishes an additional
+   `historical-weekly-goal-crosscheck` JSON artifact.
+5. Explicitly marks venue order fills, Bybit quantity/step filters, funding,
+   tiered liquidation accounting, and untouched holdout as *unverified*.
+   Zero-cost scenarios additionally report missing trading-cost evidence.
+
+This is **18 comparisons × 6 weeks = 108 weekly strategy/cost checks**.
+The first integrated run
+[GitHub Actions #44742540789](https://github.com/saifPHP411/TradingAgents/actions/runs/44742540789)
+completed successfully: **zero of 108** simulation weeks met both the
+20× account-growth and 70% net-winning-trade targets simultaneously.
+All candidate orders remain hypothetical, not exchange fills.
+
+### Anti-cherry-picking reinforcement
+
+Codex PR #22 originally allowed independent historical weeks with gaps.
+Gaps are still valid for *diagnostic* research, but cherry-picking favorable
+weeks cannot support a repeatability claim: the updated weekly gate includes
+`untested_gaps_days` and requires no unexamined gap to pass.
+Similarly, a trailing partial week is disclosed and prevents complete
+historical evidence approval until the remaining days are examined. Existing
+research outcomes are unchanged; only evidence standards are stricter.
+
+This pipeline is **not** a Bybit Demo account authorization. The official
+Bybit public instrument/ticker check remains inaccessible from the tested
+GitHub Actions runner (HTTP 403 on two documented hosts), and both Railway
+services were observed offline during read-only checking. Do not bypass
+geographic restrictions or assume $10 notional will pass account-specific
+minimums.
