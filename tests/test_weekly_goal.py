@@ -16,6 +16,10 @@ QUALITY = {
     "liquidations_included": True,
     "unrealized_pnl_included": True,
     "no_external_cash_flows": True,
+    "venue_filters_enforced": True,
+    "position_risk_limits_enforced": True,
+    "no_lookahead": True,
+    "order_fills_verified_or_conservatively_modeled": True,
 }
 
 
@@ -64,13 +68,14 @@ def fixture_report(
 
 def test_four_synthetic_weeks_can_meet_goal_but_never_auto_trade():
     audit = audit_weekly_goal(fixture_report())
-    assert audit["evidence_passed"]
+    assert audit["reported_evidence_gate_passed"]
     assert audit["evaluated_complete_disjoint_weeks"] == 4
     assert audit["weeks_meeting_both_targets"] == 4
     assert audit["windows"][0]["normalized_50_usdt_final"] == pytest.approx(1000)
     assert audit["windows"][0]["win_rate_pct"] == pytest.approx(70)
     assert audit["windows"][0]["net_return_pct"] == pytest.approx(1900)
-    assert audit["status"] == "historical_evidence_passed_not_forward_verified"
+    assert audit["status"] == "reported_historical_goal_passed_not_forward_verified"
+    assert not audit["independently_verified_by_this_tool"]
     assert not audit["auto_deployment_allowed"]
     assert not audit["orders_submitted"]
 
@@ -79,14 +84,14 @@ def test_one_lucky_week_is_not_independent_validation():
     audit = audit_weekly_goal(fixture_report(weeks=1))
     assert audit["weeks_meeting_both_targets"] == 1
     assert audit["status"] == "goal_not_validated"
-    assert not audit["evidence_passed"]
+    assert not audit["reported_evidence_gate_passed"]
 
 
 def test_outcome_selection_fails_when_other_weeks_lose():
     audit = audit_weekly_goal(fixture_report(multiples=[20, 0.98, 1.02, 1.01]))
     assert audit["weeks_meeting_both_targets"] == 1
     assert not audit["all_complete_weeks_pass"]
-    assert not audit["evidence_passed"]
+    assert not audit["reported_evidence_gate_passed"]
 
 
 def test_seventy_percent_wins_does_not_imply_twentyfold_return():
@@ -97,11 +102,11 @@ def test_seventy_percent_wins_does_not_imply_twentyfold_return():
 
 def test_small_or_low_accuracy_samples_fail():
     few = audit_weekly_goal(fixture_report(trades_per_week=9, wins=8))
-    assert not few["evidence_passed"]
+    assert not few["reported_evidence_gate_passed"]
     assert all(row["closed_trades"] == 9 for row in few["windows"])
     low = audit_weekly_goal(fixture_report(wins=20))
     assert all(row["win_rate_pct"] < 70 for row in low["windows"])
-    assert not low["evidence_passed"]
+    assert not low["reported_evidence_gate_passed"]
 
 
 def test_missing_cost_evidence_prevents_approval():
@@ -110,7 +115,7 @@ def test_missing_cost_evidence_prevents_approval():
     audit = audit_weekly_goal(fixture_report(quality=quality))
     assert audit["weeks_meeting_both_targets"] == 4
     assert "slippage_included" in audit["quality_claims_missing_or_unverified"]
-    assert not audit["evidence_passed"]
+    assert not audit["reported_evidence_gate_passed"]
 
 
 def test_deposits_or_mismatch_between_trades_and_equity_cannot_pass():
@@ -118,7 +123,7 @@ def test_deposits_or_mismatch_between_trades_and_equity_cannot_pass():
     sample["account_equity"][-1]["equity_usdt"] *= 2
     audit = audit_weekly_goal(sample)
     assert not audit["windows"][-1]["account_trade_pnl_reconciled"]
-    assert not audit["evidence_passed"]
+    assert not audit["reported_evidence_gate_passed"]
 
 
 def test_overnight_positions_at_week_boundary_prevent_passing():
@@ -127,7 +132,7 @@ def test_overnight_positions_at_week_boundary_prevent_passing():
     audit = audit_weekly_goal(sample)
     assert not audit["windows"][0]["flat_week_boundaries"]
     assert not audit["windows"][1]["flat_week_boundaries"]
-    assert not audit["evidence_passed"]
+    assert not audit["reported_evidence_gate_passed"]
 
 
 def test_liquidation_disqualifies_a_week():
@@ -135,7 +140,7 @@ def test_liquidation_disqualifies_a_week():
     sample["closed_trades"][0]["liquidated"] = True
     audit = audit_weekly_goal(sample)
     assert audit["windows"][0]["liquidations"] == 1
-    assert not audit["evidence_passed"]
+    assert not audit["reported_evidence_gate_passed"]
 
 
 def test_rejects_missing_daily_sample_or_non_utc_midnight():
