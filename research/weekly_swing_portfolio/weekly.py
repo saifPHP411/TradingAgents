@@ -115,8 +115,12 @@ def episode(
     risk_budget=None,
     stop_atr=None,
     reward_risk=None,
+    max_hold_bars=None,
 ):
     end = first + 7 * 96 * scale
+    hold_bars = (
+        max_hold_bars if max_hold_bars is not None else (96 if model == 2 else 192)
+    )
     balance = peak = 50.0
     dd = 0.0
     slot = None
@@ -199,7 +203,7 @@ def episode(
                 fill = min(op, stop) if side == 1 else max(op, stop)
             elif side * (move_good - target) >= 0:
                 fill = target
-            elif i == end - 1 or i - opened + 1 >= (96 if model == 2 else 192) * scale:
+            elif i == end - 1 or i - opened + 1 >= hold_bars * scale:
                 fill = cl
             else:
                 marked = (

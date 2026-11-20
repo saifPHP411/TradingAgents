@@ -1,0 +1,9 @@
+# Hourly trade flow and Bitcoin-relative return
+
+Four hourly rules were evaluated using BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT and DOGEUSDT USD-M perpetual futures. Aggressive flow follows directional pressure inferred from the taker buy share of traded quote volume. Reversal after absorption tests confirmation in the opposite direction after a large pressure imbalance fails to move price. The relative-return rules trade the continuation or reversal of an altcoin move after subtracting its trailing beta exposure to BTC.
+
+Only completed hourly candles contribute signals, and the entry is delayed by 15 minutes. Each weekly scenario starts at 50 USDT. The existing accounting model applies fees, historical funding, slippage and liquidation tests using mark candles. Fills are simulated. Leverage is 10x, 25x or 50x. The stop is 1.5 ATR, targets are 0.8, 1.5 or 2.5 times the stop distance, and maximum hold is six or 24 hours. The four historical blocks cover 30 distinct weeks across 2024. Of 2,160 scenario-weeks, including base and stress cost assumptions, none finished at 1,000 USDT.
+
+The August 5 flow result ended at 207.10 with three winning trades, and the November 11 relative momentum result ended at 284.64 with 11 wins out of 20. Replaying both weeks with one-minute execution and mark data reproduced their base closing balances. The two parameter sets were chosen after observing the coarse results. Across the full eight evaluation weeks the flow configuration won 14 of 42 trades with median ending balance 18.22. Across the full six evaluation weeks the relative momentum configuration won 62 of 126 trades with median ending balance 48.50.
+
+Run `python flow_weekly.py`, `python relative_weekly.py`, and `python hourly_minute.py` to reproduce the results. The compressed CSV contains the combined grid.
