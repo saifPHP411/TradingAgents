@@ -112,3 +112,36 @@ consecutive weeks, not pooled trade win rate or the best historical week.
 **Current status:** no end-to-end trade/equity dataset in this branch has
 demonstrated the 20×/70% goal. The tool is a rigorous screen only.
 Trading worker remains disabled; no PR merge or Railway deployment.
+
+## New two-week historical candidate probe (exploratory)
+
+The accompanying read-only module is
+`tradingagents/crypto/backtest/weekly_candidates.py`. Its GitHub Actions
+workflow is `.github/workflows/weekly-candidates.yml`.
+
+It requests official Binance USD-M perpetual traded 1m OHLCV daily archives
+for **BTCUSDT and XRPUSDT, November 1–14, 2026**, plus one prior warmup day.
+This is **not** the Bybit data feed and is **not** an untouched holdout.
+It replays three fixed signal families: EMA9/21+RSI momentum, Bollinger+RSI
+reversion, and Donchian20 volume-confirmed breakout. All decisions use
+completed bars; entries use the **next** 1m open. Stop/target collisions are
+resolved stop-first. Every individual seven-day trial resets one shared
+simulated account to 50 USDT, with a single position at a time and maximum
+notional of 20% of equity (2x). Modeled taker commission is 5.5 bps per
+side, with 3 bps additional adverse fill impact per side.
+
+```bash
+python tradingagents/crypto/backtest/weekly_candidates.py \
+  --start 2026-11-01 --days 14 \
+  --symbols BTCUSDT XRPUSDT \
+  --output artifacts/weekly-candidate-probe.json
+```
+
+**Caveats:** tick size/lot step, minimum executable notional, genuine Bybit
+slippage, partial IOC fills, funding and Bybit liquidation tiers are not
+verified by public Binance candle ZIPs. Any reported trades are modeled,
+not exchange-confirmed. The results must be labeled exploratory and
+must **never** be promoted to Demo execution based on this study alone.
+The strict 20×/70% portfolio gate is a separate evaluator; research
+candidate snapshots here are available for subsequent auditing only after
+its missing venue/funding provenance is resolved.
