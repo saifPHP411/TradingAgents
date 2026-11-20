@@ -104,7 +104,7 @@ coverage, an intraminute historical mark feed, or profitability.
 To check a single symbol locally without downloading the full day:
 
 ```bash
-python -m tradingagents.crypto.backtest.archive_probe \
+python tradingagents/crypto/backtest/archive_probe.py \
   --symbol XRPUSDT --date 2026-10-01 \
   --out results/l2-prefix-XRPUSDT.json
 ```
