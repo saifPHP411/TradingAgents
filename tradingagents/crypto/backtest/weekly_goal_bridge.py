@@ -9,11 +9,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 
-from weekly_goal import audit_weekly_goal
+try:
+    from .weekly_goal import audit_weekly_goal
+except ImportError:  # Standalone GitHub Actions script with no third-party dependencies
+    from weekly_goal import audit_weekly_goal
 
 REQUIRED_SCENARIOS = (
     "zero_cost_upper_bound",
