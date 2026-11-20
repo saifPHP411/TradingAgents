@@ -42,7 +42,7 @@ class Signal:
         exit_price = float(row["exit_price"]) if row.get("exit_price") else None
         if (
             not all(math.isfinite(n) and n > 0 for n in (mark, quantity, tick))
-            or expiry <= ts
+            or expiry != (ts // 60000 + 1) * 60000
             or (exit_price is not None and (not math.isfinite(exit_price) or exit_price <= 0))
         ):
             raise ValueError("invalid price, quantity or signal expiry")
@@ -129,7 +129,7 @@ def replay_archive(
     taker_fee_rate: float = 0.00055,
 ) -> list[dict]:
     """Sample the first book event at/after modeled send; never use an earlier event."""
-    if latency_ms < 0 or max_book_delay_ms < 0 or taker_fee_rate < 0:
+    if latency_ms < 0 or max_book_delay_ms < 0 or not math.isfinite(taker_fee_rate) or taker_fee_rate < 0:
         raise ValueError("invalid replay settings")
     if market_cap_bps is not None and market_cap_bps < 0:
         raise ValueError("invalid market cap")
@@ -282,6 +282,7 @@ def main() -> None:
     if not signals:
         raise SystemExit("No recorded signals; cannot invent historical fills")
     all_results: list[dict] = []
+    covered: set[str] = set()
     for archive in args.archive:
         for symbol in {row.symbol for row in signals}:
             date_prefix = archive.name[:10]
@@ -294,14 +295,18 @@ def main() -> None:
                 and datetime.fromtimestamp(row.signal_ts_ms / 1000, UTC).date().isoformat()
                 == date_prefix
             ]
+            if any(row.signal_id in covered for row in group):
+                raise SystemExit("Duplicate archive coverage for the same signal")
+            covered.update(row.signal_id for row in group)
             all_results.extend(replay_archive(
                 archive, group, latency_ms=args.latency_ms,
                 max_book_delay_ms=args.max_book_delay_ms,
                 market_cap_bps=args.market_cap_bps,
                 taker_fee_rate=args.fee_per_fill,
             ))
-    if not all_results:
-        raise SystemExit("No signals matched the supplied archives")
+    all_results.extend({
+        "signal_id": row.signal_id, "symbol": row.symbol, "status": "missing_archive",
+    } for row in signals if row.signal_id not in covered)
     result = {
         "source": "Bybit linear L2 archive plus recorded signal CSV",
         "notional_reference_usdt": 50,
