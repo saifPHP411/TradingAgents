@@ -1,3 +1,9 @@
+> **HISTORICAL / SUPERSEDED — 20 November 2026.** The 50 → 1,000 USDT
+> objective below is archived for audit purposes only. The current
+> goal is **at least +50 USDT net profit every week**, documented at
+> [WEEKLY_50_USDT_NET_PROFIT_OBJECTIVE.md](WEEKLY_50_USDT_NET_PROFIT_OBJECTIVE.md).
+> Do not use this old target for new strategy selection or Demo readiness.
+
 # 7-day 20× / 70% objective — independent evidence gate
 
 **User's target:** grow one 50 USDT account to at least 1,000 USDT in
