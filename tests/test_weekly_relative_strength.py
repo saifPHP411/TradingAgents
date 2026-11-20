@@ -152,6 +152,8 @@ def test_complete_readonly_study_passes_evidence_bridge_without_demo_approval(
     path.write_text(json.dumps(result), encoding="utf-8")
     audit = compare_artifacts([path])
     assert audit["tested_strategies"] == 3
+    assert not result["target_50_usdt_attainable_under_frozen_daily_rules"]
+    assert result["theoretical_best_weekly_net_profit_no_cost_usdt"] < 6
     assert not audit["demo_ready"]
     assert all(
         row["weeks_meeting_50usdt_profit"] == 0
@@ -163,3 +165,13 @@ def test_complete_readonly_study_passes_evidence_bridge_without_demo_approval(
         for scenarios in result["cost_scenario_comparison"].values()
         for weeks in scenarios.values() for week in weeks
     )
+
+
+
+def test_frozen_rules_cannot_reach_fifty_dollars_even_with_seven_wins():
+    # Mathematical ceiling, assuming all seven entries hit 8% take profit
+    # on 20% of immediately available equity, with *zero* trading costs.
+    ceiling = study.theoretical_weekly_net_profit_ceiling_before_costs()
+    assert ceiling == pytest.approx(50 * (1.016**7 - 1))
+    assert 5 < ceiling < 6
+    assert ceiling < 50
