@@ -1,0 +1,41 @@
+name: Bybit real-time triad public feed read-only probe
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/triad-public-feed-probe.yml"
+      - "tradingagents/crypto/triad_live_shadow.py"
+      - "tradingagents/crypto/triad_consensus.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-stream:
+    name: 25s public WS one-second heartbeat / no trade
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install read-only research websocket client
+        run: python -m pip install -e ".[realtime]"
+      - name: Probe public Bybit linear L1, mark ticker and closed candles
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -m tradingagents.crypto.triad_live_shadow \
+            --symbols BTCUSDT \
+            --max-seconds 25 \
+            --out artifacts/triad-public-feed-status.json
+      - name: Save evidence even when source access is forbidden/unavailable
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: triad-public-stream-25s
+          path: artifacts/triad-public-feed-status.json
+          if-no-files-found: warn
+          retention-days: 14
