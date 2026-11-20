@@ -17,7 +17,6 @@ from tradingagents.crypto.backtest.weekly_pairs import (
     zscores_for_pair,
 )
 
-
 BASE_MS = int(datetime(2026, 10, 3, tzinfo=UTC).timestamp() * 1000)
 
 
