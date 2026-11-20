@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from urllib.error import HTTPError
 
 import pytest
 
@@ -92,3 +93,29 @@ def test_public_gets_are_read_only_and_check_response_identity():
 
     with pytest.raises(ValueError, match="symbol mismatch"):
         fetch_market_object("/v5/market/tickers", "XRPUSDT", transport=wrong_transport)
+
+
+def test_backup_host_is_official_and_provenance_is_recorded():
+    visited = []
+
+    def transport(url):
+        visited.append(url)
+        if url.startswith("https://api.bybit.com"):
+            raise HTTPError(url, 403, "region blocked", {}, None)
+        sample = instrument() if "instruments-info" in url else ticker()
+        return json.dumps({"retCode": 0, "result": {"list": [sample]}}).encode()
+
+    result = probe("XRPUSDT", transport=transport)
+    assert result["source_api_host"] == "https://api.bytick.com"
+    assert result["passes_public_quantity_and_notional_filters"]
+    assert len(visited) == 3
+    assert all("api.bybit.com" in url or "api.bytick.com" in url for url in visited)
+
+
+def test_public_api_rejects_unapproved_host():
+    with pytest.raises(ValueError, match="unsupported"):
+        fetch_market_object(
+            "/v5/market/tickers", "XRPUSDT",
+            host="https://example.com",
+            transport=lambda url: b"{}",
+        )
