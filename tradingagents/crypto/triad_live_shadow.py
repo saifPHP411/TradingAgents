@@ -298,7 +298,7 @@ async def observe_forever(watcher: TriadShadowWatcher) -> None:
                         # but old quotes veto rather than trigger any trade.
                         print(json.dumps(watcher.tick(now_ms=now)), flush=True)
                         next_second = (now // 1000 + 1) * 1000
-        except (OSError, RuntimeError, ConnectionError) as exc:
+        except Exception as exc:  # noqa: BLE001 - all WS disconnects must reconnect
             print(json.dumps({
                 "stream_status": "reconnecting", "error": type(exc).__name__,
                 "orders_submitted": False,
