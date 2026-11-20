@@ -151,16 +151,21 @@ def size_linear_position(
     cost_rate_per_fill: float,
     instrument: LinearPerpetualInstrument,
     risk: PerpetualRiskSettings,
+    notional_reference_price: float | None = None,
 ) -> PositionSize:
     """Size a position under both stop-risk and isolated initial-margin caps.
 
     ``cost_rate_per_fill`` includes one side's commission, half-spread and slippage.
     Stop-risk includes estimated entry and stop-exit costs; it is not just the
     leverage-adjusted notional and never increases the approved size.
+    A higher notional reference can bound margin independently of stop risk.
     """
     equity = _finite_positive(equity, "equity")
     entry_price = _finite_positive(entry_price, "entry_price")
     stop_price = _finite_positive(stop_price, "stop_price")
+    notional_price = entry_price
+    if notional_reference_price is not None:
+        notional_price = max(entry_price, _finite_positive(notional_reference_price, "notional_reference_price"))
     if isinstance(cost_rate_per_fill, bool) or not math.isfinite(cost_rate_per_fill) or cost_rate_per_fill < 0:
         raise ValueError("cost_rate_per_fill must be finite and non-negative")
     if direction not in (-1, 1):
@@ -182,16 +187,16 @@ def size_linear_position(
     margin_notional_cap = equity * risk.max_margin_fraction * risk.leverage
     notional_cap = equity * risk.max_notional_fraction
     cap_notional = min(margin_notional_cap, notional_cap)
-    raw_quantity = min(risk_quantity, cap_notional / entry_price, instrument.max_market_quantity)
+    raw_quantity = min(risk_quantity, cap_notional / notional_price, instrument.max_market_quantity)
     quantity = round_quantity_down(raw_quantity, instrument.quantity_step) if raw_quantity > 0 else 0.0
-    notional = quantity * entry_price
+    notional = quantity * notional_price
     margin = notional / risk.leverage if quantity > 0 else 0.0
     modeled_risk = quantity * per_unit_risk
 
     rejection = None
     if quantity + 1e-12 < instrument.min_quantity:
         rejection = "below_minimum_quantity"
-    elif notional + 1e-9 < instrument.min_notional:
+    elif quantity * entry_price + 1e-9 < instrument.min_notional:
         rejection = "below_minimum_notional"
     elif modeled_risk > risk_budget + 1e-8:
         rejection = "risk_budget_exceeded_after_rounding"
