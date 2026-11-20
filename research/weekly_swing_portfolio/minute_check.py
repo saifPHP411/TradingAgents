@@ -10,9 +10,7 @@ from urllib.request import urlopen
 
 import numpy as np
 import pandas as pd
-
-from data import MONTHS as COARSE_MONTHS
-from data import ROOT, SYMBOLS, archive
+from data import MONTHS as COARSE_MONTHS, ROOT, SYMBOLS, archive
 from weekly import DEV, NAMES, START, WEEKS, episode, setup
 
 MONTHS = ("2026-07", "2026-08", "2026-09", "2026-10")

@@ -10,7 +10,6 @@ from urllib.request import urlopen
 
 import numpy as np
 import pandas as pd
-
 from weekly import SYMBOLS, episode, features
 
 BASE = "https://api.bybitglobal.com/v5/market/"

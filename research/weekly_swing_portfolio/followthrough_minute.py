@@ -5,7 +5,6 @@ from itertools import product
 
 import numpy as np
 import pandas as pd
-
 from data import SYMBOLS
 from followthrough import RULES, prepare
 from minute_check import fetch

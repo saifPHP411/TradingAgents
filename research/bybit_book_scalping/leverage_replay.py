@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
 from external_tape import reference_signal
 from study import WEEK, load
 

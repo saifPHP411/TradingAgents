@@ -3,10 +3,9 @@
 from concurrent.futures import ThreadPoolExecutor
 from itertools import product
 
+import flow_weekly
 import numpy as np
 import pandas as pd
-
-import flow_weekly
 import relative_weekly
 from data import SYMBOLS
 from minute_check import fetch

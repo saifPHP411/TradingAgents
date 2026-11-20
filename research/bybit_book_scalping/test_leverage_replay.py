@@ -1,7 +1,6 @@
 """Regression checks for isolated collateral and forced exits on synthetic quotes."""
 
 import numpy as np
-
 from leverage_replay import position, replay
 
 

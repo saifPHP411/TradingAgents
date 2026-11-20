@@ -6,7 +6,6 @@ from zipfile import ZipFile
 
 import numpy as np
 import pandas as pd
-
 from study import COLS, oracle
 
 

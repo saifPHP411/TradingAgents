@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
 from external_tape import reference_signal
 
 COLS = ["ts", "bid", "ask", "bid_size", "ask_size", "bid5", "ask5"]
