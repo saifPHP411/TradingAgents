@@ -18,7 +18,7 @@ def candidate_week(start: datetime, *, win: bool) -> dict:
     trades = []
     if win:
         wins, count = 21, 30
-        gain = (950.0 + 9.0) / wins
+        gain = (50.0 + 9.0) / wins
         for i in range(count):
             trades.append({
                 "symbol": "BTCUSDT",
@@ -27,7 +27,7 @@ def candidate_week(start: datetime, *, win: bool) -> dict:
                 "net_pnl_usdt": gain if i < wins else -1.0,
                 "exit_reason": "modeled_exit",
             })
-    closing = 1000.0 if win else 50.0
+    closing = 100.0 if win else 50.0
     snapshots = [
         {
             "timestamp": (start + timedelta(days=i)).isoformat(),
@@ -43,7 +43,7 @@ def candidate_week(start: datetime, *, win: bool) -> dict:
         "final_equity_usdt": closing,
         "trades": len(trades),
         "win_rate_pct": 70.0 if win else None,
-        "net_return_pct": 1900.0 if win else 0.0,
+        "net_return_pct": 100.0 if win else 0.0,
         "account_equity": snapshots,
         "closed_trades": trades,
     }
@@ -77,14 +77,15 @@ def write(path: Path, value: dict) -> Path:
     return path
 
 
-def test_four_week_research_stays_unapproved_even_with_20x_claims(tmp_path):
+def test_four_week_research_stays_unapproved_even_with_50usd_profit_claims(tmp_path):
     path = write(tmp_path / "one.json", artifact(BASE, number_weeks=4, win=True))
     result = compare_artifacts([path])
     assert result["tested_strategies"] == 1
     assert not result["independently_verified_execution"]
     assert not result["demo_ready"]
     realistic = result["strategy_comparisons"]["donchian_15m_trend"]["realistic_estimate"]
-    assert realistic["weeks_meeting_20x_and_70pct"] == 4
+    assert realistic["weeks_meeting_50usdt_profit_and_70pct"] == 4
+    assert realistic["weeks_meeting_50usdt_profit"] == 4
     assert realistic["closed_trades"] == 120
     assert realistic["audit"]["reported_evidence_gate_passed"] is False
     assert realistic["audit"]["weeks_meeting_both_targets"] == 4
@@ -103,7 +104,7 @@ def test_all_weeks_and_separate_artifacts_are_checked(tmp_path):
     result = compare_artifacts([october, november])
     checked = result["strategy_comparisons"]["donchian_15m_trend"]["realistic_estimate"]
     assert checked["tested_seven_day_periods"] == 6
-    assert checked["weeks_meeting_20x_and_70pct"] == 0
+    assert checked["weeks_meeting_50usdt_profit_and_70pct"] == 0
     assert checked["weeks_net_positive"] == 0
     assert checked["closed_trades"] == 0
 
@@ -126,7 +127,7 @@ def test_rejects_missing_trades_and_pnl_mismatch(tmp_path):
     with pytest.raises(ValueError, match="count"):
         compare_artifacts([write(tmp_path / "missing-trade.json", fake)])
     week["trades"] = len(week["closed_trades"])
-    week["final_equity_usdt"] = 999.0
+    week["final_equity_usdt"] = 99.0
     with pytest.raises(ValueError, match="last snapshot"):
         compare_artifacts([write(tmp_path / "mismatch.json", fake)])
 
