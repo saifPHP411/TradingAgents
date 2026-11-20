@@ -16,6 +16,7 @@ from tradingagents.crypto.backtest.weekly_candidates import (
     parse_candles,
     signal,
     simulate_week,
+    screen_20x_70pct,
 )
 
 BASE_MS = int(datetime(2026, 10, 31, tzinfo=UTC).timestamp() * 1000)
@@ -178,3 +179,33 @@ def test_daily_vwap_only_contains_current_session_prices():
     bars[1440] = Bar(bars[1440].ms, 200, 202, 198, 200, 1000)
     features = indicators(bars)
     assert features["vwap"][1440] == pytest.approx(200)
+
+
+
+def test_weekly_goal_screen_rejects_seventy_percent_when_return_is_small():
+    modeled = {
+        "start": "2026-10-04T00:00:00+00:00",
+        "end_exclusive": "2026-10-11T00:00:00+00:00",
+        "trades": 100,
+        "win_rate_pct": 71,
+        "final_equity_usdt": 51.75,
+    }
+    result = screen_20x_70pct([modeled])
+    assert result["weeks_meeting_both_goals"] == 0
+    assert not result["sufficient_four_week_sample"]
+    assert not result["goal_independently_validated"]
+
+
+def test_weekly_goal_screen_never_promotes_lucky_week_without_four():
+    modeled = {
+        "start": "2026-10-04T00:00:00+00:00",
+        "end_exclusive": "2026-10-11T00:00:00+00:00",
+        "trades": 31,
+        "win_rate_pct": 70.0,
+        "final_equity_usdt": 1000.0,
+    }
+    result = screen_20x_70pct([modeled])
+    assert result["weeks_meeting_both_goals"] == 1
+    assert not result["sufficient_four_week_sample"]
+    assert not result["goal_independently_validated"]
+    assert result["results_from_modeled_candles_only"]
