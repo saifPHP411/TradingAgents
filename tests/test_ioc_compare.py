@@ -104,10 +104,12 @@ def test_replay_waits_for_new_book_event_and_uses_incremental_updates(tmp_path):
 def test_signal_expiration_or_stale_book_fails_closed(tmp_path):
     archive = make_archive(tmp_path, [orderbook(T0 + 10000)])
     assert replay_archive(
-        archive, [signal(signal_expires_ms=str(T0 + 2500))]
-    )[0]["status"] == "unreplayable_book_or_expired"
-    assert replay_archive(
         archive, [signal()], max_book_delay_ms=100
+    )[0]["status"] == "unreplayable_book_or_expired"
+    late_archive = make_archive(tmp_path, [orderbook(T0 + 60100)])
+    assert replay_archive(
+        late_archive, [signal(signal_ts_ms=str(T0 + 59800))], latency_ms=0,
+        max_book_delay_ms=1000,
     )[0]["status"] == "unreplayable_book_or_expired"
 
 
@@ -147,3 +149,8 @@ def test_load_signals_rejects_duplicate_identifiers(tmp_path):
         writer.writerow(row)
     with pytest.raises(ValueError, match="unique"):
         load_signals(path)
+
+
+def test_invalid_expiry_cannot_extend_signal_into_later_minute():
+    with pytest.raises(ValueError, match="expiry"):
+        signal(signal_expires_ms=str(T0 + 100000))
