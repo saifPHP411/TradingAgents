@@ -102,6 +102,8 @@ def audit_weekly_goal(report: dict) -> dict:
             raise ValueError("trade_id must be unique and nonempty")
         identifiers.add(identifier)
         when = _time(raw.get("closed_at"), f"closed_trades[{index}].closed_at")
+        if not snapshots[0][0] <= when < snapshots[-1][0]:
+            raise ValueError("closed trade lies outside the account snapshot interval")
         net = _number(raw.get("net_pnl_usdt"), "net_pnl_usdt")
         liquidated = raw.get("liquidated", False)
         if not isinstance(liquidated, bool):
@@ -126,11 +128,18 @@ def audit_weekly_goal(report: dict) -> dict:
         win_rate = wins / count * 100 if count else None
         growth = closing / opening if opening else 0.0
         week_points = [equity for _, equity, _ in snapshots[start:start + DAYS_PER_WEEK + 1]]
-        trade_net_pnl = sum(pnl for pnl, _ in week_trades)
-        reconciled = math.isclose(
-            trade_net_pnl, closing - opening,
-            abs_tol=max(0.01, opening * 0.0001), rel_tol=0,
-        )
+        trade_net_pnl = math.fsum(pnl for pnl, _ in week_trades)
+        # Cash changes between any two flat checkpoints must be attributable
+        # to closed trades. A deposit and later withdrawal can net to zero
+        # over seven days while fabricating the buyable size midweek.
+        flat_points = [
+            (ts, balance) for ts, balance, positions in snapshots[start:start + DAYS_PER_WEEK + 1]
+            if positions == 0
+        ]
+        reconciled = math.isclose(trade_net_pnl, closing - opening, abs_tol=1e-8, rel_tol=1e-12)
+        for (t0, balance0), (t1, balance1) in zip(flat_points, flat_points[1:], strict=False):
+            interval_net = math.fsum(pnl for when, pnl, _ in trades if t0 <= when < t1)
+            reconciled &= math.isclose(interval_net, balance1 - balance0, abs_tol=1e-8, rel_tol=1e-12)
         flat_boundaries = start_positions == 0 and end_positions == 0
         peak = opening
         sampled_dd = 0.0
@@ -140,7 +149,8 @@ def audit_weekly_goal(report: dict) -> dict:
         pass_goal = (
             count >= MIN_WEEKLY_TRADES
             and win_rate is not None and win_rate >= WIN_RATE_MIN
-            and growth >= TARGET_MULTIPLE
+            and math.isclose(opening, START_USDT, abs_tol=1e-9, rel_tol=0)
+            and closing >= TARGET_USDT
             and liquidations == 0
             and flat_boundaries
             and reconciled
@@ -212,7 +222,7 @@ def audit_weekly_goal(report: dict) -> dict:
 
 
 def audit_isolated_weekly_trials(report: dict) -> dict:
-    """Audit independent 50-USDT replays for consecutive, disjoint weeks.
+    """Audit independent 50-USDT replays for chronologically ordered, disjoint weeks.
 
     This is the correct normalization when a weekly strategy replay starts
     fresh at 50 USDT each week (rather than compounding into millions).
@@ -227,6 +237,7 @@ def audit_isolated_weekly_trials(report: dict) -> dict:
     shared_ids: set[str] = set()
     windows = []
     previous_end = None
+    missing_by_week: set[str] = set()
     for index, week in enumerate(raw):
         snaps = week.get("account_equity")
         trades = week.get("closed_trades")
@@ -241,33 +252,41 @@ def audit_isolated_weekly_trials(report: dict) -> dict:
             if not isinstance(trade_id, str) or not trade_id or trade_id in shared_ids:
                 raise ValueError("trade_id must be globally unique across weekly trials")
             shared_ids.add(trade_id)
+        quality = report.get("data_quality", {})
+        if not isinstance(quality, dict):
+            raise ValueError("data_quality must be an object")
+        week_quality = week.get("data_quality", {})
+        if not isinstance(week_quality, dict):
+            raise ValueError("weekly data_quality must be an object")
+        effective_quality = quality.copy()
+        for key in REQUIRED_QUALITY_FLAGS:
+            if key in week_quality:
+                if not isinstance(week_quality[key], bool):
+                    raise ValueError("weekly data_quality flags must be boolean")
+                # A week can withdraw a global claim but cannot override a
+                # missing or negative claim about the whole protocol.
+                if not week_quality[key]:
+                    effective_quality[key] = False
         result = audit_weekly_goal({
             "initial_equity_usdt": START_USDT,
             "source": report.get("source"),
-            "data_quality": report.get("data_quality"),
+            "data_quality": effective_quality,
             "account_equity": snaps,
             "closed_trades": trades,
         })
+        missing_by_week.update(result["quality_claims_missing_or_unverified"])
         window = result["windows"][0]
         start = _time(window["week_start"], "week_start")
         end = _time(window["week_end_exclusive"], "week_end")
-        if previous_end is not None and start != previous_end:
-            raise ValueError("isolated weekly trials must be consecutive and nonoverlapping")
+        if previous_end is not None and start < previous_end:
+            raise ValueError("isolated weekly trials must be chronological and nonoverlapping")
         if start >= end:
             raise ValueError("weekly trial has invalid date range")
         previous_end = end
         window["trial_number"] = index + 1
         window["capital_reset_for_independent_trial"] = True
         windows.append(window)
-    claimed_quality = report.get("data_quality") or {}
-    if not isinstance(claimed_quality, dict):
-        raise ValueError("data_quality must be an object")
-    if any(key in claimed_quality and not isinstance(claimed_quality[key], bool)
-           for key in REQUIRED_QUALITY_FLAGS):
-        raise ValueError("data_quality flags must be boolean")
-    missing_quality = [
-        key for key in REQUIRED_QUALITY_FLAGS if claimed_quality.get(key) is not True
-    ]
+    missing_quality = [key for key in REQUIRED_QUALITY_FLAGS if key in missing_by_week]
     passed_weeks = sum(item["weekly_target_met"] for item in windows)
     reported_pass = (
         len(windows) >= MIN_INDEPENDENT_WEEKS

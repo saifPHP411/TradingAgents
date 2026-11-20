@@ -65,12 +65,11 @@ positions, margin and competing trades. It reports **every nonoverlapping
 7-day week** rather than selecting the best-looking one. Its evidence gate
 requires:
 
-- Weekly ending/start equity multiple >=20.
+- Each trial opens with 50 USDT and closes at or above 1,000 USDT. Report independent trials in chronological order in `weekly_runs`. Gaps between seven-day trials are permitted.
 - Closed net-of-cost trade win rate >=70%.
 - At least 30 closed trades per week.
 - No liquidations in any qualifying week.
-- Reconciliation of closed P&L against 7-day account equity delta and no open
-  positions at the beginning/end of the week.
+- Closed P&L reconciles between each pair of flat checkpoints and across both flat weekly boundaries. All trades must fall inside the supplied snapshot interval.
 - At least four complete independent seven-day weeks, **all** satisfying
   those criteria. This is an extra robustness gate, not a guarantee of
   future performance.

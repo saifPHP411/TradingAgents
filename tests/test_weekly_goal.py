@@ -56,6 +56,13 @@ def fixture_report(
                 "net_pnl_usdt": winner_net if trade < wins else loser_net,
                 "liquidated": False,
             })
+        for offset, checkpoint in enumerate(checkpoints[-7:], start=1):
+            boundary = T0 + timedelta(days=7 * week + offset)
+            checkpoint["equity_usdt"] = opening + sum(
+                row["net_pnl_usdt"] for row in trades[-trades_per_week:]
+                if datetime.fromisoformat(row["closed_at"]) < boundary
+            )
+        checkpoints[-1]["equity_usdt"] = closing
         opening = closing
     return {
         "initial_equity_usdt": 50,
@@ -66,15 +73,15 @@ def fixture_report(
     }
 
 
-def test_four_synthetic_weeks_can_meet_goal_but_never_auto_trade():
+def test_compounded_capital_does_not_qualify_as_independent_fifty_dollar_trials():
     audit = audit_weekly_goal(fixture_report())
-    assert audit["reported_evidence_gate_passed"]
+    assert not audit["reported_evidence_gate_passed"]
     assert audit["evaluated_complete_disjoint_weeks"] == 4
-    assert audit["weeks_meeting_both_targets"] == 4
+    assert audit["weeks_meeting_both_targets"] == 1
     assert audit["windows"][0]["normalized_50_usdt_final"] == pytest.approx(1000)
     assert audit["windows"][0]["win_rate_pct"] == pytest.approx(70)
     assert audit["windows"][0]["net_return_pct"] == pytest.approx(1900)
-    assert audit["status"] == "reported_historical_goal_passed_not_forward_verified"
+    assert audit["status"] == "goal_not_validated"
     assert not audit["independently_verified_by_this_tool"]
     assert not audit["auto_deployment_allowed"]
     assert not audit["orders_submitted"]
@@ -113,7 +120,7 @@ def test_missing_cost_evidence_prevents_approval():
     quality = QUALITY.copy()
     quality["slippage_included"] = False
     audit = audit_weekly_goal(fixture_report(quality=quality))
-    assert audit["weeks_meeting_both_targets"] == 4
+    assert audit["weeks_meeting_both_targets"] == 1
     assert "slippage_included" in audit["quality_claims_missing_or_unverified"]
     assert not audit["reported_evidence_gate_passed"]
 
@@ -213,3 +220,34 @@ def test_isolated_weekly_trials_reject_time_gaps_and_duplicate_ids():
     )
     with pytest.raises(ValueError, match="globally unique"):
         audit_weekly_goal(data)
+
+def test_offsetting_midweek_cash_flows_at_flat_checkpoints_fail_reconciliation():
+    data = isolated_weekly_trials()
+    data["weekly_runs"][1]["account_equity"][2]["equity_usdt"] += 3
+    audit = audit_weekly_goal(data)
+    assert not audit["windows"][1]["account_trade_pnl_reconciled"]
+    assert not audit["reported_evidence_gate_passed"]
+
+
+def test_unassigned_trade_is_rejected_even_when_the_other_trades_reconcile():
+    data = isolated_weekly_trials()
+    run = data["weekly_runs"][0]
+    run["closed_trades"].append({
+        "trade_id": "unassigned", "closed_at": run["account_equity"][-1]["timestamp"],
+        "net_pnl_usdt": -5,
+    })
+    with pytest.raises(ValueError, match="outside"):
+        audit_weekly_goal(data)
+
+
+def test_disjoint_trials_with_gaps_and_withdrawn_quality_evidence():
+    data = isolated_weekly_trials()
+    final = data["weekly_runs"][-1]
+    for records, key in [(final["account_equity"], "timestamp"), (final["closed_trades"], "closed_at")]:
+        for row in records:
+            row[key] = (datetime.fromisoformat(row[key]) + timedelta(days=28)).isoformat()
+    assert audit_weekly_goal(data)["reported_evidence_gate_passed"]
+    final["data_quality"] = {"fees_included": False}
+    result = audit_weekly_goal(data)
+    assert result["quality_claims_missing_or_unverified"] == ["fees_included"]
+    assert not result["reported_evidence_gate_passed"]
