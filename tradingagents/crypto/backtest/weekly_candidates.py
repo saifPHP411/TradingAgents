@@ -396,6 +396,43 @@ def simulate_week(
     }
 
 
+def screen_20x_70pct(weeks: list[dict]) -> dict:
+    """Compare *every* isolated 50-USDT week with the literal goal.
+
+    This is an exploratory score of simulated candles, never an independently
+    validated or venue-executable strategy.
+    """
+    outcomes = []
+    for week in weeks:
+        trade_count = week["trades"]
+        win_rate = week["win_rate_pct"]
+        equity = week["final_equity_usdt"]
+        objective_met = (
+            trade_count >= 30
+            and win_rate is not None
+            and win_rate >= 70.0
+            and equity >= 1000.0
+        )
+        outcomes.append({
+            "start": week["start"],
+            "end_exclusive": week["end_exclusive"],
+            "trades": trade_count,
+            "win_rate_pct": win_rate,
+            "final_usdt": equity,
+            "weekly_20x_and_70pct_met": objective_met,
+        })
+    hits = sum(item["weekly_20x_and_70pct_met"] for item in outcomes)
+    return {
+        "tested_seven_day_periods": len(outcomes),
+        "weeks_meeting_both_goals": hits,
+        "all_weeks_met_both_goals": bool(outcomes) and hits == len(outcomes),
+        "sufficient_four_week_sample": len(outcomes) >= 4,
+        "goal_independently_validated": False,
+        "results_from_modeled_candles_only": True,
+        "weekly_results": outcomes,
+    }
+
+
 def run_scan(*, start_day: date, days: int, symbols: tuple[str, ...], transport=None) -> dict:
     if days < 7 or days % 7 or not symbols:
         raise ValueError("days must be a positive multiple of 7 and symbols required")
@@ -448,6 +485,13 @@ def run_scan(*, start_day: date, days: int, symbols: tuple[str, ...], transport=
         "days": days,
         "strategies": reports,
         "cost_scenario_comparison": scenario_reports,
+        "weekly_goal_screen": {
+            name: {
+                scenario: screen_20x_70pct(weeks)
+                for scenario, weeks in comparisons.items()
+            }
+            for name, comparisons in scenario_reports.items()
+        },
         "demo_ready": False,
         "orders_submitted": False,
         "limitations": [
