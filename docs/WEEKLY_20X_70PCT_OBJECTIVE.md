@@ -145,3 +145,13 @@ must **never** be promoted to Demo execution based on this study alone.
 The strict 20×/70% portfolio gate is a separate evaluator; research
 candidate snapshots here are available for subsequent auditing only after
 its missing venue/funding provenance is resolved.
+
+## Fee ablation for the fixed candle candidates
+
+The research scan also reports all fixed candidates under three transparent
+cost assumptions: zero fee/zero impact **upper bound (not executable)**,
+realistic-estimate 5.5 bps commission plus 3 bps adverse price impact per
+fill, and stress-estimate 8 bps plus 7 bps. All scenarios use the same
+initial capital, source bars and predeclared signals. The lower-cost bound
+is diagnostic: if a candidate cannot make money before costs, reducing
+commission does not cure its directional signal.
