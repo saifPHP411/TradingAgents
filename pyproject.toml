@@ -41,6 +41,10 @@ dev = [
 bedrock = [
     "langchain-aws>=1.7.9",
 ]
+# Optional public, read-only Bybit market monitoring. No trading API is used.
+realtime = [
+    "websockets>=14,<17",
+]
 
 [project.scripts]
 tradingagents = "cli.main:app"
