@@ -246,8 +246,44 @@ def test_disjoint_trials_with_gaps_and_withdrawn_quality_evidence():
     for records, key in [(final["account_equity"], "timestamp"), (final["closed_trades"], "closed_at")]:
         for row in records:
             row[key] = (datetime.fromisoformat(row[key]) + timedelta(days=28)).isoformat()
-    assert audit_weekly_goal(data)["reported_evidence_gate_passed"]
+    gap_result = audit_weekly_goal(data)
+    assert gap_result["untested_gaps_days"] == [28]
+    assert not gap_result["complete_chronological_coverage"]
+    assert not gap_result["reported_evidence_gate_passed"]
     final["data_quality"] = {"fees_included": False}
     result = audit_weekly_goal(data)
     assert result["quality_claims_missing_or_unverified"] == ["fees_included"]
     assert not result["reported_evidence_gate_passed"]
+
+
+
+def test_partial_week_tail_is_reported_but_blocks_confirmation():
+    sample = fixture_report(weeks=4)
+    # A fifth week started but the next six days are unknown. Do not accept
+    # the four fully supplied weeks as a complete prospective sampling window.
+    sample["account_equity"].append({
+        "timestamp": (T0 + timedelta(days=29)).isoformat(),
+        "equity_usdt": sample["account_equity"][-1]["equity_usdt"],
+        "open_positions_count": 0,
+    })
+    report = audit_weekly_goal(sample)
+    assert report["ignored_partial_days"] == 1
+    assert report["partial_history_prevents_approval"]
+    assert not report["reported_evidence_gate_passed"]
+
+
+def test_unexamined_weekly_gap_is_not_cherry_picked_success():
+    sample = isolated_weekly_trials()
+    for week in sample["weekly_runs"][3:]:
+        for collection, field in (
+            (week["account_equity"], "timestamp"),
+            (week["closed_trades"], "closed_at"),
+        ):
+            for item in collection:
+                item[field] = (
+                    datetime.fromisoformat(item[field]) + timedelta(days=7)
+                ).isoformat()
+    audit = audit_weekly_goal(sample)
+    assert audit["weeks_meeting_both_targets"] == 4
+    assert audit["untested_gaps_days"] == [7]
+    assert not audit["reported_evidence_gate_passed"]
