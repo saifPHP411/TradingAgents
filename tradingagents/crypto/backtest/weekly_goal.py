@@ -66,7 +66,7 @@ def audit_weekly_goal(report: dict) -> dict:
     if len(raw_snapshots) < DAYS_PER_WEEK + 1:
         raise ValueError("at least eight daily account equity snapshots are required")
 
-    snapshots: list[tuple[datetime, float]] = []
+    snapshots: list[tuple[datetime, float, int]] = []
     for index, raw in enumerate(raw_snapshots):
         if not isinstance(raw, dict):
             raise ValueError("account equity snapshots must be objects")
@@ -74,12 +74,16 @@ def audit_weekly_goal(report: dict) -> dict:
         if stamp != stamp.replace(hour=0, minute=0, second=0, microsecond=0):
             raise ValueError("account_equity snapshots must be at UTC midnight")
         equity = _number(raw.get("equity_usdt"), "equity_usdt", nonnegative=True)
+        open_positions = raw.get("open_positions_count")
+        if (isinstance(open_positions, bool) or not isinstance(open_positions, int)
+                or open_positions < 0):
+            raise ValueError("open_positions_count must be a nonnegative integer")
         if snapshots and stamp - snapshots[-1][0] != timedelta(days=1):
             raise ValueError("account_equity timestamps must be daily, consecutive and unique")
-        snapshots.append((stamp, equity))
+        snapshots.append((stamp, equity, open_positions))
     if not math.isclose(snapshots[0][1], START_USDT, abs_tol=1e-9, rel_tol=0):
         raise ValueError("first account equity must be 50 USDT")
-    if any(equity == 0 for _, equity in snapshots[:-1]):
+    if any(equity == 0 for _, equity, _ in snapshots[:-1]):
         raise ValueError("zero interim equity indicates bankruptcy; cannot continue weeks")
 
     trades: list[tuple[datetime, float, bool]] = []
@@ -107,15 +111,21 @@ def audit_weekly_goal(report: dict) -> dict:
     windows: list[dict] = []
     end_index = ((len(snapshots) - 1) // DAYS_PER_WEEK) * DAYS_PER_WEEK
     for start in range(0, end_index, DAYS_PER_WEEK):
-        begin, opening = snapshots[start]
-        end, closing = snapshots[start + DAYS_PER_WEEK]
+        begin, opening, start_positions = snapshots[start]
+        end, closing, end_positions = snapshots[start + DAYS_PER_WEEK]
         week_trades = [(pnl, liquidated) for when, pnl, liquidated in trades if begin <= when < end]
         count = len(week_trades)
         wins = sum(pnl > 0 for pnl, _ in week_trades)
         liquidations = sum(bool(liquidated) for _, liquidated in week_trades)
         win_rate = wins / count * 100 if count else None
         growth = closing / opening if opening else 0.0
-        week_points = [equity for _, equity in snapshots[start:start + DAYS_PER_WEEK + 1]]
+        week_points = [equity for _, equity, _ in snapshots[start:start + DAYS_PER_WEEK + 1]]
+        trade_net_pnl = sum(pnl for pnl, _ in week_trades)
+        reconciled = math.isclose(
+            trade_net_pnl, closing - opening,
+            abs_tol=max(0.01, opening * 0.0001), rel_tol=0,
+        )
+        flat_boundaries = start_positions == 0 and end_positions == 0
         peak = opening
         sampled_dd = 0.0
         for equity in week_points:
@@ -126,6 +136,8 @@ def audit_weekly_goal(report: dict) -> dict:
             and win_rate is not None and win_rate >= WIN_RATE_MIN
             and growth >= TARGET_MULTIPLE
             and liquidations == 0
+            and flat_boundaries
+            and reconciled
         )
         windows.append({
             "week_start": begin.isoformat(),
@@ -138,6 +150,9 @@ def audit_weekly_goal(report: dict) -> dict:
             "closed_trades": count,
             "winning_trades": wins,
             "liquidations": liquidations,
+            "account_trade_pnl_reconciled": reconciled,
+            "realized_net_pnl_usdt": trade_net_pnl,
+            "flat_week_boundaries": flat_boundaries,
             "sampled_daily_max_drawdown_pct": sampled_dd * 100,
             "weekly_target_met": pass_goal,
         })
@@ -181,6 +196,7 @@ def audit_weekly_goal(report: dict) -> dict:
             "Snapshots must be from one shared account, not merged independent per-symbol runs.",
             "Daily samples understate intraday drawdown and omit some margin breaches.",
             "Trade PnL must be net of costs; win rate alone does not establish profitability.",
+            "A week only qualifies when both boundaries are flat and trade PnL reconciles to equity.",
             "A single best week or development-only search never establishes strategy quality.",
         ],
     }
