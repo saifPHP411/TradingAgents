@@ -1,4 +1,4 @@
-name: Exploratory weekly 20x target candidate replay
+name: Exploratory weekly 50-USDT net-profit target replay
 
 on:
   pull_request:
@@ -6,6 +6,10 @@ on:
       - ".github/workflows/weekly-candidates.yml"
       - "tradingagents/crypto/backtest/weekly_candidates.py"
       - "tests/test_weekly_candidates.py"
+      - "tradingagents/crypto/backtest/weekly_goal_bridge.py"
+      - "tradingagents/crypto/backtest/weekly_goal.py"
+      - "tests/test_weekly_goal_bridge.py"
+      - "docs/WEEKLY_50_USDT_NET_PROFIT_OBJECTIVE.md"
   workflow_dispatch:
 
 permissions:
@@ -20,6 +24,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - sample: september-4weeks
+            start: "2026-09-06"
+            days: 28
+            symbols: "BTCUSDT XRPUSDT ETHUSDT LTCUSDT"
           - sample: october-4weeks
             start: "2026-10-04"
             days: 28
@@ -51,4 +59,37 @@ jobs:
           name: research-weekly-candidates-${{ matrix.sample }}
           path: artifacts/weekly-candidates-${{ matrix.sample }}.json
           if-no-files-found: error
+          retention-days: 14
+
+  goal-audit:
+    name: Cross-check 10 weeks against $50 net-profit audit
+    needs: research
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Retrieve both complete research artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: research-weekly-candidates-*
+          path: downloaded
+          merge-multiple: true
+      - name: Verify all six isolated weeks with real-data portfolio gate
+        run: |
+          python tradingagents/crypto/backtest/weekly_goal_bridge.py \
+            --input \
+              downloaded/weekly-candidates-september-4weeks.json \
+              downloaded/weekly-candidates-october-4weeks.json \
+              downloaded/weekly-candidates-november-2weeks.json \
+            --output artifacts/weekly-goal-crosscheck.json
+      - name: Upload unverified-execution evidence audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-weekly-goal-crosscheck
+          path: artifacts/weekly-goal-crosscheck.json
+          if-no-files-found: warn
           retention-days: 14

@@ -1,0 +1,89 @@
+name: Exploratory two-leg relative-value weekly trials
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/weekly-pairs.yml"
+      - "tradingagents/crypto/backtest/weekly_pairs.py"
+      - "tradingagents/crypto/backtest/weekly_goal_bridge.py"
+      - "tradingagents/crypto/backtest/weekly_goal.py"
+      - "tests/test_weekly_pairs.py"
+      - "docs/WEEKLY_50_USDT_NET_PROFIT_OBJECTIVE.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pairs:
+    name: Two-leg $50 research (${{ matrix.sample }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sample: september-4weeks
+            start: "2026-09-06"
+            days: 28
+          - sample: october-4weeks
+            start: "2026-10-04"
+            days: 28
+          - sample: november-2weeks
+            start: "2026-11-01"
+            days: 14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Read-only public Binance minute archives, simulate BOTH legs
+        env:
+          SAMPLE: ${{ matrix.sample }}
+          START: ${{ matrix.start }}
+          DAYS: ${{ matrix.days }}
+        run: |
+          python tradingagents/crypto/backtest/weekly_pairs.py \
+            --start "$START" --days "$DAYS" \
+            --output "artifacts/weekly-pairs-${SAMPLE}.json"
+      - name: Preserve simulated orders and account history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relative-value-${{ matrix.sample }}
+          path: artifacts/weekly-pairs-${{ matrix.sample }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  goal-audit:
+    name: Audit 10 paired weeks for $50 target and execution limitations
+    needs: pairs
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Retrieve both independent historical period artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: relative-value-*
+          path: downloaded
+          merge-multiple: true
+      - name: Audit every paired strategy and cost model
+        run: |
+          python tradingagents/crypto/backtest/weekly_goal_bridge.py \
+            --input \
+              downloaded/weekly-pairs-september-4weeks.json \
+              downloaded/weekly-pairs-october-4weeks.json \
+              downloaded/weekly-pairs-november-2weeks.json \
+            --output artifacts/pairs-strict-weekly-objective.json
+      - name: Retain all missing venue execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relative-value-account-goal-audit
+          path: artifacts/pairs-strict-weekly-objective.json
+          if-no-files-found: warn
+          retention-days: 14

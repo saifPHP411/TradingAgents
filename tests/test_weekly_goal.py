@@ -28,7 +28,7 @@ def fixture_report(
     quality=None, source="historical_replay",
 ):
     if multiples is None:
-        multiples = [20] * weeks
+        multiples = [2] * weeks
     if quality is None:
         quality = QUALITY.copy()
     checkpoints = [{"timestamp": T0.isoformat(), "equity_usdt": 50,
@@ -56,6 +56,13 @@ def fixture_report(
                 "net_pnl_usdt": winner_net if trade < wins else loser_net,
                 "liquidated": False,
             })
+        for offset, checkpoint in enumerate(checkpoints[-7:], start=1):
+            boundary = T0 + timedelta(days=7 * week + offset)
+            checkpoint["equity_usdt"] = opening + sum(
+                row["net_pnl_usdt"] for row in trades[-trades_per_week:]
+                if datetime.fromisoformat(row["closed_at"]) < boundary
+            )
+        checkpoints[-1]["equity_usdt"] = closing
         opening = closing
     return {
         "initial_equity_usdt": 50,
@@ -66,14 +73,17 @@ def fixture_report(
     }
 
 
-def test_four_synthetic_weeks_can_meet_goal_but_never_auto_trade():
+def test_continuous_account_earns_at_least_fifty_new_dollars_each_week():
     audit = audit_weekly_goal(fixture_report())
     assert audit["reported_evidence_gate_passed"]
     assert audit["evaluated_complete_disjoint_weeks"] == 4
     assert audit["weeks_meeting_both_targets"] == 4
-    assert audit["windows"][0]["normalized_50_usdt_final"] == pytest.approx(1000)
+    assert audit["windows"][0]["normalized_50_usdt_final"] == pytest.approx(100)
     assert audit["windows"][0]["win_rate_pct"] == pytest.approx(70)
-    assert audit["windows"][0]["net_return_pct"] == pytest.approx(1900)
+    assert audit["windows"][0]["net_return_pct"] == pytest.approx(100)
+    assert audit["windows"][0]["weekly_net_profit_usdt"] == pytest.approx(50)
+    assert audit["windows"][-1]["opening_equity_usdt"] == pytest.approx(400)
+    assert audit["windows"][-1]["weekly_net_profit_usdt"] == pytest.approx(400)
     assert audit["status"] == "reported_historical_goal_passed_not_forward_verified"
     assert not audit["independently_verified_by_this_tool"]
     assert not audit["auto_deployment_allowed"]
@@ -88,13 +98,13 @@ def test_one_lucky_week_is_not_independent_validation():
 
 
 def test_outcome_selection_fails_when_other_weeks_lose():
-    audit = audit_weekly_goal(fixture_report(multiples=[20, 0.98, 1.02, 1.01]))
+    audit = audit_weekly_goal(fixture_report(multiples=[2, 0.98, 1.02, 1.01]))
     assert audit["weeks_meeting_both_targets"] == 1
     assert not audit["all_complete_weeks_pass"]
     assert not audit["reported_evidence_gate_passed"]
 
 
-def test_seventy_percent_wins_does_not_imply_twentyfold_return():
+def test_seventy_percent_wins_does_not_imply_fifty_net_dollars():
     audit = audit_weekly_goal(fixture_report(multiples=[1.02] * 4))
     assert all(row["win_rate_pct"] == pytest.approx(70) for row in audit["windows"])
     assert audit["weeks_meeting_both_targets"] == 0
@@ -199,7 +209,8 @@ def test_independent_50_usdt_weekly_trials_do_not_compound_into_millions():
     assert report["evaluated_complete_disjoint_weeks"] == 4
     assert report["weeks_meeting_both_targets"] == 4
     assert all(week["opening_equity_usdt"] == 50 for week in report["windows"])
-    assert all(week["closing_equity_usdt"] == 1000 for week in report["windows"])
+    assert all(week["closing_equity_usdt"] == 100 for week in report["windows"])
+    assert all(week["weekly_net_profit_usdt"] == pytest.approx(50) for week in report["windows"])
 
 
 def test_isolated_weekly_trials_reject_time_gaps_and_duplicate_ids():
@@ -213,3 +224,91 @@ def test_isolated_weekly_trials_reject_time_gaps_and_duplicate_ids():
     )
     with pytest.raises(ValueError, match="globally unique"):
         audit_weekly_goal(data)
+
+def test_offsetting_midweek_cash_flows_at_flat_checkpoints_fail_reconciliation():
+    data = isolated_weekly_trials()
+    data["weekly_runs"][1]["account_equity"][2]["equity_usdt"] += 3
+    audit = audit_weekly_goal(data)
+    assert not audit["windows"][1]["account_trade_pnl_reconciled"]
+    assert not audit["reported_evidence_gate_passed"]
+
+
+def test_unassigned_trade_is_rejected_even_when_the_other_trades_reconcile():
+    data = isolated_weekly_trials()
+    run = data["weekly_runs"][0]
+    run["closed_trades"].append({
+        "trade_id": "unassigned", "closed_at": run["account_equity"][-1]["timestamp"],
+        "net_pnl_usdt": -5,
+    })
+    with pytest.raises(ValueError, match="outside"):
+        audit_weekly_goal(data)
+
+
+def test_disjoint_trials_with_gaps_and_withdrawn_quality_evidence():
+    data = isolated_weekly_trials()
+    final = data["weekly_runs"][-1]
+    for records, key in [(final["account_equity"], "timestamp"), (final["closed_trades"], "closed_at")]:
+        for row in records:
+            row[key] = (datetime.fromisoformat(row[key]) + timedelta(days=28)).isoformat()
+    gap_result = audit_weekly_goal(data)
+    assert gap_result["untested_gaps_days"] == [28]
+    assert not gap_result["complete_chronological_coverage"]
+    assert not gap_result["reported_evidence_gate_passed"]
+    final["data_quality"] = {"fees_included": False}
+    result = audit_weekly_goal(data)
+    assert result["quality_claims_missing_or_unverified"] == ["fees_included"]
+    assert not result["reported_evidence_gate_passed"]
+
+
+
+def test_partial_week_tail_is_reported_but_blocks_confirmation():
+    sample = fixture_report(weeks=4)
+    # A fifth week started but the next six days are unknown. Do not accept
+    # the four fully supplied weeks as a complete prospective sampling window.
+    sample["account_equity"].append({
+        "timestamp": (T0 + timedelta(days=29)).isoformat(),
+        "equity_usdt": sample["account_equity"][-1]["equity_usdt"],
+        "open_positions_count": 0,
+    })
+    report = audit_weekly_goal(sample)
+    assert report["ignored_partial_days"] == 1
+    assert report["partial_history_prevents_approval"]
+    assert not report["reported_evidence_gate_passed"]
+
+
+def test_unexamined_weekly_gap_is_not_cherry_picked_success():
+    sample = isolated_weekly_trials()
+    for week in sample["weekly_runs"][3:]:
+        for collection, field in (
+            (week["account_equity"], "timestamp"),
+            (week["closed_trades"], "closed_at"),
+        ):
+            for item in collection:
+                item[field] = (
+                    datetime.fromisoformat(item[field]) + timedelta(days=7)
+                ).isoformat()
+    audit = audit_weekly_goal(sample)
+    assert audit["weeks_meeting_both_targets"] == 4
+    assert audit["untested_gaps_days"] == [7]
+    assert not audit["reported_evidence_gate_passed"]
+
+
+def test_weekly_absolute_profit_independent_of_account_growth_rate():
+    # Starting the second week at 100, a 50-USDT weekly gain needs only 50%,
+    # not another 100%. The initial account still started from 50 USDT.
+    data = fixture_report(weeks=4, multiples=[2, 1.5, 1.34, 1.25])
+    audit = audit_weekly_goal(data)
+    assert audit["windows"][0]["weekly_net_profit_usdt"] == pytest.approx(50)
+    assert audit["windows"][1]["weekly_net_profit_usdt"] == pytest.approx(50)
+    assert audit["windows"][2]["weekly_net_profit_usdt"] == pytest.approx(51)
+    assert all(w["weekly_profit_goal_met"] for w in audit["windows"])
+    assert audit["reported_evidence_gate_passed"]
+    assert not audit["independently_verified_by_this_tool"]
+
+
+def test_weekly_profit_below_fifty_fails_even_with_seventy_percent_wins():
+    report = audit_weekly_goal(fixture_report(weeks=1, multiples=[1.98]))
+    assert report["windows"][0]["weekly_net_profit_usdt"] == pytest.approx(49)
+    assert report["windows"][0]["weekly_win_rate_70pct_met"]
+    assert not report["windows"][0]["weekly_profit_goal_met"]
+    assert report["weeks_meeting_both_targets"] == 0

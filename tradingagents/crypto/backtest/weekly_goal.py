@@ -1,4 +1,4 @@
-"""Research-only audit of 50-to-1000 USDT in seven days and >=70% wins.
+"""Research-only audit of >=50 USDT weekly net profit from a 50 USDT start.
 
 Uses a single shared-account equity curve and net closed trades. The script
 never invents missing returns or authorizes actual trading.
@@ -12,7 +12,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 START_USDT = 50.0
-TARGET_USDT = 1000.0
+WEEKLY_MIN_NET_PROFIT_USDT = 50.0
+# Independent trials must finish at >=100 USDT. A continuous account does
+# not reset each week: its goal is >=50 USDT *additional* profit per week.
+TARGET_USDT = START_USDT + WEEKLY_MIN_NET_PROFIT_USDT
 TARGET_MULTIPLE = TARGET_USDT / START_USDT
 WIN_RATE_MIN = 70.0
 DAYS_PER_WEEK = 7
@@ -102,6 +105,8 @@ def audit_weekly_goal(report: dict) -> dict:
             raise ValueError("trade_id must be unique and nonempty")
         identifiers.add(identifier)
         when = _time(raw.get("closed_at"), f"closed_trades[{index}].closed_at")
+        if not snapshots[0][0] <= when < snapshots[-1][0]:
+            raise ValueError("closed trade lies outside the account snapshot interval")
         net = _number(raw.get("net_pnl_usdt"), "net_pnl_usdt")
         liquidated = raw.get("liquidated", False)
         if not isinstance(liquidated, bool):
@@ -126,24 +131,35 @@ def audit_weekly_goal(report: dict) -> dict:
         win_rate = wins / count * 100 if count else None
         growth = closing / opening if opening else 0.0
         week_points = [equity for _, equity, _ in snapshots[start:start + DAYS_PER_WEEK + 1]]
-        trade_net_pnl = sum(pnl for pnl, _ in week_trades)
-        reconciled = math.isclose(
-            trade_net_pnl, closing - opening,
-            abs_tol=max(0.01, opening * 0.0001), rel_tol=0,
-        )
+        trade_net_pnl = math.fsum(pnl for pnl, _ in week_trades)
+        # Cash changes between any two flat checkpoints must be attributable
+        # to closed trades. A deposit and later withdrawal can net to zero
+        # over seven days while fabricating the buyable size midweek.
+        flat_points = [
+            (ts, balance) for ts, balance, positions in snapshots[start:start + DAYS_PER_WEEK + 1]
+            if positions == 0
+        ]
+        reconciled = math.isclose(trade_net_pnl, closing - opening, abs_tol=1e-8, rel_tol=1e-12)
+        for (t0, balance0), (t1, balance1) in zip(flat_points, flat_points[1:], strict=False):
+            interval_net = math.fsum(pnl for when, pnl, _ in trades if t0 <= when < t1)
+            reconciled &= math.isclose(interval_net, balance1 - balance0, abs_tol=1e-8, rel_tol=1e-12)
         flat_boundaries = start_positions == 0 and end_positions == 0
         peak = opening
         sampled_dd = 0.0
         for equity in week_points:
             peak = max(peak, equity)
             sampled_dd = max(sampled_dd, (peak - equity) / peak if peak > 0 else 1.0)
+        net_profit_usdt = closing - opening
+        profit_target_met = (
+            net_profit_usdt >= WEEKLY_MIN_NET_PROFIT_USDT - 1e-9
+            and flat_boundaries and reconciled and liquidations == 0
+        )
+        # The historical 70% win-rate preference remains a separate,
+        # stricter combined evidence gate. Do not call 70% profitable by itself.
         pass_goal = (
             count >= MIN_WEEKLY_TRADES
             and win_rate is not None and win_rate >= WIN_RATE_MIN
-            and growth >= TARGET_MULTIPLE
-            and liquidations == 0
-            and flat_boundaries
-            and reconciled
+            and profit_target_met
         )
         windows.append({
             "week_start": begin.isoformat(),
@@ -152,6 +168,9 @@ def audit_weekly_goal(report: dict) -> dict:
             "closing_equity_usdt": closing,
             "normalized_50_usdt_final": START_USDT * growth,
             "net_return_pct": (growth - 1) * 100,
+            "weekly_net_profit_usdt": net_profit_usdt,
+            "weekly_profit_goal_met": profit_target_met,
+            "weekly_win_rate_70pct_met": win_rate is not None and win_rate >= WIN_RATE_MIN,
             "win_rate_pct": win_rate,
             "closed_trades": count,
             "winning_trades": wins,
@@ -166,7 +185,13 @@ def audit_weekly_goal(report: dict) -> dict:
     qualifying = sum(week["weekly_target_met"] for week in windows)
     sample_sufficient = len(windows) >= MIN_INDEPENDENT_WEEKS
     all_weeks_pass = bool(windows) and qualifying == len(windows)
-    evidence_pass = sample_sufficient and all_weeks_pass and not missing_quality
+    # A truncated final week could conceal a losing streak; preserve its
+    # diagnostic results, but never approve incomplete requested history.
+    trailing_partial_days = len(snapshots) - 1 - end_index
+    evidence_pass = (
+        sample_sufficient and all_weeks_pass and not missing_quality
+        and trailing_partial_days == 0
+    )
     source = str(report.get("source") or "")
     if not windows:
         status = "insufficient_period"
@@ -183,8 +208,9 @@ def audit_weekly_goal(report: dict) -> dict:
         "orders_submitted": False,
         "auto_deployment_allowed": False,
         "objective": {
-            "start_usdt": START_USDT, "end_usdt": TARGET_USDT,
-            "seven_day_growth_multiple": TARGET_MULTIPLE,
+            "start_usdt": START_USDT, "end_usdt_for_isolated_50_start": TARGET_USDT,
+            "weekly_min_net_profit_usdt": WEEKLY_MIN_NET_PROFIT_USDT,
+            "isolated_start_50_growth_multiple": TARGET_MULTIPLE,
             "required_win_rate_pct": WIN_RATE_MIN,
             "minimum_closed_trades_per_week": MIN_WEEKLY_TRADES,
             "minimum_independent_weeks": MIN_INDEPENDENT_WEEKS,
@@ -196,14 +222,15 @@ def audit_weekly_goal(report: dict) -> dict:
         "quality_claims_missing_or_unverified": missing_quality,
         "reported_evidence_gate_passed": evidence_pass,
         "independently_verified_by_this_tool": False,
-        "ignored_partial_days": len(snapshots) - 1 - end_index,
+        "ignored_partial_days": trailing_partial_days,
+        "partial_history_prevents_approval": trailing_partial_days > 0,
         "windows": windows,
         "limitations": [
             "Quality flags are reporter claims, not independently authenticated by this script.",
             "Meeting this gate does not independently verify venue fills, capital limits, or source data.",
             "Snapshots must be from one shared account, not merged independent per-symbol runs.",
             "Daily samples understate intraday drawdown and omit some margin breaches.",
-            "Trade PnL must be net of costs; win rate alone does not establish profitability.",
+            "Require >=50 USDT weekly net account growth after costs; win rate alone does not establish profitability.",
             "A week only qualifies when both boundaries are flat and trade PnL reconciles to equity.",
             "A single best week or development-only search never establishes strategy quality.",
         ],
@@ -212,7 +239,7 @@ def audit_weekly_goal(report: dict) -> dict:
 
 
 def audit_isolated_weekly_trials(report: dict) -> dict:
-    """Audit independent 50-USDT replays for consecutive, disjoint weeks.
+    """Audit independent 50-USDT replays for chronologically ordered, disjoint weeks.
 
     This is the correct normalization when a weekly strategy replay starts
     fresh at 50 USDT each week (rather than compounding into millions).
@@ -227,6 +254,8 @@ def audit_isolated_weekly_trials(report: dict) -> dict:
     shared_ids: set[str] = set()
     windows = []
     previous_end = None
+    untested_gaps_days: list[int] = []
+    missing_by_week: set[str] = set()
     for index, week in enumerate(raw):
         snaps = week.get("account_equity")
         trades = week.get("closed_trades")
@@ -241,38 +270,50 @@ def audit_isolated_weekly_trials(report: dict) -> dict:
             if not isinstance(trade_id, str) or not trade_id or trade_id in shared_ids:
                 raise ValueError("trade_id must be globally unique across weekly trials")
             shared_ids.add(trade_id)
+        quality = report.get("data_quality", {})
+        if not isinstance(quality, dict):
+            raise ValueError("data_quality must be an object")
+        week_quality = week.get("data_quality", {})
+        if not isinstance(week_quality, dict):
+            raise ValueError("weekly data_quality must be an object")
+        effective_quality = quality.copy()
+        for key in REQUIRED_QUALITY_FLAGS:
+            if key in week_quality:
+                if not isinstance(week_quality[key], bool):
+                    raise ValueError("weekly data_quality flags must be boolean")
+                # A week can withdraw a global claim but cannot override a
+                # missing or negative claim about the whole protocol.
+                if not week_quality[key]:
+                    effective_quality[key] = False
         result = audit_weekly_goal({
             "initial_equity_usdt": START_USDT,
             "source": report.get("source"),
-            "data_quality": report.get("data_quality"),
+            "data_quality": effective_quality,
             "account_equity": snaps,
             "closed_trades": trades,
         })
+        missing_by_week.update(result["quality_claims_missing_or_unverified"])
         window = result["windows"][0]
         start = _time(window["week_start"], "week_start")
         end = _time(window["week_end_exclusive"], "week_end")
-        if previous_end is not None and start != previous_end:
-            raise ValueError("isolated weekly trials must be consecutive and nonoverlapping")
+        if previous_end is not None:
+            if start < previous_end:
+                raise ValueError("isolated weekly trials must be chronological and nonoverlapping")
+            if start > previous_end:
+                untested_gaps_days.append((start - previous_end).days)
         if start >= end:
             raise ValueError("weekly trial has invalid date range")
         previous_end = end
         window["trial_number"] = index + 1
         window["capital_reset_for_independent_trial"] = True
         windows.append(window)
-    claimed_quality = report.get("data_quality") or {}
-    if not isinstance(claimed_quality, dict):
-        raise ValueError("data_quality must be an object")
-    if any(key in claimed_quality and not isinstance(claimed_quality[key], bool)
-           for key in REQUIRED_QUALITY_FLAGS):
-        raise ValueError("data_quality flags must be boolean")
-    missing_quality = [
-        key for key in REQUIRED_QUALITY_FLAGS if claimed_quality.get(key) is not True
-    ]
+    missing_quality = [key for key in REQUIRED_QUALITY_FLAGS if key in missing_by_week]
     passed_weeks = sum(item["weekly_target_met"] for item in windows)
     reported_pass = (
         len(windows) >= MIN_INDEPENDENT_WEEKS
         and passed_weeks == len(windows)
         and not missing_quality
+        and not untested_gaps_days
     )
     return {
         "schema_version": 1,
@@ -283,8 +324,9 @@ def audit_isolated_weekly_trials(report: dict) -> dict:
         "source": report.get("source"),
         "account_mode": "independent_50_usdt_weekly_replays",
         "objective": {
-            "start_usdt": START_USDT, "end_usdt": TARGET_USDT,
-            "seven_day_growth_multiple": TARGET_MULTIPLE,
+            "start_usdt": START_USDT, "end_usdt_for_isolated_50_start": TARGET_USDT,
+            "weekly_min_net_profit_usdt": WEEKLY_MIN_NET_PROFIT_USDT,
+            "isolated_start_50_growth_multiple": TARGET_MULTIPLE,
             "required_win_rate_pct": WIN_RATE_MIN,
             "minimum_closed_trades_per_week": MIN_WEEKLY_TRADES,
             "minimum_independent_weeks": MIN_INDEPENDENT_WEEKS,
@@ -299,9 +341,12 @@ def audit_isolated_weekly_trials(report: dict) -> dict:
         "quality_claims_missing_or_unverified": missing_quality,
         "reported_evidence_gate_passed": reported_pass,
         "ignored_partial_days": 0,
+        "untested_gaps_days": untested_gaps_days,
+        "complete_chronological_coverage": not untested_gaps_days,
         "windows": windows,
         "limitations": [
-            "Each isolated weekly replay restarts one account from 50 USDT.",
+            "Each isolated weekly replay restarts one account from 50 USDT and needs >=100 USDT at its end.",
+            "Unexamined gaps between seven-day trials block approval to limit cherry-picking.",
             "All weeks are reported; the best week is never selected.",
             "Self-reported quality flags and fills need independent validation.",
             "Daily equity snapshots can miss intraday losses and liquidation risks.",
