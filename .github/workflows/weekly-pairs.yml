@@ -8,6 +8,7 @@ on:
       - "tradingagents/crypto/backtest/weekly_goal_bridge.py"
       - "tradingagents/crypto/backtest/weekly_goal.py"
       - "tests/test_weekly_pairs.py"
+      - "docs/WEEKLY_50_USDT_NET_PROFIT_OBJECTIVE.md"
   workflow_dispatch:
 
 permissions:
@@ -52,7 +53,7 @@ jobs:
           retention-days: 14
 
   goal-audit:
-    name: Compare both legs and all weeks with strict account acceptance gate
+    name: Audit paired weekly net $50 target and execution limitations
     needs: pairs
     runs-on: ubuntu-latest
     timeout-minutes: 6
