@@ -1,4 +1,4 @@
-name: Exploratory weekly 20x target candidate replay
+name: Exploratory weekly 50-USDT net-profit target replay
 
 on:
   pull_request:
@@ -9,6 +9,7 @@ on:
       - "tradingagents/crypto/backtest/weekly_goal_bridge.py"
       - "tradingagents/crypto/backtest/weekly_goal.py"
       - "tests/test_weekly_goal_bridge.py"
+      - "docs/WEEKLY_50_USDT_NET_PROFIT_OBJECTIVE.md"
   workflow_dispatch:
 
 permissions:
@@ -57,7 +58,7 @@ jobs:
           retention-days: 14
 
   goal-audit:
-    name: Cross-check all historical weeks against strict account audit
+    name: Cross-check net $50/week and win rate against account audit
     needs: research
     runs-on: ubuntu-latest
     timeout-minutes: 6
