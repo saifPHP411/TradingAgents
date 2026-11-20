@@ -108,3 +108,29 @@ def test_rejects_time_mismatch_between_symbols():
     with pytest.raises(ValueError, match="exact minute"):
         simulate_week({"BTCUSDT": bars, "XRPUSDT": mismatched},
                       "donchian20_breakout", start=1440, end=11520)
+
+
+def test_zero_cost_ablation_vs_realistic_on_same_forced_loss(monkeypatch):
+    bars = sample_bars()
+    index = 1440
+    bars[index] = Bar(bars[index].ms, 100, 102, 98, 100, 1000)
+    monkeypatch.setattr(
+        weekly_candidates, "signal",
+        lambda _bars, _features, i, _strategy: 1 if i == 1439 else 0,
+    )
+    realistic = simulate_week(
+        {"BTCUSDT": bars}, "ema9_ema21_rsi_momentum",
+        start=1440, end=11520,
+    )
+    zero_cost = simulate_week(
+        {"BTCUSDT": bars}, "ema9_ema21_rsi_momentum",
+        start=1440, end=11520,
+        commission_rate=0, adverse_impact_rate=0,
+    )
+    assert realistic["trades"] == zero_cost["trades"] == 1
+    assert zero_cost["final_equity_usdt"] > realistic["final_equity_usdt"]
+    with pytest.raises(ValueError, match="commission or adverse"):
+        simulate_week(
+            {"BTCUSDT": bars}, "ema9_ema21_rsi_momentum",
+            start=1440, end=11520, commission_rate=float("nan"),
+        )
