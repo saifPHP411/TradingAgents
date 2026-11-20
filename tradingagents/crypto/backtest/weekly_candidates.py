@@ -20,6 +20,16 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from statistics import mean, pstdev
 
+# The research CLI is executable directly, without a project installation.
+# Running as a package uses the normal relative import instead.
+try:
+    from ..triad_consensus import TriadInput, evaluate_triad
+except ImportError:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from triad_consensus import TriadInput, evaluate_triad
+
 ONE_DAY_MINUTES = 1440
 COMMISSION_RATE = 0.00055
 ADVERSE_FILL_IMPACT_RATE = 0.00030
@@ -35,6 +45,8 @@ STRATEGIES = {
     # Predeclared, lower-frequency 1m-executed strategies with longer holds.
     "ema60_rsi_pullback": (0.0060, 0.0120),
     "donchian_15m_trend": (0.0080, 0.0180),
+    # Same fixed Donchian base; additional independent analyst/professor veto.
+    "donchian_15m_triad_shadow": (0.0080, 0.0180),
     "vwap_15m_reclaim": (0.0060, 0.0120),
     # Predeclared, cost-aware event studies from volatility and session-return
     # hypotheses; not tuned on the October/November evaluation windows.
@@ -45,6 +57,7 @@ STRATEGIES = {
 HOLD_BY_STRATEGY = {
     "ema60_rsi_pullback": 180,
     "donchian_15m_trend": 240,
+    "donchian_15m_triad_shadow": 240,
     "vwap_15m_reclaim": 120,
     "volatility_spike_5m_long_12h": 720,
     "hourly_impulse_momentum_6h": 360,
@@ -178,10 +191,34 @@ def indicators(bars: list[Bar]) -> dict[str, list[float]]:
 def signal(bars: list[Bar], feat: dict, i: int, strategy: str) -> int:
     """i is the completed candle index; entry may occur at i+1 OPEN only."""
     if i < 100 or (
-        strategy in {"ema60_rsi_pullback", "donchian_15m_trend", "vwap_15m_reclaim"}
+        strategy in {
+            "ema60_rsi_pullback", "donchian_15m_trend",
+            "donchian_15m_triad_shadow", "vwap_15m_reclaim",
+        }
         and i < 240
     ):
         return 0
+    if strategy == "donchian_15m_triad_shadow":
+        # Research replay: same original Donchian signal; independent votes
+        # see ONLY completed bars. The book/Mark here is synthetic (1 bp
+        # each side of the last completed close), never actual Bybit evidence.
+        candidate = signal(bars, feat, i, "donchian_15m_trend")
+        if candidate == 0:
+            return 0
+        close = bars[i].close
+        result = evaluate_triad(TriadInput(
+            symbol="RESEARCHUSDT", candle_end_ms=bars[i].ms + 60_000,
+            now_ms=bars[i].ms + 60_000, direction=candidate,
+            close=close, close_15m_ago=bars[i - 15].close,
+            ema60=feat["ema60"][i], ema240=feat["ema240"][i],
+            rsi=feat["rsi"][i], mark=close,
+            mark_ts_ms=bars[i].ms + 60_000,
+            best_bid=close * (1 - 0.0001),
+            best_ask=close * (1 + 0.0001),
+            book_ts_ms=bars[i].ms + 60_000,
+            venue_filters_verified=False,
+        ))
+        return candidate if result["all_three_approve"] else 0
     rsi = feat["rsi"][i]
     close = bars[i].close
     if strategy == "ema9_ema21_rsi_momentum":
@@ -477,9 +514,18 @@ def screen_weekly_net_50usdt(weeks: list[dict]) -> dict:
     }
 
 
-def run_scan(*, start_day: date, days: int, symbols: tuple[str, ...], transport=None) -> dict:
+def run_scan(
+    *, start_day: date, days: int, symbols: tuple[str, ...],
+    transport=None, selected_strategies: tuple[str, ...] | None = None,
+) -> dict:
     if days < 7 or days % 7 or not symbols:
         raise ValueError("days must be a positive multiple of 7 and symbols required")
+    if selected_strategies is not None and (
+        not selected_strategies
+        or len(set(selected_strategies)) != len(selected_strategies)
+        or any(strategy not in STRATEGIES for strategy in selected_strategies)
+    ):
+        raise ValueError("selected strategy set must be unique, known and nonempty")
     history_start = start_day - timedelta(days=1)
     by_symbol = {}
     for symbol in symbols:
@@ -495,7 +541,7 @@ def run_scan(*, start_day: date, days: int, symbols: tuple[str, ...], transport=
     }
     reports = {}
     scenario_reports = {}
-    for strategy in STRATEGIES:
+    for strategy in (selected_strategies if selected_strategies is not None else STRATEGIES):
         by_scenario = {}
         for scenario, (commission, impact) in scenarios.items():
             weeks = []
@@ -553,11 +599,15 @@ def main() -> None:
     parser.add_argument("--start", type=date.fromisoformat, default=date(2026, 11, 1))
     parser.add_argument("--days", type=int, default=14)
     parser.add_argument("--symbols", nargs="+", default=["BTCUSDT", "XRPUSDT"])
+    parser.add_argument("--strategies", nargs="+", choices=sorted(STRATEGIES))
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
-        result = run_scan(start_day=args.start, days=args.days,
-                          symbols=tuple(args.symbols))
+        result = run_scan(
+            start_day=args.start, days=args.days,
+            symbols=tuple(args.symbols),
+            selected_strategies=tuple(args.strategies) if args.strategies else None,
+        )
     except Exception as exc:
         result = {
             "status": "not_completed", "error": f"{type(exc).__name__}: {exc}",
