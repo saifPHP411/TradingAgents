@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import math
 import re
@@ -337,12 +338,10 @@ def main() -> None:
     if args.max_seconds is None:
         asyncio.run(observe_forever(watcher))
         return
-    try:
+    with contextlib.suppress(TimeoutError):
         asyncio.run(asyncio.wait_for(
             observe_forever(watcher), timeout=args.max_seconds
         ))
-    except TimeoutError:
-        pass
     report = {
         "status": (
             "public_market_data_observed" if watcher.market_events and watcher.scans
