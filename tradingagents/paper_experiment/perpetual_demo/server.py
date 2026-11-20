@@ -11,9 +11,11 @@ import contextlib
 import json
 import math
 import os
+import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -44,7 +46,12 @@ DEFAULT_SYMBOLS = (
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
     "XRPUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT",
     "LTCUSDT", "AVAXUSDT", "DOTUSDT", "TRXUSDT",
+    "BCHUSDT", "UNIUSDT", "NEARUSDT", "APTUSDT",
+    "ETCUSDT", "ATOMUSDT", "FILUSDT", "ARBUSDT",
+    "OPUSDT", "SUIUSDT", "INJUSDT", "ICPUSDT",
 )
+SYMBOLS_ENV = "TRADINGAGENTS_PERPETUAL_DEMO_SYMBOLS"
+SCAN_WORKERS = 6
 STRATEGY_ID = "ema_mtf_scalper_1m_5m_15m"
 STATE_FILE = "bybit_linear_demo_state.json"
 POLL_SECONDS = 15
@@ -88,23 +95,25 @@ class PerpetualDemoController:
     ) -> None:
         if isinstance(poll_seconds, bool) or not isinstance(poll_seconds, int) or poll_seconds < 5:
             raise ValueError("poll_seconds must be an integer of at least five seconds")
-        if not symbols or len(set(symbols)) != len(symbols):
+        normalized = tuple(str(s).strip().upper() for s in symbols)
+        if not normalized or len(set(normalized)) != len(normalized):
             raise ValueError("symbols must be a non-empty unique sequence")
+        if any(not re.fullmatch(r"[A-Z0-9]{1,26}USDT", s) for s in normalized):
+            raise ValueError("strategy symbols must be Bybit USDT contract symbols")
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.state_path = self.root / STATE_FILE
         self.broker = broker or BybitLinearDemoBroker()
         self.public = public_client or self.broker.public
         self.poll_seconds = poll_seconds
-        self.symbols = tuple(str(s).strip().upper() for s in symbols)
-        if any(not s.isalnum() or not 3 <= len(s) <= 30 for s in self.symbols):
-            raise ValueError("invalid strategy symbol")
+        self.symbols = normalized
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._instrument_cache: dict[str, Any] = {}
         self._strategy_status: dict[str, Any] = {
             "status": "idle",
+            "symbols": list(self.symbols),
             "strategy_id": STRATEGY_ID,
             "orders_submitted": False,
             "execution_enabled": False,
@@ -358,8 +367,6 @@ class PerpetualDemoController:
     def close_manual(self, symbol: str) -> dict:
         self._require_configured()
         market = str(symbol or "").strip().upper()
-        if market not in self.symbols:
-            raise ValueError("symbol is outside the configured Demo perpetual universe")
         result = self.broker.close_market_position(
             market,
             order_link_id=f"CLOSE-{market}-{uuid.uuid4().hex[:16]}",
@@ -391,9 +398,11 @@ class PerpetualDemoController:
             # Cache current contract filters before arming the worker. Symbols
             # whose minimum order cannot fit the account's hard notional cap are
             # skipped before signal execution rather than repeatedly rejected.
-            self._instrument_cache = {}
-            for symbol in self.symbols:
-                self._instrument_cache[symbol] = self.broker.instrument_info(symbol)
+            with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as executor:
+                self._instrument_cache = dict(zip(
+                    self.symbols, executor.map(self.broker.instrument_info, self.symbols),
+                    strict=True,
+                ))
             self.broker.get_positions()  # also refuses hedge-mode positions
             self._stop.clear()
             self._strategy_status = {
@@ -408,7 +417,7 @@ class PerpetualDemoController:
                 "orders_submitted": False,
                 "execution_enabled": True,
                 "started_at": datetime.now(UTC).isoformat(),
-                "detail": f"Preflight passed; scanning 12 USDT perpetuals on live 1-minute Mark Price with completed 5m/15m trend filters every {self.poll_seconds}s.",
+                "detail": f"Preflight passed; scanning {len(self.symbols)} USDT perpetuals on live 1-minute Mark Price with completed 5m/15m trend filters.",
             }
             self._thread = threading.Thread(
                 target=self._strategy_loop,
@@ -433,7 +442,7 @@ class PerpetualDemoController:
         self._strategy_status = {
             **self._strategy_status,
             "status": "running",
-            "detail": f"EMA MTF scalper is checking live 1-minute Mark Price with completed 5m/15m trend filters every {self.poll_seconds}s; max hold {self.strategy.max_hold_minutes}m, 2x max leverage, 0.5% modeled risk.",
+            "detail": f"EMA MTF scalper is checking live 1-minute Mark Price with completed 5m/15m trend filters with a {self.poll_seconds}s pause between scan cycles; max hold {self.strategy.max_hold_minutes}m, 2x max leverage, 0.5% modeled risk.",
         }
         while not self._stop.is_set():
             try:
@@ -585,6 +594,14 @@ class PerpetualDemoController:
                 "attribution_error": f"{type(exc).__name__}: {str(exc)[:140]}",
             }
 
+    def _scan_market(self, symbol: str) -> tuple[dict | None, str | None]:
+        if self._stop.is_set() or symbol not in self.symbols:
+            return None, None
+        try:
+            return self._scalping_market(symbol, include_instrument=False), None
+        except Exception as exc:
+            return None, f"{type(exc).__name__}: {str(exc)[:120]}"
+
     def _strategy_cycle(self) -> None:
         wallet = self.broker.get_wallet_balance()
         if wallet.get("status") != "ok":
@@ -601,25 +618,36 @@ class PerpetualDemoController:
         attempts = self._state.setdefault("scalper_entry_attempts", {})
         cooldowns = self._state.setdefault("scalper_cooldowns", {})
         scan_errors = self._state.setdefault("scalper_scan_errors", {})
-        scanned = signals_seen = 0
-        now_ms = int(time.time() * 1000)
+        scan_order = tuple(dict.fromkeys((*managed, *self.symbols)))
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as executor:
+            self._process_scan(
+                scan_order, executor.map(self._scan_market, scan_order),
+                equity, active_by_symbol, managed, attempts, cooldowns, scan_errors,
+            )
 
-        for symbol in self.symbols:
+    def _process_scan(
+        self, scan_order, snapshots, equity, active_by_symbol, managed, attempts,
+        cooldowns, scan_errors,
+    ) -> None:
+        scanned = signals_seen = 0
+        for symbol, (market, error) in zip(scan_order, snapshots, strict=True):
             if self._stop.is_set():
                 break
-            try:
-                market = self._scalping_market(symbol, now_ms, include_instrument=False)
+            now_ms = int(time.time() * 1000)
+            if market is not None:
                 scanned += 1
                 scan_errors.pop(symbol, None)
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {str(exc)[:120]}"
-                if scan_errors.get(symbol) != error:
-                    scan_errors[symbol] = error
-                    self._record({"type": "strategy_scan_error", "symbol": symbol, "reason": error})
-                continue
+            elif error is not None and scan_errors.get(symbol) != error:
+                scan_errors[symbol] = error
+                self._record({"type": "strategy_scan_error", "symbol": symbol, "reason": error})
 
-            current_minute = market["forming_candle_open"]
-            current_signal = int(market.get("signal", 0))
+            current_minute = market["forming_candle_open"] if market is not None else None
+            # A queued snapshot may be from the previous minute by the time an
+            # earlier symbol's order or reconciliation has finished.
+            forming_open = pd_timestamp(current_minute)
+            open_ms = int(forming_open.timestamp() * 1000) if forming_open is not None else None
+            is_current = open_ms is not None and open_ms <= now_ms < open_ms + 60_000
+            current_signal = int(market.get("signal", 0)) if is_current else 0
             if current_signal in (-1, 1):
                 signals_seen += 1
             position = active_by_symbol.get(symbol)
@@ -843,6 +871,8 @@ class PerpetualDemoController:
                 })
                 continue
 
+            if market is None or not is_current:
+                continue
             if cooldowns.get(symbol, 0) > now_ms or attempts.get(symbol) == current_minute:
                 continue
             if current_signal not in (-1, 1) or len(active_by_symbol) >= MAX_OPEN_POSITIONS:
@@ -937,6 +967,7 @@ class PerpetualDemoController:
         self._state["last_scalper_scan"] = {
             "at": datetime.now(UTC).isoformat(),
             "symbols_scanned": scanned,
+            "configured_symbol_count": len(self.symbols),
             "signals_seen": signals_seen,
         }
         self._save_state()
@@ -944,6 +975,7 @@ class PerpetualDemoController:
             **self._strategy_status,
             "last_cycle_at": datetime.now(UTC).isoformat(),
             "last_scan_symbols": scanned,
+            "configured_symbol_count": len(self.symbols),
             "last_signals_seen": signals_seen,
             "scan_errors": len(scan_errors),
         }
@@ -954,8 +986,6 @@ def pd_timestamp(value: object):
     if not isinstance(value, str) or not value:
         return None
     try:
-        from datetime import datetime
-
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return parsed.astimezone(UTC)
     except ValueError:
@@ -1015,7 +1045,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
    </div>
    <p id="strategy-detail" class="muted">Stopped. No automatic orders.</p>
    <div class="actions"><button id="start-strategy" class="primary">Start Scalping Auto</button><button id="stop-strategy" class="danger" disabled>Stop strategy</button></div>
-   <div class="note">The scalper checks live Mark Price every 15 seconds, using completed 5m/15m trend filters and a 1m pullback-reclaim trigger. Each entry gets exchange-side Mark Price SL/TP; strategy exits on an opposite signal or after 15 minutes. 2x leverage and existing account risk limits remain enforced. Demo only; no profit is guaranteed.</div>
+   <div class="note">The scalper scans the configured contracts using live Mark Price, completed 5m/15m trend filters and a 1m pullback-reclaim trigger. Each entry gets exchange-side Mark Price SL/TP; strategy exits on an opposite signal or after 15 minutes. 2x leverage and existing account risk limits remain enforced. Demo only; no profit is guaranteed.</div>
   </section>
   <section class="panel">
    <div class="heading"><h2>Manual Demo order</h2><span class="pill">BUY / SELL</span></div>
@@ -1053,23 +1083,23 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
 <script>
 (function(){
 "use strict";
-var $=function(id){return document.getElementById(id)},TOKEN=localStorage.getItem("bybit_linear_demo_token")||"",symbols=["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT","LTCUSDT","AVAXUSDT","DOTUSDT","TRXUSDT"],statusTimer=null,marketTimer=null;
-symbols.forEach(function(s){var o=document.createElement("option");o.value=s;o.textContent=s;$("symbol").appendChild(o);});
+var $=function(id){return document.getElementById(id)},TOKEN=localStorage.getItem("bybit_linear_demo_token")||"",statusTimer=null,marketTimer=null;
+function loadSymbols(symbols){var select=$("symbol"),previous=select.value;if(Array.from(select.options).map(function(o){return o.value;}).join(",")===symbols.join(","))return;select.replaceChildren();symbols.forEach(function(s){select.add(new Option(s,s));});if(symbols.includes(previous))select.value=previous;loadMarket();}
 function esc(v){return String(v===null||v===undefined?"—":v).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c];});}
 function fmt(v,d){var n=Number(v);return Number.isFinite(n)?n.toLocaleString(undefined,{maximumFractionDigits:d===undefined?3:d,minimumFractionDigits:0}):"—";}
 function msg(t,ok){$("message").textContent=t;$("message").className=ok?"ok":"error";}
 async function api(path,options){options=options||{};options.headers=Object.assign({"Authorization":"Bearer "+TOKEN,"Content-Type":"application/json"},options.headers||{});var r=await fetch(path,options),body=await r.json().catch(function(){return {};});if(!r.ok)throw new Error(body.detail||body.error||"HTTP "+r.status);return body;}
 function connect(){TOKEN=$("token").value.trim();if(!TOKEN){msg("Dashboard token is required.",false);return;}localStorage.setItem("bybit_linear_demo_token",TOKEN);boot();}
 async function refresh(){try{var d=await api("/api/status");$("venue-badge").textContent=d.status==="ok"?"BYBIT DEMO · LINEAR":String(d.status||"UNKNOWN").toUpperCase();$("venue-badge").className="pill "+(d.status==="ok"?"safe":"warn");var build=d.build||{};$("build-tag").textContent=(build.branch||"branch?")+" · "+(build.commit_sha?String(build.commit_sha).slice(0,8):"sha unavailable");var w=d.wallet||{};$("equity").textContent=fmt(w.total_equity_usd);$("available").textContent=fmt(w.total_available_balance_usd);$("upl").textContent=fmt(w.total_perpetual_unrealized_pnl_usd);$("position-count").textContent=String((d.positions||[]).length);$("positions-badge").textContent=String((d.positions||[]).length)+" / 2";$("refresh-time").textContent=new Date().toLocaleTimeString();
-renderPositions(d.positions||[]);renderOrders(d.open_orders||[]);renderClosedPnl(d.closed_pnl||[],d.closed_pnl_error,d.closed_pnl_fetched_at_ms);renderEvents((d.strategy_state||{}).events||[]);renderStrategy(d.strategy||{});
+renderPositions(d.positions||[]);renderOrders(d.open_orders||[]);renderClosedPnl(d.closed_pnl||[],d.closed_pnl_error,d.closed_pnl_fetched_at_ms);renderEvents((d.strategy_state||{}).events||[]);renderStrategy(d.strategy||{});loadSymbols(d.strategy.symbols||d.strategy_symbols||[]);
 if(d.status!=="ok")msg(d.detail||"Demo account is not ready. Check dedicated Contract Trade key permissions.",false);else if(d.spot_enabled!==false)msg("Safety error: service did not confirm Spot is disabled.",false);else $("message").style.display="none";
 }catch(e){msg(e.message,false);}}
-function renderStrategy(s){var state=s.status||"idle";$("strategy-badge").textContent=String(state).toUpperCase();$("strategy-badge").className="pill "+(state==="running"?"safe":state==="error"||state==="halted"?"bad":"");$("strategy-detail").textContent=s.detail||s.last_error||"Stopped.";var active=["starting","running","stopping"].indexOf(state)>=0;$("start-strategy").disabled=active||state==="halted";$("stop-strategy").disabled=!active;}
+function renderStrategy(s){var state=s.status||"idle";$("strategy-badge").textContent=String(state).toUpperCase();$("strategy-badge").className="pill "+(state==="running"?"safe":state==="error"||state==="halted"?"bad":"");$("strategy-detail").textContent=(s.detail||s.last_error||"Stopped.")+(s.last_scan_symbols==null?"":" · Scanned "+s.last_scan_symbols+" / "+s.configured_symbol_count);var active=["starting","running","stopping"].indexOf(state)>=0;$("start-strategy").disabled=active||state==="halted";$("stop-strategy").disabled=!active;}
 function renderPositions(rows){if(!rows.length){$("positions").innerHTML='<div class="empty">No open USDT linear perpetual positions.</div>';return;}$("positions").innerHTML=rows.map(function(p){var side=String(p.side||"").toUpperCase(),pnl=Number(p.unrealized_pnl||0);return '<div class="rowitem"><div class="rowtop"><strong>'+esc(p.symbol)+' · '+esc(side)+'</strong><span class="pill">'+fmt(p.leverage,1)+'x</span></div><div class="stats"><div class="stat">Quantity<b>'+fmt(p.quantity,6)+'</b></div><div class="stat">Entry<b>'+fmt(p.entry_price,5)+'</b></div><div class="stat">Mark<b>'+fmt(p.mark_price,5)+'</b></div><div class="stat">Unrealized P&amp;L<b class="'+(pnl>0?"positive":pnl<0?"negative":"")+'">'+fmt(pnl,4)+' USDT</b></div><div class="stat">Stop loss<b>'+fmt(p.stop_loss,5)+'</b></div><div class="stat">Take profit<b>'+fmt(p.take_profit,5)+'</b></div></div><div class="actions" style="margin-top:10px"><button class="danger" data-close="'+esc(p.symbol)+'">Close position · Reduce Only</button></div></div>';}).join("");}
 function renderOrders(rows){if(!rows.length){$("orders").innerHTML='<div class="empty">No active exchange orders.</div>';return;}$("orders").innerHTML='<table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Protection type</th><th>Trigger</th><th>Stop</th><th>Target</th><th>Reduce only</th><th>Order ID</th></tr></thead><tbody>'+rows.map(function(o){return '<tr><td>'+esc(o.symbol)+'</td><td>'+esc(o.side)+'</td><td>'+fmt(o.qty,6)+'</td><td>'+esc(o.order_status)+'</td><td>'+esc(o.stop_order_type||o.order_type)+'</td><td>'+esc(o.trigger_price||o.trigger_by||"—")+'</td><td>'+esc(o.stop_loss||"—")+'</td><td>'+esc(o.take_profit||"—")+'</td><td>'+String(!!o.reduce_only)+'</td><td>'+esc(o.order_id).slice(0,12)+'</td></tr>';}).join("")+'</tbody></table>';}
 function renderClosedPnl(rows,error,fetchedAt){if(error){$("closed-pnl").innerHTML='<div class="empty">Closed P&amp;L history unavailable: '+esc(error)+'</div>';return;}if(!rows.length){$("closed-pnl").innerHTML='<div class="empty">No closed linear P&amp;L records returned by Bybit.</div>';}else{$("closed-pnl").innerHTML='<table><thead><tr><th>Symbol</th><th>Direction</th><th>Closed size</th><th>Avg entry</th><th>Avg exit</th><th>Closed P&amp;L</th><th>Open fee</th><th>Close fee</th><th>Updated</th></tr></thead><tbody>'+rows.map(function(p){var pnl=Number(p.closed_pnl||0),direction=p.side==="Sell"?"LONG":p.side==="Buy"?"SHORT":p.side;return '<tr><td>'+esc(p.symbol)+'</td><td>'+esc(direction)+'</td><td>'+fmt(p.closed_size,6)+'</td><td>'+fmt(p.avg_entry_price,6)+'</td><td>'+fmt(p.avg_exit_price,6)+'</td><td class="'+(pnl>0?"positive":pnl<0?"negative":"")+'">'+fmt(pnl,6)+'</td><td>'+fmt(p.open_fee,6)+'</td><td>'+fmt(p.close_fee,6)+'</td><td>'+esc(p.updated_time_ms?new Date(p.updated_time_ms).toLocaleString():"—")+'</td></tr>';}).join("")+'</tbody></table>';}$("closed-pnl-note").textContent=fetchedAt?"Bybit Closed P&L snapshot · refreshed "+new Date(fetchedAt).toLocaleTimeString():"";}
 function renderEvents(rows){if(!rows.length){$("events").innerHTML='<div class="empty">No strategy or manual execution events.</div>';return;}$("events").innerHTML=rows.slice().reverse().map(function(e){var detail=[e.side?"side="+e.side:null,e.reason?"reason="+e.reason:null,e.venue_exit_reason?"venue_exit="+e.venue_exit_reason:null,e.order_status?"order="+e.order_status:null,e.close_order_status?"close="+e.close_order_status:null,e.reject_reason?"reject="+e.reject_reason:null,e.detail||null,e.minimum_order_notional!==undefined?"minOrder="+fmt(e.minimum_order_notional,4):null,e.maximum_order_notional!==undefined?"cap="+fmt(e.maximum_order_notional,4):null,e.minimum_quantity!==undefined?"minQty="+fmt(e.minimum_quantity,6):null,e.mark_price!==undefined?"mark="+fmt(e.mark_price,6):null,e.attribution_status?"PnL attribution="+e.attribution_status:null,e.closed_pnl!==undefined&&e.closed_pnl!==null?"closed PnL="+fmt(e.closed_pnl,6)+" USDT":null,e.fees_total!==undefined&&e.fees_total!==null?"fees="+fmt(e.fees_total,6)+" USDT":null,e.held_seconds!==undefined?"held="+e.held_seconds+"s":null].filter(Boolean).join(" · ");return '<div class="rowitem"><div class="rowtop"><strong>'+esc(e.type||"event")+' · '+esc(e.symbol||"—")+'</strong><span class="sub">'+esc(e.at||"")+'</span></div><div class="sub">'+esc(detail||"No additional details")+' '+(e.leverage?esc(e.leverage)+"x":"")+' '+(e.order_link_id?"· "+esc(e.order_link_id):"")+'</div></div>';}).join("");}
-async function loadMarket(){var s=$("symbol").value;try{var d=await api("/api/market?symbol="+encodeURIComponent(s));$("mark").value=fmt(d.mark_price,6);var side=$("side").value;var stop=side==="long"?d.suggested_long_stop:d.suggested_short_stop;var target=side==="long"?d.suggested_long_target:d.suggested_short_target;$("stop").value=stop==null?"":String(stop);$("target").value=target==null?"":String(target);$("market-note").textContent="Live mark "+fmt(d.mark_price,6)+" · forming 1m candle "+new Date(d.forming_candle_open).toLocaleString()+" · ATR "+fmt(d.atr,6)+" · RSI "+fmt(d.rsi,1)+" · 5m/15m bias L:"+d.long_bias+" S:"+d.short_bias+" · signal "+d.signal+" ("+d.signal_reason+") · qty step "+d.quantity_step;}catch(e){$("market-note").textContent="Market / scalping data unavailable: "+e.message;}}
+async function loadMarket(){var s=$("symbol").value;if(!s)return;try{var d=await api("/api/market?symbol="+encodeURIComponent(s));if(s!==$("symbol").value)return;$("mark").value=fmt(d.mark_price,6);var side=$("side").value;var stop=side==="long"?d.suggested_long_stop:d.suggested_short_stop;var target=side==="long"?d.suggested_long_target:d.suggested_short_target;$("stop").value=stop==null?"":String(stop);$("target").value=target==null?"":String(target);$("market-note").textContent="Live mark "+fmt(d.mark_price,6)+" · forming 1m candle "+new Date(d.forming_candle_open).toLocaleString()+" · ATR "+fmt(d.atr,6)+" · RSI "+fmt(d.rsi,1)+" · 5m/15m bias L:"+d.long_bias+" S:"+d.short_bias+" · signal "+d.signal+" ("+d.signal_reason+") · qty step "+d.quantity_step;}catch(e){$("market-note").textContent="Market / scalping data unavailable: "+e.message;}}
 async function manual(side){$("side").value=side;var symbol=$("symbol").value,stop=Number($("stop").value),target=Number($("target").value),leverage=Number($("leverage").value);if(!Number.isFinite(stop)||!Number.isFinite(target)||stop<=0||target<=0){msg("Enter a valid stop loss and take profit first.",false);return;}if(!confirm("Submit a "+side.toUpperCase()+" market order on BYBIT DEMO "+symbol+" at up to "+leverage+"x? SL and TP will be attached at the exchange."))return;try{var d=await api("/api/order",{method:"POST",headers:{"X-Demo-Confirm":"yes"},body:JSON.stringify({symbol:symbol,side:side,leverage:leverage,stop_loss:stop,take_profit:target})});msg("Demo order accepted: "+(d.order_id||d.order_link_id)+" · "+fmt(d.quantity,6)+" "+symbol+". Confirm fill in the positions panel.",true);await refresh();}catch(e){msg(e.message,false);}}
 async function closePosition(symbol){if(!confirm("Close the entire "+symbol+" position using a reduce-only market order on Bybit Demo?"))return;try{var d=await api("/api/close",{method:"POST",headers:{"X-Demo-Confirm":"yes"},body:JSON.stringify({symbol:symbol})});msg(d.closed===false?"No open position was found.":"Reduce-only close accepted for "+symbol+".",true);await refresh();}catch(e){msg(e.message,false);}}
 async function startStrategy(){if(!confirm("Start automatic multi-timeframe scalping on Bybit Demo USDT Perpetual? Orders may be sent after a live 1m reclaim signal."))return;try{var s=await api("/api/strategy/start",{method:"POST",headers:{"X-Demo-Confirm":"yes"},body:"{}"});renderStrategy(s);msg("Scalping strategy start requested. Automatic orders remain limited to Bybit Demo.",true);}catch(e){msg(e.message,false);}await refresh();}
@@ -1135,7 +1165,7 @@ def make_handler(controller: PerpetualDemoController, token: str):
                 if path == "/api/status":
                     self._send(200, controller.status())
                 elif path == "/api/market":
-                    symbol = (parse_qs(urlsplit(self.path).query).get("symbol") or ["BTCUSDT"])[0]
+                    symbol = (parse_qs(urlsplit(self.path).query).get("symbol") or [controller.symbols[0]])[0]
                     self._send(200, controller.market(symbol))
                 else:
                     self._send(404, {"error": "not found"})
@@ -1202,6 +1232,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
     parser.add_argument("--token", default=None)
     parser.add_argument("--poll-seconds", type=int, default=int(os.environ.get("TRADINGAGENTS_PERPETUAL_DEMO_POLL_SECONDS", str(POLL_SECONDS))))
+    parser.add_argument("--symbols", default=os.environ.get(SYMBOLS_ENV) or None, help="Comma- or space-separated USDT perpetual symbols")
     return parser
 
 
@@ -1211,7 +1242,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--port must be in [1, 65535]")
     token = resolve_token(args.token)
     require_bindable(args.host, token)
-    controller = PerpetualDemoController(args.root, poll_seconds=args.poll_seconds)
+    symbols = DEFAULT_SYMBOLS if args.symbols is None else tuple(args.symbols.replace(",", " ").split())
+    controller = PerpetualDemoController(args.root, poll_seconds=args.poll_seconds, symbols=symbols)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(controller, token))
     server.daemon_threads = True
     print(
