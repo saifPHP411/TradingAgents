@@ -110,3 +110,65 @@ python tradingagents/crypto/backtest/archive_probe.py \
 ```
 
 The research PR never deploys or enables the Demo worker.
+
+
+## Bounded real-L2 quote-only shadow comparison (new)
+
+**This does not bypass the missing historical strategy signal trace.**
+The true Market IOC vs signal-anchored Limit IOC backtest still requires
+the original pre-existing intraminute scalper signal timestamps, actual
+**Bybit Mark prices**, trade sizes, and independent exit fills. None of
+those fields are constructed from profitable-looking future candles.
+
+To obtain a **real order-book execution *diagnostic*** in the meantime,
+`ioc_quote_prefix_benchmark.py` examines the first **8 MiB compressed**
+of public Bybit **linear** L2 ZIPs from each of four *predeclared* days
+(2026-10-01, 08, 15 and 21), for XRPUSDT and LTCUSDT. It does not
+download or assume a complete historical day. The workflow is
+`.github/workflows/ioc-quote-prefix-benchmark.yml`.
+
+A deterministic **quote-proxy sampling schedule** takes the first valid
+L2 quote in each completed 15-second UTC bucket and alternates long and
+short sides by the fixed bucket number. The quote midpoint is a **proxy**
+for Mark price, not the actual archived Bybit mark or a strategy trigger.
+It sizes each hypothetical request to about **10 USDT notional**, using
+UNVERIFIED research tick assumptions (XRP: 0.0001, LTC: 0.01). Book
+snapshots and subsequent deltas are replayed to the exact arrival
+timestamp without reading future deltas. Three bounded latency cases
+are checked: 0, 250 and 1000 ms, with a 1000 ms maximum quote age.
+
+Both entry policies consume **identical** sampled quote-proxy events:
+- Market IOC: unlimited modeled visible book walk, a deliberately
+  optimistic fill benchmark. Real Bybit Market is **not unlimited**:
+  according to its V5 documentation, it is internally converted to
+  an IOC limit order with venue-managed price protection, and can
+  partially fill/cancel.
+- Limit IOC: a directionally rounded price cap of 10 bps against
+  the **sampled midpoint proxy**, not against the live signal mark.
+  Partial fills and immediate cancel of the unfilled remainder are
+  included. Taker fees are *estimated* at 5.5 bps per side.
+
+Outputs are deliberately named `sampled_quote_only_not_strategy_backtest`.
+Report only measurable simulated **entry** properties (any/full/quantity
+fill rates, average adverse entry slippage, paid estimated entry fees,
+extra Market-filled quantity). Never present a fixed quote-sample rate as
+a forward or full-day strategy fill rate. **Strategy P&L and net weekly
+profit are NULL** because authentic signals, independent exits, Bybit
+funding, mark-price triggers, and venue order constraints are unverified.
+
+Run manually with:
+
+```bash
+python tradingagents/crypto/backtest/ioc_quote_prefix_benchmark.py \
+  --symbol XRPUSDT --date 2026-10-01 \
+  --output results/ioc-shadow-XRPUSDT-2026-10-01.json
+```
+
+For a **genuine scalper backtest** use the original `ioc_compare.py`
+with recorded historical signal CSV and full archive, and reconcile the
+exit fills and real 50-USDT account trade ledger. Do not substitute
+these quote-proxy observations for original signal records.
+
+Official source for Market IOC's actual hidden venue protection:
+[Bybit V5 Place Order](https://bybit-exchange.github.io/docs/v5/order/create-order).
+
