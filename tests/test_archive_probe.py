@@ -30,6 +30,8 @@ def test_probe_accepts_real_zip_container_with_complete_jsonl_prefix(method):
     assert report["sampled_snapshots"] == 1
     assert report["symbol"] == "XRPUSDT"
     assert report["first_ts_ms"] == 1790812800000
+    assert report["sampled_spread_observations"] == 1
+    assert report["mean_quoted_spread_bps"] == pytest.approx((0.01 / 1.015) * 10000)
 
 
 def test_probe_rejects_incorrect_symbol_and_date():
