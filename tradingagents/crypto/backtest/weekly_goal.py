@@ -61,6 +61,8 @@ def audit_weekly_goal(report: dict) -> dict:
     """Audit all nonoverlapping seven-day periods; never select the best week."""
     if not isinstance(report, dict):
         raise ValueError("report must be an object")
+    if "weekly_runs" in report:
+        return audit_isolated_weekly_trials(report)
     if report.get("initial_equity_usdt") != START_USDT:
         raise ValueError("initial_equity_usdt must equal 50")
     raw_snapshots = report.get("account_equity")
@@ -204,6 +206,106 @@ def audit_weekly_goal(report: dict) -> dict:
             "Trade PnL must be net of costs; win rate alone does not establish profitability.",
             "A week only qualifies when both boundaries are flat and trade PnL reconciles to equity.",
             "A single best week or development-only search never establishes strategy quality.",
+        ],
+    }
+
+
+
+def audit_isolated_weekly_trials(report: dict) -> dict:
+    """Audit independent 50-USDT replays for consecutive, disjoint weeks.
+
+    This is the correct normalization when a weekly strategy replay starts
+    fresh at 50 USDT each week (rather than compounding into millions).
+    """
+    raw = report.get("weekly_runs")
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("weekly_runs must be a nonempty list")
+    if any(not isinstance(item, dict) for item in raw):
+        raise ValueError("weekly_runs must contain account trial objects")
+    if report.get("initial_equity_usdt") != START_USDT:
+        raise ValueError("initial_equity_usdt must equal 50")
+    shared_ids: set[str] = set()
+    windows = []
+    previous_end = None
+    for index, week in enumerate(raw):
+        snaps = week.get("account_equity")
+        trades = week.get("closed_trades")
+        if not isinstance(snaps, list) or len(snaps) != 8:
+            raise ValueError("each isolated weekly trial must have exactly eight daily snapshots")
+        if not isinstance(trades, list):
+            raise ValueError("each weekly trial needs a closed-trades ledger")
+        for trade in trades:
+            if not isinstance(trade, dict):
+                raise ValueError("closed trade must be an object")
+            trade_id = trade.get("trade_id")
+            if not isinstance(trade_id, str) or not trade_id or trade_id in shared_ids:
+                raise ValueError("trade_id must be globally unique across weekly trials")
+            shared_ids.add(trade_id)
+        result = audit_weekly_goal({
+            "initial_equity_usdt": START_USDT,
+            "source": report.get("source"),
+            "data_quality": report.get("data_quality"),
+            "account_equity": snaps,
+            "closed_trades": trades,
+        })
+        window = result["windows"][0]
+        start = _time(window["week_start"], "week_start")
+        end = _time(window["week_end_exclusive"], "week_end")
+        if previous_end is not None and start != previous_end:
+            raise ValueError("isolated weekly trials must be consecutive and nonoverlapping")
+        if start >= end:
+            raise ValueError("weekly trial has invalid date range")
+        previous_end = end
+        window["trial_number"] = index + 1
+        window["capital_reset_for_independent_trial"] = True
+        windows.append(window)
+    claimed_quality = report.get("data_quality") or {}
+    if not isinstance(claimed_quality, dict):
+        raise ValueError("data_quality must be an object")
+    if any(key in claimed_quality and not isinstance(claimed_quality[key], bool)
+           for key in REQUIRED_QUALITY_FLAGS):
+        raise ValueError("data_quality flags must be boolean")
+    missing_quality = [
+        key for key in REQUIRED_QUALITY_FLAGS if claimed_quality.get(key) is not True
+    ]
+    passed_weeks = sum(item["weekly_target_met"] for item in windows)
+    reported_pass = (
+        len(windows) >= MIN_INDEPENDENT_WEEKS
+        and passed_weeks == len(windows)
+        and not missing_quality
+    )
+    return {
+        "schema_version": 1,
+        "research_only": True,
+        "orders_submitted": False,
+        "auto_deployment_allowed": False,
+        "independently_verified_by_this_tool": False,
+        "source": report.get("source"),
+        "account_mode": "independent_50_usdt_weekly_replays",
+        "objective": {
+            "start_usdt": START_USDT, "end_usdt": TARGET_USDT,
+            "seven_day_growth_multiple": TARGET_MULTIPLE,
+            "required_win_rate_pct": WIN_RATE_MIN,
+            "minimum_closed_trades_per_week": MIN_WEEKLY_TRADES,
+            "minimum_independent_weeks": MIN_INDEPENDENT_WEEKS,
+        },
+        "status": (
+            "reported_historical_goal_passed_not_forward_verified"
+            if reported_pass else "goal_not_validated"
+        ),
+        "evaluated_complete_disjoint_weeks": len(windows),
+        "weeks_meeting_both_targets": passed_weeks,
+        "all_complete_weeks_pass": passed_weeks == len(windows),
+        "quality_claims_missing_or_unverified": missing_quality,
+        "reported_evidence_gate_passed": reported_pass,
+        "ignored_partial_days": 0,
+        "windows": windows,
+        "limitations": [
+            "Each isolated weekly replay restarts one account from 50 USDT.",
+            "All weeks are reported; the best week is never selected.",
+            "Self-reported quality flags and fills need independent validation.",
+            "Daily equity snapshots can miss intraday losses and liquidation risks.",
+            "This script never authorizes real or Demo trading.",
         ],
     }
 
