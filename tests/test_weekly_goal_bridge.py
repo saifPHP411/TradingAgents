@@ -87,6 +87,12 @@ def test_four_week_research_stays_unapproved_even_with_50usd_profit_claims(tmp_p
     assert realistic["weeks_meeting_50usdt_profit_and_70pct"] == 4
     assert realistic["weeks_meeting_50usdt_profit"] == 4
     assert realistic["closed_trades"] == 120
+    assert realistic["average_weekly_net_profit_usdt"] == pytest.approx(50)
+    assert realistic["median_weekly_net_profit_usdt"] == pytest.approx(50)
+    assert realistic["worst_weekly_net_profit_usdt"] == pytest.approx(50)
+    assert realistic["pooled_net_win_rate_pct"] == pytest.approx(70)
+    assert result["ranking_is_out_of_sample_evidence"] is False
+    assert result["exploratory_ranking_by_median_realistic_weekly_net_profit"][0]["strategy"] == "donchian_15m_trend"
     assert realistic["audit"]["reported_evidence_gate_passed"] is False
     assert realistic["audit"]["weeks_meeting_both_targets"] == 4
     assert "venue_filters_enforced" in realistic["missing_evidence"]
