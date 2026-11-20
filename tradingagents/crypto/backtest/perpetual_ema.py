@@ -359,6 +359,7 @@ def run_backtest(
     strategy: PerpetualEMAStrategy | None = None,
     costs: PerpetualCosts | None = None,
     trade_start_index: int = 1,
+    entry_signals: pd.Series | None = None,
 ) -> PerpetualBacktestResult:
     """Simulate a single symbol; missing or misaligned funding/mark data fail closed.
 
@@ -439,6 +440,16 @@ def run_backtest(
         raise ValueError("insufficient candles for EMA/ATR warm-up")
 
     features = _features(trade, cfg)
+    if entry_signals is not None:
+        if (
+            cfg.signal_mode != "donchian_breakout"
+            or not isinstance(entry_signals, pd.Series)
+            or not entry_signals.index.equals(trade.index)
+            or not entry_signals.isin((-1, 0, 1)).all()
+        ):
+            raise ValueError("research entry signals require aligned -1/0/1 directions and channel exits")
+        features["signal"] = entry_signals.astype(int)
+
     cash = float(initial_equity)
     trades: list[PerpetualTrade] = []
     curve: list[float] = [cash]
@@ -602,6 +613,13 @@ def run_backtest(
                                 "time": stamp.isoformat(), "index": i, "entry_fee": entry_fee,
                                 "margin": sizing.initial_margin, "stop": stop, "liq": liq,
                                 "target": target, "funding": 0.0, "trend_exit_bars": 0}
+                            if entry_signals is not None:
+                                # At the entry open, subsequent adverse extremes
+                                # can already reach liquidation or the stop.
+                                if (direction > 0 and mr.low <= liq) or (direction < 0 and mr.high >= liq):
+                                    close(liq, stamp, "liquidation")
+                                elif (direction > 0 and row.low <= stop) or (direction < 0 and row.high >= stop):
+                                    close(stop, stamp, "atr_stop")
             pending_signal, pending_atr, pending_target = 0, math.nan, math.nan
 
         if position is not None:

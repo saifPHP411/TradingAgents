@@ -1,0 +1,807 @@
+{
+  "windows": [
+    [
+      "prior_comparison",
+      "2024-05-01",
+      "2024-11-01"
+    ],
+    [
+      "holdout",
+      "2025-05-01",
+      "2025-08-01"
+    ],
+    [
+      "recent_check",
+      "2026-11-01",
+      "2026-11-20"
+    ]
+  ],
+  "comparison": {
+    "prior_comparison/volume_breakout": {
+      "core": {
+        "tested": [
+          "BTCUSDT",
+          "ETHUSDT",
+          "SOLUSDT",
+          "BNBUSDT"
+        ],
+        "unavailable": [],
+        "cost_cases": {
+          "realistic_estimate": {
+            "net_pnl_sum_independent_50_usdt_runs": 0.4479799946685448,
+            "trades": 9,
+            "wins": 3,
+            "win_rate_pct": 33.333333333333336,
+            "profit_factor": 1.5690081715383482,
+            "worst_symbol_drawdown_pct": 1.251548441463968,
+            "rejections": {
+              "below_minimum_quantity": 200
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.44797999466856,
+            "liquidations": 0
+          },
+          "conservative": {
+            "net_pnl_sum_independent_50_usdt_runs": 0.3865348056922129,
+            "trades": 9,
+            "wins": 3,
+            "win_rate_pct": 33.333333333333336,
+            "profit_factor": 1.4681732855570062,
+            "worst_symbol_drawdown_pct": 1.2983713301745743,
+            "rejections": {
+              "below_minimum_quantity": 200
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.3865348056922,
+            "liquidations": 0
+          },
+          "stress": {
+            "net_pnl_sum_independent_50_usdt_runs": 0.2829695584482576,
+            "trades": 9,
+            "wins": 3,
+            "win_rate_pct": 33.333333333333336,
+            "profit_factor": 1.317921757980755,
+            "worst_symbol_drawdown_pct": 1.3775006672973509,
+            "rejections": {
+              "below_minimum_quantity": 200
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.28296955844827,
+            "liquidations": 0
+          }
+        }
+      },
+      "expanded": {
+        "tested": [
+          "BTCUSDT",
+          "ETHUSDT",
+          "SOLUSDT",
+          "BNBUSDT",
+          "XRPUSDT",
+          "DOGEUSDT",
+          "ADAUSDT",
+          "LINKUSDT",
+          "LTCUSDT",
+          "AVAXUSDT",
+          "DOTUSDT",
+          "TRXUSDT",
+          "BCHUSDT",
+          "UNIUSDT",
+          "NEARUSDT",
+          "APTUSDT",
+          "ETCUSDT",
+          "ATOMUSDT",
+          "FILUSDT",
+          "ARBUSDT",
+          "OPUSDT",
+          "SUIUSDT",
+          "INJUSDT",
+          "ICPUSDT"
+        ],
+        "unavailable": [],
+        "cost_cases": {
+          "realistic_estimate": {
+            "net_pnl_sum_independent_50_usdt_runs": -6.7228520327468475,
+            "trades": 85,
+            "wins": 15,
+            "win_rate_pct": 17.647058823529413,
+            "profit_factor": 0.42228622326430465,
+            "worst_symbol_drawdown_pct": 2.1943917169390823,
+            "rejections": {
+              "below_minimum_quantity": 276,
+              "below_minimum_notional": 283
+            },
+            "symbols_with_trades": 19,
+            "highest_symbol_end_usdt": 51.26900464621183,
+            "liquidations": 0
+          },
+          "conservative": {
+            "net_pnl_sum_independent_50_usdt_runs": -6.8255377313017505,
+            "trades": 81,
+            "wins": 14,
+            "win_rate_pct": 17.28395061728395,
+            "profit_factor": 0.4028295741234614,
+            "worst_symbol_drawdown_pct": 2.18102028140894,
+            "rejections": {
+              "below_minimum_quantity": 278,
+              "below_minimum_notional": 276
+            },
+            "symbols_with_trades": 19,
+            "highest_symbol_end_usdt": 51.25645909898131,
+            "liquidations": 0
+          },
+          "stress": {
+            "net_pnl_sum_independent_50_usdt_runs": -6.564938627758024,
+            "trades": 73,
+            "wins": 11,
+            "win_rate_pct": 15.068493150684931,
+            "profit_factor": 0.406474277045219,
+            "worst_symbol_drawdown_pct": 2.1307888108777484,
+            "rejections": {
+              "below_minimum_quantity": 293,
+              "below_minimum_notional": 319
+            },
+            "symbols_with_trades": 19,
+            "highest_symbol_end_usdt": 50.87463155184533,
+            "liquidations": 0
+          }
+        }
+      }
+    },
+    "prior_comparison/trend_pullback": {
+      "core": {
+        "tested": [
+          "BTCUSDT",
+          "ETHUSDT",
+          "SOLUSDT",
+          "BNBUSDT"
+        ],
+        "unavailable": [],
+        "cost_cases": {
+          "realistic_estimate": {
+            "net_pnl_sum_independent_50_usdt_runs": -0.3631784654557549,
+            "trades": 3,
+            "wins": 0,
+            "win_rate_pct": 0.0,
+            "profit_factor": 0.0,
+            "worst_symbol_drawdown_pct": 0.9401427710553701,
+            "rejections": {
+              "below_minimum_quantity": 190
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.0,
+            "liquidations": 0
+          },
+          "conservative": {
+            "net_pnl_sum_independent_50_usdt_runs": -0.3812499362171465,
+            "trades": 3,
+            "wins": 0,
+            "win_rate_pct": 0.0,
+            "profit_factor": 0.0,
+            "worst_symbol_drawdown_pct": 0.9686412780796304,
+            "rejections": {
+              "below_minimum_quantity": 190
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.0,
+            "liquidations": 0
+          },
+          "stress": {
+            "net_pnl_sum_independent_50_usdt_runs": -0.41157462638715375,
+            "trades": 3,
+            "wins": 0,
+            "win_rate_pct": 0.0,
+            "profit_factor": 0.0,
+            "worst_symbol_drawdown_pct": 1.016359598928979,
+            "rejections": {
+              "below_minimum_quantity": 190
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.0,
+            "liquidations": 0
+          }
+        }
+      },
+      "expanded": {
+        "tested": [
+          "BTCUSDT",
+          "ETHUSDT",
+          "SOLUSDT",
+          "BNBUSDT",
+          "XRPUSDT",
+          "DOGEUSDT",
+          "ADAUSDT",
+          "LINKUSDT",
+          "LTCUSDT",
+          "AVAXUSDT",
+          "DOTUSDT",
+          "TRXUSDT",
+          "BCHUSDT",
+          "UNIUSDT",
+          "NEARUSDT",
+          "APTUSDT",
+          "ETCUSDT",
+          "ATOMUSDT",
+          "FILUSDT",
+          "ARBUSDT",
+          "OPUSDT",
+          "SUIUSDT",
+          "INJUSDT",
+          "ICPUSDT"
+        ],
+        "unavailable": [],
+        "cost_cases": {
+          "realistic_estimate": {
+            "net_pnl_sum_independent_50_usdt_runs": 3.7532462747541238,
+            "trades": 145,
+            "wins": 49,
+            "win_rate_pct": 33.793103448275865,
+            "profit_factor": 1.2560275374263643,
+            "worst_symbol_drawdown_pct": 2.1300832634364197,
+            "rejections": {
+              "below_minimum_quantity": 277,
+              "below_minimum_notional": 350
+            },
+            "symbols_with_trades": 20,
+            "highest_symbol_end_usdt": 52.455403292069796,
+            "liquidations": 0
+          },
+          "conservative": {
+            "net_pnl_sum_independent_50_usdt_runs": 1.2657230984739327,
+            "trades": 124,
+            "wins": 39,
+            "win_rate_pct": 31.451612903225808,
+            "profit_factor": 1.0994447959005789,
+            "worst_symbol_drawdown_pct": 2.3080073349052035,
+            "rejections": {
+              "below_minimum_quantity": 281,
+              "below_minimum_notional": 347
+            },
+            "symbols_with_trades": 20,
+            "highest_symbol_end_usdt": 52.4999835515723,
+            "liquidations": 0
+          },
+          "stress": {
+            "net_pnl_sum_independent_50_usdt_runs": -3.4067073418529694,
+            "trades": 101,
+            "wins": 25,
+            "win_rate_pct": 24.752475247524753,
+            "profit_factor": 0.6729566954805759,
+            "worst_symbol_drawdown_pct": 2.1689435802300876,
+            "rejections": {
+              "below_minimum_quantity": 286,
+              "below_minimum_notional": 334
+            },
+            "symbols_with_trades": 20,
+            "highest_symbol_end_usdt": 51.58516213084346,
+            "liquidations": 0
+          }
+        }
+      }
+    },
+    "holdout/volume_breakout": {
+      "core": {
+        "tested": [
+          "BTCUSDT",
+          "ETHUSDT",
+          "SOLUSDT",
+          "BNBUSDT"
+        ],
+        "unavailable": [],
+        "cost_cases": {
+          "realistic_estimate": {
+            "net_pnl_sum_independent_50_usdt_runs": 0.0733901326098496,
+            "trades": 4,
+            "wins": 1,
+            "win_rate_pct": 25.0,
+            "profit_factor": 1.3073134769169872,
+            "worst_symbol_drawdown_pct": 0.9655049593897128,
+            "rejections": {
+              "below_minimum_quantity": 86
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.07339013260984,
+            "liquidations": 0
+          },
+          "conservative": {
+            "net_pnl_sum_independent_50_usdt_runs": 0.041869159833009116,
+            "trades": 4,
+            "wins": 1,
+            "win_rate_pct": 25.0,
+            "profit_factor": 1.159776131169462,
+            "worst_symbol_drawdown_pct": 1.0199438328889774,
+            "rejections": {
+              "below_minimum_quantity": 86
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.041869159833006,
+            "liquidations": 0
+          },
+          "stress": {
+            "net_pnl_sum_independent_50_usdt_runs": -0.01132318329694533,
+            "trades": 4,
+            "wins": 1,
+            "win_rate_pct": 25.0,
+            "profit_factor": 0.9624092097563541,
+            "worst_symbol_drawdown_pct": 1.111787086153314,
+            "rejections": {
+              "below_minimum_quantity": 86
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.0,
+            "liquidations": 0
+          }
+        }
+      },
+      "expanded": {
+        "tested": [
+          "BTCUSDT",
+          "ETHUSDT",
+          "SOLUSDT",
+          "BNBUSDT",
+          "XRPUSDT",
+          "DOGEUSDT",
+          "ADAUSDT",
+          "LINKUSDT",
+          "LTCUSDT",
+          "AVAXUSDT",
+          "DOTUSDT",
+          "TRXUSDT",
+          "BCHUSDT",
+          "UNIUSDT",
+          "NEARUSDT",
+          "APTUSDT",
+          "ETCUSDT",
+          "ATOMUSDT",
+          "FILUSDT",
+          "ARBUSDT",
+          "OPUSDT",
+          "SUIUSDT",
+          "INJUSDT",
+          "ICPUSDT"
+        ],
+        "unavailable": [],
+        "cost_cases": {
+          "realistic_estimate": {
+            "net_pnl_sum_independent_50_usdt_runs": 6.9684333600891195,
+            "trades": 86,
+            "wins": 35,
+            "win_rate_pct": 40.69767441860465,
+            "profit_factor": 1.841019645182096,
+            "worst_symbol_drawdown_pct": 2.1823081221151033,
+            "rejections": {
+              "below_minimum_quantity": 140,
+              "below_minimum_notional": 254
+            },
+            "symbols_with_trades": 20,
+            "highest_symbol_end_usdt": 52.09664471095534,
+            "liquidations": 0
+          },
+          "conservative": {
+            "net_pnl_sum_independent_50_usdt_runs": 6.4849831304141965,
+            "trades": 77,
+            "wins": 32,
+            "win_rate_pct": 41.55844155844156,
+            "profit_factor": 1.8901762136537186,
+            "worst_symbol_drawdown_pct": 2.2106749548616835,
+            "rejections": {
+              "below_minimum_quantity": 141,
+              "below_minimum_notional": 264
+            },
+            "symbols_with_trades": 20,
+            "highest_symbol_end_usdt": 52.05110278680336,
+            "liquidations": 0
+          },
+          "stress": {
+            "net_pnl_sum_independent_50_usdt_runs": 6.158186109666924,
+            "trades": 56,
+            "wins": 24,
+            "win_rate_pct": 42.857142857142854,
+            "profit_factor": 2.284026864142173,
+            "worst_symbol_drawdown_pct": 1.6180452671216456,
+            "rejections": {
+              "below_minimum_quantity": 148,
+              "below_minimum_notional": 308
+            },
+            "symbols_with_trades": 18,
+            "highest_symbol_end_usdt": 51.87781870416111,
+            "liquidations": 0
+          }
+        }
+      }
+    },
+    "holdout/trend_pullback": {
+      "core": {
+        "tested": [
+          "BTCUSDT",
+          "ETHUSDT",
+          "SOLUSDT",
+          "BNBUSDT"
+        ],
+        "unavailable": [],
+        "cost_cases": {
+          "realistic_estimate": {
+            "net_pnl_sum_independent_50_usdt_runs": -0.3095036108160668,
+            "trades": 3,
+            "wins": 0,
+            "win_rate_pct": 0.0,
+            "profit_factor": 0.0,
+            "worst_symbol_drawdown_pct": 0.6190072216321028,
+            "rejections": {
+              "below_minimum_quantity": 115
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.0,
+            "liquidations": 0
+          },
+          "conservative": {
+            "net_pnl_sum_independent_50_usdt_runs": -0.31301246741809235,
+            "trades": 3,
+            "wins": 0,
+            "win_rate_pct": 0.0,
+            "profit_factor": 0.0,
+            "worst_symbol_drawdown_pct": 0.626024934836181,
+            "rejections": {
+              "below_minimum_quantity": 115
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.0,
+            "liquidations": 0
+          },
+          "stress": {
+            "net_pnl_sum_independent_50_usdt_runs": -0.33990388109855496,
+            "trades": 3,
+            "wins": 0,
+            "win_rate_pct": 0.0,
+            "profit_factor": 0.0,
+            "worst_symbol_drawdown_pct": 0.6798077621970862,
+            "rejections": {
+              "below_minimum_quantity": 115
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.0,
+            "liquidations": 0
+          }
+        }
+      },
+      "expanded": {
+        "tested": [
+          "BTCUSDT",
+          "ETHUSDT",
+          "SOLUSDT",
+          "BNBUSDT",
+          "XRPUSDT",
+          "DOGEUSDT",
+          "ADAUSDT",
+          "LINKUSDT",
+          "LTCUSDT",
+          "AVAXUSDT",
+          "DOTUSDT",
+          "TRXUSDT",
+          "BCHUSDT",
+          "UNIUSDT",
+          "NEARUSDT",
+          "APTUSDT",
+          "ETCUSDT",
+          "ATOMUSDT",
+          "FILUSDT",
+          "ARBUSDT",
+          "OPUSDT",
+          "SUIUSDT",
+          "INJUSDT",
+          "ICPUSDT"
+        ],
+        "unavailable": [],
+        "cost_cases": {
+          "realistic_estimate": {
+            "net_pnl_sum_independent_50_usdt_runs": -2.7862723858845535,
+            "trades": 75,
+            "wins": 15,
+            "win_rate_pct": 20.0,
+            "profit_factor": 0.7090284568748791,
+            "worst_symbol_drawdown_pct": 2.3897362191513385,
+            "rejections": {
+              "below_minimum_quantity": 181,
+              "below_minimum_notional": 256
+            },
+            "symbols_with_trades": 19,
+            "highest_symbol_end_usdt": 51.16688972239592,
+            "liquidations": 0
+          },
+          "conservative": {
+            "net_pnl_sum_independent_50_usdt_runs": -3.4965985304378986,
+            "trades": 78,
+            "wins": 16,
+            "win_rate_pct": 20.512820512820515,
+            "profit_factor": 0.6553254024142616,
+            "worst_symbol_drawdown_pct": 2.365078253326045,
+            "rejections": {
+              "below_minimum_quantity": 188,
+              "below_minimum_notional": 276
+            },
+            "symbols_with_trades": 19,
+            "highest_symbol_end_usdt": 51.28494463854076,
+            "liquidations": 0
+          },
+          "stress": {
+            "net_pnl_sum_independent_50_usdt_runs": -4.094861903646265,
+            "trades": 67,
+            "wins": 10,
+            "win_rate_pct": 14.925373134328359,
+            "profit_factor": 0.5801985782578137,
+            "worst_symbol_drawdown_pct": 2.3765781820546867,
+            "rejections": {
+              "below_minimum_quantity": 202,
+              "below_minimum_notional": 298
+            },
+            "symbols_with_trades": 18,
+            "highest_symbol_end_usdt": 51.06387001974309,
+            "liquidations": 0
+          }
+        }
+      }
+    },
+    "recent_check/volume_breakout": {
+      "core": {
+        "tested": [
+          "BTCUSDT",
+          "ETHUSDT",
+          "SOLUSDT",
+          "BNBUSDT"
+        ],
+        "unavailable": [],
+        "cost_cases": {
+          "realistic_estimate": {
+            "net_pnl_sum_independent_50_usdt_runs": 0.8367263544232654,
+            "trades": 4,
+            "wins": 2,
+            "win_rate_pct": 50.0,
+            "profit_factor": 3.718934183929857,
+            "worst_symbol_drawdown_pct": 0.6765969809674743,
+            "rejections": {
+              "below_minimum_quantity": 18
+            },
+            "symbols_with_trades": 2,
+            "highest_symbol_end_usdt": 50.470784913338,
+            "liquidations": 0
+          },
+          "conservative": {
+            "net_pnl_sum_independent_50_usdt_runs": 0.3454546736180981,
+            "trades": 3,
+            "wins": 1,
+            "win_rate_pct": 33.333333333333336,
+            "profit_factor": 2.078980719850738,
+            "worst_symbol_drawdown_pct": 0.7099478865018227,
+            "rejections": {
+              "below_minimum_quantity": 22
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.345454673618086,
+            "liquidations": 0
+          },
+          "stress": {
+            "net_pnl_sum_independent_50_usdt_runs": 0.31111600522358257,
+            "trades": 3,
+            "wins": 1,
+            "win_rate_pct": 33.333333333333336,
+            "profit_factor": 1.9127195436616433,
+            "worst_symbol_drawdown_pct": 0.7657200968908313,
+            "rejections": {
+              "below_minimum_quantity": 22
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.31111600522358,
+            "liquidations": 0
+          }
+        }
+      },
+      "expanded": {
+        "tested": [
+          "BTCUSDT",
+          "ETHUSDT",
+          "SOLUSDT",
+          "BNBUSDT",
+          "XRPUSDT",
+          "DOGEUSDT",
+          "ADAUSDT",
+          "LINKUSDT",
+          "LTCUSDT",
+          "AVAXUSDT",
+          "DOTUSDT",
+          "TRXUSDT",
+          "BCHUSDT",
+          "UNIUSDT",
+          "NEARUSDT",
+          "APTUSDT",
+          "ETCUSDT",
+          "ATOMUSDT",
+          "FILUSDT",
+          "ARBUSDT",
+          "OPUSDT",
+          "SUIUSDT",
+          "INJUSDT",
+          "ICPUSDT"
+        ],
+        "unavailable": [],
+        "cost_cases": {
+          "realistic_estimate": {
+            "net_pnl_sum_independent_50_usdt_runs": -1.7237412018562155,
+            "trades": 28,
+            "wins": 4,
+            "win_rate_pct": 14.285714285714286,
+            "profit_factor": 0.5970362963038124,
+            "worst_symbol_drawdown_pct": 1.0396448394207232,
+            "rejections": {
+              "below_minimum_quantity": 29,
+              "below_minimum_notional": 87
+            },
+            "symbols_with_trades": 17,
+            "highest_symbol_end_usdt": 50.87333765266712,
+            "liquidations": 0
+          },
+          "conservative": {
+            "net_pnl_sum_independent_50_usdt_runs": -2.7777725550012153,
+            "trades": 26,
+            "wins": 2,
+            "win_rate_pct": 7.6923076923076925,
+            "profit_factor": 0.351053810564589,
+            "worst_symbol_drawdown_pct": 1.0325899819730233,
+            "rejections": {
+              "below_minimum_quantity": 33,
+              "below_minimum_notional": 92
+            },
+            "symbols_with_trades": 16,
+            "highest_symbol_end_usdt": 50.83704104812229,
+            "liquidations": 0
+          },
+          "stress": {
+            "net_pnl_sum_independent_50_usdt_runs": -2.4654418950734653,
+            "trades": 23,
+            "wins": 2,
+            "win_rate_pct": 8.695652173913043,
+            "profit_factor": 0.36553036473976364,
+            "worst_symbol_drawdown_pct": 1.0086049970632829,
+            "rejections": {
+              "below_minimum_quantity": 33,
+              "below_minimum_notional": 96
+            },
+            "symbols_with_trades": 15,
+            "highest_symbol_end_usdt": 50.76840624975679,
+            "liquidations": 0
+          }
+        }
+      }
+    },
+    "recent_check/trend_pullback": {
+      "core": {
+        "tested": [
+          "BTCUSDT",
+          "ETHUSDT",
+          "SOLUSDT",
+          "BNBUSDT"
+        ],
+        "unavailable": [],
+        "cost_cases": {
+          "realistic_estimate": {
+            "net_pnl_sum_independent_50_usdt_runs": 0.8764385840909246,
+            "trades": 5,
+            "wins": 4,
+            "win_rate_pct": 80.0,
+            "profit_factor": 5.628011865195198,
+            "worst_symbol_drawdown_pct": 0.9494368581448455,
+            "rejections": {
+              "below_minimum_quantity": 10
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.87643858409092,
+            "liquidations": 0
+          },
+          "conservative": {
+            "net_pnl_sum_independent_50_usdt_runs": 0.9215809069087597,
+            "trades": 5,
+            "wins": 4,
+            "win_rate_pct": 80.0,
+            "profit_factor": 5.706629907393791,
+            "worst_symbol_drawdown_pct": 0.7412771776896224,
+            "rejections": {
+              "below_minimum_quantity": 11
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.92158090690876,
+            "liquidations": 0
+          },
+          "stress": {
+            "net_pnl_sum_independent_50_usdt_runs": 0.8534191544515504,
+            "trades": 5,
+            "wins": 4,
+            "win_rate_pct": 80.0,
+            "profit_factor": 5.132535522395497,
+            "worst_symbol_drawdown_pct": 0.7781184163767922,
+            "rejections": {
+              "below_minimum_quantity": 11
+            },
+            "symbols_with_trades": 1,
+            "highest_symbol_end_usdt": 50.853419154451544,
+            "liquidations": 0
+          }
+        }
+      },
+      "expanded": {
+        "tested": [
+          "BTCUSDT",
+          "ETHUSDT",
+          "SOLUSDT",
+          "BNBUSDT",
+          "XRPUSDT",
+          "DOGEUSDT",
+          "ADAUSDT",
+          "LINKUSDT",
+          "LTCUSDT",
+          "AVAXUSDT",
+          "DOTUSDT",
+          "TRXUSDT",
+          "BCHUSDT",
+          "UNIUSDT",
+          "NEARUSDT",
+          "APTUSDT",
+          "ETCUSDT",
+          "ATOMUSDT",
+          "FILUSDT",
+          "ARBUSDT",
+          "OPUSDT",
+          "SUIUSDT",
+          "INJUSDT",
+          "ICPUSDT"
+        ],
+        "unavailable": [],
+        "cost_cases": {
+          "realistic_estimate": {
+            "net_pnl_sum_independent_50_usdt_runs": 2.8641966916817094,
+            "trades": 37,
+            "wins": 21,
+            "win_rate_pct": 56.75675675675676,
+            "profit_factor": 2.406764429252541,
+            "worst_symbol_drawdown_pct": 1.3383814009838495,
+            "rejections": {
+              "below_minimum_quantity": 19,
+              "below_minimum_notional": 69
+            },
+            "symbols_with_trades": 17,
+            "highest_symbol_end_usdt": 50.96405044533849,
+            "liquidations": 0
+          },
+          "conservative": {
+            "net_pnl_sum_independent_50_usdt_runs": 1.8910022174440884,
+            "trades": 33,
+            "wins": 17,
+            "win_rate_pct": 51.515151515151516,
+            "profit_factor": 1.9899847013785128,
+            "worst_symbol_drawdown_pct": 0.9628477593188723,
+            "rejections": {
+              "below_minimum_quantity": 21,
+              "below_minimum_notional": 75
+            },
+            "symbols_with_trades": 16,
+            "highest_symbol_end_usdt": 50.92158090690876,
+            "liquidations": 0
+          },
+          "stress": {
+            "net_pnl_sum_independent_50_usdt_runs": 0.7798733578145552,
+            "trades": 31,
+            "wins": 15,
+            "win_rate_pct": 48.38709677419355,
+            "profit_factor": 1.377628323626211,
+            "worst_symbol_drawdown_pct": 0.944746914287085,
+            "rejections": {
+              "below_minimum_quantity": 21,
+              "below_minimum_notional": 80
+            },
+            "symbols_with_trades": 15,
+            "highest_symbol_end_usdt": 50.853419154451544,
+            "liquidations": 0
+          }
+        }
+      }
+    }
+  }
+}

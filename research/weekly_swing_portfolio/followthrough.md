@@ -1,0 +1,9 @@
+# Four-hour continuation signals
+
+Each week starts flat with 50 USDT. Two new rules replay long and short perpetual futures for BTC, ETH, SOL, XRP and DOGE on Binance USD-M. Pullback reclaim requires price to cross back over its prior short EMA in the direction of the slower EMA trend. Volatility expansion requires a breakout of the six preceding candles after range compression. Signals use completed bars and retain the existing 15-minute entry delay. The replay uses trade and mark candles, funding settlements and the same liquidation and cost model as the main study.
+
+The grid tests 10x, 25x and 50x with a one-ATR stop and targets at 0.6, 1.25 or 2.5 times the stop distance. There are 21 development weeks from December 2024 through April 2025 and 12 disjoint evaluation weeks beginning August 2025. Base and stress costs are tested separately. Of the 1,188 simulated scenario-weeks, none closed at 1,000 USDT. The two minute replays use the development leader by closing balance and an exploratory evaluation leader selected after inspecting the coarse results. The latter selection is subject to selection bias.
+
+The development leader used pullback reclaim at 50x with a 1.25 target ratio. It closed at 748.44 on April 21–27, with six wins in seven trades and a peak of 974.34. Under stress the same minute replay ended at 8.03. On the 12 evaluation weeks the rule won 37 of 101 trades and had median weekly ending balance 7.45. The 25x volatility-expansion rule with a 1.25 target ratio had one 191.23 week at six wins in six trades, but only 44 wins out of 78 trades across the 12 evaluation weeks, with median ending balance 41.82.
+
+Run `python followthrough.py` for the complete grid, then `python followthrough_minute.py` for the two finer-resolution checks. Input archives are public Binance data. Fills and historical instrument constraints retain the model assumptions documented in the main README.

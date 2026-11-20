@@ -1,0 +1,20 @@
+{
+  "base": {
+    "weeks": 32,
+    "trades": 535,
+    "net_r_total": -110.08008087226544,
+    "best_week": "2023-09-11",
+    "best_week_net_r": 9.70384426297567,
+    "net_r_without_best_week": -119.7839251352411,
+    "profitable_weeks": 1
+  },
+  "stress": {
+    "weeks": 32,
+    "trades": 463,
+    "net_r_total": -208.33083488547803,
+    "best_week": "2023-09-11",
+    "best_week_net_r": 9.55990446934949,
+    "net_r_without_best_week": -217.8907393548275,
+    "profitable_weeks": 1
+  }
+}
