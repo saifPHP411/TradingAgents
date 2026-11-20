@@ -155,3 +155,20 @@ fill, and stress-estimate 8 bps plus 7 bps. All scenarios use the same
 initial capital, source bars and predeclared signals. The lower-cost bound
 is diagnostic: if a candidate cannot make money before costs, reducing
 commission does not cure its directional signal.
+
+## Independent 50-USDT trial input (preferred)
+
+For the literal question "Can 50 USDT become 1,000 USDT in a week?",
+the audit supports a top-level `weekly_runs` list. Each element contains
+its own eight daily `account_equity` checkpoints and complete
+`closed_trades` array. All four or more historical trials are *chronologically
+consecutive*, **each independently resets to 50 USDT**, and all account
+positions must be flat at each week's start and end. Trade IDs must be globally
+unique across the trials.
+
+This option prevents the mistaken requirement to compound one 50-USDT account
+into 8 million USDT over four weeks: the intended claim is reproducibility of
+a **50 -> 1,000 USDT weekly experiment**, not infinite capital scaling.
+The separate original account-equity mode can evaluate a real continuously
+compounding account, but requires appropriate actual portfolio evidence.
+Neither mode asserts that a one-week historical success guarantees repetition.
