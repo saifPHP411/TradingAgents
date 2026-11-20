@@ -28,7 +28,7 @@ jobs:
         id: inspect
         continue-on-error: true
         run: |
-          python -m tradingagents.crypto.backtest.archive_probe \
+          python tradingagents/crypto/backtest/archive_probe.py \
             --symbol "${{ matrix.symbol }}" \
             --date 2026-10-01 \
             --out "results/l2-prefix-${{ matrix.symbol }}.json"
