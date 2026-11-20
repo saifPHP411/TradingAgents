@@ -4,7 +4,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
-from datetime import date, datetime, UTC
+from datetime import UTC, date, datetime
 
 import pytest
 
