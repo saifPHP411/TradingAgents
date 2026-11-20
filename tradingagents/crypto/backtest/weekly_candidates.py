@@ -169,7 +169,10 @@ def indicators(bars: list[Bar]) -> dict[str, list[float]]:
 
 def signal(bars: list[Bar], feat: dict, i: int, strategy: str) -> int:
     """i is the completed candle index; entry may occur at i+1 OPEN only."""
-    if i < 100:
+    if i < 100 or (
+        strategy in {"ema60_rsi_pullback", "donchian_15m_trend", "vwap_15m_reclaim"}
+        and i < 240
+    ):
         return 0
     rsi = feat["rsi"][i]
     close = bars[i].close
