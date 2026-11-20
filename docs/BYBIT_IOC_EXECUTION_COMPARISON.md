@@ -89,3 +89,24 @@ request latency after the sampled book, hidden liquidity, dynamic venue price
 limits, queueing, order rejections, margin/funding, and dynamic trade exit
 logic. Timestamp and fee assumptions must accompany every result. Do not
 turn on the Demo worker solely because modeled entry slippage improves.
+
+## Bounded real-archive access check
+
+The optional `IOC archive prefix validation (research)` GitHub workflow probes
+the first 512 KiB of the actual 2026-10-01 XRPUSDT and LTCUSDT linear ZIPs.
+It uploads individual JSON reports, including *unavailable_or_invalid* evidence
+when network access or schema validation fails. A passing workflow job does
+**not** imply the remote archive passed validation: inspect the individual
+report's `status`, which must be `prefix_verified`. This check establishes
+only file prefix schema/reachability; it does not verify a day's CRC, full
+coverage, an intraminute historical mark feed, or profitability.
+
+To check a single symbol locally without downloading the full day:
+
+```bash
+python -m tradingagents.crypto.backtest.archive_probe \
+  --symbol XRPUSDT --date 2026-10-01 \
+  --out results/l2-prefix-XRPUSDT.json
+```
+
+The research PR never deploys or enables the Demo worker.
