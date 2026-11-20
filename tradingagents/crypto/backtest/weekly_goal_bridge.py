@@ -1,4 +1,4 @@
-"""Bridge real archived-candle research results into the strict 50->1000 gate.
+"""Bridge real archived-candle research results into the strict >=50-USDT net profit per week gate.
 
 Uses previously generated JSON from weekly_candidates.py; never reconstructs
 missing fills or claims that public Binance OHLCV are real Bybit executions.
@@ -140,7 +140,10 @@ def compare_artifacts(paths: list[Path]) -> dict:
                 raise RuntimeError("unverified venue fills must not satisfy the independent evidence gate")
             by_scenario[scenario] = {
                 "tested_seven_day_periods": audit["evaluated_complete_disjoint_weeks"],
-                "weeks_meeting_20x_and_70pct": audit["weeks_meeting_both_targets"],
+                "weeks_meeting_50usdt_profit_and_70pct": audit["weeks_meeting_both_targets"],
+                "weeks_meeting_50usdt_profit": sum(
+                    w["weekly_profit_goal_met"] for w in audit["windows"]
+                ),
                 "weeks_net_positive": sum(
                     w["net_return_pct"] > 0 for w in audit["windows"]
                 ),
@@ -191,7 +194,8 @@ def main() -> None:
                 "scenario": scenario,
                 "weeks": item["tested_seven_day_periods"],
                 "positive_weeks": item["weeks_net_positive"],
-                "weeks_meeting_20x_and_70pct": item["weeks_meeting_20x_and_70pct"],
+                "weeks_meeting_50usdt_profit_and_70pct": item["weeks_meeting_50usdt_profit_and_70pct"],
+                "weeks_meeting_50usdt_profit": item["weeks_meeting_50usdt_profit"],
                 "independently_verified_execution": False,
                 "missing_evidence": item["missing_evidence"],
             }, sort_keys=True))
