@@ -40,6 +40,17 @@ STRATEGIES = (
 )
 
 
+def theoretical_weekly_net_profit_ceiling_before_costs() -> float:
+    """Best imaginable seven wins, each capped at target on 20% of equity.
+
+    Assumes one entry per day and every trade hits its 8% target, with no
+    funding, fees, slippage or losing trades. No higher growth is possible
+    *under this particular simulator's entry count and take-profit rules*.
+    This is NOT a universal bound for crypto trading strategies.
+    """
+    return STARTING_USDT * ((1 + NOTIONAL_SHARE * TARGET_FRACTION) ** 7 - 1)
+
+
 def choose_ranked_signal(
     by_symbol: dict[str, list[Bar]], entry_idx: int, strategy: str,
 ) -> tuple[str, int] | None:
@@ -247,6 +258,12 @@ def run_study(*, first_day: date, days: int, symbols: tuple[str, ...],
         "starting_equity_each_week_usdt": STARTING_USDT,
         "max_notional_fraction_of_account": NOTIONAL_SHARE,
         "max_leverage": MAX_LEVERAGE,
+        "theoretical_best_weekly_net_profit_no_cost_usdt": (
+            theoretical_weekly_net_profit_ceiling_before_costs()
+        ),
+        "target_50_usdt_attainable_under_frozen_daily_rules": (
+            theoretical_weekly_net_profit_ceiling_before_costs() >= 50
+        ),
         "symbols": list(symbols),
         "start": first_day.isoformat(),
         "days": days,
