@@ -174,10 +174,15 @@ def signal(bars: list[Bar], feat: dict, i: int, strategy: str) -> int:
 
 def simulate_week(
     by_symbol: dict[str, list[Bar]], strategy: str, *, start: int, end: int,
+    commission_rate: float = COMMISSION_RATE,
+    adverse_impact_rate: float = ADVERSE_FILL_IMPACT_RATE,
 ) -> dict:
     """One isolated 50-USDT week, one shared-account position at a time."""
     if strategy not in STRATEGIES or start < 101 or end <= start:
         raise ValueError("invalid strategy or simulation window")
+    if (not all(math.isfinite(x) and 0 <= x <= 0.01
+                for x in (commission_rate, adverse_impact_rate))):
+        raise ValueError("invalid commission or adverse impact assumptions")
     if any(len(bars) < end for bars in by_symbol.values()):
         raise ValueError("bar histories must cover the entire window")
     if not by_symbol:
@@ -225,9 +230,9 @@ def simulate_week(
                 else:
                     raw_exit = bar.close
                     reason = "time_exit" if deadline else "week_boundary"
-                exit_price = raw_exit * (1 - direction * ADVERSE_FILL_IMPACT_RATE)
+                exit_price = raw_exit * (1 - direction * adverse_impact_rate)
                 gross = direction * (exit_price - position["entry"]) * position["qty"]
-                exit_fee = position["qty"] * exit_price * COMMISSION_RATE
+                exit_fee = position["qty"] * exit_price * commission_rate
                 net = gross - position["entry_fee"] - exit_fee
                 equity += gross - exit_fee
                 trades.append({
@@ -244,9 +249,9 @@ def simulate_week(
                 if action == 0:
                     continue
                 bar = by_symbol[symbol][i]
-                price = bar.open * (1 + action * ADVERSE_FILL_IMPACT_RATE)
+                price = bar.open * (1 + action * adverse_impact_rate)
                 qty = (max(equity, 0) * MAX_NOTIONAL_FRACTION) / price
-                fee = qty * price * COMMISSION_RATE
+                fee = qty * price * commission_rate
                 if qty <= 0 or fee >= equity:
                     break
                 equity -= fee
@@ -270,9 +275,9 @@ def simulate_week(
                     else:
                         raw_exit = bar.close
                         reason = "week_boundary"
-                    exit_price = raw_exit * (1 - action * ADVERSE_FILL_IMPACT_RATE)
+                    exit_price = raw_exit * (1 - action * adverse_impact_rate)
                     gross = action * (exit_price - position["entry"]) * qty
-                    exit_fee = qty * exit_price * COMMISSION_RATE
+                    exit_fee = qty * exit_price * commission_rate
                     net = gross - fee - exit_fee
                     equity += gross - exit_fee
                     trades.append({
@@ -312,14 +317,27 @@ def run_scan(*, start_day: date, days: int, symbols: tuple[str, ...], transport=
             history.extend(fetch_daily(symbol, history_start + timedelta(days=offset),
                                        transport=transport))
         by_symbol[symbol] = history
+    scenarios = {
+        "zero_cost_upper_bound": (0.0, 0.0),
+        "realistic_estimate": (COMMISSION_RATE, ADVERSE_FILL_IMPACT_RATE),
+        "stress_estimate": (0.0008, 0.0007),
+    }
     reports = {}
+    scenario_reports = {}
     for strategy in STRATEGIES:
-        weeks = []
-        for week_idx in range(days // 7):
-            start = ONE_DAY_MINUTES + week_idx * 7 * ONE_DAY_MINUTES
-            end = start + 7 * ONE_DAY_MINUTES
-            weeks.append(simulate_week(by_symbol, strategy, start=start, end=end))
-        reports[strategy] = weeks
+        by_scenario = {}
+        for scenario, (commission, impact) in scenarios.items():
+            weeks = []
+            for week_idx in range(days // 7):
+                start = ONE_DAY_MINUTES + week_idx * 7 * ONE_DAY_MINUTES
+                end = start + 7 * ONE_DAY_MINUTES
+                weeks.append(simulate_week(
+                    by_symbol, strategy, start=start, end=end,
+                    commission_rate=commission, adverse_impact_rate=impact,
+                ))
+            by_scenario[scenario] = weeks
+        reports[strategy] = by_scenario["realistic_estimate"]
+        scenario_reports[strategy] = by_scenario
     return {
         "research_only": True,
         "source": "Binance USD-M official public historical daily 1m kline ZIPs",
@@ -339,6 +357,7 @@ def run_scan(*, start_day: date, days: int, symbols: tuple[str, ...], transport=
         "start_day": start_day.isoformat(),
         "days": days,
         "strategies": reports,
+        "cost_scenario_comparison": scenario_reports,
         "demo_ready": False,
         "orders_submitted": False,
         "limitations": [
@@ -371,15 +390,16 @@ def main() -> None:
     if result.get("status") == "not_completed":
         print(json.dumps(result, indent=2))
         raise SystemExit(2)
-    for strategy, weeks in result["strategies"].items():
-        for index, week in enumerate(weeks):
-            print(json.dumps({
-                "strategy": strategy, "week": index + 1,
-                "win_rate_pct": week["win_rate_pct"],
-                "net_return_pct": week["net_return_pct"],
-                "trades": week["trades"], "starting_usdt": INITIAL_USDT,
-                "final_usdt": week["final_equity_usdt"], "real_trading": False,
-            }))
+    for strategy, scenarios in result["cost_scenario_comparison"].items():
+        for scenario, weeks in scenarios.items():
+            for index, week in enumerate(weeks):
+                print(json.dumps({
+                    "strategy": strategy, "scenario": scenario, "week": index + 1,
+                    "win_rate_pct": week["win_rate_pct"],
+                    "net_return_pct": week["net_return_pct"],
+                    "trades": week["trades"], "starting_usdt": INITIAL_USDT,
+                    "final_usdt": week["final_equity_usdt"], "real_trading": False,
+                }))
 
 
 if __name__ == "__main__":
