@@ -128,23 +128,92 @@ def replay_archive(
     market_cap_bps: float | None = None,
     taker_fee_rate: float = 0.00055,
 ) -> list[dict]:
-    """Sample the first book event at/after modeled send; never use an earlier event."""
-    if latency_ms < 0 or max_book_delay_ms < 0 or not math.isfinite(taker_fee_rate) or taker_fee_rate < 0:
+    """Use only the most recent orderbook state at or before modeled arrival.
+
+    The next event *after* arrival can tell us when to process pending orders,
+    but its book delta must never affect a prior arrival (no lookahead).
+    """
+    if (
+        isinstance(latency_ms, bool) or not isinstance(latency_ms, int) or latency_ms < 0
+        or isinstance(max_book_delay_ms, bool)
+        or not isinstance(max_book_delay_ms, int) or max_book_delay_ms < 0
+        or not math.isfinite(taker_fee_rate) or taker_fee_rate < 0
+        or not math.isfinite(limit_bps) or limit_bps < 0
+        or (market_cap_bps is not None
+            and (not math.isfinite(market_cap_bps) or market_cap_bps < 0))
+    ):
         raise ValueError("invalid replay settings")
-    if market_cap_bps is not None and market_cap_bps < 0:
-        raise ValueError("invalid market cap")
     if not signals:
         return []
     symbol = signals[0].symbol
     if any(row.symbol != symbol for row in signals):
         raise ValueError("one symbol per archive")
-    pending = sorted(signals, key=lambda row: row.signal_ts_ms)
+    pending = sorted(signals, key=lambda row: row.signal_ts_ms + latency_ms)
     results: list[dict] = []
     index = 0
     bids: dict[float, float] = {}
     asks: dict[float, float] = {}
     initialized = False
     last_ts = -1
+
+    def record(signal: Signal) -> None:
+        send_ms = signal.signal_ts_ms + latency_ms
+        if send_ms >= signal.expires_ms:
+            results.append({
+                "signal_id": signal.signal_id, "symbol": symbol,
+                "status": "signal_expired_before_arrival",
+            })
+            return
+        if (
+            not initialized or last_ts < 0
+            or send_ms - last_ts > max_book_delay_ms
+            or not bids or not asks or max(bids) >= min(asks)
+        ):
+            results.append({
+                "signal_id": signal.signal_id, "symbol": symbol,
+                "status": "no_fresh_book_as_of_arrival",
+            })
+            return
+        cap = cap_price(signal.mark, signal.tick_size, signal.side, limit_bps)
+        market_cap = (
+            cap_price(signal.mark, signal.tick_size, signal.side, market_cap_bps)
+            if market_cap_bps is not None else None
+        )
+        levels = list(asks.items()) if signal.side == "long" else list(bids.items())
+        both: dict[str, dict] = {}
+        for name, price_limit in (("market_ioc", market_cap), ("limit_ioc", cap)):
+            entry = walk_book(levels, signal.side, signal.quantity, price_limit)
+            avg = entry["average_price"]
+            qty = entry["filled_quantity"]
+            entry["adverse_slippage_bps"] = (
+                (1 if signal.side == "long" else -1)
+                * (avg / signal.mark - 1) * 10000 if avg is not None else None
+            )
+            entry["entry_fees_usdt"] = (
+                qty * avg * taker_fee_rate if avg is not None else 0.0
+            )
+            # Conditional sensitivity only: no TP/SL, funding or portfolio replay.
+            entry["conditional_net_pnl_usdt"] = (
+                (1 if signal.side == "long" else -1)
+                * (signal.exit_price - avg) * qty
+                - entry["entry_fees_usdt"]
+                - qty * signal.exit_price * taker_fee_rate
+                if avg is not None and signal.exit_price is not None else None
+            )
+            both[name] = entry
+        results.append({
+            "signal_id": signal.signal_id,
+            "symbol": symbol,
+            "status": "modeled",
+            "book_ts_ms": last_ts,
+            "book_age_ms": send_ms - last_ts,
+            "send_ts_ms": send_ms,
+            "signal_ts_ms": signal.signal_ts_ms,
+            "side": signal.side,
+            "entry_cap_price": cap,
+            **both,
+        })
+
     with zipfile.ZipFile(archive) as bundle:
         names = [name for name in bundle.namelist() if name.endswith(".data")]
         if len(names) != 1:
@@ -152,80 +221,51 @@ def replay_archive(
         with bundle.open(names[0]) as stream:
             for raw in stream:
                 event = json.loads(raw)
-                if str(event.get("data", {}).get("s", "")) != symbol:
+                data = event.get("data")
+                if not isinstance(data, dict) or str(data.get("s", "")) != symbol:
                     continue
                 ts = int(event["ts"])
                 if ts < last_ts:
                     raise ValueError("orderbook events must be time ordered")
-                last_ts = ts
                 event_type = event.get("type")
-                data = event["data"]
+                if event_type not in {"snapshot", "delta"}:
+                    continue
+
+                # Any arrivals strictly before this event saw the *previous*
+                # book, so process them before applying this event's changes.
+                while (
+                    index < len(pending)
+                    and pending[index].signal_ts_ms + latency_ms < ts
+                ):
+                    record(pending[index])
+                    index += 1
+
                 if event_type == "snapshot":
                     bids.clear()
                     asks.clear()
                     initialized = True
-                elif event_type != "delta" or not initialized:
+                elif not initialized:
                     continue
                 _update_side(bids, data.get("b") or [])
                 _update_side(asks, data.get("a") or [])
-                while index < len(pending) and ts >= pending[index].signal_ts_ms + latency_ms:
-                    signal = pending[index]
+                last_ts = ts
+
+                # Arrivals exactly at this timestamp can see this snapshot.
+                while (
+                    index < len(pending)
+                    and pending[index].signal_ts_ms + latency_ms == ts
+                ):
+                    record(pending[index])
                     index += 1
-                    send_ms = signal.signal_ts_ms + latency_ms
-                    if (
-                        ts - send_ms > max_book_delay_ms
-                        or ts >= signal.expires_ms
-                        or not bids
-                        or not asks
-                        or max(bids) >= min(asks)
-                    ):
-                        results.append({
-                            "signal_id": signal.signal_id,
-                            "symbol": symbol,
-                            "status": "unreplayable_book_or_expired",
-                        })
-                        continue
-                    cap = cap_price(signal.mark, signal.tick_size, signal.side, limit_bps)
-                    market_cap = (
-                        cap_price(signal.mark, signal.tick_size, signal.side, market_cap_bps)
-                        if market_cap_bps is not None else None
-                    )
-                    levels = list(asks.items()) if signal.side == "long" else list(bids.items())
-                    both = {}
-                    for name, price_limit in (("market_ioc", market_cap), ("limit_ioc", cap)):
-                        entry = walk_book(levels, signal.side, signal.quantity, price_limit)
-                        avg = entry["average_price"]
-                        qty = entry["filled_quantity"]
-                        entry["adverse_slippage_bps"] = (
-                            (1 if signal.side == "long" else -1)
-                            * (avg / signal.mark - 1) * 10000 if avg is not None else None
-                        )
-                        entry["entry_fees_usdt"] = (
-                            qty * avg * taker_fee_rate if avg is not None else 0.0
-                        )
-                        # Same fixed exit price is conditional P&L, NOT a replay of TP/SL.
-                        entry["conditional_net_pnl_usdt"] = (
-                            (1 if signal.side == "long" else -1)
-                            * (signal.exit_price - avg) * qty
-                            - entry["entry_fees_usdt"]
-                            - qty * signal.exit_price * taker_fee_rate
-                            if avg is not None and signal.exit_price is not None else None
-                        )
-                        both[name] = entry
-                    results.append({
-                        "signal_id": signal.signal_id,
-                        "symbol": symbol,
-                        "status": "modeled",
-                        "book_ts_ms": ts,
-                        "signal_ts_ms": signal.signal_ts_ms,
-                        "side": signal.side,
-                        "entry_cap_price": cap,
-                        **both,
-                    })
+
+    # Do not extrapolate past the end of the observed archive.
     results.extend({
-        "signal_id": signal.signal_id,
-        "symbol": symbol,
-        "status": "missing_orderbook",
+        "signal_id": signal.signal_id, "symbol": symbol,
+        "status": (
+            "signal_expired_before_arrival"
+            if signal.signal_ts_ms + latency_ms >= signal.expires_ms
+            else "missing_orderbook"
+        ),
     } for signal in pending[index:])
     return results
 
