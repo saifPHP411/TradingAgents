@@ -14,9 +14,9 @@ from tradingagents.crypto.backtest.weekly_candidates import (
     fetch_daily,
     indicators,
     parse_candles,
+    screen_20x_70pct,
     signal,
     simulate_week,
-    screen_20x_70pct,
 )
 
 BASE_MS = int(datetime(2026, 10, 31, tzinfo=UTC).timestamp() * 1000)
