@@ -188,7 +188,10 @@ def indicators(bars: list[Bar]) -> dict[str, list[float]]:
     }
 
 
-def signal(bars: list[Bar], feat: dict, i: int, strategy: str) -> int:
+def signal(
+    bars: list[Bar], feat: dict, i: int, strategy: str, *,
+    account_equity_usdt: float = INITIAL_USDT,
+) -> int:
     """i is the completed candle index; entry may occur at i+1 OPEN only."""
     if i < 100 or (
         strategy in {
@@ -203,7 +206,7 @@ def signal(bars: list[Bar], feat: dict, i: int, strategy: str) -> int:
         # see ONLY completed bars. The book/Mark here is synthetic (1 bp
         # each side of the last completed close), never actual Bybit evidence.
         candidate = signal(bars, feat, i, "donchian_15m_trend")
-        if candidate == 0:
+        if candidate == 0 or not math.isfinite(account_equity_usdt) or account_equity_usdt <= 0:
             return 0
         close = bars[i].close
         result = evaluate_triad(TriadInput(
@@ -216,6 +219,8 @@ def signal(bars: list[Bar], feat: dict, i: int, strategy: str) -> int:
             best_bid=close * (1 - 0.0001),
             best_ask=close * (1 + 0.0001),
             book_ts_ms=bars[i].ms + 60_000,
+            account_equity_usdt=account_equity_usdt,
+            requested_notional_usdt=account_equity_usdt * MAX_NOTIONAL_FRACTION,
             venue_filters_verified=False,
         ))
         return candidate if result["all_three_approve"] else 0
@@ -412,7 +417,14 @@ def simulate_week(
                 closed_this_bar = True
         if position is None and not closed_this_bar:
             for symbol in sorted(by_symbol):
-                action = signal(by_symbol[symbol], f[symbol], i - 1, strategy)
+                action = (
+                    signal(
+                        by_symbol[symbol], f[symbol], i - 1, strategy,
+                        account_equity_usdt=equity,
+                    )
+                    if strategy == "donchian_15m_triad_shadow"
+                    else signal(by_symbol[symbol], f[symbol], i - 1, strategy)
+                )
                 if action == 0:
                     continue
                 bar = by_symbol[symbol][i]
