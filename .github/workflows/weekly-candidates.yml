@@ -1,0 +1,37 @@
+name: Exploratory weekly 20x target candidate replay
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/weekly-candidates.yml"
+      - "tradingagents/crypto/backtest/weekly_candidates.py"
+      - "tests/test_weekly_candidates.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  research:
+    name: Read-only 1m momentum, reversion, breakout research
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Replay two complete seven-day weeks, no trading
+        run: |
+          python tradingagents/crypto/backtest/weekly_candidates.py \
+            --start 2026-11-01 --days 14 \
+            --symbols BTCUSDT XRPUSDT \
+            --output artifacts/weekly-candidate-probe.json
+      - name: Preserve evidence on failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exploratory-weekly-long-short-candidates
+          path: artifacts/weekly-candidate-probe.json
+          if-no-files-found: error
+          retention-days: 14
