@@ -163,3 +163,53 @@ def test_rejects_duplicate_trade_ids_and_invalid_numeric_values():
     sample["account_equity"][5]["equity_usdt"] = float("nan")
     with pytest.raises(ValueError, match="finite"):
         audit_weekly_goal(sample)
+
+
+def isolated_weekly_trials():
+    runs = []
+    for week_number in range(4):
+        standalone = fixture_report(weeks=1)
+        shift = timedelta(days=7 * week_number)
+        for item in standalone["account_equity"]:
+            item["timestamp"] = (
+                datetime.fromisoformat(item["timestamp"]) + shift
+            ).isoformat()
+        for item in standalone["closed_trades"]:
+            item["closed_at"] = (
+                datetime.fromisoformat(item["closed_at"]) + shift
+            ).isoformat()
+            item["trade_id"] = f"independent-{week_number}-" + item["trade_id"]
+        runs.append({
+            "account_equity": standalone["account_equity"],
+            "closed_trades": standalone["closed_trades"],
+        })
+    return {
+        "initial_equity_usdt": 50,
+        "source": "historical_replay",
+        "data_quality": QUALITY.copy(),
+        "weekly_runs": runs,
+    }
+
+
+def test_independent_50_usdt_weekly_trials_do_not_compound_into_millions():
+    report = audit_weekly_goal(isolated_weekly_trials())
+    assert report["account_mode"] == "independent_50_usdt_weekly_replays"
+    assert report["reported_evidence_gate_passed"]
+    assert not report["independently_verified_by_this_tool"]
+    assert report["evaluated_complete_disjoint_weeks"] == 4
+    assert report["weeks_meeting_both_targets"] == 4
+    assert all(week["opening_equity_usdt"] == 50 for week in report["windows"])
+    assert all(week["closing_equity_usdt"] == 1000 for week in report["windows"])
+
+
+def test_isolated_weekly_trials_reject_time_gaps_and_duplicate_ids():
+    data = isolated_weekly_trials()
+    data["weekly_runs"][1]["account_equity"][0]["timestamp"] = "2026-11-01T00:00:00Z"
+    with pytest.raises(ValueError, match="daily"):
+        audit_weekly_goal(data)
+    data = isolated_weekly_trials()
+    data["weekly_runs"][1]["closed_trades"][0]["trade_id"] = (
+        data["weekly_runs"][0]["closed_trades"][0]["trade_id"]
+    )
+    with pytest.raises(ValueError, match="globally unique"):
+        audit_weekly_goal(data)
