@@ -23,6 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - sample: september-4weeks
+            start: "2026-09-06"
+            days: 28
           - sample: october-4weeks
             start: "2026-10-04"
             days: 28
@@ -53,7 +56,7 @@ jobs:
           retention-days: 14
 
   goal-audit:
-    name: Audit paired weekly net $50 target and execution limitations
+    name: Audit 10 paired weeks for $50 target and execution limitations
     needs: pairs
     runs-on: ubuntu-latest
     timeout-minutes: 6
@@ -72,6 +75,7 @@ jobs:
         run: |
           python tradingagents/crypto/backtest/weekly_goal_bridge.py \
             --input \
+              downloaded/weekly-pairs-september-4weeks.json \
               downloaded/weekly-pairs-october-4weeks.json \
               downloaded/weekly-pairs-november-2weeks.json \
             --output artifacts/pairs-strict-weekly-objective.json
