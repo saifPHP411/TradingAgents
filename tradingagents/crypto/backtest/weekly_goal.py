@@ -26,6 +26,10 @@ REQUIRED_QUALITY_FLAGS = (
     "liquidations_included",
     "unrealized_pnl_included",
     "no_external_cash_flows",
+    "venue_filters_enforced",
+    "position_risk_limits_enforced",
+    "no_lookahead",
+    "order_fills_verified_or_conservatively_modeled",
 )
 
 
@@ -165,9 +169,9 @@ def audit_weekly_goal(report: dict) -> dict:
     if not windows:
         status = "insufficient_period"
     elif evidence_pass and source == "bybit_demo_confirmed":
-        status = "demo_evidence_passed_not_live_authorized"
+        status = "reported_demo_goal_passed_not_independently_verified"
     elif evidence_pass:
-        status = "historical_evidence_passed_not_forward_verified"
+        status = "reported_historical_goal_passed_not_forward_verified"
     else:
         status = "goal_not_validated"
     return {
@@ -188,11 +192,13 @@ def audit_weekly_goal(report: dict) -> dict:
         "weeks_meeting_both_targets": qualifying,
         "all_complete_weeks_pass": all_weeks_pass,
         "quality_claims_missing_or_unverified": missing_quality,
-        "evidence_passed": evidence_pass,
+        "reported_evidence_gate_passed": evidence_pass,
+        "independently_verified_by_this_tool": False,
         "ignored_partial_days": len(snapshots) - 1 - end_index,
         "windows": windows,
         "limitations": [
             "Quality flags are reporter claims, not independently authenticated by this script.",
+            "Meeting this gate does not independently verify venue fills, capital limits, or source data.",
             "Snapshots must be from one shared account, not merged independent per-symbol runs.",
             "Daily samples understate intraday drawdown and omit some margin breaches.",
             "Trade PnL must be net of costs; win rate alone does not establish profitability.",
@@ -215,7 +221,7 @@ def main() -> int:
         "status": result["status"],
         "weeks": result["evaluated_complete_disjoint_weeks"],
         "weeks_meeting_both_targets": result["weeks_meeting_both_targets"],
-        "evidence_passed": result["evidence_passed"],
+        "reported_evidence_gate_passed": result["reported_evidence_gate_passed"],
         "orders_submitted": False,
     }, indent=2, allow_nan=False))
     return 0
