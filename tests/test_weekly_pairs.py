@@ -8,14 +8,14 @@ from datetime import UTC, date, datetime
 import pytest
 
 from tradingagents.crypto.backtest import weekly_pairs
+from tradingagents.crypto.backtest.weekly_candidates import Bar
+from tradingagents.crypto.backtest.weekly_goal_bridge import compare_artifacts
 from tradingagents.crypto.backtest.weekly_pairs import (
     BARS_PER_DAY,
     STARTING_USDT,
     simulate_pair_week,
     zscores_for_pair,
 )
-from tradingagents.crypto.backtest.weekly_candidates import Bar
-from tradingagents.crypto.backtest.weekly_goal_bridge import compare_artifacts
 
 
 BASE_MS = int(datetime(2026, 10, 3, tzinfo=UTC).timestamp() * 1000)
