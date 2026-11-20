@@ -121,7 +121,7 @@ def test_full_readonly_pair_scan_can_be_audited_in_existing_portfolio_gate(
     assert audit["tested_strategies"] == 2
     assert audit["demo_ready"] is False
     assert all(
-        result["weeks_meeting_20x_and_70pct"] == 0
+        result["weeks_meeting_50usdt_profit_and_70pct"] == 0
         for scenarios in audit["strategy_comparisons"].values()
         for result in scenarios.values()
     )
