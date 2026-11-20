@@ -84,7 +84,7 @@ def test_same_orderbook_gives_more_market_fills_but_worse_price(tmp_path):
     assert trade["market_ioc"]["filled_quantity"] == 1
     assert trade["limit_ioc"]["filled_quantity"] == pytest.approx(0.7)
     assert trade["market_ioc"]["average_price"] > trade["limit_ioc"]["average_price"]
-    assert trade["limit_ioc"]["adverse_slippage_bps"] <= pytest.approx(10, abs=1e-6)
+    assert trade["limit_ioc"]["adverse_slippage_bps"] <= 10 + 1e-6
     summary = summarize(trades)
     assert summary["market_ioc"]["full_fill_rate"] == 1
     assert summary["limit_ioc"]["full_fill_rate"] == 0
