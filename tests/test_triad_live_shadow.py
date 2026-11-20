@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from tradingagents.crypto.backtest.weekly_candidates import Bar, indicators, signal
+from tradingagents.crypto.backtest.weekly_candidates import Bar
 from tradingagents.crypto.triad_live_shadow import TriadShadowWatcher
 
 START = int(datetime(2026, 10, 1, tzinfo=UTC).timestamp()*1000)
