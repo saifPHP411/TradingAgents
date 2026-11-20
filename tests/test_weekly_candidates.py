@@ -14,7 +14,7 @@ from tradingagents.crypto.backtest.weekly_candidates import (
     fetch_daily,
     indicators,
     parse_candles,
-    screen_20x_70pct,
+    screen_weekly_net_50usdt,
     signal,
     simulate_week,
 )
@@ -190,7 +190,7 @@ def test_weekly_goal_screen_rejects_seventy_percent_when_return_is_small():
         "win_rate_pct": 71,
         "final_equity_usdt": 51.75,
     }
-    result = screen_20x_70pct([modeled])
+    result = screen_weekly_net_50usdt([modeled])
     assert result["weeks_meeting_both_goals"] == 0
     assert not result["sufficient_four_week_sample"]
     assert not result["goal_independently_validated"]
@@ -202,9 +202,9 @@ def test_weekly_goal_screen_never_promotes_lucky_week_without_four():
         "end_exclusive": "2026-10-11T00:00:00+00:00",
         "trades": 31,
         "win_rate_pct": 70.0,
-        "final_equity_usdt": 1000.0,
+        "final_equity_usdt": 100.0,
     }
-    result = screen_20x_70pct([modeled])
+    result = screen_weekly_net_50usdt([modeled])
     assert result["weeks_meeting_both_goals"] == 1
     assert not result["sufficient_four_week_sample"]
     assert not result["goal_independently_validated"]
