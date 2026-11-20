@@ -209,3 +209,72 @@ def test_weekly_goal_screen_never_promotes_lucky_week_without_four():
     assert not result["sufficient_four_week_sample"]
     assert not result["goal_independently_validated"]
     assert result["results_from_modeled_candles_only"]
+
+
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        "volatility_spike_5m_long_12h",
+        "hourly_impulse_momentum_6h",
+        "hourly_impulse_reversal_6h",
+    ],
+)
+def test_event_driven_candidates_require_complete_signal_bars(strategy):
+    bars = sample_bars(900)
+    assert signal(bars, indicators(bars), 726, strategy) == 0
+
+
+def test_five_minute_volatility_spike_is_past_only_and_long_only():
+    bars = [
+        Bar(BASE_MS + i * 60000, 100, 101, 99, 100, 1000)
+        for i in range(900)
+    ]
+    spike = bars[724]
+    bars[724] = Bar(spike.ms, 100, 102, 99, 101.5, 5000)
+    past_result = signal(bars, indicators(bars), 724, "volatility_spike_5m_long_12h")
+    assert past_result == 1
+    future = bars[725]
+    bars[725] = Bar(future.ms, 100, 500, 1, 400, 500000)
+    assert signal(bars, indicators(bars), 724, "volatility_spike_5m_long_12h") == past_result
+    assert weekly_candidates.HOLD_BY_STRATEGY["volatility_spike_5m_long_12h"] == 720
+
+
+def test_hourly_impulse_compares_directional_and_reversal_hypotheses():
+    bars = [
+        Bar(BASE_MS + i * 60000, 100, 101, 99, 100, 1000)
+        for i in range(900)
+    ]
+    for i in range(660, 720):
+        bar = bars[i]
+        bars[i] = Bar(bar.ms, 100, 101, 99, 100, 2000)
+    last = bars[719]
+    bars[719] = Bar(last.ms, 100, 103, 99, 102, 2000)
+    feat = indicators(bars)
+    assert signal(bars, feat, 719, "hourly_impulse_momentum_6h") == 1
+    assert signal(bars, feat, 719, "hourly_impulse_reversal_6h") == -1
+    assert weekly_candidates.HOLD_BY_STRATEGY["hourly_impulse_momentum_6h"] == 360
+    # A future price shock must not change decisions at the earlier hour close.
+    future = bars[720]
+    bars[720] = Bar(future.ms, 100, 200, 1, 150, 20000)
+    assert signal(
+        bars, indicators(bars), 719, "hourly_impulse_momentum_6h"
+    ) == 1
+
+
+def test_event_study_keeps_conservative_same_entry_bar_stop(monkeypatch):
+    bars = sample_bars()
+    bar = bars[1440]
+    bars[1440] = Bar(bar.ms, 100, 108, 95, 100, 1000)
+    monkeypatch.setattr(
+        weekly_candidates, "signal",
+        lambda _b, _f, i, strategy: 1 if i == 1439 else 0,
+    )
+    result = simulate_week(
+        {"BTCUSDT": bars},
+        "volatility_spike_5m_long_12h",
+        start=1440,
+        end=11520,
+    )
+    assert result["trades"] == 1
+    assert result["closed_trades"][0]["exit_reason"] == "entry_bar_stop"
+    assert result["closed_trades"][0]["net_pnl_usdt"] < 0
