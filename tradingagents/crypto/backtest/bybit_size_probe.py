@@ -17,6 +17,7 @@ from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 
 API_HOST = "https://api.bybit.com"
+OFFICIAL_API_HOSTS = (API_HOST, "https://api.bytick.com")
 SUPPORTED_SYMBOLS = {"BTCUSDT", "ETHUSDT", "XRPUSDT", "LTCUSDT"}
 INITIAL_EQUITY = Decimal("50")
 MAX_NOTIONAL_FRACTION = Decimal("0.20")
@@ -89,12 +90,18 @@ def evaluate_public_filters(instrument: dict, ticker: dict, symbol: str) -> dict
     }
 
 
-def fetch_market_object(endpoint: str, symbol: str, *, transport=None) -> dict:
-    if symbol not in SUPPORTED_SYMBOLS or not re.fullmatch(r"/v5/market/[a-z-]+", endpoint):
-        raise ValueError("unsupported symbol or public API endpoint")
+def fetch_market_object(
+    endpoint: str, symbol: str, *, transport=None, host: str = API_HOST,
+) -> dict:
+    if (
+        symbol not in SUPPORTED_SYMBOLS
+        or not re.fullmatch(r"/v5/market/[a-z-]+", endpoint)
+        or host not in OFFICIAL_API_HOSTS
+    ):
+        raise ValueError("unsupported symbol, public API endpoint or source host")
     if endpoint not in ("/v5/market/instruments-info", "/v5/market/tickers"):
         raise ValueError("endpoint must be a documented public market GET route")
-    url = API_HOST + endpoint + "?" + urllib.parse.urlencode({
+    url = host + endpoint + "?" + urllib.parse.urlencode({
         "category": "linear", "symbol": symbol,
     })
     if transport is None:
@@ -121,17 +128,28 @@ def fetch_market_object(endpoint: str, symbol: str, *, transport=None) -> dict:
 
 
 def probe(symbol: str, *, transport=None) -> dict:
-    instrument = fetch_market_object(
-        "/v5/market/instruments-info", symbol, transport=transport,
-    )
-    ticker = fetch_market_object(
-        "/v5/market/tickers", symbol, transport=transport,
-    )
-    return {
-        "status": "current_public_filters_checked",
-        "checked_at_utc": datetime.now(UTC).isoformat(),
-        **evaluate_public_filters(instrument, ticker, symbol),
-    }
+    # Both officially documented Bybit mainnet hosts are allowed; source
+    # identity is recorded. No third-party aggregators or private endpoints.
+    errors = []
+    for host in OFFICIAL_API_HOSTS:
+        try:
+            instrument = fetch_market_object(
+                "/v5/market/instruments-info", symbol,
+                transport=transport, host=host,
+            )
+            ticker = fetch_market_object(
+                "/v5/market/tickers", symbol,
+                transport=transport, host=host,
+            )
+            return {
+                "status": "current_public_filters_checked",
+                "checked_at_utc": datetime.now(UTC).isoformat(),
+                "source_api_host": host,
+                **evaluate_public_filters(instrument, ticker, symbol),
+            }
+        except Exception as exc:
+            errors.append(f"{host}: {type(exc).__name__}: {exc}")
+    raise ValueError("both official Bybit market hosts unavailable: " + "; ".join(errors))
 
 
 def main() -> None:
