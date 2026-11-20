@@ -83,7 +83,10 @@ def evaluate_triad(inp: TriadInput) -> dict:
     spread_bps = ((inp.best_ask - inp.best_bid)
                   / ((inp.best_ask + inp.best_bid) / 2) * 10000)
     spread_ok = 0 <= spread_bps <= MAX_ASK_BID_SPREAD_BPS
-    market_coherent = inp.best_bid <= inp.mark <= inp.best_ask
+    # Perpetual Mark Price is independently calculated and need not sit
+    # strictly between top bid and ask. Reject only excessive divergence.
+    midpoint = (inp.best_bid + inp.best_ask) / 2
+    market_coherent = abs(inp.mark / midpoint - 1) <= 0.005
     # The sniper owns the already independently defined Donchian 15m trigger.
     sniper_ok = inp.direction != 0 and candle_is_complete_15m and candidate_fresh
     sniper_reason = (
