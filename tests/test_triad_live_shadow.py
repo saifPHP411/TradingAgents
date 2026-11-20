@@ -50,6 +50,7 @@ def test_checks_every_second_and_emits_single_unanimous_shadow_event(monkeypatch
     )
     # close at 15m boundary, first second after close.
     feed_quotes(watcher, CANDLE_END + 1000)
+    assert watcher.market_events == 2
     result = watcher.tick(now_ms=CANDLE_END + 1000)
     assert result["scans_completed"] == 1
     assert len(result["new_unanimous_shadow_opportunities"]) == 1
@@ -159,3 +160,15 @@ def test_history_validator_rejects_missing_minute_and_invalid_symbols():
     bars = source_bars()
     with pytest.raises(ValueError, match="gaps"):
         watcher.bootstrap("BTCUSDT", bars[:10] + bars[12:])
+
+
+
+def test_subscription_ack_is_not_falsely_counted_as_market_data():
+    watcher = TriadShadowWatcher(("BTCUSDT",))
+    watcher.ingest(
+        {"op": "subscribe", "success": True, "ret_msg": "subscribe"},
+        received_ms=CANDLE_END,
+    )
+    assert watcher.received == 1
+    assert watcher.market_events == 0
+    assert watcher.tick(now_ms=CANDLE_END)["orders_submitted"] is False
