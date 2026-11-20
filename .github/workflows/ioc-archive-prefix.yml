@@ -1,0 +1,46 @@
+name: IOC archive prefix validation (research)
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ioc-archive-prefix.yml"
+      - "tradingagents/crypto/backtest/archive_probe.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bybit-prefix:
+    name: Bybit L2 prefix (${{ matrix.symbol }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [XRPUSDT, LTCUSDT]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Inspect first 512KiB of actual October 1 orderbook ZIP
+        id: inspect
+        continue-on-error: true
+        run: |
+          python tradingagents/crypto/backtest/archive_probe.py \
+            --symbol "${{ matrix.symbol }}" \
+            --date 2026-10-01 \
+            --out "results/l2-prefix-${{ matrix.symbol }}.json"
+      - name: Upload report even if source is unavailable
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: l2-prefix-${{ matrix.symbol }}
+          path: results/l2-prefix-${{ matrix.symbol }}.json
+          if-no-files-found: error
+      - name: State evidence limitation
+        if: always()
+        run: |
+          echo "Prefix validation is NOT a full-day archive check or backtest."
+          echo "Probe step outcome: ${{ steps.inspect.outcome }}"

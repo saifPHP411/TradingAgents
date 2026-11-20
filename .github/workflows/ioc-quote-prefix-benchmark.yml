@@ -1,0 +1,45 @@
+name: Bybit Market-vs-10bps Limit IOC bounded real-L2 quote check
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ioc-quote-prefix-benchmark.yml"
+      - "tradingagents/crypto/backtest/ioc_quote_prefix_benchmark.py"
+      - "tradingagents/crypto/backtest/ioc_compare.py"
+      - "tests/test_ioc_quote_prefix_benchmark.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  archived-book-quote-samples:
+    name: L2 quote-only shadow execution (${{ matrix.symbol }} ${{ matrix.day }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [LTCUSDT, XRPUSDT]
+        day: ["2026-10-01", "2026-10-08", "2026-10-15", "2026-10-21"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Bound HTTP Range to first 8MiB of real Bybit linear L2 ZIP
+        env:
+          SYMBOL: ${{ matrix.symbol }}
+          DAY: ${{ matrix.day }}
+        run: |
+          python tradingagents/crypto/backtest/ioc_quote_prefix_benchmark.py \
+            --symbol "$SYMBOL" --date "$DAY" \
+            --output "results/book-entry-shadow-${SYMBOL}-${DAY}.json"
+      - name: Preserve evidence, including unavailable source errors
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bybit-shadow-${{ matrix.symbol }}-${{ matrix.day }}
+          path: results/book-entry-shadow-${{ matrix.symbol }}-${{ matrix.day }}.json
+          if-no-files-found: error
+          retention-days: 14

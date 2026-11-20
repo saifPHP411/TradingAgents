@@ -1,0 +1,38 @@
+name: IOC shadow comparison focused tests
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ioc-shadow-smoke.yml"
+      - "tradingagents/crypto/backtest/ioc_quote_prefix_benchmark.py"
+      - "tradingagents/crypto/backtest/ioc_compare.py"
+      - "tests/test_ioc_quote_prefix_benchmark.py"
+      - "tests/test_ioc_compare.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    name: Test IOC execution research and anti-fabrication guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Check touched code formatting and imports
+        run: |
+          ruff check tradingagents/crypto/backtest/ioc_compare.py \
+            tradingagents/crypto/backtest/ioc_quote_prefix_benchmark.py \
+            tests/test_ioc_compare.py \
+            tests/test_ioc_quote_prefix_benchmark.py
+      - name: Run IOC no-network smoke and negative-evidence tests
+        run: |
+          python -m pytest -q tests/test_ioc_compare.py \
+            tests/test_ioc_quote_prefix_benchmark.py

@@ -1,0 +1,363 @@
+"""Research-only, evidence-gated Market IOC vs signal-anchored Limit IOC replay.
+
+Requires actual timestamped strategy signals (not generated from candle closes)
+and Bybit linear L2 archive files. Does not send orders. An execution price
+from the book is a model, not an exchange-confirmed fill.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import zipfile
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class Signal:
+    signal_id: str
+    symbol: str
+    signal_ts_ms: int
+    side: str
+    mark: float
+    quantity: float
+    tick_size: float
+    expires_ms: int
+    exit_price: float | None
+
+    @classmethod
+    def from_row(cls, row: dict[str, str]) -> Signal:
+        ts = int(row["signal_ts_ms"])
+        side = row["side"].lower()
+        if side not in {"long", "short"}:
+            raise ValueError("side must be long or short")
+        mark = float(row["signal_mark"])
+        quantity = float(row["quantity"])
+        tick = float(row["tick_size"])
+        expiry = int(row.get("signal_expires_ms") or (ts // 60000 + 1) * 60000)
+        exit_price = float(row["exit_price"]) if row.get("exit_price") else None
+        if (
+            not all(math.isfinite(n) and n > 0 for n in (mark, quantity, tick))
+            or expiry != (ts // 60000 + 1) * 60000
+            or (exit_price is not None and (not math.isfinite(exit_price) or exit_price <= 0))
+        ):
+            raise ValueError("invalid price, quantity or signal expiry")
+        return cls(
+            str(row["signal_id"]), str(row["symbol"]).upper(), ts, side,
+            mark, quantity, tick, expiry, exit_price,
+        )
+
+
+def load_signals(path: Path) -> list[Signal]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        signals = [Signal.from_row(row) for row in csv.DictReader(handle)]
+    identifiers = [signal.signal_id for signal in signals]
+    if len(identifiers) != len(set(identifiers)):
+        raise ValueError("signal_id must be unique")
+    return sorted(signals, key=lambda row: row.signal_ts_ms)
+
+
+def cap_price(mark: float, tick: float, side: str, bps: float) -> float:
+    if not math.isfinite(bps) or bps < 0:
+        raise ValueError("bps must be finite and nonnegative")
+    direction = 1 if side == "long" else -1
+    raw = Decimal(str(mark)) * (1 + Decimal(direction) * Decimal(str(bps)) / 10000)
+    rounding = ROUND_FLOOR if direction > 0 else ROUND_CEILING
+    return float(
+        (raw / Decimal(str(tick))).to_integral_value(rounding=rounding)
+        * Decimal(str(tick))
+    )
+
+
+def walk_book(
+    levels: list[tuple[float, float]],
+    side: str,
+    requested: float,
+    max_price: float | None,
+) -> dict:
+    """Walk visible ask/bid depth; partial IOC remainder cancels immediately."""
+    if side not in {"long", "short"} or requested <= 0:
+        raise ValueError("invalid side or size")
+    ordered = sorted(levels, key=lambda level: level[0], reverse=side == "short")
+    filled = 0.0
+    notional = 0.0
+    for price, available in ordered:
+        if price <= 0 or available <= 0:
+            continue
+        if max_price is not None and (
+            (side == "long" and price > max_price)
+            or (side == "short" and price < max_price)
+        ):
+            break
+        take = min(available, requested - filled)
+        filled += take
+        notional += take * price
+        if filled >= requested - 1e-12:
+            break
+    return {
+        "requested_quantity": requested,
+        "filled_quantity": min(filled, requested),
+        "fill_fraction": min(filled / requested, 1.0),
+        "average_price": notional / filled if filled > 0 else None,
+    }
+
+
+def _update_side(book: dict[float, float], levels: list[list[str]]) -> None:
+    for raw_price, raw_qty in levels:
+        price = float(raw_price)
+        quantity = float(raw_qty)
+        if not math.isfinite(price) or price <= 0 or not math.isfinite(quantity) or quantity < 0:
+            raise ValueError("invalid Bybit L2 level")
+        if quantity == 0:
+            book.pop(price, None)
+        else:
+            book[price] = quantity
+
+
+def replay_archive(
+    archive: Path,
+    signals: list[Signal],
+    *,
+    latency_ms: int = 250,
+    max_book_delay_ms: int = 1000,
+    limit_bps: float = 10,
+    market_cap_bps: float | None = None,
+    taker_fee_rate: float = 0.00055,
+) -> list[dict]:
+    """Use only the most recent orderbook state at or before modeled arrival.
+
+    The next event *after* arrival can tell us when to process pending orders,
+    but its book delta must never affect a prior arrival (no lookahead).
+    """
+    if (
+        isinstance(latency_ms, bool) or not isinstance(latency_ms, int) or latency_ms < 0
+        or isinstance(max_book_delay_ms, bool)
+        or not isinstance(max_book_delay_ms, int) or max_book_delay_ms < 0
+        or not math.isfinite(taker_fee_rate) or taker_fee_rate < 0
+        or not math.isfinite(limit_bps) or limit_bps < 0
+        or (market_cap_bps is not None
+            and (not math.isfinite(market_cap_bps) or market_cap_bps < 0))
+    ):
+        raise ValueError("invalid replay settings")
+    if not signals:
+        return []
+    symbol = signals[0].symbol
+    if any(row.symbol != symbol for row in signals):
+        raise ValueError("one symbol per archive")
+    pending = sorted(signals, key=lambda row: row.signal_ts_ms + latency_ms)
+    results: list[dict] = []
+    index = 0
+    bids: dict[float, float] = {}
+    asks: dict[float, float] = {}
+    initialized = False
+    last_ts = -1
+
+    def record(signal: Signal) -> None:
+        send_ms = signal.signal_ts_ms + latency_ms
+        if send_ms >= signal.expires_ms:
+            results.append({
+                "signal_id": signal.signal_id, "symbol": symbol,
+                "status": "signal_expired_before_arrival",
+            })
+            return
+        if (
+            not initialized or last_ts < 0
+            or send_ms - last_ts > max_book_delay_ms
+            or not bids or not asks or max(bids) >= min(asks)
+        ):
+            results.append({
+                "signal_id": signal.signal_id, "symbol": symbol,
+                "status": "no_fresh_book_as_of_arrival",
+            })
+            return
+        cap = cap_price(signal.mark, signal.tick_size, signal.side, limit_bps)
+        market_cap = (
+            cap_price(signal.mark, signal.tick_size, signal.side, market_cap_bps)
+            if market_cap_bps is not None else None
+        )
+        levels = list(asks.items()) if signal.side == "long" else list(bids.items())
+        both: dict[str, dict] = {}
+        for name, price_limit in (("market_ioc", market_cap), ("limit_ioc", cap)):
+            entry = walk_book(levels, signal.side, signal.quantity, price_limit)
+            avg = entry["average_price"]
+            qty = entry["filled_quantity"]
+            entry["adverse_slippage_bps"] = (
+                (1 if signal.side == "long" else -1)
+                * (avg / signal.mark - 1) * 10000 if avg is not None else None
+            )
+            entry["entry_fees_usdt"] = (
+                qty * avg * taker_fee_rate if avg is not None else 0.0
+            )
+            # Conditional sensitivity only: no TP/SL, funding or portfolio replay.
+            entry["conditional_net_pnl_usdt"] = (
+                (1 if signal.side == "long" else -1)
+                * (signal.exit_price - avg) * qty
+                - entry["entry_fees_usdt"]
+                - qty * signal.exit_price * taker_fee_rate
+                if avg is not None and signal.exit_price is not None else None
+            )
+            both[name] = entry
+        results.append({
+            "signal_id": signal.signal_id,
+            "symbol": symbol,
+            "status": "modeled",
+            "book_ts_ms": last_ts,
+            "book_age_ms": send_ms - last_ts,
+            "send_ts_ms": send_ms,
+            "signal_ts_ms": signal.signal_ts_ms,
+            "side": signal.side,
+            "entry_cap_price": cap,
+            **both,
+        })
+
+    with zipfile.ZipFile(archive) as bundle:
+        names = [name for name in bundle.namelist() if name.endswith(".data")]
+        if len(names) != 1:
+            raise ValueError("expected exactly one .data stream in ZIP")
+        with bundle.open(names[0]) as stream:
+            for raw in stream:
+                event = json.loads(raw)
+                data = event.get("data")
+                if not isinstance(data, dict) or str(data.get("s", "")) != symbol:
+                    continue
+                ts = int(event["ts"])
+                if ts < last_ts:
+                    raise ValueError("orderbook events must be time ordered")
+                event_type = event.get("type")
+                if event_type not in {"snapshot", "delta"}:
+                    continue
+
+                # Any arrivals strictly before this event saw the *previous*
+                # book, so process them before applying this event's changes.
+                while (
+                    index < len(pending)
+                    and pending[index].signal_ts_ms + latency_ms < ts
+                ):
+                    record(pending[index])
+                    index += 1
+
+                if event_type == "snapshot":
+                    bids.clear()
+                    asks.clear()
+                    initialized = True
+                elif not initialized:
+                    continue
+                _update_side(bids, data.get("b") or [])
+                _update_side(asks, data.get("a") or [])
+                last_ts = ts
+
+                # Arrivals exactly at this timestamp can see this snapshot.
+                while (
+                    index < len(pending)
+                    and pending[index].signal_ts_ms + latency_ms == ts
+                ):
+                    record(pending[index])
+                    index += 1
+
+    # Do not extrapolate past the end of the observed archive.
+    results.extend({
+        "signal_id": signal.signal_id, "symbol": symbol,
+        "status": (
+            "signal_expired_before_arrival"
+            if signal.signal_ts_ms + latency_ms >= signal.expires_ms
+            else "missing_orderbook"
+        ),
+    } for signal in pending[index:])
+    return results
+
+
+def summarize(results: list[dict]) -> dict:
+    modeled = [item for item in results if item["status"] == "modeled"]
+    output: dict = {
+        "signals": len(results),
+        "modeled_signals": len(modeled),
+        "excluded": len(results) - len(modeled),
+        "warning": (
+            "Book-walk execution estimates only; no queue dynamics, venue market"
+            " cap, actual signal feed or independent exits verified by this tool."
+        ),
+    }
+    for mode in ("market_ioc", "limit_ioc"):
+        fills = [item[mode] for item in modeled]
+        with_fill = [item for item in fills if item["filled_quantity"] > 0]
+        pnl = [item["conditional_net_pnl_usdt"] for item in fills
+               if item["conditional_net_pnl_usdt"] is not None]
+        output[mode] = {
+            "any_fill_rate": len(with_fill) / len(fills) if fills else None,
+            "full_fill_rate": (
+                sum(item["fill_fraction"] >= 1 - 1e-9 for item in fills) / len(fills)
+                if fills else None
+            ),
+            "quantity_fill_rate": (
+                sum(item["filled_quantity"] for item in fills)
+                / sum(item["requested_quantity"] for item in fills)
+                if fills else None
+            ),
+            "mean_adverse_slippage_bps": (
+                sum(item["adverse_slippage_bps"] for item in with_fill) / len(with_fill)
+                if with_fill else None
+            ),
+            "entry_fees_usdt": sum(item["entry_fees_usdt"] for item in fills),
+            "conditional_net_pnl_usdt": sum(pnl) if len(pnl) == len(fills) and pnl else None,
+            "conditional_pnl_samples": len(pnl),
+        }
+    return output
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--signals", required=True, type=Path)
+    parser.add_argument("--archive", required=True, type=Path, action="append")
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--latency-ms", type=int, default=250)
+    parser.add_argument("--max-book-delay-ms", type=int, default=1000)
+    parser.add_argument("--market-cap-bps", type=float)
+    parser.add_argument("--fee-per-fill", type=float, default=0.00055)
+    args = parser.parse_args()
+    signals = load_signals(args.signals)
+    if not signals:
+        raise SystemExit("No recorded signals; cannot invent historical fills")
+    all_results: list[dict] = []
+    covered: set[str] = set()
+    for archive in args.archive:
+        for symbol in {row.symbol for row in signals}:
+            date_prefix = archive.name[:10]
+            archive_symbol = archive.name.split("_")[1] if "_" in archive.name else ""
+            if archive_symbol != symbol:
+                continue
+            group = [
+                row for row in signals
+                if row.symbol == symbol
+                and datetime.fromtimestamp(row.signal_ts_ms / 1000, UTC).date().isoformat()
+                == date_prefix
+            ]
+            if any(row.signal_id in covered for row in group):
+                raise SystemExit("Duplicate archive coverage for the same signal")
+            covered.update(row.signal_id for row in group)
+            all_results.extend(replay_archive(
+                archive, group, latency_ms=args.latency_ms,
+                max_book_delay_ms=args.max_book_delay_ms,
+                market_cap_bps=args.market_cap_bps,
+                taker_fee_rate=args.fee_per_fill,
+            ))
+    all_results.extend({
+        "signal_id": row.signal_id, "symbol": row.symbol, "status": "missing_archive",
+    } for row in signals if row.signal_id not in covered)
+    result = {
+        "source": "Bybit linear L2 archive plus recorded signal CSV",
+        "notional_reference_usdt": 50,
+        "model": "timestamped visible-depth book walk; no actual exchange fills",
+        "summary": summarize(all_results),
+        "trades": all_results,
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(json.dumps(result["summary"], indent=2))
+
+
+if __name__ == "__main__":
+    main()
