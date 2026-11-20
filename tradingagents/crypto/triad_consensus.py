@@ -17,7 +17,7 @@ MAX_CANDIDATE_AGE_MS = 60_000
 MAX_ASK_BID_SPREAD_BPS = 10.0
 MAX_NOTIONAL_FRACTION = 0.20
 MAX_LEVERAGE = 2.0
-COST_PER_SIDE = 0.00055 + 0.00030
+COST_PER_SIDE = 0.00080 + 0.00070  # Stress estimate, per-side
 DONCHIAN_STOP = 0.008
 DONCHIAN_TARGET = 0.018
 
@@ -113,7 +113,7 @@ def evaluate_triad(inp: TriadInput) -> dict:
         <= MAX_NOTIONAL_FRACTION * inp.account_equity_usdt + 1e-9
         and inp.max_leverage <= MAX_LEVERAGE
         and after_cost_risk > 0
-        and after_cost_reward / after_cost_risk >= 1.5
+        and after_cost_reward / after_cost_risk >= 1.3
     )
     professor_reason = (
         "modeled_cost_and_risk_screen_passed" if professor_ok
