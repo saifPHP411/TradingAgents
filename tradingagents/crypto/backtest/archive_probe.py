@@ -51,6 +51,9 @@ def inspect_zip_prefix(prefix: bytes, *, symbol: str, day: date) -> dict:
     snapshots = deltas = 0
     previous_ts = -1
     first_ts = None
+    bid_levels: dict[float, float] = {}
+    ask_levels: dict[float, float] = {}
+    observed_spreads_bps: list[float] = []
     for event in events:
         if not isinstance(event, dict):
             raise ValueError("orderbook events must be objects")
@@ -68,8 +71,26 @@ def inspect_zip_prefix(prefix: bytes, *, symbol: str, day: date) -> dict:
         first_ts = ts if first_ts is None else first_ts
         if event["type"] == "snapshot":
             snapshots += 1
+            bid_levels.clear()
+            ask_levels.clear()
         else:
             deltas += 1
+        for side_key, levels in (("b", bid_levels), ("a", ask_levels)):
+            for price_text, quantity_text in data[side_key]:
+                price = float(price_text)
+                quantity = float(quantity_text)
+                if not (0 < price < float("inf") and 0 <= quantity < float("inf")):
+                    raise ValueError("invalid price or quantity in sampled book")
+                if quantity == 0:
+                    levels.pop(price, None)
+                else:
+                    levels[price] = quantity
+        if bid_levels and ask_levels:
+            best_bid, best_ask = max(bid_levels), min(ask_levels)
+            if best_bid >= best_ask:
+                raise ValueError("crossed or locked sampled orderbook")
+            midpoint = (best_bid + best_ask) / 2
+            observed_spreads_bps.append((best_ask - best_bid) / midpoint * 10000)
     # Never conflate a validated prefix with a validated full-day archive.
     if first_ts is not None:
         observed_day = datetime.fromtimestamp(first_ts / 1000, UTC).date()
@@ -82,6 +103,13 @@ def inspect_zip_prefix(prefix: bytes, *, symbol: str, day: date) -> dict:
         "sampled_complete_records": len(events),
         "sampled_snapshots": snapshots,
         "sampled_deltas": deltas,
+        "sampled_spread_observations": len(observed_spreads_bps),
+        "mean_quoted_spread_bps": (
+            sum(observed_spreads_bps) / len(observed_spreads_bps)
+            if observed_spreads_bps else None
+        ),
+        "min_quoted_spread_bps": min(observed_spreads_bps) if observed_spreads_bps else None,
+        "max_quoted_spread_bps": max(observed_spreads_bps) if observed_spreads_bps else None,
         "first_ts_ms": first_ts,
         "last_sampled_ts_ms": previous_ts,
         "scope": "ZIP prefix only; full-day CRC and completeness NOT verified",
