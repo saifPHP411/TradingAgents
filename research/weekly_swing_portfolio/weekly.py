@@ -113,6 +113,8 @@ def episode(
     audit=None,
     specs=None,
     risk_budget=None,
+    stop_atr=None,
+    reward_risk=None,
 ):
     end = first + 7 * 96 * scale
     balance = peak = 50.0
@@ -123,6 +125,10 @@ def episode(
     funding_total = 0.0
     slip = 0.001 if stress else 0.0003
     fee = 0.00055
+    stop_factor = stop_atr if stop_atr is not None else (1.25 if model == 2 else 1.75)
+    target_factor = (
+        reward_risk if reward_risk is not None else (1.5 if model == 2 else 2.5)
+    )
     for i in range(first, end):
         if slot is None and i % scale == 0:
             ranks = np.argsort(-np.abs(scores[:, i // scale, model]), kind="stable")
@@ -146,10 +152,8 @@ def episode(
                 if leverage > max_lev:
                     continue
                 units = balance * 0.50 * leverage / price
+                stop_distance = scores[a, i // scale, -1] * stop_factor
                 if risk_budget is not None:
-                    stop_distance = scores[a, i // scale, -1] * (
-                        1.25 if model == 2 else 1.75
-                    )
                     units = min(
                         units,
                         balance
@@ -163,15 +167,14 @@ def episode(
                     or amount <= 0
                 ):
                     continue
-                dist = scores[a, i // scale, -1] * (1.25 if model == 2 else 1.75)
-                target = price + side * (1.5 if model == 2 else 2.5) * dist
+                target = price + side * target_factor * stop_distance
                 goal_exit = (
                     (side * price + fee * price + (1000 - balance) / amount)
                     / (side - fee)
                     / (1 - side * slip)
                 )
                 target = min(target, goal_exit) if side == 1 else max(target, goal_exit)
-                slot = (a, side, price, amount, price - side * dist, target, i)
+                slot = (a, side, price, amount, price - side * stop_distance, target, i)
                 funding = 0.0
                 break
         if slot is None:
