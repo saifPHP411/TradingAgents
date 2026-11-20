@@ -57,6 +57,10 @@ STATE_FILE = "bybit_linear_demo_state.json"
 POLL_SECONDS = 15
 CANDLE_MS = 4 * 60 * 60 * 1000
 MAX_REQUEST_BYTES = 16_384
+TERMINAL_ENTRY_STATUS = frozenset({
+    "Filled", "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled",
+    "PartiallyFilledCancelled",
+})
 
 
 def _number(value: object, name: str, *, positive: bool = True) -> float:
@@ -625,6 +629,45 @@ class PerpetualDemoController:
                 equity, active_by_symbol, managed, attempts, cooldowns, scan_errors,
             )
 
+    def _entry_history(self, symbol: str, meta: dict, now_ms: int) -> dict:
+        submitted_ms = int(meta.get("entry_time_ms") or now_ms)
+        link_id = meta.get("order_link_id")
+        if link_id:
+            with contextlib.suppress(BybitLinearDemoError, ValueError):
+                orders = self.broker.get_order_history(
+                    symbol=symbol,
+                    order_link_id=link_id,
+                    start_time_ms=max(1, submitted_ms - 60_000),
+                    end_time_ms=min(now_ms + 60_000, submitted_ms + 7 * 24 * 60 * 60 * 1000),
+                    limit=5,
+                )
+                return next((order for order in orders if order.get("order_link_id") == link_id), {})
+        return {}
+
+    def _record_entry_fill(self, symbol: str, meta: dict, order: dict) -> None:
+        status = order.get("order_status")
+        if status not in TERMINAL_ENTRY_STATUS or meta.get("entry_fill_recorded"):
+            return
+        with contextlib.suppress(ValueError):
+            quantity = _number(order.get("cum_exec_qty"), "executed quantity")
+            price = _number(order.get("avg_price"), "average execution price")
+            reference = _number(meta.get("entry_price_mark"), "signal price")
+            direction = 1 if meta["side"] == "long" else -1
+            meta["entry_fill_recorded"] = True
+            self._record({
+                "type": "strategy_entry_fill",
+                "symbol": symbol,
+                "side": meta["side"],
+                "order_link_id": meta["order_link_id"],
+                "order_status": status,
+                "requested_quantity": meta.get("requested_quantity") or order.get("qty"),
+                "filled_quantity": quantity,
+                "average_fill_price": price,
+                "entry_limit_price": meta.get("entry_limit_price") or order.get("price"),
+                "entry_mark_price": reference,
+                "adverse_slippage_bps": direction * (price - reference) / reference * 10_000,
+            })
+
     def _process_scan(
         self, scan_order, snapshots, equity, active_by_symbol, managed, attempts,
         cooldowns, scan_errors,
@@ -657,6 +700,11 @@ class PerpetualDemoController:
                 # Never adopt or alter positions opened manually in the Demo desk.
                 if not isinstance(meta, dict):
                     continue
+                entry_order = {} if meta.get("entry_fill_recorded") else self._entry_history(symbol, meta, now_ms)
+                if meta.get("entry_submission_unconfirmed"):
+                    if (entry_order.get("cum_exec_qty") or 0.0) <= 0:
+                        continue
+                    meta["entry_submission_unconfirmed"] = False
                 if not meta.get("venue_position_confirmed"):
                     meta["venue_position_confirmed"] = True
                     meta["venue_entry_price"] = position.get("entry_price")
@@ -664,6 +712,7 @@ class PerpetualDemoController:
                         position.get("created_time_ms") or meta.get("entry_time_ms") or now_ms
                     )
                     self._save_state()
+                self._record_entry_fill(symbol, meta, entry_order)
 
                 pending = meta.get("pending_exit")
                 if isinstance(pending, dict):
@@ -795,26 +844,12 @@ class PerpetualDemoController:
             # treating that disappearance as an exit.
             if isinstance(meta, dict):
                 confirmed = bool(meta.get("venue_position_confirmed", True))
+                entry_order = {} if meta.get("entry_fill_recorded") else self._entry_history(symbol, meta, now_ms)
                 if not confirmed:
-                    order_rows = []
-                    with contextlib.suppress(Exception):
-                        order_rows = self.broker.get_order_history(
-                            symbol=symbol,
-                            order_link_id=meta.get("order_link_id"),
-                            start_time_ms=max(1, int(meta.get("entry_time_ms") or now_ms) - 60_000),
-                            end_time_ms=min(
-                                now_ms + 60_000,
-                                int(meta.get("entry_time_ms") or now_ms) + 7 * 24 * 60 * 60 * 1000,
-                            ),
-                            limit=5,
-                        )
-                    entry_order = order_rows[0] if order_rows else {}
                     filled_quantity = float(entry_order.get("cum_exec_qty") or 0.0)
                     entry_status = str(entry_order.get("order_status") or "")
                     entry_age = max(0, now_ms - int(meta.get("entry_time_ms") or now_ms))
-                    if filled_quantity <= 0 and entry_status in {
-                        "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"
-                    }:
+                    if filled_quantity <= 0 and entry_status in TERMINAL_ENTRY_STATUS - {"Filled"}:
                         managed.pop(symbol, None)
                         cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
                         self._record({
@@ -847,6 +882,7 @@ class PerpetualDemoController:
                         entry_order.get("created_time_ms") or meta.get("entry_time_ms") or now_ms
                     )
 
+                self._record_entry_fill(symbol, meta, entry_order)
                 exit_details = self._closed_trade_details(symbol, meta, now_ms)
                 pending_exit = meta.get("pending_exit")
                 managed.pop(symbol, None)
@@ -875,7 +911,7 @@ class PerpetualDemoController:
                 continue
             if cooldowns.get(symbol, 0) > now_ms or attempts.get(symbol) == current_minute:
                 continue
-            if current_signal not in (-1, 1) or len(active_by_symbol) >= MAX_OPEN_POSITIONS:
+            if current_signal not in (-1, 1) or len(active_by_symbol.keys() | managed.keys()) >= MAX_OPEN_POSITIONS:
                 continue
 
             instrument = self._instrument_cache.get(symbol)
@@ -911,19 +947,35 @@ class PerpetualDemoController:
             side = "long" if current_signal > 0 else "short"
             stop = float(market["suggested_long_stop"] if side == "long" else market["suggested_short_stop"])
             target = float(market["suggested_long_target"] if side == "long" else market["suggested_short_target"])
-            minute_ms = int(datetime.fromisoformat(current_minute).timestamp() * 1000)
-            order_link_id = f"SC-{symbol}-{minute_ms}"[-36:]
+            order_link_id = f"SC-{symbol}-{open_ms}"[-36:]
             # Persist before the network write to prevent blind resubmission on
             # a timeout or process restart during the same 1-minute candle.
             attempts[symbol] = current_minute
+            managed[symbol] = {
+                "side": side, "entry_time_ms": now_ms,
+                "entry_signal_candle": current_minute,
+                "entry_price_mark": market["mark_price"],
+                "venue_position_confirmed": False,
+                "entry_submission_unconfirmed": True,
+                "stop_loss": stop, "take_profit": target,
+                "order_link_id": order_link_id,
+            }
             self._save_state()
             try:
-                result = self.broker.open_market_position(
+                result = self.broker.open_position(
                     symbol=symbol, side=side, leverage=self.strategy.leverage,
                     equity=equity, stop_loss=stop, take_profit=target,
                     order_link_id=order_link_id,
+                    signal_price=market["mark_price"], signal_expires_ms=open_ms + 60_000,
                 )
+            except BybitLinearDemoAmbiguous:
+                self._record({
+                    "type": "strategy_entry_submission_unconfirmed", "symbol": symbol,
+                    "side": side, "order_link_id": order_link_id,
+                })
+                continue
             except Exception as exc:
+                managed.pop(symbol, None)
                 self._record({
                     "type": "strategy_entry_rejected", "symbol": symbol, "side": side,
                     "reason": f"{type(exc).__name__}: {str(exc)[:140]}",
@@ -931,14 +983,15 @@ class PerpetualDemoController:
                 })
                 continue
 
-            managed[symbol] = {
-                "side": side, "entry_time_ms": now_ms,
-                "entry_signal_candle": current_minute,
-                "entry_price_mark": market["mark_price"],
-                "venue_position_confirmed": False,
-                "stop_loss": stop, "take_profit": target,
-                "order_link_id": order_link_id,
-            }
+            stop = result.get("stop_loss", stop)
+            target = result.get("take_profit", target)
+            managed[symbol].update(
+                entry_submission_unconfirmed=False,
+                requested_quantity=result["quantity"],
+                entry_limit_price=result.get("limit_price"),
+                stop_loss=stop,
+                take_profit=target,
+            )
             active_by_symbol[symbol] = {
                 "symbol": symbol, "side": side, "quantity": result["quantity"],
                 "entry_price": market["mark_price"], "leverage": self.strategy.leverage,
@@ -952,6 +1005,7 @@ class PerpetualDemoController:
                 "initial_margin_usdt": result.get("initial_margin_usdt"),
                 "modeled_stop_risk_usdt": result.get("modeled_stop_risk_usdt"),
                 "entry_mark_price": market["mark_price"],
+                "entry_limit_price": result.get("limit_price"),
                 "stop_loss": stop, "take_profit": target,
             })
             self._strategy_status = {
@@ -1098,7 +1152,7 @@ function renderStrategy(s){var state=s.status||"idle";$("strategy-badge").textCo
 function renderPositions(rows){if(!rows.length){$("positions").innerHTML='<div class="empty">No open USDT linear perpetual positions.</div>';return;}$("positions").innerHTML=rows.map(function(p){var side=String(p.side||"").toUpperCase(),pnl=Number(p.unrealized_pnl||0);return '<div class="rowitem"><div class="rowtop"><strong>'+esc(p.symbol)+' · '+esc(side)+'</strong><span class="pill">'+fmt(p.leverage,1)+'x</span></div><div class="stats"><div class="stat">Quantity<b>'+fmt(p.quantity,6)+'</b></div><div class="stat">Entry<b>'+fmt(p.entry_price,5)+'</b></div><div class="stat">Mark<b>'+fmt(p.mark_price,5)+'</b></div><div class="stat">Unrealized P&amp;L<b class="'+(pnl>0?"positive":pnl<0?"negative":"")+'">'+fmt(pnl,4)+' USDT</b></div><div class="stat">Stop loss<b>'+fmt(p.stop_loss,5)+'</b></div><div class="stat">Take profit<b>'+fmt(p.take_profit,5)+'</b></div></div><div class="actions" style="margin-top:10px"><button class="danger" data-close="'+esc(p.symbol)+'">Close position · Reduce Only</button></div></div>';}).join("");}
 function renderOrders(rows){if(!rows.length){$("orders").innerHTML='<div class="empty">No active exchange orders.</div>';return;}$("orders").innerHTML='<table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Protection type</th><th>Trigger</th><th>Stop</th><th>Target</th><th>Reduce only</th><th>Order ID</th></tr></thead><tbody>'+rows.map(function(o){return '<tr><td>'+esc(o.symbol)+'</td><td>'+esc(o.side)+'</td><td>'+fmt(o.qty,6)+'</td><td>'+esc(o.order_status)+'</td><td>'+esc(o.stop_order_type||o.order_type)+'</td><td>'+esc(o.trigger_price||o.trigger_by||"—")+'</td><td>'+esc(o.stop_loss||"—")+'</td><td>'+esc(o.take_profit||"—")+'</td><td>'+String(!!o.reduce_only)+'</td><td>'+esc(o.order_id).slice(0,12)+'</td></tr>';}).join("")+'</tbody></table>';}
 function renderClosedPnl(rows,error,fetchedAt){if(error){$("closed-pnl").innerHTML='<div class="empty">Closed P&amp;L history unavailable: '+esc(error)+'</div>';return;}if(!rows.length){$("closed-pnl").innerHTML='<div class="empty">No closed linear P&amp;L records returned by Bybit.</div>';}else{$("closed-pnl").innerHTML='<table><thead><tr><th>Symbol</th><th>Direction</th><th>Closed size</th><th>Avg entry</th><th>Avg exit</th><th>Closed P&amp;L</th><th>Open fee</th><th>Close fee</th><th>Updated</th></tr></thead><tbody>'+rows.map(function(p){var pnl=Number(p.closed_pnl||0),direction=p.side==="Sell"?"LONG":p.side==="Buy"?"SHORT":p.side;return '<tr><td>'+esc(p.symbol)+'</td><td>'+esc(direction)+'</td><td>'+fmt(p.closed_size,6)+'</td><td>'+fmt(p.avg_entry_price,6)+'</td><td>'+fmt(p.avg_exit_price,6)+'</td><td class="'+(pnl>0?"positive":pnl<0?"negative":"")+'">'+fmt(pnl,6)+'</td><td>'+fmt(p.open_fee,6)+'</td><td>'+fmt(p.close_fee,6)+'</td><td>'+esc(p.updated_time_ms?new Date(p.updated_time_ms).toLocaleString():"—")+'</td></tr>';}).join("")+'</tbody></table>';}$("closed-pnl-note").textContent=fetchedAt?"Bybit Closed P&L snapshot · refreshed "+new Date(fetchedAt).toLocaleTimeString():"";}
-function renderEvents(rows){if(!rows.length){$("events").innerHTML='<div class="empty">No strategy or manual execution events.</div>';return;}$("events").innerHTML=rows.slice().reverse().map(function(e){var detail=[e.side?"side="+e.side:null,e.reason?"reason="+e.reason:null,e.venue_exit_reason?"venue_exit="+e.venue_exit_reason:null,e.order_status?"order="+e.order_status:null,e.close_order_status?"close="+e.close_order_status:null,e.reject_reason?"reject="+e.reject_reason:null,e.detail||null,e.minimum_order_notional!==undefined?"minOrder="+fmt(e.minimum_order_notional,4):null,e.maximum_order_notional!==undefined?"cap="+fmt(e.maximum_order_notional,4):null,e.minimum_quantity!==undefined?"minQty="+fmt(e.minimum_quantity,6):null,e.mark_price!==undefined?"mark="+fmt(e.mark_price,6):null,e.attribution_status?"PnL attribution="+e.attribution_status:null,e.closed_pnl!==undefined&&e.closed_pnl!==null?"closed PnL="+fmt(e.closed_pnl,6)+" USDT":null,e.fees_total!==undefined&&e.fees_total!==null?"fees="+fmt(e.fees_total,6)+" USDT":null,e.held_seconds!==undefined?"held="+e.held_seconds+"s":null].filter(Boolean).join(" · ");return '<div class="rowitem"><div class="rowtop"><strong>'+esc(e.type||"event")+' · '+esc(e.symbol||"—")+'</strong><span class="sub">'+esc(e.at||"")+'</span></div><div class="sub">'+esc(detail||"No additional details")+' '+(e.leverage?esc(e.leverage)+"x":"")+' '+(e.order_link_id?"· "+esc(e.order_link_id):"")+'</div></div>';}).join("");}
+function renderEvents(rows){if(!rows.length){$("events").innerHTML='<div class="empty">No strategy or manual execution events.</div>';return;}$("events").innerHTML=rows.slice().reverse().map(function(e){var detail=[e.side?"side="+e.side:null,e.reason?"reason="+e.reason:null,e.venue_exit_reason?"venue_exit="+e.venue_exit_reason:null,e.order_status?"order="+e.order_status:null,e.close_order_status?"close="+e.close_order_status:null,e.reject_reason?"reject="+e.reject_reason:null,e.detail||null,e.minimum_order_notional!==undefined?"minOrder="+fmt(e.minimum_order_notional,4):null,e.maximum_order_notional!==undefined?"cap="+fmt(e.maximum_order_notional,4):null,e.minimum_quantity!==undefined?"minQty="+fmt(e.minimum_quantity,6):null,e.mark_price!==undefined?"mark="+fmt(e.mark_price,6):null,e.entry_limit_price!=null?"limit="+fmt(e.entry_limit_price,6):null,e.filled_quantity!=null?"fill="+fmt(e.filled_quantity,8)+(e.requested_quantity!=null?" / "+fmt(e.requested_quantity,8):""):null,e.average_fill_price!=null?"avg="+fmt(e.average_fill_price,6):null,e.adverse_slippage_bps!=null?"slippage="+fmt(e.adverse_slippage_bps,2)+" bps":null,e.attribution_status?"PnL attribution="+e.attribution_status:null,e.closed_pnl!==undefined&&e.closed_pnl!==null?"closed PnL="+fmt(e.closed_pnl,6)+" USDT":null,e.fees_total!==undefined&&e.fees_total!==null?"fees="+fmt(e.fees_total,6)+" USDT":null,e.held_seconds!==undefined?"held="+e.held_seconds+"s":null].filter(Boolean).join(" · ");return '<div class="rowitem"><div class="rowtop"><strong>'+esc(e.type||"event")+' · '+esc(e.symbol||"—")+'</strong><span class="sub">'+esc(e.at||"")+'</span></div><div class="sub">'+esc(detail||"No additional details")+' '+(e.leverage?esc(e.leverage)+"x":"")+' '+(e.order_link_id?"· "+esc(e.order_link_id):"")+'</div></div>';}).join("");}
 async function loadMarket(){var s=$("symbol").value;if(!s)return;try{var d=await api("/api/market?symbol="+encodeURIComponent(s));if(s!==$("symbol").value)return;$("mark").value=fmt(d.mark_price,6);var side=$("side").value;var stop=side==="long"?d.suggested_long_stop:d.suggested_short_stop;var target=side==="long"?d.suggested_long_target:d.suggested_short_target;$("stop").value=stop==null?"":String(stop);$("target").value=target==null?"":String(target);$("market-note").textContent="Live mark "+fmt(d.mark_price,6)+" · forming 1m candle "+new Date(d.forming_candle_open).toLocaleString()+" · ATR "+fmt(d.atr,6)+" · RSI "+fmt(d.rsi,1)+" · 5m/15m bias L:"+d.long_bias+" S:"+d.short_bias+" · signal "+d.signal+" ("+d.signal_reason+") · qty step "+d.quantity_step;}catch(e){$("market-note").textContent="Market / scalping data unavailable: "+e.message;}}
 async function manual(side){$("side").value=side;var symbol=$("symbol").value,stop=Number($("stop").value),target=Number($("target").value),leverage=Number($("leverage").value);if(!Number.isFinite(stop)||!Number.isFinite(target)||stop<=0||target<=0){msg("Enter a valid stop loss and take profit first.",false);return;}if(!confirm("Submit a "+side.toUpperCase()+" market order on BYBIT DEMO "+symbol+" at up to "+leverage+"x? SL and TP will be attached at the exchange."))return;try{var d=await api("/api/order",{method:"POST",headers:{"X-Demo-Confirm":"yes"},body:JSON.stringify({symbol:symbol,side:side,leverage:leverage,stop_loss:stop,take_profit:target})});msg("Demo order accepted: "+(d.order_id||d.order_link_id)+" · "+fmt(d.quantity,6)+" "+symbol+". Confirm fill in the positions panel.",true);await refresh();}catch(e){msg(e.message,false);}}
 async function closePosition(symbol){if(!confirm("Close the entire "+symbol+" position using a reduce-only market order on Bybit Demo?"))return;try{var d=await api("/api/close",{method:"POST",headers:{"X-Demo-Confirm":"yes"},body:JSON.stringify({symbol:symbol})});msg(d.closed===false?"No open position was found.":"Reduce-only close accepted for "+symbol+".",true);await refresh();}catch(e){msg(e.message,false);}}

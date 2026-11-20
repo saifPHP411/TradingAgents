@@ -57,7 +57,7 @@ class Public:
 class ScriptedTransport:
     def __init__(
         self, *, position_rows=None, orders=None, closed_rows=None,
-        history_rows=None, create_error=None, set_leverage_ret_code=0
+        history_rows=None, create_error=None, set_leverage_ret_code=0, ticker=None,
     ):
         self.calls = []
         self.position_rows = position_rows or []
@@ -66,6 +66,7 @@ class ScriptedTransport:
         self.history_rows = history_rows or []
         self.create_error = create_error
         self.set_leverage_ret_code = set_leverage_ret_code
+        self.ticker = ticker if ticker is not None else {"markPrice": "100"}
 
     def __call__(self, *, method, url, headers, params=None, data=None, timeout):
         self.calls.append(
@@ -82,7 +83,7 @@ class ScriptedTransport:
             raise AssertionError("non-Demo endpoint was contacted")
         path = url.rsplit("/", 1)[-1]
         if method == "GET" and path == "tickers":
-            return Response({"retCode": 0, "result": {"list": [{"markPrice": "100"}]}})
+            return Response({"retCode": 0, "result": {"list": [self.ticker]}})
         if method == "GET" and path == "closed-pnl":
             return Response({"retCode": 0, "result": {"list": self.closed_rows}})
         if method == "GET" and path == "history":
@@ -152,6 +153,7 @@ def test_entry_is_signed_and_linear_only_with_exchange_side_protection():
     order_call = next(c for c in transport.calls if c["url"].endswith("/v5/order/create"))
     body = json.loads(order_call["data"])
     assert body["category"] == "linear"
+    assert body["orderType"] == "Market"
     assert body["side"] == "Buy"
     assert body["positionIdx"] == 0
     assert body["reduceOnly"] is False
@@ -170,6 +172,67 @@ def test_entry_is_signed_and_linear_only_with_exchange_side_protection():
     expected = hmac.new(b"demo-secret", payload.encode(), hashlib.sha256).hexdigest()
     assert order_call["headers"]["X-BAPI-SIGN"] == expected
     assert order_call["headers"]["X-BAPI-SIGN-TYPE"] == "2"
+
+
+@pytest.mark.parametrize(
+    ("side", "book", "stop", "target", "expected_price", "expected_stop", "expected_target"),
+    [
+        ("long", {"ask1Price": "100.1"}, 98.02, 104.09, "100.1", "98.1", "104"),
+        ("short", {"bid1Price": "100.1"}, 101.94, 95.99, "100", "101.9", "96"),
+    ],
+)
+def test_automated_entry_uses_capped_ioc_and_attached_protection(
+    side, book, stop, target, expected_price, expected_stop, expected_target,
+):
+    transport = ScriptedTransport(ticker={"markPrice": "100.1", **book})
+    result = broker(transport).open_position(
+        symbol="BTCUSDT", side=side, leverage=2, equity=50,
+        stop_loss=stop, take_profit=target, order_link_id="bounded",
+        signal_price=100.05, signal_expires_ms=1_700_000_001_500,
+    )
+    order_call = next(c for c in transport.calls if c["url"].endswith("/v5/order/create"))
+    body = json.loads(order_call["data"])
+    assert body["orderType"] == "Limit"
+    assert body["timeInForce"] == "IOC"
+    assert body["price"] == expected_price
+    assert body["stopLoss"] == expected_stop
+    assert body["takeProfit"] == expected_target
+    assert body["tpslMode"] == "Full"
+    assert body["slOrderType"] == body["tpOrderType"] == "Market"
+    assert order_call["headers"]["X-BAPI-RECV-WINDOW"] == "1500"
+    assert result["limit_price"] == float(expected_price)
+    assert result["notional_usdt"] == pytest.approx(result["quantity"] * 100.1)
+    assert result["quantity"] * 100.1 <= 10
+
+
+def test_automated_entry_does_not_submit_outside_its_price_limit():
+    transport = ScriptedTransport(ticker={"markPrice": "100", "ask1Price": "100.2"})
+    with pytest.raises(BybitLinearDemoRejected, match="entry_quote_outside_price_limit"):
+        broker(transport).open_position(
+            symbol="BTCUSDT", side="long", leverage=2, equity=50,
+            stop_loss=98, take_profit=104, order_link_id="bounded",
+            signal_price=100, signal_expires_ms=1_700_000_005_000,
+        )
+    assert all(c["method"] == "GET" for c in transport.calls)
+
+
+def test_automated_entry_does_not_submit_when_signal_expires_during_preflight(monkeypatch):
+    transport = ScriptedTransport(ticker={"markPrice": "100", "ask1Price": "100.1"})
+    instance = broker(transport)
+    set_leverage = instance._set_leverage
+
+    def expire_signal(*args):
+        set_leverage(*args)
+        instance.clock_ms = lambda: 1_700_000_001_500
+
+    monkeypatch.setattr(instance, "_set_leverage", expire_signal)
+    with pytest.raises(BybitLinearDemoRejected, match="entry_signal_expired"):
+        instance.open_position(
+            symbol="BTCUSDT", side="long", leverage=2, equity=50,
+            stop_loss=98, take_profit=104, order_link_id="bounded",
+            signal_price=100, signal_expires_ms=1_700_000_001_500,
+        )
+    assert not any(c["url"].endswith("/v5/order/create") for c in transport.calls)
 
 
 def test_short_entry_uses_sell_and_reversed_stop_target():
