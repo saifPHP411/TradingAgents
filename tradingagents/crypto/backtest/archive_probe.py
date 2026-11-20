@@ -113,7 +113,7 @@ def probe(symbol: str, day: date) -> dict:
         url=url,
         http_status=status,
         compressed_prefix_bytes=len(prefix),
-        "analysis": "archive reachability and prefix schema only; NOT a backtest",
+        analysis="archive reachability and prefix schema only; NOT a backtest",
     )
     return report
 
