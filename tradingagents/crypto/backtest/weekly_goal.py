@@ -176,7 +176,13 @@ def audit_weekly_goal(report: dict) -> dict:
     qualifying = sum(week["weekly_target_met"] for week in windows)
     sample_sufficient = len(windows) >= MIN_INDEPENDENT_WEEKS
     all_weeks_pass = bool(windows) and qualifying == len(windows)
-    evidence_pass = sample_sufficient and all_weeks_pass and not missing_quality
+    # A truncated final week could conceal a losing streak; preserve its
+    # diagnostic results, but never approve incomplete requested history.
+    trailing_partial_days = len(snapshots) - 1 - end_index
+    evidence_pass = (
+        sample_sufficient and all_weeks_pass and not missing_quality
+        and trailing_partial_days == 0
+    )
     source = str(report.get("source") or "")
     if not windows:
         status = "insufficient_period"
@@ -206,7 +212,8 @@ def audit_weekly_goal(report: dict) -> dict:
         "quality_claims_missing_or_unverified": missing_quality,
         "reported_evidence_gate_passed": evidence_pass,
         "independently_verified_by_this_tool": False,
-        "ignored_partial_days": len(snapshots) - 1 - end_index,
+        "ignored_partial_days": trailing_partial_days,
+        "partial_history_prevents_approval": trailing_partial_days > 0,
         "windows": windows,
         "limitations": [
             "Quality flags are reporter claims, not independently authenticated by this script.",
@@ -237,6 +244,7 @@ def audit_isolated_weekly_trials(report: dict) -> dict:
     shared_ids: set[str] = set()
     windows = []
     previous_end = None
+    untested_gaps_days: list[int] = []
     missing_by_week: set[str] = set()
     for index, week in enumerate(raw):
         snaps = week.get("account_equity")
@@ -278,8 +286,11 @@ def audit_isolated_weekly_trials(report: dict) -> dict:
         window = result["windows"][0]
         start = _time(window["week_start"], "week_start")
         end = _time(window["week_end_exclusive"], "week_end")
-        if previous_end is not None and start < previous_end:
-            raise ValueError("isolated weekly trials must be chronological and nonoverlapping")
+        if previous_end is not None:
+            if start < previous_end:
+                raise ValueError("isolated weekly trials must be chronological and nonoverlapping")
+            if start > previous_end:
+                untested_gaps_days.append((start - previous_end).days)
         if start >= end:
             raise ValueError("weekly trial has invalid date range")
         previous_end = end
@@ -292,6 +303,7 @@ def audit_isolated_weekly_trials(report: dict) -> dict:
         len(windows) >= MIN_INDEPENDENT_WEEKS
         and passed_weeks == len(windows)
         and not missing_quality
+        and not untested_gaps_days
     )
     return {
         "schema_version": 1,
@@ -318,9 +330,12 @@ def audit_isolated_weekly_trials(report: dict) -> dict:
         "quality_claims_missing_or_unverified": missing_quality,
         "reported_evidence_gate_passed": reported_pass,
         "ignored_partial_days": 0,
+        "untested_gaps_days": untested_gaps_days,
+        "complete_chronological_coverage": not untested_gaps_days,
         "windows": windows,
         "limitations": [
             "Each isolated weekly replay restarts one account from 50 USDT.",
+            "Unexamined gaps between seven-day trials block approval to limit cherry-picking.",
             "All weeks are reported; the best week is never selected.",
             "Self-reported quality flags and fills need independent validation.",
             "Daily equity snapshots can miss intraday losses and liquidation risks.",
