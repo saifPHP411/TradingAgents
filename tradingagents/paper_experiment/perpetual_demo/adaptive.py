@@ -182,6 +182,11 @@ class AdaptiveDesk:
                 INSERT OR IGNORE INTO regime_choices
                 (event_key, symbol, observed_ms, report_json) VALUES (?, ?, ?, ?)
             """, (event_key, symbol, observed_ms, encoded))
+            # Cap retention on the persisted volume. This is a decision
+            # journal, not an infinite time-series/market-data store.
+            db.execute("DELETE FROM regime_choices WHERE observed_ms < ?", (
+                observed_ms - 14 * 86_400_000,
+            ))
         return result.rowcount == 1
 
     @staticmethod
