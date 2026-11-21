@@ -1242,6 +1242,10 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
     <div class="stat">Settled shadow trades<b id="learning-trades">—</b></div>
     <div class="stat">Net win rate<b id="learning-win">—</b></div>
     <div class="stat">Avg. net trade return<b id="learning-net">—</b></div>
+    <div class="stat">Profit factor · shadow<b id="learning-pf">—</b></div>
+    <div class="stat">Max drawdown · modeled<b id="learning-dd">—</b></div>
+    <div class="stat">95% lower win estimate<b id="learning-win-lower">—</b></div>
+    <div class="stat">Distinct sample days<b id="learning-days">—</b></div>
     <div class="stat">Gemini calls today (UTC)<b id="learning-budget">—</b></div>
    </div>
    <p id="learning-gate" class="muted"></p>
@@ -1297,9 +1301,15 @@ async function loadLearning(){
   $("learning-trades").textContent=m.observations||0;
   $("learning-win").textContent=m.win_rate==null?"—":fmt(m.win_rate*100,1)+"%";
   $("learning-net").textContent=m.mean_net_return_pct==null?"—":fmt(m.mean_net_return_pct,3)+"%";
+  var c=d.shadow_scorecard||{};
+  $("learning-pf").textContent=c.profit_factor==null?"n/a":fmt(c.profit_factor,2);
+  $("learning-dd").textContent=c.modeled_max_drawdown_fraction==null?"—":fmt(c.modeled_max_drawdown_fraction*100,2)+"%";
+  $("learning-win-lower").textContent=c.win_rate_lower_95==null?"—":fmt(c.win_rate_lower_95*100,1)+"%";
+  $("learning-days").textContent=c.days_observed==null?"—":String(c.days_observed);
   $("learning-budget").textContent=d.model_requests_today+"/"+d.model_daily_limit;
-  $("learning-gate").textContent="Modeled Mark-price outcomes after stress costs. Demo evidence "+
-   (d.demo_evidence_ready?"passed":"pending · "+d.min_evidence_trades+" trades and "+(d.min_evidence_win_rate*100)+"% net wins required")+
+  var failures=c.failed_gates||[];
+  $("learning-gate").textContent="Shadow Mark proxy only — NOT verified Bybit fills or account equity. Demo evidence "+
+   (d.demo_evidence_ready?"passed":"BLOCKED · "+(failures.length?failures.join(", "):"learning confidence gate"))+
    ". Demo permission "+(d.demo_armed_by_config?"configured.":"off.");
   $("learning-votes").replaceChildren(...d.recent_votes.map(function(v){
    var row=document.createElement("div");row.className="rowitem";

@@ -16,6 +16,8 @@ from urllib.request import Request, urlopen
 from tradingagents.crypto.backtest.learning import OnlineExpertLearner
 from tradingagents.crypto.scalping import ScalpingConfig
 
+from .scorecard import shadow_scorecard
+
 CANDLE_MS = 60_000
 MIN_TRADES = 30
 MIN_WIN_RATE = 0.75
@@ -164,18 +166,29 @@ class AdaptiveDesk:
         return metrics
 
     @staticmethod
-    def _qualified(performance: dict, side: str | None = None) -> bool:
+    def _qualified(performance: dict, side: str | None = None, *, scorecard: dict | None = None) -> bool:
         baseline = performance.get("baseline", {})
         side_metrics = performance.get(side, {})
         return (
-            baseline.get("status") == "validated"
+            scorecard is not None and scorecard.get("eligible_for_demo") is True
+            and baseline.get("status") == "validated"
             and baseline["win_rate"] >= MIN_WIN_RATE
             and side_metrics.get("status") != "blocked"
         )
 
+    def _shadow_scorecard(self, db, now_ms: int) -> dict:
+        rows = db.execute("""
+            SELECT exit_ms, net_pct FROM shadow
+            WHERE net_pct IS NOT NULL AND exit_ms < ?
+            ORDER BY exit_ms DESC, id DESC LIMIT ?
+        """, (now_ms, MAX_HISTORY)).fetchall()
+        return shadow_scorecard([dict(row) for row in reversed(rows)], as_of_ms=now_ms)
+
     def ready(self, now_ms: int) -> bool:
         with self._db() as db:
-            return self.analyst.configured and self._qualified(self._performance(db, now_ms))
+            return self.analyst.configured and self._qualified(
+                self._performance(db, now_ms), scorecard=self._shadow_scorecard(db, now_ms),
+            )
 
     @staticmethod
     def _day_start(now_ms: int) -> int:
@@ -224,6 +237,7 @@ class AdaptiveDesk:
                 """, (event_id, symbol, side, quote_ms, quote_ms, price, stop, target))
 
             performance = self._performance(db, now_ms)
+            scorecard = self._shadow_scorecard(db, now_ms)
             row = db.execute("SELECT result, completed_ms, evidence FROM votes WHERE id = ?", (event_id,)).fetchone()
             if row and row["result"] is not None:
                 result = json.loads(row["result"])
@@ -234,7 +248,7 @@ class AdaptiveDesk:
                 reference = json.loads(row["evidence"])["mark"]
                 if abs(price / reference - 1) > MAX_REFERENCE_DRIFT:
                     return "professor_price_moved"
-                return "unanimous" if self._qualified(performance, side) else "professor_learning_gate"
+                return "unanimous" if self._qualified(performance, side, scorecard=scorecard) else "professor_learning_gate"
             if row:
                 return "analyst_pending"
             if not self.analyst.configured:
@@ -256,6 +270,7 @@ class AdaptiveDesk:
                 "trend_5m_15m_agrees": bool(market.get(f"{side}_bias")),
                 "stress_cost_fraction_per_side": STRESS_COST_PER_SIDE,
                 "prior_settled_shadow_mark_model": performance,
+                "prior_settled_shadow_scorecard": scorecard,
             }
             db.execute("INSERT INTO votes VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)", (
                 event_id, symbol, side, now_ms, candle_ms + CANDLE_MS,
@@ -322,6 +337,7 @@ class AdaptiveDesk:
     def status(self, now_ms: int) -> dict:
         with self._db() as db:
             performance = self._performance(db, now_ms)
+            scorecard = self._shadow_scorecard(db, now_ms)
             counts = dict(db.execute("""
                 SELECT COALESCE(exit_reason, 'open'), COUNT(*) FROM shadow GROUP BY exit_reason
             """).fetchall())
@@ -345,8 +361,9 @@ class AdaptiveDesk:
             "configured": self.analyst.configured, "model": self.analyst.model,
             "model_requests_today": calls, "model_daily_limit": self.calls_per_day,
             "sample_counts": counts, "performance": performance, "recent_votes": recent,
+            "shadow_scorecard": scorecard,
             "shadow_only_metrics": True,
-            "demo_evidence_ready": self._qualified(performance),
+            "demo_evidence_ready": self._qualified(performance, scorecard=scorecard),
             "min_evidence_trades": MIN_TRADES, "min_evidence_win_rate": MIN_WIN_RATE,
         }
 
