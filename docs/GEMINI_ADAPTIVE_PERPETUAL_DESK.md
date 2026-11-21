@@ -43,9 +43,15 @@ inference through Google's API.
 ## Railway setup
 
 Use an isolated service pointing at the feature branch, with a single replica
-and a persistent volume at `/data`. Set the service configuration path to
-`/deploy/gemini-perpetual-railway.json`. Run the service with `RAILWAY_RUN_UID=0`
-when the mounted volume requires it. From a Railway service's Variables tab:
+and a persistent volume at `/data`. Use the repository Dockerfile, configure
+`/healthz` as the health check, and set this start command on the service:
+
+```sh
+/bin/sh -c "exec python -m tradingagents.paper_experiment.perpetual_demo.server --root /data --host 0.0.0.0 --port $PORT --gemini-adaptive"
+```
+
+Run the service with `RAILWAY_RUN_UID=0` when the mounted volume requires it.
+From a Railway service's Variables tab:
 
 | Variable | Purpose |
 | --- | --- |
