@@ -147,6 +147,11 @@ class AdaptiveDesk:
                     exit_price REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS venue_closes_time ON venue_closes(observed_ms);
+                CREATE TABLE IF NOT EXISTS regime_choices (
+                    event_key TEXT PRIMARY KEY, symbol TEXT NOT NULL,
+                    observed_ms INTEGER NOT NULL, report_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS regime_choices_observed ON regime_choices(observed_ms);
             """)
 
     @contextmanager
@@ -158,6 +163,51 @@ class AdaptiveDesk:
                 yield db
         finally:
             db.close()
+
+    def record_regime_choice(self, symbol: str, report: dict, observed_ms: int) -> bool:
+        """Persist research selections once per 5m bar; never authorize orders."""
+        if (
+            not isinstance(symbol, str) or not re.fullmatch(r"[A-Z0-9]{3,28}", symbol)
+            or type(observed_ms) is not int or observed_ms <= 0
+            or not isinstance(report, dict)
+            or report.get("shadow_only") is not True
+            or report.get("execution_authorized") is not False
+            or not isinstance(report.get("timestamp_5m_open"), str)
+        ):
+            return False
+        encoded = json.dumps(report, allow_nan=False, sort_keys=True)
+        event_key = f"{symbol}:{report['timestamp_5m_open']}"
+        with self._db() as db:
+            result = db.execute("""
+                INSERT OR IGNORE INTO regime_choices
+                (event_key, symbol, observed_ms, report_json) VALUES (?, ?, ?, ?)
+            """, (event_key, symbol, observed_ms, encoded))
+        return result.rowcount == 1
+
+    @staticmethod
+    def _latest_regime_choices(db) -> list[dict]:
+        rows = db.execute("""
+            SELECT symbol, observed_ms, report_json FROM regime_choices
+            ORDER BY observed_ms DESC, event_key DESC LIMIT 1000
+        """).fetchall()
+        seen: set[str] = set()
+        latest = []
+        for row in rows:
+            if row["symbol"] in seen:
+                continue
+            seen.add(row["symbol"])
+            report = json.loads(row["report_json"])
+            latest.append({
+                "symbol": row["symbol"], "observed_ms": row["observed_ms"],
+                "regime": report.get("regime"),
+                "selected_strategy": report.get("selected_strategy"),
+                "selected_signal": report.get("selected_signal", 0),
+                "selection_reason": report.get("selection_reason"),
+                "timestamp_5m_open": report.get("timestamp_5m_open"),
+                "shadow_only": True,
+                "execution_authorized": False,
+            })
+        return latest
 
     def record_venue_close(
         self, symbol: str, side: str, details: dict, observed_ms: int,
@@ -421,6 +471,7 @@ class AdaptiveDesk:
             performance = self._performance(db, now_ms)
             scorecard = self._shadow_scorecard(db, now_ms)
             venue_performance = self._venue_performance(db, now_ms)
+            latest_regime_choices = self._latest_regime_choices(db)
             counts = dict(db.execute("""
                 SELECT COALESCE(exit_reason, 'open'), COUNT(*) FROM shadow GROUP BY exit_reason
             """).fetchall())
@@ -446,6 +497,7 @@ class AdaptiveDesk:
             "sample_counts": counts, "performance": performance, "recent_votes": recent,
             "shadow_scorecard": scorecard,
             "venue_performance": venue_performance,
+            "latest_regime_choices": latest_regime_choices,
             "shadow_only_metrics": True,
             "demo_evidence_ready": self._qualified(performance, scorecard=scorecard),
             "min_evidence_trades": MIN_TRADES, "min_evidence_win_rate": MIN_WIN_RATE,
