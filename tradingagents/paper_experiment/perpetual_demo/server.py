@@ -42,6 +42,8 @@ from tradingagents.paper_experiment.dashboard.auth import (
     resolve_token,
 )
 
+from .adaptive import MODEL, AdaptiveDesk, GeminiAnalyst
+
 DEFAULT_SYMBOLS = (
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
     "XRPUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT",
@@ -96,6 +98,8 @@ class PerpetualDemoController:
         public_client=None,
         poll_seconds: int = POLL_SECONDS,
         symbols: tuple[str, ...] = DEFAULT_SYMBOLS,
+        adaptive: bool = False,
+        adaptive_demo_enabled: bool = False,
     ) -> None:
         if isinstance(poll_seconds, bool) or not isinstance(poll_seconds, int) or poll_seconds < 5:
             raise ValueError("poll_seconds must be an integer of at least five seconds")
@@ -124,6 +128,16 @@ class PerpetualDemoController:
             "detail": "Strategy is stopped. No orders are submitted automatically.",
         }
         self.strategy = ScalpingConfig()
+        self.adaptive = AdaptiveDesk(
+            self.root, GeminiAnalyst(
+                os.environ.get("GEMINI_API_KEY", ""),
+                os.environ.get("TRADINGAGENTS_GEMINI_MODEL", MODEL),
+            ), self.strategy,
+            calls_per_day=int(os.environ.get("TRADINGAGENTS_GEMINI_DAILY_LIMIT", "24")),
+            poll_seconds=self.poll_seconds,
+        ) if adaptive else None
+        self.adaptive_demo_enabled = adaptive_demo_enabled
+        self._mode = "idle"
         self._state = _safe_json(
             self.state_path,
             {
@@ -136,18 +150,20 @@ class PerpetualDemoController:
         )
 
     def _save_state(self) -> None:
-        temporary = self.state_path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(self._state, sort_keys=True, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary, self.state_path)
+        with self._lock:
+            temporary = self.state_path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(self._state, sort_keys=True, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, self.state_path)
 
     def _record(self, event: dict) -> None:
-        events = self._state.setdefault("events", [])
-        events.append({"at": datetime.now(UTC).isoformat(), **event})
-        self._state["events"] = events[-100:]
-        self._save_state()
+        with self._lock:
+            events = self._state.setdefault("events", [])
+            events.append({"at": datetime.now(UTC).isoformat(), **event})
+            self._state["events"] = events[-100:]
+            self._save_state()
 
     def _require_configured(self) -> None:
         if not self.broker.configured:
@@ -284,6 +300,7 @@ class PerpetualDemoController:
         if not forming_open_ms <= now < forming_open_ms + 60_000:
             raise BybitLinearDemoError("live forming 1-minute candle is unavailable; refusing stale signals")
         mark = self.broker.mark_price(market)
+        mark_received_ms = time.time_ns() // 1_000_000
         current_time = one_minute.index[-1]
         one_minute.at[current_time, "close"] = mark
         one_minute.at[current_time, "high"] = max(float(one_minute.at[current_time, "high"]), mark)
@@ -304,7 +321,8 @@ class PerpetualDemoController:
         return {
             "status": "ok", "venue": "Bybit Demo", "category": "linear",
             "symbol": market, "timeframe": "1m", "trend_timeframes": ["5m", "15m"],
-            "mark_price": mark, "forming_candle_open": current_time.isoformat(),
+            "mark_price": mark, "mark_received_ms": mark_received_ms,
+            "forming_candle_open": current_time.isoformat(),
             "signal_basis": "live_mark_1m_reclaim_with_completed_5m_15m_trend",
             "atr": float(atr) if isinstance(atr, (int, float)) and math.isfinite(float(atr)) else None,
             "rsi": signal.get("rsi"), "ema9": signal.get("ema9"),
@@ -332,6 +350,8 @@ class PerpetualDemoController:
         stop_loss: float,
         take_profit: float,
     ) -> dict:
+        if self.adaptive is not None:
+            raise BybitLinearDemoRejected("This desk opens entries only through the three-role strategy.")
         self._require_configured()
         market = str(symbol or "").strip().upper()
         if market not in self.symbols:
@@ -388,8 +408,14 @@ class PerpetualDemoController:
     def start_strategy(self) -> dict:
         self._require_configured()
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
+            worker_active = self._thread is not None and self._thread.is_alive()
+            if worker_active and self._mode == "demo":
                 return dict(self._strategy_status)
+            if self.adaptive is not None:
+                if not self.adaptive_demo_enabled:
+                    raise BybitLinearDemoRejected("Adaptive Demo execution is disabled in the service settings.")
+                if not self.adaptive.ready(time.time_ns() // 1_000_000):
+                    raise BybitLinearDemoRejected("Gemini and qualifying forward shadow evidence are required.")
             risk_state = self._state.setdefault("risk", {})
             if risk_state.get("halted"):
                 raise BybitLinearDemoRejected(
@@ -423,57 +449,121 @@ class PerpetualDemoController:
                 "started_at": datetime.now(UTC).isoformat(),
                 "detail": f"Preflight passed; scanning {len(self.symbols)} USDT perpetuals on live 1-minute Mark Price with completed 5m/15m trend filters.",
             }
-            self._thread = threading.Thread(
-                target=self._strategy_loop,
-                name="bybit-demo-scalper-linear",
-                daemon=True,
-            )
-            self._thread.start()
+            self._mode = "demo"
+            if not worker_active:
+                self._launch_worker()
             return dict(self._strategy_status)
 
-    def stop_strategy(self) -> dict:
-        self._stop.set()
+    def _launch_worker(self) -> None:
+        self._thread = threading.Thread(
+            target=self._strategy_loop, name="bybit-demo-scalper-linear", daemon=True,
+        )
+        self._thread.start()
+
+    def start_shadow(self) -> None:
         with self._lock:
+            if self.adaptive is not None and self._mode == "idle":
+                self._mode = "shadow"
+                self._stop.clear()
+                self._launch_worker()
+
+    def learning_status(self) -> dict:
+        if self.adaptive is None:
+            return {"enabled": False}
+        return {
+            "enabled": True, "mode": self._mode,
+            "demo_armed_by_config": self.adaptive_demo_enabled,
+            "last_market_scan": {
+                key: self._strategy_status.get(key) for key in (
+                    "last_cycle_at", "last_scan_symbols", "configured_symbol_count", "scan_errors",
+                )
+            },
+            "last_decision": self._strategy_status.get("last_learning_decision"),
+            **self.adaptive.status(time.time_ns() // 1_000_000),
+        }
+
+    def _shadow_cycle(self) -> None:
+        scanned = signals = 0
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as executor:
+            for symbol, (market, _) in zip(
+                self.symbols, executor.map(self._scan_market, self.symbols), strict=True,
+            ):
+                if self._stop.is_set():
+                    return
+                if market is None:
+                    continue
+                scanned += 1
+                if market.get("signal") in (-1, 1):
+                    signals += 1
+                self._observe_candidate(symbol, market, time.time_ns() // 1_000_000)
+        if self._mode == "shadow":
             self._strategy_status = {
-                **self._strategy_status,
-                "status": "stopping",
-                "execution_enabled": False,
-                "detail": "New entries are disabled. Existing Demo positions remain protected by exchange-side SL/TP.",
+                **self._strategy_status, "last_scan_symbols": scanned, "last_signals_seen": signals,
+                "configured_symbol_count": len(self.symbols), "scan_errors": len(self.symbols) - scanned,
+                "detail": f"Shadow learning · observed {scanned}/{len(self.symbols)} contracts.",
             }
-        return dict(self._strategy_status)
+
+    def _observe_candidate(self, symbol: str, market: dict, now_ms: int) -> str:
+        candle = pd_timestamp(market.get("forming_candle_open"))
+        quote_ms = market.get("mark_received_ms")
+        if self.adaptive is None or candle is None or type(quote_ms) is not int:
+            return "stale_or_invalid_market"
+        return self.adaptive.observe(symbol, market, int(candle.timestamp() * 1000), quote_ms, now_ms)
+
+    def stop_strategy(self) -> dict:
+        with self._lock:
+            if self.adaptive is not None and not self._stop.is_set() and self._mode != "idle":
+                self._mode = "shadow"
+                status = "shadow"
+                detail = "Demo entries paused. Venue protections remain active and shadow learning continues."
+            else:
+                self._stop.set()
+                status = "stopping"
+                detail = "New entries are disabled. Existing Demo positions keep exchange-side SL/TP."
+            self._strategy_status = {
+                **self._strategy_status, "status": status,
+                "execution_enabled": False, "detail": detail,
+            }
+            return dict(self._strategy_status)
+
+    def shutdown(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        if self.adaptive is not None:
+            self.adaptive.close()
 
     def _strategy_loop(self) -> None:
-        self._strategy_status = {
-            **self._strategy_status,
-            "status": "running",
-            "detail": f"EMA MTF scalper is checking live 1-minute Mark Price with completed 5m/15m trend filters with a {self.poll_seconds}s pause between scan cycles; max hold {self.strategy.max_hold_minutes}m, 2x max leverage, 0.5% modeled risk.",
-        }
         while not self._stop.is_set():
+            mode = self._mode
             try:
-                self._strategy_cycle()
-                self._strategy_status = {
-                    **self._strategy_status,
-                    "status": "running",
-                    "last_cycle_at": datetime.now(UTC).isoformat(),
-                    "last_error": None,
-                    "orders_submitted": bool(self._strategy_status.get("orders_submitted")),
-                }
+                if mode == "shadow":
+                    self._shadow_cycle()
+                else:
+                    self._strategy_cycle()
+                if not self._stop.is_set() and self._mode == mode:
+                    self._strategy_status = {
+                        **self._strategy_status,
+                        "status": "shadow" if mode == "shadow" else "running",
+                        "execution_enabled": mode == "demo",
+                        "last_cycle_at": datetime.now(UTC).isoformat(),
+                        "last_error": None,
+                    }
             except Exception as exc:
-                # Do not log request bodies, keys, secrets or raw exchange payloads.
+                # Never include raw Gemini/Bybit payloads.
                 self._strategy_status = {
-                    **self._strategy_status,
-                    "status": "error",
-                    "last_error": f"{type(exc).__name__}: {str(exc)[:180]}",
+                    **self._strategy_status, "status": "error",
+                    "last_error": type(exc).__name__,
                     "last_cycle_at": datetime.now(UTC).isoformat(),
                 }
             self._stop.wait(self.poll_seconds)
-        self._strategy_status = {
-            **self._strategy_status,
-            "status": "stopped",
-            "execution_enabled": False,
-            "detail": "Strategy stopped. Existing positions are not force-closed.",
-            "stopped_at": datetime.now(UTC).isoformat(),
-        }
+        self._mode = "idle"
+        if self._strategy_status.get("status") != "halted":
+            self._strategy_status = {
+                **self._strategy_status, "status": "stopped", "execution_enabled": False,
+                "detail": "Strategy stopped. Existing positions are not force-closed.",
+                "stopped_at": datetime.now(UTC).isoformat(),
+            }
 
     def _risk_guard(self, equity: float, positions: list[dict]) -> bool:
         risk = self._state.setdefault("risk", {})
@@ -491,6 +581,8 @@ class PerpetualDemoController:
             risk["halt_reason"] = "daily_loss_limit" if daily_loss >= 0.03 else "max_drawdown_limit"
             risk["halted_at"] = datetime.now(UTC).isoformat()
             for position in positions:
+                if self.adaptive is not None and position["symbol"] not in self._state.get("scalper_positions", {}):
+                    continue
                 with contextlib.suppress(Exception):
                     self.broker.close_market_position(
                         position["symbol"],
@@ -511,7 +603,10 @@ class PerpetualDemoController:
                 "detail": "Risk kill-switch activated. No new entries will be submitted.",
                 "risk": dict(risk),
             }
-            self._stop.set()
+            if self.adaptive is not None:
+                self._mode = "shadow"
+            else:
+                self._stop.set()
             return True
         self._save_state()
         return False
@@ -614,6 +709,10 @@ class PerpetualDemoController:
         positions = self.broker.get_positions()
         if self._risk_guard(equity, positions):
             return
+        if self.adaptive is not None:
+            managed_symbols = self._state.get("scalper_positions", {})
+            if any(position["symbol"] not in managed_symbols for position in positions):
+                raise BybitLinearDemoRejected("Use a dedicated Demo account without unrelated positions.")
         if len(positions) > MAX_OPEN_POSITIONS:
             raise BybitLinearDemoRejected("Demo account has more than two open positions; entries halted")
 
@@ -693,6 +792,15 @@ class PerpetualDemoController:
             current_signal = int(market.get("signal", 0)) if is_current else 0
             if current_signal in (-1, 1):
                 signals_seen += 1
+            adaptive_verdict = (
+                self._observe_candidate(symbol, market, now_ms)
+                if self.adaptive is not None and is_current else None
+            )
+            if adaptive_verdict is not None and current_signal in (-1, 1):
+                self._strategy_status = {
+                    **self._strategy_status,
+                    "last_learning_decision": {"symbol": symbol, "status": adaptive_verdict},
+                }
             position = active_by_symbol.get(symbol)
             meta = managed.get(symbol)
 
@@ -911,6 +1019,8 @@ class PerpetualDemoController:
                 continue
             if cooldowns.get(symbol, 0) > now_ms or attempts.get(symbol) == current_minute:
                 continue
+            if self.adaptive is not None and (adaptive_verdict != "unanimous" or self._mode != "demo"):
+                continue
             if current_signal not in (-1, 1) or len(active_by_symbol.keys() | managed.keys()) >= MAX_OPEN_POSITIONS:
                 continue
 
@@ -962,6 +1072,10 @@ class PerpetualDemoController:
             }
             self._save_state()
             try:
+                if self.adaptive is not None and self._mode != "demo":
+                    managed.pop(symbol, None)
+                    self._save_state()
+                    continue
                 result = self.broker.open_position(
                     symbol=symbol, side=side, leverage=self.strategy.leverage,
                     equity=equity, stop_loss=stop, take_profit=target,
@@ -999,6 +1113,7 @@ class PerpetualDemoController:
             }
             self._record({
                 "type": "strategy_entry", "symbol": symbol, "side": side,
+                "gemini_event_id": f"{symbol}:{open_ms}:{side}" if self.adaptive is not None else None,
                 "leverage": self.strategy.leverage, "order_link_id": order_link_id,
                 "venue_order_id": result.get("order_id"),
                 "quantity": result.get("quantity"), "notional_usdt": result.get("notional_usdt"),
@@ -1091,7 +1206,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
    <div class="heading"><h2>Scalping strategy</h2><span id="strategy-badge" class="pill">IDLE</span></div>
    <div class="rowitem">
     <strong>EMA Multi-Timeframe Scalper</strong>
-    <div class="sub">1m live reclaim · 5m momentum · 15m direction · max 15m hold · 12 USDT perpetual pairs</div>
+    <div class="sub">1m live reclaim · 5m momentum · 15m direction · max 15m hold</div>
     <div class="stats">
      <div class="stat">Leverage<b>2x max</b></div><div class="stat">Risk per entry<b>0.5% equity</b></div>
      <div class="stat">Daily stop<b>3%</b></div><div class="stat">Drawdown stop<b>10%</b></div>
@@ -1101,7 +1216,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
    <div class="actions"><button id="start-strategy" class="primary">Start Scalping Auto</button><button id="stop-strategy" class="danger" disabled>Stop strategy</button></div>
    <div class="note">The scalper scans the configured contracts using live Mark Price, completed 5m/15m trend filters and a 1m pullback-reclaim trigger. Each entry gets exchange-side Mark Price SL/TP; strategy exits on an opposite signal or after 15 minutes. 2x leverage and existing account risk limits remain enforced. Demo only; no profit is guaranteed.</div>
   </section>
-  <section class="panel">
+  <section class="panel" id="manual-panel">
    <div class="heading"><h2>Manual Demo order</h2><span class="pill">BUY / SELL</span></div>
    <div class="fields">
     <div class="field"><label>Contract</label><select id="symbol"></select></div>
@@ -1114,6 +1229,18 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
    <p id="market-note" class="sub">Loading 1m scalping indicators and risk levels…</p>
    <div class="actions"><button id="open-long" class="long">Open Long</button><button id="open-short" class="short">Open Short</button></div>
    <div class="note">Quantity is calculated server-side from verified Demo equity, the exchange's live lot filters, the stop distance, and the 0.5% risk budget. Raw quantity is not accepted from the browser.</div>
+  </section>
+  <section class="panel wide" id="learning-panel" hidden>
+   <div class="heading"><h2>Gemini · Forward learning</h2><span id="learning-mode" class="pill">—</span></div>
+   <div class="stats">
+    <div class="stat">Settled shadow trades<b id="learning-trades">—</b></div>
+    <div class="stat">Net win rate<b id="learning-win">—</b></div>
+    <div class="stat">Avg. net trade return<b id="learning-net">—</b></div>
+    <div class="stat">Gemini calls today (UTC)<b id="learning-budget">—</b></div>
+   </div>
+   <p id="learning-gate" class="muted"></p>
+   <p id="learning-error" class="muted" role="status"></p>
+   <div id="learning-votes" class="rows"></div>
   </section>
   <section class="panel wide">
    <div class="heading"><h2>Open linear positions</h2><span id="positions-badge" class="pill">—</span></div>
@@ -1144,10 +1271,40 @@ function fmt(v,d){var n=Number(v);return Number.isFinite(n)?n.toLocaleString(und
 function msg(t,ok){$("message").textContent=t;$("message").className=ok?"ok":"error";}
 async function api(path,options){options=options||{};options.headers=Object.assign({"Authorization":"Bearer "+TOKEN,"Content-Type":"application/json"},options.headers||{});var r=await fetch(path,options),body=await r.json().catch(function(){return {};});if(!r.ok)throw new Error(body.detail||body.error||"HTTP "+r.status);return body;}
 function connect(){TOKEN=$("token").value.trim();if(!TOKEN){msg("Dashboard token is required.",false);return;}localStorage.setItem("bybit_linear_demo_token",TOKEN);boot();}
-async function refresh(){try{var d=await api("/api/status");$("venue-badge").textContent=d.status==="ok"?"BYBIT DEMO · LINEAR":String(d.status||"UNKNOWN").toUpperCase();$("venue-badge").className="pill "+(d.status==="ok"?"safe":"warn");var build=d.build||{};$("build-tag").textContent=(build.branch||"branch?")+" · "+(build.commit_sha?String(build.commit_sha).slice(0,8):"sha unavailable");var w=d.wallet||{};$("equity").textContent=fmt(w.total_equity_usd);$("available").textContent=fmt(w.total_available_balance_usd);$("upl").textContent=fmt(w.total_perpetual_unrealized_pnl_usd);$("position-count").textContent=String((d.positions||[]).length);$("positions-badge").textContent=String((d.positions||[]).length)+" / 2";$("refresh-time").textContent=new Date().toLocaleTimeString();
+async function refresh(){void loadLearning();try{var d=await api("/api/status");$("venue-badge").textContent=d.status==="ok"?"BYBIT DEMO · LINEAR":String(d.status||"UNKNOWN").toUpperCase();$("venue-badge").className="pill "+(d.status==="ok"?"safe":"warn");var build=d.build||{};$("build-tag").textContent=(build.branch||"branch?")+" · "+(build.commit_sha?String(build.commit_sha).slice(0,8):"sha unavailable");var w=d.wallet||{};$("equity").textContent=fmt(w.total_equity_usd);$("available").textContent=fmt(w.total_available_balance_usd);$("upl").textContent=fmt(w.total_perpetual_unrealized_pnl_usd);$("position-count").textContent=String((d.positions||[]).length);$("positions-badge").textContent=String((d.positions||[]).length)+" / 2";$("refresh-time").textContent=new Date().toLocaleTimeString();
 renderPositions(d.positions||[]);renderOrders(d.open_orders||[]);renderClosedPnl(d.closed_pnl||[],d.closed_pnl_error,d.closed_pnl_fetched_at_ms);renderEvents((d.strategy_state||{}).events||[]);renderStrategy(d.strategy||{});loadSymbols(d.strategy.symbols||d.strategy_symbols||[]);
 if(d.status!=="ok")msg(d.detail||"Demo account is not ready. Check dedicated Contract Trade key permissions.",false);else if(d.spot_enabled!==false)msg("Safety error: service did not confirm Spot is disabled.",false);else $("message").style.display="none";
 }catch(e){msg(e.message,false);}}
+async function loadLearning(){
+ var panel=$("learning-panel");
+ try{
+  var d=await api("/api/learning");
+  panel.hidden=!d.enabled;
+  $("open-long").hidden=d.enabled;
+  $("open-short").hidden=d.enabled;
+  if(!d.enabled)return;
+  var scan=d.last_market_scan;
+  $("learning-error").textContent=scan.last_cycle_at?
+   ("Latest market scan: "+(scan.last_scan_symbols||0)+"/"+(scan.configured_symbol_count||0)+" contracts."):"Waiting for the first market scan.";
+  $("learning-mode").textContent=d.mode.toUpperCase()+(d.configured?" · "+d.model:" · GEMINI KEY MISSING");
+  var m=d.performance.baseline||{};
+  $("learning-trades").textContent=m.observations||0;
+  $("learning-win").textContent=m.win_rate==null?"—":fmt(m.win_rate*100,1)+"%";
+  $("learning-net").textContent=m.mean_net_return_pct==null?"—":fmt(m.mean_net_return_pct,3)+"%";
+  $("learning-budget").textContent=d.model_requests_today+"/"+d.model_daily_limit;
+  $("learning-gate").textContent="Modeled Mark-price outcomes after stress costs. Demo evidence "+
+   (d.demo_evidence_ready?"passed":"pending · "+d.min_evidence_trades+" trades and "+(d.min_evidence_win_rate*100)+"% net wins required")+
+   ". Demo permission "+(d.demo_armed_by_config?"configured.":"off.");
+  $("learning-votes").replaceChildren(...d.recent_votes.map(function(v){
+   var row=document.createElement("div");row.className="rowitem";
+   var label=document.createElement("strong");label.textContent=v.symbol+" "+v.side+" · "+v.status;
+   var reason=document.createElement("div");reason.className="sub";reason.dir="auto";reason.textContent=v.reason||"";
+   row.append(label,reason);return row;
+  }));
+ }catch(e){
+  if(!panel.hidden)$("learning-error").textContent="Learning status unavailable.";
+ }
+}
 function renderStrategy(s){var state=s.status||"idle";$("strategy-badge").textContent=String(state).toUpperCase();$("strategy-badge").className="pill "+(state==="running"?"safe":state==="error"||state==="halted"?"bad":"");$("strategy-detail").textContent=(s.detail||s.last_error||"Stopped.")+(s.last_scan_symbols==null?"":" · Scanned "+s.last_scan_symbols+" / "+s.configured_symbol_count);var active=["starting","running","stopping"].indexOf(state)>=0;$("start-strategy").disabled=active||state==="halted";$("stop-strategy").disabled=!active;}
 function renderPositions(rows){if(!rows.length){$("positions").innerHTML='<div class="empty">No open USDT linear perpetual positions.</div>';return;}$("positions").innerHTML=rows.map(function(p){var side=String(p.side||"").toUpperCase(),pnl=Number(p.unrealized_pnl||0);return '<div class="rowitem"><div class="rowtop"><strong>'+esc(p.symbol)+' · '+esc(side)+'</strong><span class="pill">'+fmt(p.leverage,1)+'x</span></div><div class="stats"><div class="stat">Quantity<b>'+fmt(p.quantity,6)+'</b></div><div class="stat">Entry<b>'+fmt(p.entry_price,5)+'</b></div><div class="stat">Mark<b>'+fmt(p.mark_price,5)+'</b></div><div class="stat">Unrealized P&amp;L<b class="'+(pnl>0?"positive":pnl<0?"negative":"")+'">'+fmt(pnl,4)+' USDT</b></div><div class="stat">Stop loss<b>'+fmt(p.stop_loss,5)+'</b></div><div class="stat">Take profit<b>'+fmt(p.take_profit,5)+'</b></div></div><div class="actions" style="margin-top:10px"><button class="danger" data-close="'+esc(p.symbol)+'">Close position · Reduce Only</button></div></div>';}).join("");}
 function renderOrders(rows){if(!rows.length){$("orders").innerHTML='<div class="empty">No active exchange orders.</div>';return;}$("orders").innerHTML='<table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Protection type</th><th>Trigger</th><th>Stop</th><th>Target</th><th>Reduce only</th><th>Order ID</th></tr></thead><tbody>'+rows.map(function(o){return '<tr><td>'+esc(o.symbol)+'</td><td>'+esc(o.side)+'</td><td>'+fmt(o.qty,6)+'</td><td>'+esc(o.order_status)+'</td><td>'+esc(o.stop_order_type||o.order_type)+'</td><td>'+esc(o.trigger_price||o.trigger_by||"—")+'</td><td>'+esc(o.stop_loss||"—")+'</td><td>'+esc(o.take_profit||"—")+'</td><td>'+String(!!o.reduce_only)+'</td><td>'+esc(o.order_id).slice(0,12)+'</td></tr>';}).join("")+'</tbody></table>';}
@@ -1218,6 +1375,8 @@ def make_handler(controller: PerpetualDemoController, token: str):
             try:
                 if path == "/api/status":
                     self._send(200, controller.status())
+                elif path == "/api/learning":
+                    self._send(200, controller.learning_status())
                 elif path == "/api/market":
                     symbol = (parse_qs(urlsplit(self.path).query).get("symbol") or [controller.symbols[0]])[0]
                     self._send(200, controller.market(symbol))
@@ -1286,6 +1445,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
     parser.add_argument("--token", default=None)
     parser.add_argument("--poll-seconds", type=int, default=int(os.environ.get("TRADINGAGENTS_PERPETUAL_DEMO_POLL_SECONDS", str(POLL_SECONDS))))
+    parser.add_argument("--gemini-adaptive", action="store_true")
     parser.add_argument("--symbols", default=os.environ.get(SYMBOLS_ENV) or None, help="Comma- or space-separated USDT perpetual symbols")
     return parser
 
@@ -1297,9 +1457,13 @@ def main(argv: list[str] | None = None) -> int:
     token = resolve_token(args.token)
     require_bindable(args.host, token)
     symbols = DEFAULT_SYMBOLS if args.symbols is None else tuple(args.symbols.replace(",", " ").split())
-    controller = PerpetualDemoController(args.root, poll_seconds=args.poll_seconds, symbols=symbols)
+    controller = PerpetualDemoController(
+        args.root, poll_seconds=args.poll_seconds, symbols=symbols, adaptive=args.gemini_adaptive,
+        adaptive_demo_enabled=os.environ.get("TRADINGAGENTS_GEMINI_DEMO_ENABLED") == "true",
+    )
     server = ThreadingHTTPServer((args.host, args.port), make_handler(controller, token))
     server.daemon_threads = True
+    controller.start_shadow()
     print(
         "Bybit Demo linear-perpetual dashboard listening; "
         f"endpoint={DEMO_BASE_URL} category=linear spot_enabled=false",
@@ -1310,7 +1474,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        controller.stop_strategy()
+        controller.shutdown()
         server.server_close()
     return 0
 
