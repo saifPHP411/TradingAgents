@@ -1,0 +1,25 @@
+name: Gemini desk historical EMA replay
+on:
+  pull_request:
+    paths:
+      - .github/workflows/gemini-scalper-backtest.yml
+      - tradingagents/crypto/backtest/gemini_scalper.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'pandas>=2.2,<4' requests
+      - run: python -m tradingagents.crypto.backtest.gemini_scalper --out artifacts/gemini-scalper-backtest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gemini-scalper-full-ledger
+          path: artifacts/gemini-scalper-backtest.json
+          if-no-files-found: error
