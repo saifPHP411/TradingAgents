@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 
 from tradingagents.crypto.backtest.learning import OnlineExpertLearner
 from tradingagents.crypto.scalping import ScalpingConfig
+
 from .scorecard import shadow_scorecard
 
 CANDLE_MS = 60_000
