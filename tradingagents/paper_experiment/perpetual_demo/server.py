@@ -36,6 +36,7 @@ from tradingagents.crypto.bybit_linear_demo import (
     BybitLinearDemoRejected,
 )
 from tradingagents.crypto.bybit_perpetual_account import BybitPerpetualAccountError
+from tradingagents.crypto.regime_selector import evaluate_regime_menu
 from tradingagents.crypto.scalping import ScalpingConfig, evaluate_scalping_signal
 from tradingagents.paper_experiment.dashboard.auth import (
     check_bearer,
@@ -318,6 +319,20 @@ class PerpetualDemoController:
                 target_distance = stop_distance * self.strategy.reward_risk
                 long_stop, long_target = mark - stop_distance, mark + target_distance
                 short_stop, short_target = mark + stop_distance, mark - target_distance
+        # Evaluate other strategy families in RESEARCH ONLY. The live/Demo
+        # broker path continues to use the original verified scalping signal.
+        regime_research = None
+        if self.adaptive is not None:
+            try:
+                regime_research = evaluate_regime_menu(
+                    five_minute, fifteen_minute,
+                    now_ms=mark_received_ms, reference_price=mark,
+                )
+            except (ValueError, TypeError) as exc:
+                regime_research = {
+                    "regime": "unavailable", "selection_reason": type(exc).__name__,
+                    "shadow_only": True, "execution_authorized": False,
+                }
         instrument = self.broker.instrument_info(market) if include_instrument else None
         return {
             "status": "ok", "venue": "Bybit Demo", "category": "linear",
@@ -328,6 +343,7 @@ class PerpetualDemoController:
             "atr": float(atr) if isinstance(atr, (int, float)) and math.isfinite(float(atr)) else None,
             "rsi": signal.get("rsi"), "ema9": signal.get("ema9"),
             "signal": int(signal.get("signal", 0)), "signal_reason": signal.get("reason"),
+            "regime_research": regime_research,
             "long_bias": bool(signal.get("long_bias", False)),
             "short_bias": bool(signal.get("short_bias", False)),
             "suggested_long_stop": long_stop, "suggested_long_target": long_target,
@@ -510,8 +526,11 @@ class PerpetualDemoController:
         if self.adaptive is None or candle is None or type(quote_ms) is not int:
             return "stale_or_invalid_market"
         try:
+            report = market.get("regime_research")
+            if isinstance(report, dict) and report.get("timestamp_5m_open"):
+                self.adaptive.record_regime_choice(symbol, report, now_ms)
             return self.adaptive.observe(symbol, market, int(candle.timestamp() * 1000), quote_ms, now_ms)
-        except sqlite3.Error:
+        except (sqlite3.Error, ValueError):
             # Loss of learning storage blocks new entries, while managed exits
             # still use the venue state and the deterministic risk rules.
             return "learning_storage_unavailable"
@@ -1267,6 +1286,9 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
     <div class="stat">Demo Profit Factor<b id="venue-learning-pf">—</b></div>
    </div>
    <p id="learning-error" class="muted" role="status"></p>
+   <div class="heading"><h3>Market-regime strategy router · Shadow only</h3><span class="pill">NO ORDERS</span></div>
+   <p class="sub">Evaluates six independent strategy families on confirmed 5m/15m bars. It cannot activate Demo trading or override the existing EMA entry rules.</p>
+   <div id="regime-choices" class="rows"></div>
    <div id="learning-votes" class="rows"></div>
   </section>
   <section class="panel wide">
@@ -1333,6 +1355,16 @@ async function loadLearning(){
   $("learning-gate").textContent="Shadow Mark proxy only — NOT verified Bybit fills or account equity. Demo evidence "+
    (d.demo_evidence_ready?"passed":"BLOCKED · "+(failures.length?failures.join(", "):"learning confidence gate"))+
    ". Demo permission "+(d.demo_armed_by_config?"configured.":"off.");
+  $("regime-choices").replaceChildren(...(d.latest_regime_choices||[]).map(function(r){
+   var row=document.createElement("div");row.className="rowitem";
+   var top=document.createElement("strong");top.textContent=r.symbol+" · "+(r.regime||"unknown")+" · "+(r.selected_strategy||"NO TRADE");
+   var reason=document.createElement("div");reason.className="sub";
+   var fresh=Date.now()-r.observed_ms<10*60*1000;
+   reason.textContent=(r.selected_signal===1?"LONG":r.selected_signal===-1?"SHORT":"ABSTAIN")+
+     " · "+r.selection_reason+(fresh?" · recent":" · STALE")+
+     " · RESEARCH ONLY";
+   row.append(top,reason);return row;
+  }));
   $("learning-votes").replaceChildren(...d.recent_votes.map(function(v){
    var row=document.createElement("div");row.className="rowitem";
    var label=document.createElement("strong");label.textContent=v.symbol+" "+v.side+" · "+v.status;
