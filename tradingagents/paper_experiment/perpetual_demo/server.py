@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -508,7 +509,12 @@ class PerpetualDemoController:
         quote_ms = market.get("mark_received_ms")
         if self.adaptive is None or candle is None or type(quote_ms) is not int:
             return "stale_or_invalid_market"
-        return self.adaptive.observe(symbol, market, int(candle.timestamp() * 1000), quote_ms, now_ms)
+        try:
+            return self.adaptive.observe(symbol, market, int(candle.timestamp() * 1000), quote_ms, now_ms)
+        except sqlite3.Error:
+            # Loss of learning storage blocks new entries, while managed exits
+            # still use the venue state and the deterministic risk rules.
+            return "learning_storage_unavailable"
 
     def stop_strategy(self) -> dict:
         with self._lock:

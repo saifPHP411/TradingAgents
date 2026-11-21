@@ -67,7 +67,8 @@ class GeminiAnalyst:
             "systemInstruction": {"parts": [{"text": instruction}]},
             "contents": [{"parts": [{"text": json.dumps(evidence, allow_nan=False)}]}],
             "generationConfig": {
-                "maxOutputTokens": 512,
+                "maxOutputTokens": 1024,
+                "thinkingConfig": {"thinkingLevel": "LOW"},
                 "responseMimeType": "application/json",
                 "responseJsonSchema": SCHEMA,
             },
