@@ -135,6 +135,18 @@ class AdaptiveDesk:
                     completed_ms INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS votes_requested ON votes(requested_ms);
+                CREATE TABLE IF NOT EXISTS venue_closes (
+                    close_order_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    observed_ms INTEGER NOT NULL,
+                    net_usdt REAL NOT NULL,
+                    fees_reported_usdt REAL,
+                    closed_size REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    exit_price REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS venue_closes_time ON venue_closes(observed_ms);
             """)
 
     @contextmanager
@@ -146,6 +158,76 @@ class AdaptiveDesk:
                 yield db
         finally:
             db.close()
+
+    def record_venue_close(
+        self, symbol: str, side: str, details: dict, observed_ms: int,
+    ) -> bool:
+        """Persist a matched Bybit Demo closed-PnL record exactly once.
+
+        This is observational, never fed to the automatic shadow eligibility
+        or risk/sizing policy. Attribution to our strategy is heuristic.
+        Bybit's closed_pnl is already fee/funding adjusted: do not subtract
+        reported fees a second time.
+        """
+        if details.get("attribution_status") != "matched":
+            return False
+        order_id = details.get("close_order_id")
+        if (
+            not isinstance(order_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", order_id)
+            or side not in ("long", "short")
+            or not isinstance(symbol, str) or not re.fullmatch(r"[A-Z0-9]{3,28}", symbol)
+            or type(observed_ms) is not int or observed_ms <= 0
+        ):
+            return False
+
+        def number(key: str, *, positive: bool = False) -> float:
+            raw = details.get(key)
+            if raw is None or type(raw) is bool:
+                raise ValueError("Incomplete Bybit closed PnL record")
+            value = float(raw)
+            if not math.isfinite(value) or (positive and value <= 0):
+                raise ValueError("Invalid Bybit closed PnL record")
+            return value
+
+        try:
+            pnl = number("closed_pnl")
+            size = number("closed_size", positive=True)
+            entry = number("avg_entry_price", positive=True)
+            exit_price = number("avg_exit_price", positive=True)
+            fees = number("fees_total") if details.get("fees_total") is not None else None
+        except (TypeError, ValueError, OverflowError):
+            return False
+        with self._db() as db:
+            cursor = db.execute("""
+                INSERT OR IGNORE INTO venue_closes
+                (close_order_id, symbol, side, observed_ms, net_usdt,
+                 fees_reported_usdt, closed_size, entry_price, exit_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (order_id, symbol, side, observed_ms, pnl, fees, size, entry, exit_price))
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def _venue_performance(db, now_ms: int) -> dict:
+        rows = db.execute("""
+            SELECT net_usdt FROM venue_closes
+            WHERE observed_ms < ? ORDER BY observed_ms, close_order_id
+        """, (now_ms,)).fetchall()
+        values = [row["net_usdt"] for row in rows]
+        wins = [value for value in values if value > 0]
+        losses = [value for value in values if value < 0]
+        gross_loss = -sum(losses)
+        return {
+            "source": "bybit_demo_closed_pnl_not_live_money",
+            "attribution": "matched_exchange_record_heuristic_strategy_link",
+            "fees_and_funding_already_in_closed_pnl": True,
+            "recorded_closes": len(values),
+            "winning_closes": len(wins),
+            "losing_closes": len(losses),
+            "net_realized_usdt": sum(values),
+            "net_win_rate": len(wins) / len(values) if values else None,
+            "profit_factor": sum(wins) / gross_loss if gross_loss else None,
+            "note": "Does not influence automatic Demo authorization or shadow training.",
+        }
 
     def _performance(self, db, now_ms: int) -> dict:
         learner = OnlineExpertLearner(min_observations=MIN_TRADES, max_observations=MAX_HISTORY)
@@ -338,6 +420,7 @@ class AdaptiveDesk:
         with self._db() as db:
             performance = self._performance(db, now_ms)
             scorecard = self._shadow_scorecard(db, now_ms)
+            venue_performance = self._venue_performance(db, now_ms)
             counts = dict(db.execute("""
                 SELECT COALESCE(exit_reason, 'open'), COUNT(*) FROM shadow GROUP BY exit_reason
             """).fetchall())
@@ -362,6 +445,7 @@ class AdaptiveDesk:
             "model_requests_today": calls, "model_daily_limit": self.calls_per_day,
             "sample_counts": counts, "performance": performance, "recent_votes": recent,
             "shadow_scorecard": scorecard,
+            "venue_performance": venue_performance,
             "shadow_only_metrics": True,
             "demo_evidence_ready": self._qualified(performance, scorecard=scorecard),
             "min_evidence_trades": MIN_TRADES, "min_evidence_win_rate": MIN_WIN_RATE,
