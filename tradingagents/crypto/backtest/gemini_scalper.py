@@ -7,7 +7,7 @@ import json
 import math
 import zipfile
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 from urllib.request import urlopen
@@ -95,20 +95,19 @@ def _fetch(first, last):
     raise RuntimeError("No complete historical dataset: " + "; ".join(failures))
 
 
+def _truncated_ema(close, span, n):
+    decay = 1 - 2 / (span + 1)
+    ew = close.ewm(span=span, adjust=False).mean()
+    return ew + (close.shift(n - 1) - ew.shift(n - 1)) * decay ** (n - 1)
+
+
 def _bias_bounds(frame, freq):
     """Compute exact fast and slow EMAs for the 99/100 most recent closes."""
     close = frame["close"]
-
-    def truncated(span, n):
-        alpha = 2 / (span + 1)
-        decay = 1 - alpha
-        ew = close.ewm(span=span, adjust=False).mean()
-        return ew + (close.shift(n - 1) - ew.shift(n - 1)) * decay ** (n - 1)
-
     fast, slow = (9, 21) if freq == 5 else (20, 50)
     return {
-        n: ((close > truncated(fast, n)) & (truncated(fast, n) > truncated(slow, n))).astype(int)
-        - ((close < truncated(fast, n)) & (truncated(fast, n) < truncated(slow, n))).astype(int)
+        n: ((close > _truncated_ema(close, fast, n)) & (_truncated_ema(close, fast, n) > _truncated_ema(close, slow, n))).astype(int)
+        - ((close < _truncated_ema(close, fast, n)) & (_truncated_ema(close, fast, n) < _truncated_ema(close, slow, n))).astype(int)
         for n in (99, 100)
     }
 
@@ -118,15 +117,20 @@ def _signals(traded, mark, start):
     frames = [traded.resample(f"{mins}min").agg(aggregation) for mins in (5, 15)]
     biases = [_bias_bounds(frame, mins) for frame, mins in zip(frames, (5, 15), strict=True)]
     prices = mark["close"].to_numpy()
-    previous_close = traded["close"].shift().to_numpy()
-    volume = traded["volume"]
+    close, volume = traded["close"], traded["volume"]
+    previous_close = close.shift().to_numpy()
+    ema = _truncated_ema(close, 9, 119).shift().to_numpy()
+    low, high = traded["low"].shift().to_numpy(), traded["high"].shift().to_numpy()
     volume_ok = (volume >= 0.5 * volume.shift().rolling(20).mean()).shift(fill_value=False)
+    epsilon = ema * 1e-12  # Preserve borderline events for the exact evaluator.
+    could_long = (prices > previous_close) & (prices > ema - epsilon) & (low <= ema * 1.0015 + epsilon) & (previous_close <= ema * 1.002 + epsilon)
+    could_short = (prices < previous_close) & (prices < ema + epsilon) & (high >= ema * 0.9985 - epsilon) & (previous_close >= ema * 0.998 - epsilon)
     signals = {}
     for i in range(traded.index.searchsorted(start), len(traded)):
-        quote_time = traded.index[i] + MINUTE - pd.Timedelta(milliseconds=1)
-        if not volume_ok.iat[i] or prices[i] == previous_close[i]:
+        if not volume_ok.iat[i] or not (could_long[i] or could_short[i]):
             continue
-        direction = 1 if prices[i] > previous_close[i] else -1
+        quote_time = traded.index[i] + MINUTE - pd.Timedelta(milliseconds=1)
+        direction = 1 if could_long[i] else -1
         ends, starts = [], []
         for mins, frame, bias in zip((5, 15), frames, biases, strict=True):
             duration = pd.Timedelta(minutes=mins)
@@ -212,7 +216,7 @@ def _run_week(tables, start_i, stop_i, cost, *, professor):
                                  "stop": stop, "target": target, "side": side, "qty": qty}
         equity = cash + sum(p["qty"] * p["side"] * (tables[s][0][i, 3] - p["entry"]) for s, p in positions.items())
         peak = max(peak, equity)
-        halted = halted or equity < day_start * 0.97 or equity < peak * 0.90
+        halted = bool(halted or equity < day_start * 0.97 or equity < peak * 0.90)
         for symbol, p in list(positions.items()):
             mark, fills, signals, _, index = tables[symbol]
             opposite = signals.get(i, {}).get("signal", 0) == -p["side"]
@@ -259,8 +263,11 @@ def main():
     first, last = start - pd.Timedelta(days=2), start + pd.Timedelta(days=14)
     source, data, failures = _fetch(first, last)
     print(f"Validated complete minute coverage from {source}.", flush=True)
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        signals = list(pool.map(lambda pair: _signals(*pair[:2], start), data.values()))
+    series = list(data.values())
+    with ProcessPoolExecutor(max_workers=4) as pool:
+        signals = list(pool.map(
+            _signals, [p[0] for p in series], [p[1] for p in series], [start] * len(series),
+        ))
     tables = {
         name: (mark[["open", "high", "low", "close"]].to_numpy(), traded[["open", "high", "low", "close"]].to_numpy(),
                signals[i], info, mark.index)
@@ -293,8 +300,6 @@ def main():
         "signals": {s: len(t[2]) for s, t in tables.items()}, "starting_usdt_per_week": START_CASH,
         "gemini_replayed": False, "funding_included": False, "cases": cases,
     }
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     summary = {
         "source": source, "symbols": SYMBOLS, "signals": report["signals"],
         "cases": {key: {"pooled": val["pooled"], "weeks": [
@@ -302,6 +307,8 @@ def main():
         ]} for key, val in cases.items()},
     }
     print("RESULT " + json.dumps(summary, allow_nan=False), flush=True)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
 
 
 if __name__ == "__main__":
