@@ -68,8 +68,14 @@ def test_provider_vote_respects_durable_budget_and_binds_to_fresh_reference(tmp_
         db.executemany("""
             INSERT INTO shadow VALUES (?, ?, 'long', ?, ?, 100, 99, 102, ?, ?, ?, 'target')
         """, (
-            (str(i), SYMBOL, CANDLE - 180_000, CANDLE - 180_000,
-             CANDLE - 180_000, CANDLE - 179_500, 0.5)
+            (
+                str(i), SYMBOL,
+                CANDLE - ((i % 4) + 1) * 86_400_000 - 60_000,
+                CANDLE - ((i % 4) + 1) * 86_400_000 - 60_000,
+                CANDLE - ((i % 4) + 1) * 86_400_000 - 30_000,
+                CANDLE - ((i % 4) + 1) * 86_400_000 - 1_000,
+                0.5 if i < 24 else -0.4,
+            )
             for i in range(30)
         ))
     assert observe(desk, 1_000) == "analyst_requested"
@@ -77,6 +83,7 @@ def test_provider_vote_respects_durable_budget_and_binds_to_fresh_reference(tmp_
     assert observe(desk, 2_000) == "waiting_for_quote_after_vote"
     assert observe(desk, 3_000, mark=100.09) == "professor_price_moved"
     assert observe(desk, 4_000) == "unanimous"
+    assert desk.status(CANDLE + 4_000)["shadow_scorecard"]["eligible_for_demo"] is True
     desk.close()
     reopened = adaptive.AdaptiveDesk(tmp_path, Analyst("fixture"), ScalpingConfig(), calls_per_day=1)
     assert observe(reopened, 5_000, symbol="BTCUSDT") == "gemini_daily_budget"
