@@ -1,0 +1,54 @@
+name: Exploratory weekly 20x target candidate replay
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/weekly-candidates.yml"
+      - "tradingagents/crypto/backtest/weekly_candidates.py"
+      - "tests/test_weekly_candidates.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  research:
+    name: Read-only 1m scan (${{ matrix.sample }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sample: october-4weeks
+            start: "2026-10-04"
+            days: 28
+            symbols: "BTCUSDT XRPUSDT ETHUSDT LTCUSDT"
+          - sample: november-2weeks
+            start: "2026-11-01"
+            days: 14
+            symbols: "BTCUSDT XRPUSDT ETHUSDT LTCUSDT"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Replay all fixed strategies with one shared 50-USDT simulated account
+        env:
+          SAMPLE: ${{ matrix.sample }}
+          START: ${{ matrix.start }}
+          DAYS: ${{ matrix.days }}
+          SYMBOLS: ${{ matrix.symbols }}
+        run: |
+          python tradingagents/crypto/backtest/weekly_candidates.py \
+            --start "$START" --days "$DAYS" \
+            --symbols $SYMBOLS \
+            --output "artifacts/weekly-candidates-${SAMPLE}.json"
+      - name: Preserve exact research evidence even on failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-weekly-candidates-${{ matrix.sample }}
+          path: artifacts/weekly-candidates-${{ matrix.sample }}.json
+          if-no-files-found: error
+          retention-days: 14

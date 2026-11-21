@@ -1,0 +1,51 @@
+name: Read-only Bybit minimum order-size feasibility
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/bybit-size-feasibility.yml"
+      - "tradingagents/crypto/backtest/bybit_size_probe.py"
+      - "tests/test_bybit_size_probe.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bybit-size:
+    name: Bybit linear $10-notional check (${{ matrix.symbol }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [BTCUSDT, ETHUSDT, XRPUSDT, LTCUSDT]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Check public current contract and ticker filters without a secret or orders
+        id: check
+        continue-on-error: true
+        run: |
+          python tradingagents/crypto/backtest/bybit_size_probe.py \
+            --symbol "${{ matrix.symbol }}" \
+            --out "artifacts/bybit-size-${{ matrix.symbol }}.json"
+      - name: Preserve result, including unavailable API responses
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bybit-public-size-${{ matrix.symbol }}
+          path: artifacts/bybit-size-${{ matrix.symbol }}.json
+          if-no-files-found: error
+      - name: Require verified public market data
+        if: steps.check.outcome != 'success'
+        run: |
+          echo "::error::Both public market hosts unavailable or invalid. Filter feasibility remains UNKNOWN, not PASS."
+          exit 1
+      - name: Clarify evidence limitations
+        if: always()
+        run: |
+          echo "Current public filters only; Demo account execution remains OFF."
+          echo "Actual Bybit data status: ${{ steps.check.outcome }}"
