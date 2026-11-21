@@ -28,7 +28,7 @@ cost plus 10 bps surplus. They are **not** executable Bybit protections.
 ### Research journal and access
 
 The adaptive desk writes one report per (symbol, finished 5m candle)
-to its SQLite volume and exposes the most recent per-symbol observations
+to its SQLite volume (with a 14-day bounded retention window) and exposes the most recent per-symbol observations
 via the existing *authenticated* `/api/learning` endpoint. The burgundy
 mobile dashboard shows the current regime, selected candidate, direction,
 reason and stale state. Reports explicitly say `shadow_only=true` and
