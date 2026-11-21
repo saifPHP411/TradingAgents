@@ -75,3 +75,13 @@ def test_empty_history_is_explicitly_unqualified():
     assert result["settled_trades"] == 0
     assert result["win_rate"] is None
     assert result["eligible_for_demo"] is False
+
+
+def test_mobile_dashboard_labels_shadow_metrics_not_venue_equity():
+    from tradingagents.paper_experiment.perpetual_demo.server import HTML
+
+    assert 'id="learning-pf"' in HTML
+    assert 'id="learning-dd"' in HTML
+    assert 'id="learning-win-lower"' in HTML
+    assert 'Shadow Mark proxy only' in HTML
+    assert 'NOT verified Bybit fills or account equity' in HTML
