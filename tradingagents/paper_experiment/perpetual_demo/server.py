@@ -699,6 +699,14 @@ class PerpetualDemoController:
                 "attribution_error": f"{type(exc).__name__}: {str(exc)[:140]}",
             }
 
+    def _remember_closed_venue(
+        self, symbol: str, side: str, details: dict, now_ms: int,
+    ) -> None:
+        """A learning-write failure must never interfere with venue exits."""
+        if self.adaptive is not None and details.get("attribution_status") == "matched":
+            with contextlib.suppress(sqlite3.Error, ValueError):
+                self.adaptive.record_venue_close(symbol, side, details, now_ms)
+
     def _scan_market(self, symbol: str) -> tuple[dict | None, str | None]:
         if self._stop.is_set() or symbol not in self.symbols:
             return None, None
@@ -915,6 +923,7 @@ class PerpetualDemoController:
                         ]
                         if not remaining:
                             exit_details = self._closed_trade_details(symbol, meta, now_ms)
+                            self._remember_closed_venue(symbol, position["side"], exit_details, now_ms)
                             managed.pop(symbol, None)
                             active_by_symbol.pop(symbol, None)
                             cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
@@ -998,6 +1007,7 @@ class PerpetualDemoController:
 
                 self._record_entry_fill(symbol, meta, entry_order)
                 exit_details = self._closed_trade_details(symbol, meta, now_ms)
+                self._remember_closed_venue(symbol, meta.get("side"), exit_details, now_ms)
                 pending_exit = meta.get("pending_exit")
                 managed.pop(symbol, None)
                 cooldowns[symbol] = now_ms + self.strategy.cooldown_minutes * 60_000
@@ -1249,6 +1259,13 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
     <div class="stat">Gemini calls today (UTC)<b id="learning-budget">—</b></div>
    </div>
    <p id="learning-gate" class="muted"></p>
+   <p class="sub">Bybit Demo venue closed P&amp;L — separate from modeled shadow trades. Matched order attribution is heuristic.</p>
+   <div class="stats">
+    <div class="stat">Demo venue closes<b id="venue-learning-closes">—</b></div>
+    <div class="stat">Demo net closed P&amp;L<b id="venue-learning-net">—</b></div>
+    <div class="stat">Demo net win rate<b id="venue-learning-win">—</b></div>
+    <div class="stat">Demo Profit Factor<b id="venue-learning-pf">—</b></div>
+   </div>
    <p id="learning-error" class="muted" role="status"></p>
    <div id="learning-votes" class="rows"></div>
   </section>
@@ -1307,6 +1324,11 @@ async function loadLearning(){
   $("learning-win-lower").textContent=c.win_rate_lower_95==null?"—":fmt(c.win_rate_lower_95*100,1)+"%";
   $("learning-days").textContent=c.days_observed==null?"—":String(c.days_observed);
   $("learning-budget").textContent=d.model_requests_today+"/"+d.model_daily_limit;
+  var v=d.venue_performance||{};
+  $("venue-learning-closes").textContent=String(v.recorded_closes||0);
+  $("venue-learning-net").textContent=v.recorded_closes?fmt(v.net_realized_usdt,4)+" USDT":"—";
+  $("venue-learning-win").textContent=v.net_win_rate==null?"—":fmt(v.net_win_rate*100,1)+"%";
+  $("venue-learning-pf").textContent=v.profit_factor==null?"n/a":fmt(v.profit_factor,2);
   var failures=c.failed_gates||[];
   $("learning-gate").textContent="Shadow Mark proxy only — NOT verified Bybit fills or account equity. Demo evidence "+
    (d.demo_evidence_ready?"passed":"BLOCKED · "+(failures.length?failures.join(", "):"learning confidence gate"))+
